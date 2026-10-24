@@ -21,6 +21,8 @@ Compress-Archive -Force -Path "$portable\*" -DestinationPath dist\PilotHouse-Win
 
 $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
 if (-not $makensis) { $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe" }
-& $makensis /V2 "/DVERSION=$version" scripts\package\windows.nsi
+# Windows' file version is numbers only: 0.1.0 for 0.1.0-beta.
+$numeric = ($version -split '-')[0]
+& $makensis /V2 "/DVERSION=$version" "/DNUMERIC=$numeric" scripts\package\windows.nsi
 if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
 Get-ChildItem dist | Select-Object Name, Length

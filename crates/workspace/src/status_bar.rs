@@ -90,7 +90,7 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .when(!stacks.is_empty(), |this| this.child(stacks.join(" · ")))
-                .child(concat!("PilotHouse ", env!("CARGO_PKG_VERSION"))),
+                .child(format!("PilotHouse {}", ph_ui::version())),
         )
 }
 

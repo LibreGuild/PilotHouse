@@ -562,10 +562,7 @@ fn about_page() -> SettingPage {
         .group(
             SettingGroup::new()
                 .item(SettingItem::render(|_, _, cx| {
-                    note(
-                        format!("PilotHouse {} · Apache-2.0", env!("CARGO_PKG_VERSION")),
-                        cx,
-                    )
+                    note(format!("PilotHouse {} · Apache-2.0", ph_ui::version()), cx)
                 }))
                 .item(SettingItem::render(|_, _, cx| {
                     let data = ph_store::paths::data_dir();

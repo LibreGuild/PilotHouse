@@ -51,7 +51,7 @@ cp "$ICON" "$DEB/usr/share/icons/hicolor/512x512/apps/pilothouse.png"
 cp LICENSE NOTICE "$DEB/usr/share/doc/pilothouse/"
 cat > "$DEB/DEBIAN/control" <<CONTROL
 Package: pilothouse
-Version: $VERSION
+Version: $(echo "$VERSION" | tr - '~')
 Section: devel
 Priority: optional
 Architecture: amd64
