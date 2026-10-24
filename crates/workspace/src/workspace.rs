@@ -95,6 +95,11 @@ impl Workspace {
                 }
             },
         );
+        // A closed menu or popover can leave nothing with the keyboard, and
+        // then no shortcut works until something is clicked: the chat in
+        // front takes it back.
+        let focus_subscription =
+            cx.on_focus_lost(window, |this, window, cx| this.focus_front(window, cx));
         // Schedules run app-wide; the inbox shows what they did.
         let automation = crate::schedules::Automation::global(cx);
         let automation_subscription = cx.subscribe(
@@ -133,6 +138,7 @@ impl Workspace {
                 inbox_subscription,
                 automation_subscription,
                 switcher_subscription,
+                focus_subscription,
             ],
             inbox,
         };
@@ -169,6 +175,15 @@ impl Workspace {
 
     pub fn is_sidebar_collapsed(&self) -> bool {
         self.sidebar_collapsed
+    }
+
+    /// Gives the keyboard to the chat of the workspace in front, else the
+    /// window.
+    pub(crate) fn focus_front(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.active_space().cloned() {
+            Some(space) => space.update(cx, |space, cx| space.focus_chat(window, cx)),
+            None => self.focus_handle.focus(window, cx),
+        }
     }
 
     /// The switcher opened: no filter, typing goes there.

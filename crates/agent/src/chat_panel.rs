@@ -1495,9 +1495,14 @@ fn model_button(
             let panel = panel.clone();
             // Each opening shows this chat's agent first.
             move |open, window, cx| {
-                if *open {
-                    _ = panel.update(cx, |panel, cx| panel.picker_opened(window, cx));
-                }
+                _ = panel.update(cx, |panel, cx| {
+                    if *open {
+                        panel.picker_opened(window, cx)
+                    } else {
+                        // The keyboard goes back to the message.
+                        panel.focus_composer(window, cx)
+                    }
+                });
             }
         })
         .content(move |_, _, cx| match panel.upgrade() {

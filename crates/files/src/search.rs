@@ -1,13 +1,16 @@
 //! Project-wide text search, using ripgrep's own crates.
 //!
 //! Plain-text, smart-case matching (case-insensitive unless the query has an
-//! upper-case letter), skipping ignored and binary files like `rg` does.
+//! upper-case letter), skipping ignored and binary files like `rg` does, on
+//! every core.
 
 use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{BinaryDetection, SearcherBuilder, sinks::UTF8};
-use ignore::WalkBuilder;
+use ignore::{WalkBuilder, WalkState};
 
 /// Stop after this many matching lines; the UI says when results were cut.
 pub const MAX_RESULTS: usize = 500;
@@ -30,48 +33,70 @@ pub struct SearchResults {
 }
 
 pub fn search_project(root: &Path, query: &str) -> anyhow::Result<SearchResults> {
-    let mut results = SearchResults::default();
     if query.trim().is_empty() {
-        return Ok(results);
+        return Ok(SearchResults::default());
     }
     let matcher = RegexMatcherBuilder::new()
         .fixed_strings(true)
         .case_smart(true)
         .build(query)?;
-    let mut searcher = SearcherBuilder::new()
-        .binary_detection(BinaryDetection::quit(0))
-        .line_number(true)
-        .build();
-
-    let walker = WalkBuilder::new(root)
+    // Every core searches its own files, like `rg`; the hits are sorted at
+    // the end so the list does not jump between runs.
+    let found = Mutex::new(Vec::<SearchMatch>::new());
+    let full = AtomicBool::new(false);
+    WalkBuilder::new(root)
         .hidden(false)
         .filter_entry(|entry| entry.file_name() != ".git")
-        .build();
-    for entry in walker.flatten() {
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-            continue;
-        }
-        let relative = entry
-            .path()
-            .strip_prefix(root)
-            .map(|path| path.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-        let sink = UTF8(|line, text| {
-            results.matches.push(SearchMatch {
-                path: relative.clone(),
-                line,
-                text: text.trim_end().chars().take(MAX_LINE_CHARS).collect(),
-            });
-            Ok(results.matches.len() < MAX_RESULTS)
+        .build_parallel()
+        .run(|| {
+            let (matcher, found, full) = (matcher.clone(), &found, &full);
+            let mut searcher = SearcherBuilder::new()
+                .binary_detection(BinaryDetection::quit(0))
+                .line_number(true)
+                .build();
+            Box::new(move |entry| {
+                if full.load(Ordering::Relaxed) {
+                    return WalkState::Quit;
+                }
+                let Ok(entry) = entry else {
+                    return WalkState::Continue;
+                };
+                if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+                    return WalkState::Continue;
+                }
+                let relative = entry
+                    .path()
+                    .strip_prefix(root)
+                    .map(|path| path.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                let mut hits = Vec::new();
+                let sink = UTF8(|line, text| {
+                    hits.push(SearchMatch {
+                        path: relative.clone(),
+                        line,
+                        text: text.trim_end().chars().take(MAX_LINE_CHARS).collect(),
+                    });
+                    Ok(hits.len() < MAX_RESULTS)
+                });
+                // Unreadable files are skipped, like ripgrep does.
+                let _ = searcher.search_path(&matcher, entry.path(), sink);
+                if hits.is_empty() {
+                    return WalkState::Continue;
+                }
+                let mut found = found.lock().unwrap_or_else(|err| err.into_inner());
+                found.extend(hits);
+                if found.len() >= MAX_RESULTS {
+                    full.store(true, Ordering::Relaxed);
+                    return WalkState::Quit;
+                }
+                WalkState::Continue
+            })
         });
-        // Unreadable files are skipped, like ripgrep does.
-        let _ = searcher.search_path(&matcher, entry.path(), sink);
-        if results.matches.len() >= MAX_RESULTS {
-            results.truncated = true;
-            break;
-        }
-    }
-    Ok(results)
+    let mut matches = found.into_inner().unwrap_or_else(|err| err.into_inner());
+    matches.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+    let truncated = matches.len() >= MAX_RESULTS;
+    matches.truncate(MAX_RESULTS);
+    Ok(SearchResults { matches, truncated })
 }
 
 #[cfg(test)]

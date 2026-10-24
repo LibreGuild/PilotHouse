@@ -475,6 +475,12 @@ impl ProjectSpace {
         self.unsaved_files(cx) == 0 && !self.chat.read(cx).has_draft(cx)
     }
 
+    /// Puts the keyboard in the chat's composer.
+    pub fn focus_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat
+            .update(cx, |chat, cx| chat.focus_composer(window, cx));
+    }
+
     /// The window's sidebar was shown or hidden.
     pub fn set_sidebar_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.sidebar_shown = shown;
