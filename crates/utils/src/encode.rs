@@ -3,7 +3,7 @@
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
-use hmac::Mac as _;
+use hmac::{KeyInit as _, Mac as _};
 
 use crate::Input;
 
