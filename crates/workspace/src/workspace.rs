@@ -288,17 +288,18 @@ impl Workspace {
         self.statuses.get(&id).copied().unwrap_or_default()
     }
 
-    /// Closes the screens of workspaces hidden for [`UNLOAD_AFTER`] with
-    /// nothing going on and nothing to lose, so memory stays flat however
-    /// many are visited. Their chats and shells live on; opening one again
-    /// rebuilds its screen from what was saved.
-    fn unload_idle(&mut self, cx: &mut Context<Self>) {
+    /// Closes the screens of workspaces hidden for `hidden_for` (every
+    /// second: [`UNLOAD_AFTER`]) with nothing going on and nothing to lose,
+    /// so memory stays flat however many are visited. Their chats and
+    /// shells live on; opening one again rebuilds its screen from what was
+    /// saved.
+    pub fn unload_idle(&mut self, hidden_for: std::time::Duration, cx: &mut Context<Self>) {
         let idle: Vec<ProjectId> = self
             .hidden_since
             .iter()
             .filter(|(id, since)| {
                 let status = self.status(**id);
-                since.elapsed() >= UNLOAD_AFTER
+                since.elapsed() >= hidden_for
                     && status.working == 0
                     && status.waiting == 0
                     && self
@@ -316,7 +317,7 @@ impl Workspace {
     }
 
     fn refresh_statuses(&mut self, cx: &mut Context<Self>) {
-        self.unload_idle(cx);
+        self.unload_idle(UNLOAD_AFTER, cx);
         let statuses: HashMap<ProjectId, WorkspaceStatus> = self
             .projects
             .iter()
