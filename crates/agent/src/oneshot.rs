@@ -3,8 +3,11 @@
 //! CLI's own non-interactive mode instead of a chat session.
 //!
 //! The prompt goes on stdin where the CLI reads it (Claude Code, Codex,
-//! Gemini CLI), so long diffs and any characters are safe on every platform;
-//! `agy` takes it as an argument (it is a native executable).
+//! Gemini CLI), so long diffs and any characters are safe on every platform.
+//! `agy` takes it only as an argument (its stdin mode needs stream-json), so
+//! callers cut every part of a prompt: the largest, a pull request's, stays
+//! near 23 KB, inside Linux's 128 KB for one argument and Windows' 32,767
+//! characters for a whole command line.
 
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
