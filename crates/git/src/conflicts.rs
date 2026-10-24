@@ -170,19 +170,33 @@ pub fn mark_resolved(root: &Path, path: &str) -> Result<()> {
 
 /// What is in progress: a merge, rebase or cherry-pick, if any.
 pub fn operation(root: &Path) -> Option<&'static str> {
-    for (file, name) in [
+    const MARKERS: [(&str, &str); 5] = [
         ("MERGE_HEAD", "merge"),
         ("rebase-merge", "rebase"),
         ("rebase-apply", "rebase"),
         ("CHERRY_PICK_HEAD", "cherry-pick"),
         ("REVERT_HEAD", "revert"),
-    ] {
-        let path = git(root, &["rev-parse", "--git-path", file]).ok()?;
-        if root.join(path.trim()).exists() {
-            return Some(name);
-        }
+    ];
+    // One call for every marker (each is a run on a network drive's server).
+    let mut args = vec!["rev-parse"];
+    for (file, _) in MARKERS {
+        args.extend(["--git-path", file]);
     }
-    None
+    let paths = git(root, &args).ok()?;
+    MARKERS
+        .iter()
+        .zip(paths.lines())
+        .find(|(_, path)| {
+            let path = path.trim();
+            // Relative to `root`, or (a linked worktree) absolute, maybe
+            // the server's.
+            if path.starts_with('/') || Path::new(path).is_absolute() {
+                crate::local_path(path).exists()
+            } else {
+                root.join(path).exists()
+            }
+        })
+        .map(|((_, name), _)| *name)
 }
 
 /// Gives up on the operation in progress.

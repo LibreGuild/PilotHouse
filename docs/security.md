@@ -11,6 +11,9 @@ PilotHouse runs on your machine with your permissions and has no server. The thi
 | Browser DevTools | Full control of a logged-in browser | A private pipe (`--remote-debugging-pipe`), not a localhost port that every local user could reach. A port opens only if you turn on **Allow other DevTools clients** for that project |
 | Emulator gRPC | The emulator's own endpoint | Uses the token the emulator writes in its user-only discovery file |
 | Agents' child processes | Run with your permissions | Adapters are pinned versions (`agents.rs`), so a new npm release never runs unannounced |
+| SSH to network drives' servers | Commands run as you on a server | The system `ssh` with your keys; never a stored password. Commands use `BatchMode` and `StrictHostKeyChecking=yes`, so they never prompt or accept an unknown or changed server. A new server is trusted only after its fingerprints are shown. Hosts that `ssh` could read as an option are refused, and every word sent to the server's shell is quoted. Only a validated public key line is ever installed on a server |
+| Shared SSH connections (macOS, Linux) | A socket that runs commands on the server as you | In a private (`0700`) folder; closed at quit or after 10 idle minutes |
+| Tunnels to a server's ports | A port on this computer | Bound to `127.0.0.1`; each ends when PilotHouse does |
 
 ## Agent boundaries
 

@@ -66,16 +66,35 @@ impl EventEmitter<TerminalEvent> for Terminal {}
 
 impl Terminal {
     /// Starts the user's login shell in `cwd`. Done before creating the
-    /// terminal so a failure can be shown instead of an empty one.
+    /// terminal so a failure can be shown instead of an empty one. A folder
+    /// on a mapped network drive gets a shell on the server, in the same
+    /// folder there (through `ssh`, which may ask for a password).
     pub fn start(cwd: std::path::PathBuf) -> anyhow::Result<StartedShell> {
+        if let Some(remote) = ph_remote::remote_of(&cwd) {
+            let (program, args) = ph_remote::ssh::shell(&remote.mapping, &remote.path);
+            let mut shell = Self::start_program(&program, args, home_or(cwd))?;
+            shell.title = remote.mapping.host.clone().into();
+            return Ok(shell);
+        }
         let (shell, args) = ph_env::default_shell();
+        Self::start_program(&shell.to_string_lossy(), args, cwd)
+    }
+
+    /// Starts `program` with `args` in `cwd` on a PTY (a shell, `ssh`,
+    /// `ssh-keygen`). The terminal is named after the program.
+    pub fn start_program(
+        program: &str,
+        args: Vec<String>,
+        cwd: std::path::PathBuf,
+    ) -> anyhow::Result<StartedShell> {
+        let shell = std::path::PathBuf::from(program);
         let mut extra_env = ph_env::shell_env().clone();
         extra_env.insert("TERM".into(), "xterm-256color".into());
         extra_env.insert("COLORTERM".into(), "truecolor".into());
         extra_env.insert("TERM_PROGRAM".into(), "PilotHouse".into());
 
         let options = tty::Options {
-            shell: Some(tty::Shell::new(shell.to_string_lossy().into_owned(), args)),
+            shell: Some(tty::Shell::new(program.to_string(), args)),
             working_directory: Some(cwd),
             drain_on_exit: true,
             env: extra_env,
@@ -279,4 +298,13 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = self.pty.send(Msg::Shutdown);
     }
+}
+
+/// The home folder for a program that only needs some folder to start in
+/// (`ssh` to a server), else `fallback`.
+fn home_or(fallback: std::path::PathBuf) -> std::path::PathBuf {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(std::path::PathBuf::from)
+        .filter(|home| home.is_dir())
+        .unwrap_or(fallback)
 }

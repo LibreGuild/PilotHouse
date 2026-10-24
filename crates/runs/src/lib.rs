@@ -2,11 +2,14 @@
 //!
 //! - [`detect`]: commands found in the project (`package.json` scripts,
 //!   cargo, go, gradle, make, just, compose…). Users can add their own.
-//! - [`ports`]: listening TCP ports, for "open in browser" and "stop".
+//! - [`ports`]: listening TCP ports, for "open in browser" and "stop", here
+//!   or on a mapped network drive's server.
+//! - [`forward`]: tunnels to a server's ports, to open them here.
 //! - [`RunsPanel`]: the Run tab. Configurations run in a named terminal.
 //! - `control`: `runs.ports` for agents.
 
 pub mod detect;
+pub mod forward;
 pub mod ports;
 mod runs_panel;
 

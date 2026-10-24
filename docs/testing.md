@@ -34,6 +34,23 @@ pilothouse ctl app.state                            # projects, active tab, sess
 
 Screenshots render the window offscreen (`Window::render_to_image`), so they need no screen-recording permission. Release builds do not include the `ui.*` methods.
 
+## Network drives (SSH)
+
+Unit tests cover paths both ways (Windows spellings included), quoting, failures and parsing. Git against a real server is `crates/git/tests/network_drive.rs`, skipped unless pointed at one. A container with SSH and Git sharing a folder with this computer stands in for a Samba server:
+
+```sh
+mkdir -p /tmp/ph-share && ssh-keygen -t ed25519 -N '' -f /tmp/ph-key
+# A Dockerfile: alpine + openssh-server git bash iproute2, a user `dev` with
+# /tmp/ph-key.pub in ~/.ssh/authorized_keys, sshd on port 2222.
+docker run -d --name ph-sshd -p 127.0.0.1:2222:2222 -v /tmp/ph-share:/srv/share ph-sshd
+mkdir -p /tmp/ph-ssh && ssh-keyscan -p 2222 127.0.0.1 > /tmp/ph-ssh/known_hosts
+eval "$(ssh-agent)" && ssh-add /tmp/ph-key
+PH_SSH_TEST=1 PH_SSH_HOST=dev@127.0.0.1 PH_SSH_PORT=2222 PH_SSH_LOCAL=/tmp/ph-share \
+  PH_SSH_REMOTE=/srv/share PH_SSH_STATE=/tmp/ph-ssh cargo test -p ph-git --test network_drive
+```
+
+In the app, add the same mapping in Settings → Network drives and open a folder under `/tmp/ph-share`.
+
 ## Visual regression
 
 Keep reference screenshots of key screens (welcome, chat, each tab, light and dark). Compare new captures after UI changes. Automating the comparison is planned; for now, review the images.

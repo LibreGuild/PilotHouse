@@ -1,5 +1,6 @@
 //! The bar at the bottom of the window: the git branch (click for the
-//! branch picker), the project folder, and the detected stack.
+//! branch picker), the project folder, where its work runs when it is on a
+//! network drive, and the detected stack.
 
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _,
@@ -52,6 +53,7 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
     let stacks: Vec<&'static str> = space
         .map(|space| space.stacks().iter().map(|stack| stack.label()).collect())
         .unwrap_or_default();
+    let drive = space.and_then(|space| drive_item(space, cx));
     let branch = space_entity.and_then(|space| branch_item(&space, cx));
 
     StatusBar::new()
@@ -79,7 +81,8 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                                 .truncate()
                                 .child(path.unwrap_or_else(|| "No workspace open".into())),
                         ),
-                ),
+                )
+                .children(drive),
         )
         .right(
             h_flex()
@@ -89,6 +92,48 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                 .when(!stacks.is_empty(), |this| this.child(stacks.join(" · ")))
                 .child(concat!("PilotHouse ", env!("CARGO_PKG_VERSION"))),
         )
+}
+
+/// Where the workspace's work runs when its folder is on a network drive:
+/// the server (mapped), or an offer to set that up. Opens Network drives.
+fn drive_item(
+    space: &crate::workspace_screen::WorkspaceScreen,
+    cx: &Context<Workspace>,
+) -> Option<AnyElement> {
+    let (label, tip, color) = if let Some(server) = space.server() {
+        (
+            format!("SSH · {}", server.mapping.host),
+            format!(
+                "Git, terminals and runs work on {} in {}. Files are read through the drive; agents run on this computer.",
+                server.mapping.destination(),
+                server.path
+            ),
+            cx.theme().info,
+        )
+    } else {
+        let drive = space.network_drive()?;
+        (
+            "Network drive".to_string(),
+            format!(
+                "This folder is {}'s share “{}”. Set it up to run Git, terminals and runs on the server over SSH.",
+                drive.server, drive.share
+            ),
+            cx.theme().muted_foreground,
+        )
+    };
+    Some(
+        Button::new("status-network-drive")
+            .ghost()
+            .xsmall()
+            .icon(Icon::new(Icons::HardDrive).xsmall())
+            .label(label)
+            .text_color(color)
+            .tooltip(tip)
+            .on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(crate::actions::ShowNetworkDrives), cx)
+            })
+            .into_any_element(),
+    )
 }
 
 /// Branch, ahead/behind and a running operation; opens the branch picker.

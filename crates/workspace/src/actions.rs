@@ -30,6 +30,8 @@ actions!(
         ShowUsage,
         /// The keyboard shortcuts sheet.
         ShowShortcuts,
+        /// Network drives whose work runs on a server over SSH.
+        ShowNetworkDrives,
         /// Agent prompts and test runs at set times.
         ShowSchedules,
         /// Offline tools: formats, encodings, hashes, times, regex, SQLite.

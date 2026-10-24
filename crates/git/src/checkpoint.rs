@@ -58,7 +58,7 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// checkpoint stores the files' exact bytes and a restore writes them back
 /// exactly, or a Windows user's LF files would come back as CRLF.
 fn git_in(root: &Path, index: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String> {
-    let no_attributes = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let no_attributes = crate::null_device(root);
     let mut command = command(root);
     command
         .args([
@@ -74,7 +74,9 @@ fn git_in(root: &Path, index: &Path, args: &[&str], input: Option<&[u8]>) -> Res
         .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_INDEX_FILE", index)
         .env("GIT_LITERAL_PATHSPECS", "1")
-        .envs(IDENTITY)
+        .envs(IDENTITY);
+    let mut command = crate::run::ready(command);
+    command
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -90,9 +92,8 @@ fn git_in(root: &Path, index: &Path, args: &[&str], input: Option<&[u8]>) -> Res
     let output = child.wait_with_output()?;
     if !output.status.success() {
         bail!(
-            "git {} failed: {}",
-            args.first().unwrap_or(&""),
-            String::from_utf8_lossy(&output.stderr).trim()
+            "{}",
+            crate::run::failure(root, args.first().unwrap_or(&""), &output)
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -134,8 +135,8 @@ pub fn create(root: &Path, label: &str) -> Result<Option<String>> {
     let Ok(git_dir) = crate::git(root, &["rev-parse", "--absolute-git-dir"]) else {
         return Ok(None);
     };
-    let top = PathBuf::from(crate::git(root, &["rev-parse", "--show-toplevel"])?.trim());
-    let index = TempIndex::new(Path::new(git_dir.trim()))?;
+    let top = crate::local_path(&crate::git(root, &["rev-parse", "--show-toplevel"])?);
+    let index = TempIndex::new(&crate::local_path(&git_dir))?;
     let index = index.0.as_path();
 
     // Tracked files: changes and deletions.
@@ -244,7 +245,7 @@ fn prune(root: &Path) -> Result<()> {
 /// [`Restored::undo`]).
 pub fn restore(root: &Path, checkpoint: &str) -> Result<Restored> {
     crate::check_name("checkpoint", checkpoint)?;
-    let top = PathBuf::from(crate::git(root, &["rev-parse", "--show-toplevel"])?.trim());
+    let top = crate::local_path(&crate::git(root, &["rev-parse", "--show-toplevel"])?);
     crate::git(
         &top,
         &["cat-file", "-e", &format!("{checkpoint}^{{commit}}")],
@@ -279,9 +280,10 @@ pub fn restore(root: &Path, checkpoint: &str) -> Result<Restored> {
     }
     if !write_back.is_empty() {
         let list = write_back.join("\0");
-        let index = TempIndex::new(Path::new(
-            crate::git(&top, &["rev-parse", "--absolute-git-dir"])?.trim(),
-        ))?;
+        let index = TempIndex::new(&crate::local_path(&crate::git(
+            &top,
+            &["rev-parse", "--absolute-git-dir"],
+        )?))?;
         git_in(
             &top,
             &index.0,

@@ -59,6 +59,7 @@ ph-lsp = { path = "crates/lsp" }
 ph-github = { path = "crates/github" }
 ph-pulls = { path = "crates/pulls" }
 ph-review = { path = "crates/review" }
+ph-remote = { path = "crates/remote" }
 
 # Debug info is the largest part of a debug build. Keep line tables for our own
 # crates (readable backtraces) and drop it for dependencies to save disk space.

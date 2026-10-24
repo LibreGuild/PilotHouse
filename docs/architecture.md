@@ -24,7 +24,9 @@ crates/
   browser/    per-project headless Chrome over DevTools + its control methods
   devices/    Android over adb and the emulator's gRPC controller + control methods
   media/      live frames: surface view, annotation, capture, recording, diff
-  runs/       run configurations and the ports panel
+  runs/       run configurations, the ports panel, tunnels to a server's ports
+  remote/     network drives: Git, shells and runs on the server over SSH (mappings, routing,
+              host keys, checks)
   uitest/     UI tests: recorded from agents' tool calls, replayed on sizes/devices, visual
               baselines, the Done-needs-tests gate, repair
   utils/      offline utilities (formats, encodings, hashes, ids, times, regex, SQLite)

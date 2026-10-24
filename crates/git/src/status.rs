@@ -19,7 +19,13 @@ pub struct WorkingChanges {
     pub staged_files: usize,
 }
 
+/// Whether `root` is in a Git working tree. On a mapped network drive the
+/// drive is looked at instead of asking the server, so a server that cannot
+/// be reached reads as that (Git fails with why), not as "no repository".
 pub fn is_repository(root: &Path) -> bool {
+    if ph_remote::remote_of(root).is_some() {
+        return root.ancestors().any(|dir| dir.join(".git").exists());
+    }
     git(root, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true")
 }
 
@@ -64,8 +70,9 @@ pub fn apply(root: &Path, patch: &str, mode: ApplyMode) -> Result<()> {
         ApplyMode::Discard => &["apply", "--reverse", "--whitespace=nowarn", "-"],
         ApplyMode::Restore => &["apply", "--whitespace=nowarn", "-"],
     };
-    let mut child = command(root)
-        .args(args)
+    let mut command = command(root);
+    command.args(args);
+    let mut child = crate::run::ready(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -78,10 +85,7 @@ pub fn apply(root: &Path, patch: &str, mode: ApplyMode) -> Result<()> {
         .write_all(patch.as_bytes())?;
     let output = child.wait_with_output()?;
     if !output.status.success() {
-        bail!(
-            "git apply failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        bail!("{}", crate::run::failure(root, "apply", &output));
     }
     Ok(())
 }

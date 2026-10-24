@@ -138,13 +138,14 @@ pub fn prepare(
     let sha = ph_pulls::hosting::fetch_head(root, hosting, pull.number)?;
     // The base, so the agent can diff against it.
     let _ = ph_git::worktree::fetch_ref(root, &hosting.remote, &pull.base.name);
-    let worktree = worktree_path(project_id, pull.number);
+    let worktree = worktree_path(
+        &crate::copies::folder(store, root)?,
+        project_id,
+        pull.number,
+    );
     if worktree.join(".git").exists() {
         ph_git::git(&worktree, &["checkout", "--quiet", "--detach", &sha])?;
     } else {
-        if let Some(parent) = worktree.parent() {
-            ph_store::paths::ensure_private_dir(parent)?;
-        }
         ph_git::worktree::add_detached(root, &worktree, &sha)?;
     }
 
@@ -188,9 +189,7 @@ pub fn prepare(
     })
 }
 
-/// `<data dir>/worktrees/<project>-pr-<number>`.
-pub fn worktree_path(project_id: ProjectId, number: u64) -> PathBuf {
-    ph_store::paths::data_dir()
-        .join("worktrees")
-        .join(format!("{project_id}-pr-{number}"))
+/// `<copies>/<project>-pr-<number>` (see [`crate::copies`]).
+pub fn worktree_path(folder: &std::path::Path, project_id: ProjectId, number: u64) -> PathBuf {
+    folder.join(format!("{project_id}-pr-{number}"))
 }

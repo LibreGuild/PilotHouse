@@ -26,7 +26,8 @@ pub use terminal_panel::{TerminalPanel, TerminalPanelEvent};
 pub use terminal_view::{TerminalView, TerminalViewEvent};
 pub use workspace_terminals::{TerminalHub, WorkspaceTerminals};
 
-use gpui_kit::{App, KeyBinding, actions};
+use gpui_kit::{Action, App, KeyBinding, actions};
+use serde::Deserialize;
 
 actions!(
     terminal,
@@ -41,6 +42,14 @@ actions!(
     ]
 );
 
+/// A key the terminal takes before anything around it does: in a dialog,
+/// Enter would confirm and Escape close it, instead of reaching the shell.
+#[derive(Action, Clone, PartialEq, Deserialize)]
+#[action(namespace = terminal, no_json)]
+pub struct TerminalKey {
+    pub key: String,
+}
+
 pub fn init(cx: &mut App) {
     let context = Some(terminal_view::TERMINAL_CONTEXT);
     let copy = if cfg!(target_os = "macos") {
@@ -53,4 +62,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(copy, TerminalCopy, context),
         KeyBinding::new("secondary-l", TerminalAsk, context),
     ]);
+    cx.bind_keys(
+        ["enter", "shift-enter", "escape", "tab", "shift-tab"]
+            .map(|key| KeyBinding::new(key, TerminalKey { key: key.into() }, context)),
+    );
 }

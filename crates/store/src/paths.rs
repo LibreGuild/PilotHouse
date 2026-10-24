@@ -19,9 +19,36 @@ pub fn data_dir() -> PathBuf {
 
 /// The absolute, symlink-free form of `path`. Unlike `fs::canonicalize`, it
 /// gives `C:\\work\\app` on Windows, not `\\\\?\\C:\\work\\app`, which many
-/// programs refuse as a working directory.
+/// programs refuse as a working directory. A path on a mapped network drive
+/// keeps its letter (`Z:\\app`, not the share `\\\\server\\code\\app`):
+/// `cmd.exe`, which agents' tools often run in, cannot start in a share.
 pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(windows)]
+    if on_mapped_drive(path) {
+        let absolute = std::path::absolute(path)?;
+        std::fs::metadata(&absolute)?;
+        return Ok(absolute);
+    }
     dunce::canonicalize(path)
+}
+
+/// `Z:\\…` where `Z:` is a network drive.
+#[cfg(windows)]
+fn on_mapped_drive(path: &Path) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+    /// `DRIVE_REMOTE` from `GetDriveTypeW`.
+    const DRIVE_REMOTE: u32 = 4;
+    let text = path.to_string_lossy();
+    let mut chars = text.chars();
+    let (Some(letter), Some(':')) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    if !letter.is_ascii_alphabetic() {
+        return false;
+    }
+    let root: Vec<u16> = format!("{letter}:\\\0").encode_utf16().collect();
+    // SAFETY: `root` is a NUL-terminated UTF-16 string.
+    unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
 }
 
 /// Where workspaces without folders keep their scratch folders.
@@ -58,6 +85,18 @@ pub fn control_socket_path() -> PathBuf {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     dir.hash(&mut hasher);
     private_temp_dir().join(format!("pilothouse-{:016x}.sock", hasher.finish()))
+}
+
+/// A private folder named `name` for sockets: in the data folder when its
+/// path leaves room for a socket name (a socket path is at most ~103
+/// bytes), else in the private temp folder. Not made; see
+/// [`ensure_private_dir`].
+pub fn socket_dir(name: &str) -> PathBuf {
+    let preferred = data_dir().join(name);
+    if preferred.as_os_str().len() <= 60 {
+        return preferred;
+    }
+    private_temp_dir().join(name)
 }
 
 /// `$XDG_RUNTIME_DIR` when set (already private), else a per-user folder in

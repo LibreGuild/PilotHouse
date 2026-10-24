@@ -29,6 +29,8 @@ pub(crate) fn open(project: Option<std::path::PathBuf>, window: &mut Window, cx:
     let fonts = font_options(cx);
     let store = AppState::store(cx).clone();
     let accounts = cx.new(|cx| ph_pulls::AccountsView::new(store.clone(), window, cx));
+    let drives =
+        cx.new(|cx| crate::network_drives::NetworkDrivesView::new(store.clone(), window, cx));
     let open_file: ph_agent::tools_view::OpenFile = std::rc::Rc::new(|path, window, cx| {
         use gpui_kit::component::WindowExt as _;
         window.close_dialog(cx);
@@ -57,6 +59,7 @@ pub(crate) fn open(project: Option<std::path::PathBuf>, window: &mut Window, cx:
                     agents_page(),
                     tools_page(tools.clone()),
                     github_page(accounts.clone()),
+                    drives_page(drives.clone()),
                     features_page(),
                     shortcuts_page(),
                     about_page(),
@@ -399,6 +402,16 @@ fn github_page(accounts: gpui_kit::Entity<ph_pulls::AccountsView>) -> SettingPag
 }
 
 /// Each agent's setup status, checked when the page renders.
+fn drives_page(view: gpui_kit::Entity<crate::network_drives::NetworkDrivesView>) -> SettingPage {
+    SettingPage::new("Network drives")
+        .icon(Icon::new(Icons::HardDrive))
+        .group(
+            SettingGroup::new().item(SettingItem::render(move |_, _, _| {
+                div().w_full().py_1().child(view.clone())
+            })),
+        )
+}
+
 fn agents_page() -> SettingPage {
     SettingPage::new("Agents")
         .icon(Icon::new(Icons::Bot))

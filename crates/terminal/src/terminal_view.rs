@@ -62,9 +62,20 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.send_keystroke(&event.keystroke, cx);
+    }
+
+    fn key_action(&mut self, action: &crate::TerminalKey, _: &mut Window, cx: &mut Context<Self>) {
+        if let Ok(keystroke) = gpui_kit::Keystroke::parse(&action.key) {
+            self.send_keystroke(&keystroke, cx);
+        }
+    }
+
+    /// Sends what `keystroke` types to the shell.
+    fn send_keystroke(&mut self, keystroke: &gpui_kit::Keystroke, cx: &mut Context<Self>) {
         let terminal = self.terminal.read(cx);
         let app_cursor = terminal.term().lock().mode().contains(TermMode::APP_CURSOR);
-        if let Some(bytes) = keys::to_bytes(&event.keystroke, app_cursor) {
+        if let Some(bytes) = keys::to_bytes(keystroke, app_cursor) {
             // Typing jumps back to the live screen, like every terminal does,
             // and drops the selection.
             let mut term = terminal.term().lock();
@@ -389,6 +400,7 @@ impl Render for TerminalView {
             .key_context(TERMINAL_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
+            .on_action(cx.listener(Self::key_action))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::ask))

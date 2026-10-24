@@ -1,4 +1,6 @@
-//! TCP ports that local processes listen on (`lsof`), for the ports panel.
+//! TCP ports that processes listen on, for the ports panel: this
+//! computer's (`lsof`, `netstat`), or a server's (`ss`, over SSH) for a
+//! workspace on a mapped network drive.
 
 use std::path::{Path, PathBuf};
 
@@ -189,6 +191,89 @@ fn parse_cwds(text: &str) -> Vec<(u32, PathBuf)> {
 
 /// Asks a process to stop: SIGTERM, or on Windows `taskkill` (forced, with
 /// its children, since console servers ignore a polite close).
+/// Listening ports on `mapping`'s server (`ss`, Linux), with the working
+/// folders of the user's own processes as this computer's paths. Empty when
+/// the server cannot be reached or has no `ss`.
+pub fn listening_on(mapping: &ph_remote::Mapping) -> Vec<Port> {
+    let script = "ss -ltnpH 2>/dev/null; echo '--- cwd'; for pid in $(ss -ltnpH 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do printf '%s %s\\n' \"$pid\" \"$(readlink /proc/$pid/cwd 2>/dev/null)\"; done";
+    let Ok(output) = ph_remote::ssh::command(mapping, script)
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    parse_ss(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `ss -ltnpH` lines, then `--- cwd` and `<pid> <folder>` lines.
+fn parse_ss(text: &str) -> Vec<Port> {
+    let (listing, cwds) = text.split_once("--- cwd").unwrap_or((text, ""));
+    let cwds: Vec<(u32, String)> = cwds
+        .lines()
+        .filter_map(|line| {
+            let (pid, cwd) = line.trim().split_once(' ')?;
+            Some((pid.parse().ok()?, cwd.to_string()))
+        })
+        .collect();
+    let mut ports: Vec<Port> = Vec::new();
+    for line in listing.lines() {
+        // LISTEN 0 511 127.0.0.1:5173 0.0.0.0:* users:(("node",pid=812,fd=21))
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some(local) = fields.get(3) else { continue };
+        let Some((address, port)) = local.rsplit_once(':') else {
+            continue;
+        };
+        let Ok(port) = port.parse::<u16>() else {
+            continue;
+        };
+        let users = fields.get(5).copied().unwrap_or_default();
+        let process = users
+            .split('"')
+            .nth(1)
+            .unwrap_or("(another user)")
+            .to_string();
+        let pid = users
+            .split("pid=")
+            .nth(1)
+            .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|pid| pid.parse().ok())
+            .unwrap_or(0);
+        if ports
+            .iter()
+            .any(|known| known.port == port && known.pid == pid)
+        {
+            continue;
+        }
+        let cwd = cwds
+            .iter()
+            .find(|(known, _)| *known == pid && pid != 0)
+            .and_then(|(_, cwd)| ph_remote::to_local(cwd));
+        ports.push(Port {
+            port,
+            address: address.trim_matches(['[', ']']).to_string(),
+            pid,
+            process,
+            cwd,
+        });
+    }
+    ports.sort_by_key(|port| port.port);
+    ports
+}
+
+/// Stops process `pid` on `mapping`'s server.
+pub fn stop_on(mapping: &ph_remote::Mapping, pid: u32) -> anyhow::Result<()> {
+    let output = ph_remote::ssh::command(mapping, &format!("kill {pid}"))
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "could not stop process {pid} on {}: {}",
+        mapping.host,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
+}
+
 pub fn stop(pid: u32) -> anyhow::Result<()> {
     let status = if cfg!(windows) {
         ph_env::command("taskkill")
@@ -204,6 +289,19 @@ pub fn stop(pid: u32) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_ss_output_from_a_server() {
+        let text = "LISTEN 0 511 127.0.0.1:5173 0.0.0.0:* users:((\"node\",pid=812,fd=21))\nLISTEN 0 128 [::]:22 [::]:*\nLISTEN 0 511 [::1]:5173 [::]:* users:((\"node\",pid=812,fd=22))\n--- cwd\n812 /srv/code/app\n";
+        let ports = parse_ss(text);
+        assert_eq!(ports.len(), 2);
+        assert_eq!((ports[0].port, ports[0].pid), (22, 0));
+        assert_eq!(ports[0].process, "(another user)");
+        assert_eq!(
+            (ports[1].port, ports[1].process.as_str(), ports[1].pid),
+            (5173, "node", 812)
+        );
+    }
 
     #[test]
     fn parses_lsof_output() {

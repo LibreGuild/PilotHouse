@@ -83,6 +83,8 @@ struct Traits {
     /// Some folder's repository has a hosted remote (pull requests).
     remote: bool,
     has_tests: bool,
+    /// The network drive the primary folder is on, if any.
+    network: Option<ph_remote::drives::NetworkDrive>,
 }
 
 /// What finished while the workspace was away, shown above the chat until
@@ -282,6 +284,9 @@ impl WorkspaceScreen {
         let inspect = cx.background_spawn(async move {
             let mut traits = Traits {
                 has_tests: !ph_uitest::model::list(&tests_root).is_empty(),
+                network: folders
+                    .first()
+                    .and_then(|folder| ph_remote::drives::network_drive_of(folder)),
                 ..Traits::default()
             };
             for folder in &folders {
@@ -331,6 +336,27 @@ impl WorkspaceScreen {
             ContextTab::Runs => !traits.stacks.is_empty(),
             ContextTab::Tests => empty || traits.has_tests || web || has(Stack::Android),
         }
+    }
+
+    /// The network drive the primary folder is on (once looked at).
+    pub fn network_drive(&self) -> Option<&ph_remote::drives::NetworkDrive> {
+        self.traits.as_ref()?.network.as_ref()
+    }
+
+    /// Where the workspace's Git, shells and runs work when its primary
+    /// folder is on a mapped network drive.
+    pub fn server(&self) -> Option<ph_remote::Remote> {
+        ph_remote::remote_of(self.project.folders().first()?)
+    }
+
+    /// Runs Git again everywhere (a network drive mapping changed, so Git
+    /// may now run elsewhere).
+    pub fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        for repo in self.repos.values() {
+            repo.update(cx, |repo, cx| repo.refresh(cx));
+        }
+        self.inspect_folder(cx);
+        cx.notify();
     }
 
     /// The repository model, created with the space. Git operations report

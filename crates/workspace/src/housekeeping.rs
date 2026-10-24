@@ -9,7 +9,9 @@
 //!
 //! Copies are removed with `git worktree remove`, so their repository
 //! forgets them too; one whose repository is gone is deleted directly. Only
-//! folders inside `<data dir>/worktrees` are ever removed.
+//! folders inside this install's copy folders are ever removed: the data
+//! folder's `worktrees`, and on each mapped network drive this install's own
+//! (never another person's sharing the drive; see [`crate::copies`]).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -62,11 +64,19 @@ pub fn tidy(store: &Store) -> usize {
     if !own {
         return 0;
     }
-    let folder = data.join("worktrees");
-    let Ok(entries) = std::fs::read_dir(&folder) else {
+    let projects = store.projects().unwrap_or_default();
+    let mut removed = 0;
+    for folder in crate::copies::all_folders(store) {
+        removed += tidy_folder(store, &projects, &folder);
+    }
+    removed
+}
+
+/// [`tidy`] for one folder of copies.
+fn tidy_folder(store: &Store, projects: &[ph_store::projects::Project], folder: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(folder) else {
         return 0;
     };
-    let projects = store.projects().unwrap_or_default();
     let mut removed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -102,7 +112,7 @@ pub fn tidy(store: &Store) -> usize {
                 Some(_),
             ) => age > UNUSED && lane_finished(store, *project, *run, agent, &path),
         };
-        if stale && remove(&folder, root.as_deref(), &path) {
+        if stale && remove(folder, root.as_deref(), &path) {
             removed += 1;
         }
     }

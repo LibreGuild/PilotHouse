@@ -52,6 +52,9 @@ pub struct RunsPanel {
     command_input: Entity<InputState>,
     status: Option<SharedString>,
     active: bool,
+    /// The server the workspace's work runs on (a mapped network drive):
+    /// its ports are listed, and opened through a tunnel.
+    server: Option<ph_remote::Mapping>,
     _poll: Option<Task<()>>,
 }
 
@@ -87,6 +90,7 @@ impl RunsPanel {
             command_input,
             status: None,
             active: false,
+            server: None,
             _poll: None,
         };
         panel.rescan(cx);
@@ -99,10 +103,20 @@ impl RunsPanel {
             return;
         }
         self.active = active;
+        // Mappings can change in Settings; look again each time it shows.
+        self.server = self
+            .folders
+            .first()
+            .and_then(|(_, folder)| ph_remote::remote_of(folder))
+            .map(|remote| remote.mapping);
+        let server = self.server.clone();
         self._poll = active.then(|| {
             cx.spawn(async move |this, cx| {
                 loop {
-                    let ports = cx.background_spawn(async { ports::listening() }).await;
+                    let server = server.clone();
+                    let ports = cx
+                        .background_spawn(async move { listening(server.as_ref()) })
+                        .await;
                     if this
                         .update(cx, |this, cx| {
                             this.ports = ports;
@@ -173,9 +187,22 @@ impl RunsPanel {
 
     fn stop_port(&mut self, port: &Port, cx: &mut Context<Self>) {
         let (pid, name) = (port.pid, port.process.clone());
+        let server = self.server.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async move { ports::stop(pid) }).await;
-            let ports = cx.background_spawn(async { ports::listening() }).await;
+            let result = cx
+                .background_spawn({
+                    let server = server.clone();
+                    async move {
+                        match &server {
+                            Some(server) => ports::stop_on(server, pid),
+                            None => ports::stop(pid),
+                        }
+                    }
+                })
+                .await;
+            let ports = cx
+                .background_spawn(async move { listening(server.as_ref()) })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 this.status = Some(match result {
                     Ok(()) => format!("Stopped {name} ({pid})").into(),
@@ -255,9 +282,48 @@ impl RunsPanel {
             .into_any_element()
     }
 
+    /// Opens `port` in the browser pane (`copy`: copies its address): on a
+    /// server, through a tunnel to a port here.
+    fn reach_port(&mut self, port: u16, copy: bool, cx: &mut Context<Self>) {
+        let Some(server) = self.server.clone() else {
+            let url = format!("http://localhost:{port}");
+            if copy {
+                cx.write_to_clipboard(ClipboardItem::new_string(url));
+            } else {
+                cx.emit(RunsPanelEvent::OpenUrl(url));
+            }
+            return;
+        };
+        self.status = Some(format!("Connecting to port {port} on {}…", server.host).into());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let host = server.host.clone();
+            let local = cx
+                .background_spawn(async move { crate::forward::open(&server, port) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match local {
+                    Ok(local) => {
+                        let url = format!("http://localhost:{local}");
+                        this.status = Some(
+                            format!("Port {port} on {host} is at localhost:{local} here.").into(),
+                        );
+                        if copy {
+                            cx.write_to_clipboard(ClipboardItem::new_string(url));
+                        } else {
+                            cx.emit(RunsPanelEvent::OpenUrl(url));
+                        }
+                    }
+                    Err(err) => this.status = Some(format!("{err:#}").into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn render_port(&self, ix: usize, port: &Port, cx: &mut Context<Self>) -> AnyElement {
-        let url = port.url();
-        let (open_url, copy_url) = (url.clone(), url);
+        let number = port.port;
         let stop = port.clone();
         let ours = self
             .folders
@@ -308,9 +374,9 @@ impl RunsPanel {
                     .icon(Icons::Globe)
                     .tooltip("Open in the browser pane")
                     .accessibility_label(format!("Open port {}", port.port))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(RunsPanelEvent::OpenUrl(open_url.clone()))
-                    })),
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.reach_port(number, false, cx)),
+                    ),
             )
             .child(
                 Button::new(("copy-port", ix))
@@ -319,9 +385,7 @@ impl RunsPanel {
                     .icon(IconName::Copy)
                     .tooltip("Copy the address")
                     .accessibility_label("Copy the address")
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(copy_url.clone()))
-                    }),
+                    .on_click(cx.listener(move |this, _, _, cx| this.reach_port(number, true, cx))),
             )
             .child(
                 Button::new(("stop-port", ix))
@@ -333,6 +397,14 @@ impl RunsPanel {
                     .on_click(cx.listener(move |this, _, _, cx| this.stop_port(&stop, cx))),
             )
             .into_any_element()
+    }
+}
+
+/// Listening ports here, or on `server`.
+fn listening(server: Option<&ph_remote::Mapping>) -> Vec<Port> {
+    match server {
+        Some(server) => ports::listening_on(server),
+        None => ports::listening(),
     }
 }
 
@@ -454,22 +526,33 @@ impl Render for RunsPanel {
                     .enumerate()
                     .map(|(ix, config)| self.render_config(ix, config, cx)),
             )
-            .child(section("Ports", None, cx).when(other_count > 0, |this| {
-                this.child(
-                    Button::new("other-ports")
-                        .ghost()
-                        .xsmall()
-                        .label(if self.show_other_ports {
-                            "Only this project".to_string()
-                        } else {
-                            format!("Show {other_count} more")
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_other_ports = !this.show_other_ports;
-                            cx.notify();
-                        })),
+            .child(
+                section(
+                    if self.server.is_some() {
+                        "Ports on the server"
+                    } else {
+                        "Ports"
+                    },
+                    None,
+                    cx,
                 )
-            }))
+                .when(other_count > 0, |this| {
+                    this.child(
+                        Button::new("other-ports")
+                            .ghost()
+                            .xsmall()
+                            .label(if self.show_other_ports {
+                                "Only this project".to_string()
+                            } else {
+                                format!("Show {other_count} more")
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_other_ports = !this.show_other_ports;
+                                cx.notify();
+                            })),
+                    )
+                }),
+            )
             .when(ports.is_empty(), |this| {
                 this.child(
                     h_flex()

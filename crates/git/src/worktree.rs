@@ -26,6 +26,24 @@ pub fn checkout_size(root: &Path) -> Result<u64> {
         .sum())
 }
 
+/// Where PilotHouse puts extra working trees of the repository at `root`
+/// when it is on a mapped network drive: in the share, so Git on the server
+/// can write them and agents here can reach them, in a folder of `owner`'s
+/// (an install's id) so people sharing the drive keep theirs apart. `None`
+/// for a repository on this computer (they go in the data folder).
+pub fn home(root: &Path, owner: &str) -> Option<PathBuf> {
+    let remote = ph_remote::remote_of(root)?;
+    Some(share_home(&remote.mapping, owner))
+}
+
+/// [`home`] for every repository under `mapping`.
+pub fn share_home(mapping: &ph_remote::Mapping, owner: &str) -> PathBuf {
+    PathBuf::from(&mapping.local)
+        .join(".pilothouse")
+        .join(owner)
+        .join("worktrees")
+}
+
 /// Checks out `commit` (detached) at `path`.
 pub fn add_detached(root: &Path, path: &Path, commit: &str) -> Result<()> {
     check_name("commit", commit)?;
@@ -61,7 +79,7 @@ pub fn list(root: &Path) -> Result<Vec<Worktree>> {
         if let Some(path) = line.strip_prefix("worktree ") {
             list.extend(current.take());
             current = Some(Worktree {
-                path: PathBuf::from(path),
+                path: crate::local_path(path),
                 head: String::new(),
                 branch: None,
             });

@@ -32,11 +32,9 @@ use ph_store::projects::ProjectId;
 use crate::AppState;
 use crate::workspace_screen::WorkspaceScreen;
 
-/// `<data dir>/worktrees/<project>-run<run>-<agent>`.
-fn lane_path(project: ProjectId, run: i64, agent: &str) -> PathBuf {
-    ph_store::paths::data_dir()
-        .join("worktrees")
-        .join(format!("{project}-run{run}-{agent}"))
+/// `<copies>/<project>-run<run>-<agent>` (see [`crate::copies`]).
+fn lane_path(folder: &std::path::Path, project: ProjectId, run: i64, agent: &str) -> PathBuf {
+    folder.join(format!("{project}-run{run}-{agent}"))
 }
 
 /// Takes the snapshot and makes a worktree per agent (blocking). Returns the
@@ -51,12 +49,10 @@ fn prepare(
     let base = ph_git::checkpoint::create(root, &format!("Parallel run: {prompt}"))?
         .context("parallel runs need a Git repository")?;
     let run = store.create_parallel_run(project, prompt, &base)?;
+    let folder = crate::copies::folder(store, root)?;
     let mut lanes = Vec::new();
     for agent in agents {
-        let path = lane_path(project, run, agent.id);
-        if let Some(parent) = path.parent() {
-            ph_store::paths::ensure_private_dir(parent)?;
-        }
+        let path = lane_path(&folder, project, run, agent.id);
         ph_git::worktree::add_detached(root, &path, &base)
             .with_context(|| format!("making a worktree for {}", agent.name))?;
         let lane = store.add_parallel_lane(run, agent.id, &path.to_string_lossy())?;

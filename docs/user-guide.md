@@ -19,6 +19,10 @@ A short tour of PilotHouse for people using it. For how it is built, see the [do
 
 A workspace keeps its chats, shells and test runs going while you look at another one. The workspace menu shows what each is doing, and coming back shows what finished while you were away.
 
+## Code on a network drive
+
+If your code lives on a server and you reach it as a mapped drive (`Z:\`) or a mounted share, open the folder as usual, then click **Network drive** in the status bar (or Settings → Network drives). PilotHouse checks the server with you, and from then on Git, terminals and run configurations work on the server over SSH; the status bar says **SSH · server**. Files are still read and saved through the drive, and agents run on this computer. See [network drives](features/network-drives.md).
+
 ## Shortcuts
 
 The welcome screen shows three steps to start; **⌘/** shows every shortcut in the app.
