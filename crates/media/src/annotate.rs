@@ -172,7 +172,9 @@ mod tests {
         // BGRA: red is the third byte.
         frame
             .bgra()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[2] == 255 && p[1] == 59)
             .count()
     }

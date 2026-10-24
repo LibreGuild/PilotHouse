@@ -10,6 +10,8 @@
 
 use anyhow::Result;
 
+/// The service name secrets are filed under in the OS store.
+#[cfg(any(target_vendor = "apple", windows))]
 const SERVICE: &str = "PilotHouse";
 
 /// The OS store in release builds on macOS and Windows.

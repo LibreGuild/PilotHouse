@@ -39,4 +39,4 @@ A workspace keeps its chats, shells and test runs going while you look at anothe
 
 ## Your data
 
-Everything is stored on your computer, in PilotHouse's data folder (on macOS `~/Library/Application Support/PilotHouse`, on Windows `%APPDATA%\PilotHouse`, on Linux `~/.local/share/PilotHouse`): one SQLite database, browser profiles, captures, and test reports. Tokens for GitHub are kept in the system keychain (Keychain, Windows Credential Manager, or the Secret Service on Linux). Nothing is sent anywhere except to the agents you run, Git remotes, and the GitHub hosts you add.
+Everything is stored on your computer, in PilotHouse's data folder (on macOS `~/Library/Application Support/PilotHouse`, on Windows `%APPDATA%\PilotHouse`, on Linux `~/.local/share/PilotHouse`): one SQLite database, browser profiles, captures, and test reports. Tokens for GitHub are kept in the system's credential store (Keychain on macOS, Credential Manager on Windows; on Linux, a file in the data folder only you can read). Nothing is sent anywhere except to the agents you run, Git remotes, and the GitHub hosts you add.

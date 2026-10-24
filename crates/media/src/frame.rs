@@ -43,7 +43,9 @@ impl Frame {
     pub fn from_rgb_slice(width: u32, height: u32, rgb: &[u8]) -> Self {
         // Fixed-size chunks on a pre-filled buffer let the compiler vectorize.
         let mut pixels = vec![255u8; rgb.len() / 3 * 4];
-        for (out, pixel) in pixels.chunks_exact_mut(4).zip(rgb.chunks_exact(3)) {
+        let (out_pixels, _) = pixels.as_chunks_mut::<4>();
+        let (in_pixels, _) = rgb.as_chunks::<3>();
+        for (out, pixel) in out_pixels.iter_mut().zip(in_pixels) {
             out[0] = pixel[2];
             out[1] = pixel[1];
             out[2] = pixel[0];
@@ -133,7 +135,7 @@ impl Frame {
 }
 
 fn swap_red_blue(pixels: &mut [u8]) {
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
 }

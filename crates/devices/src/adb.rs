@@ -260,7 +260,10 @@ fn parse_raw_screencap(bytes: &[u8]) -> Option<Frame> {
     }
     // RGBX: the fourth byte is padding, so make it opaque.
     let mut rgba = pixels.to_vec();
-    rgba.chunks_exact_mut(4).for_each(|pixel| pixel[3] = 255);
+    rgba.as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .for_each(|pixel| pixel[3] = 255);
     Some(Frame::from_rgba(width, height, rgba))
 }
 
