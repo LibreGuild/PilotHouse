@@ -18,6 +18,7 @@ Everything lands in `dist/` (git-ignored). The version comes from `Cargo.toml` (
 
 - **Stable:** push a tag `vX.Y.Z` matching `Cargo.toml`. Only maintainers can create `v*` tags.
 - **Nightly:** once a day, if `main` moved since the last nightly, a `nightly` pre-release is built from it (or start the workflow by hand).
+- **Check a branch:** start the Release workflow by hand on any other branch (`gh workflow run release.yml --ref <branch>`): it builds every installer and keeps them as run artifacts, without publishing.
 
 Each build job attests its files ([build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations)), and the release carries `SHA256SUMS`. Check a download with `gh attestation verify <file> -R LibreGuild/PilotHouse`.
 

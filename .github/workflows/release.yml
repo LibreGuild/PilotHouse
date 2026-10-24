@@ -2,7 +2,8 @@ name: Release
 
 # A tag `vX.Y.Z` (matching Cargo.toml) builds and publishes that release.
 # Once a day, when `main` has moved since the last nightly, a "nightly"
-# pre-release is built from it; it can also be started by hand.
+# pre-release is built from it; it can also be started by hand. Started on
+# another branch, it only builds the installers (a check before merging).
 on:
   push:
     tags: ["v*"]
@@ -178,6 +179,7 @@ jobs:
   publish:
     name: Publish
     needs: [plan, macos, windows, linux]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
