@@ -1,0 +1,3 @@
+// Windows resources for pilothouse.exe. Icon 1 is the one GPUI loads for
+// the window and the taskbar.
+1 ICON "icon/PilotHouse.ico"

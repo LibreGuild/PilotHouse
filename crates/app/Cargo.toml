@@ -1,0 +1,45 @@
+[package]
+name = "pilothouse"
+description = "PilotHouse: one desktop app for coding agents, code, devices and project planning."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pilothouse"
+path = "src/main.rs"
+
+[features]
+default = []
+# Dev-only UI automation over the control socket. See docs/testing.md.
+automation = ["ph-control/automation"]
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+ph-board.workspace = true
+ph-browser.workspace = true
+ph-devices.workspace = true
+ph-runs.workspace = true
+ph-control.workspace = true
+ph-env.workspace = true
+ph-mcp.workspace = true
+ph-agy.workspace = true
+ph-store.workspace = true
+ph-theme.workspace = true
+ph-ui.workspace = true
+ph-uitest.workspace = true
+ph-utils.workspace = true
+ph-workspace.workspace = true
+serde_json.workspace = true
+smol.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
+[build-dependencies]
+embed-resource = "3"

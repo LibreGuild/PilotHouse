@@ -1,0 +1,18 @@
+[package]
+name = "ph-board"
+description = "The project Kanban board: cards agents pick up and move, plus its control-socket methods."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+ph-control.workspace = true
+ph-store.workspace = true
+ph-uitest.workspace = true
+ph-ui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

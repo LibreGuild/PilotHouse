@@ -1,0 +1,31 @@
+[package]
+name = "ph-control"
+description = "Local control socket: lets the MCP bridge and the dev automation harness talk to the running app."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# UI automation methods (ui.click, ui.screenshot, ...). Development builds only:
+# it compiles in GPUI's test support, so release builds must leave it off.
+automation = ["gpui-kit/test-support", "dep:image"]
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+ph-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smol.workspace = true
+tracing.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+] }

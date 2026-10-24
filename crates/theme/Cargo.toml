@@ -1,0 +1,15 @@
+[package]
+name = "ph-theme"
+description = "PilotHouse design system: light/dark themes, appearance switching and layout tokens."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

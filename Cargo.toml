@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+default-members = ["crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/LibreGuild/PilotHouse"
+publish = false
+
+[workspace.dependencies]
+# GPUI Kit pins one exact GPUI snapshot; bump deliberately (see docs/architecture.md).
+gpui-kit = { version = "=0.8.0", features = ["syntect"] }
+anyhow = "1"
+dirs = "6"
+dunce = "1"
+agent-client-protocol-schema = { version = "=1.12.0", default-features = false }
+futures = "0.3"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+ignore = "0.4"
+jiff = "0.2"
+memchr = "2"
+similar = "2"
+notify = "8"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smol = "2"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+# PilotHouse crates
+ph-theme = { path = "crates/theme" }
+ph-store = { path = "crates/store" }
+ph-ui = { path = "crates/ui" }
+ph-workspace = { path = "crates/workspace" }
+ph-control = { path = "crates/control" }
+ph-files = { path = "crates/files" }
+ph-board = { path = "crates/board" }
+ph-mcp = { path = "crates/mcp" }
+ph-env = { path = "crates/env" }
+ph-agent = { path = "crates/agent" }
+ph-terminal = { path = "crates/terminal" }
+ph-changes = { path = "crates/changes" }
+ph-utils = { path = "crates/utils" }
+ph-media = { path = "crates/media" }
+ph-browser = { path = "crates/browser" }
+ph-devices = { path = "crates/devices" }
+ph-runs = { path = "crates/runs" }
+ph-uitest = { path = "crates/uitest" }
+ph-agy = { path = "crates/agy" }
+ph-git = { path = "crates/git" }
+ph-lsp = { path = "crates/lsp" }
+ph-github = { path = "crates/github" }
+ph-pulls = { path = "crates/pulls" }
+ph-review = { path = "crates/review" }
+
+# Debug info is the largest part of a debug build. Keep line tables for our own
+# crates (readable backtraces) and drop it for dependencies to save disk space.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

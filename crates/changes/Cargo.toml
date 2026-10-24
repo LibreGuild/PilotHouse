@@ -1,0 +1,16 @@
+[package]
+name = "ph-changes"
+description = "Review uncommitted changes (by you or an agent) and keep or discard them hunk by hunk."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+ph-env.workspace = true
+ph-files.workspace = true
+ph-git.workspace = true
+ph-ui.workspace = true
+tracing.workspace = true

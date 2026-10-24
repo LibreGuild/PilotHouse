@@ -1,0 +1,28 @@
+[package]
+name = "ph-browser"
+description = "The embedded browser pane: a headless Chrome per project, driven over the DevTools protocol."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+futures.workspace = true
+gpui-kit.workspace = true
+ph-control.workspace = true
+ph-env.workspace = true
+ph-media.workspace = true
+ph-store.workspace = true
+ph-ui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smol.workspace = true
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation"] }

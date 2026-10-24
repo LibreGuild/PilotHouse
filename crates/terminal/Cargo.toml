@@ -1,0 +1,17 @@
+[package]
+name = "ph-terminal"
+description = "Embedded terminals: a PTY and VT emulator (alacritty_terminal) rendered with GPUI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+alacritty_terminal = "0.26"
+anyhow.workspace = true
+gpui-kit.workspace = true
+ph-env.workspace = true
+ph-theme.workspace = true
+ph-ui.workspace = true
+smol.workspace = true
+tracing.workspace = true

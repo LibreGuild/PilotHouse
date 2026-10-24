@@ -1,0 +1,23 @@
+PilotHouse
+Copyright 2026 The PilotHouse contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product bundles third-party works under their own licences:
+
+- File and folder icons, crates/ui/assets/file-icons/: from the Material Icon
+  Theme by Material Extensions, MIT licence (crates/ui/assets/file-icons/LICENSE).
+  The default folder icon is recoloured from its "folder-base" icon.
+
+- Agent marks, crates/ui/assets/agents/: from Lobe Icons by LobeHub, MIT
+  licence (crates/ui/assets/agents/LICENSE). The marks are trademarks of their
+  owners (Anthropic, OpenAI, Google) and are used only to name their products.
+
+- Interface icons: from Lucide, ISC licence, embedded through the gpui-kit
+  crates.
+
+- crates/ui/src/menu.rs is adapted from gpui-component's
+  menu/dropdown_menu.rs, Apache License 2.0.
+
+The PilotHouse app icon (crates/app/assets/icon/) was made for this project
+and is covered by the Apache License 2.0 with the rest of the repository.

@@ -1,0 +1,13 @@
+[package]
+name = "ph-mcp"
+description = "The PilotHouse MCP server (stdio): gives coding agents board tools backed by the running app."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ph-control.workspace = true
+serde.workspace = true
+serde_json.workspace = true

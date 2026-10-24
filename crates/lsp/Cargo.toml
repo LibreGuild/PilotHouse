@@ -1,0 +1,18 @@
+[package]
+name = "ph-lsp"
+description = "Language servers for PilotHouse's editor: finds installed servers, speaks LSP over stdio, and feeds hover, go to definition, completion, references, rename, symbols and diagnostics to the editor."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+gpui-kit.workspace = true
+lsp-types = { version = "0.97", features = ["proposed"] }
+ph-env.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smol.workspace = true
+tracing.workspace = true

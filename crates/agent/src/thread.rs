@@ -1,0 +1,1413 @@
+//! One chat: its transcript and its conversation with an agent.
+//!
+//! A thread can start as a **draft** (no stored session yet). Focusing the
+//! composer warms it up: the agent starts and the ACP session is created, so
+//! the model and mode pickers are filled before the first message. The stored
+//! session is created on the first send.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use ph_store::usage::{SessionUsage, UsageReport};
+
+use agent_client_protocol_schema::v1::{
+    CancelNotification, ContentBlock, EnvVariable, McpServer, McpServerStdio, PromptRequest,
+    PromptResponse, RequestPermissionRequest, SessionUpdate, StopReason, TextContent,
+};
+use futures::FutureExt as _;
+use futures::future::Shared;
+use gpui_kit::component::message_scroller::MessageScrollerState;
+use gpui_kit::{
+    App, AppContext as _, Context, Entity, EventEmitter, SharedString, Subscription, Task,
+};
+use ph_store::Store;
+use ph_store::projects::ProjectId;
+use ph_store::sessions::Session;
+use serde_json::{Value, json};
+
+use crate::agents::{self, AgentSpec};
+use crate::connection::{AgentConnection, Ready, SignInMethod};
+use crate::options::{self, AgentOption};
+use crate::permission::{ApprovalInbox, PermissionChoice, PermissionRequest};
+use crate::review_card::ReviewCardEvent;
+use crate::transcript::{AttachmentSummary, Entry, PlanItem, ToolEntry, ToolKindLabel, block_text};
+
+/// How much earlier conversation is replayed to a fresh agent session.
+const HISTORY_PREAMBLE_CHARS: usize = 8_000;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ThreadStatus {
+    Idle,
+    /// Starting the agent or its session for a prompt.
+    Connecting,
+    /// The agent is working on a prompt.
+    Working,
+}
+
+/// Facts about the project the thread belongs to.
+#[derive(Clone)]
+pub struct ThreadProject {
+    pub id: ProjectId,
+    pub name: String,
+    /// Where the agent works: the primary folder (or a worktree, or the
+    /// scratch folder of a workspace without folders).
+    pub path: PathBuf,
+    /// The workspace's other folders, given to the agent as extra roots.
+    pub extra_dirs: Vec<PathBuf>,
+    /// The workspace has no folders: `path` is its scratch folder.
+    pub empty: bool,
+}
+
+impl ThreadProject {
+    pub fn of(project: &ph_store::projects::Project) -> Self {
+        Self {
+            id: project.id,
+            name: project.name.clone(),
+            path: project.path.clone(),
+            extra_dirs: project.extra_folders.clone(),
+            empty: project.empty,
+        }
+    }
+
+    /// The folders as Files names them, for mentions and attachments.
+    pub fn roots(&self) -> ph_files::roots::Roots {
+        let folders: Vec<_> =
+            std::iter::once((self.path.clone(), self.empty.then(|| "Scratch".to_string())))
+                .chain(self.extra_dirs.iter().map(|dir| (dir.clone(), None)))
+                .collect();
+        ph_files::roots::Roots::new(&folders)
+    }
+
+    /// Told to the agent with a chat's first message: the workspace's other
+    /// folders, or that it has none.
+    pub fn workspace_note(&self) -> Option<String> {
+        if self.empty && self.extra_dirs.is_empty() {
+            return Some(format!(
+                "(Workspace note from PilotHouse: this workspace has no project folder. You are working in its own scratch \
+                 folder, {}, which you may use for any files you make. The user may just want to talk, or to use the \
+                 browser and devices through the PilotHouse tools.)",
+                self.path.display()
+            ));
+        }
+        if self.extra_dirs.is_empty() {
+            return None;
+        }
+        let roots = self.roots();
+        let folders: Vec<String> = roots
+            .list()
+            .iter()
+            .map(|root| format!("- {}: {}", root.name, root.path.display()))
+            .collect();
+        Some(format!(
+            "(Workspace note from PilotHouse: this workspace has several folders, often separate Git repositories. You \
+             work in the first; the others are open to you too:\n{}\nIn this chat a path like `{}/src/main.rs` names a file \
+             in the folder of that name.)",
+            folders.join("\n"),
+            roots.list()[1].name
+        ))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ThreadEvent {
+    /// The agent finished a turn (or it stopped or failed).
+    TurnEnded,
+    /// The first send created the stored session.
+    SessionCreated(Session),
+    /// A review card asks to open a file, or for a new review run.
+    Review(ReviewCardEvent),
+}
+
+/// The agent session id, once set up; shared so concurrent callers await one setup.
+type SetupTask = Shared<Task<Result<String, SharedString>>>;
+
+pub struct ChatThread {
+    store: Store,
+    project: ThreadProject,
+    /// `None` while the chat is a draft.
+    session: Option<Session>,
+    agent: &'static AgentSpec,
+    connection: Option<Entity<AgentConnection>>,
+    acp_session_id: Option<String>,
+    setup: Option<SetupTask>,
+    /// What the agent offers (model, mode, effort…); from the cache until the session exists.
+    options: Vec<AgentOption>,
+    /// Ignore streamed history while the agent replays a resumed session.
+    replaying: bool,
+    /// Whether the running agent accepts images.
+    accepts_images: bool,
+    entries: Vec<Entry>,
+    /// `entries[..saved]` are in the store.
+    saved: usize,
+    status: ThreadStatus,
+    scroller: Entity<MessageScrollerState>,
+    /// The PR review this chat runs, if it is a review chat.
+    review_id: Option<i64>,
+    /// A lane of a parallel run: the agent works in its own worktree
+    /// (`project.path`), remembered with the session.
+    parallel: bool,
+    /// Read-only tools run without asking during the current turn (a quick
+    /// question about code). Review chats always allow them.
+    reads_this_turn: bool,
+    /// PilotHouse's browser, device and test tools run without asking
+    /// during the current turn (recording or repairing a UI test).
+    app_tools_this_turn: bool,
+    /// Stored message ids of user entries, by entry index, so a checkpoint
+    /// taken after the message was saved can be added to it.
+    user_message_ids: HashMap<usize, i64>,
+    /// A checkpoint restore in progress.
+    restoring: bool,
+    /// Told to the agent with the next message (files were restored, so
+    /// what it read earlier may be stale).
+    note_for_agent: Option<String>,
+    /// Tokens, cost and context so far, as the agent reported them.
+    usage: Option<SessionUsage>,
+    _turn: Option<Task<()>>,
+    _cards: Vec<Subscription>,
+}
+
+impl EventEmitter<ThreadEvent> for ChatThread {}
+
+impl ChatThread {
+    /// A new, unsaved chat with `agent`.
+    pub fn draft(
+        store: Store,
+        project: ThreadProject,
+        agent: &'static AgentSpec,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let options = options::with_preferences(
+            options::cached(&store, agent.id),
+            &options::preferences(&store, agent.id),
+        );
+        let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
+        Self {
+            store,
+            project,
+            session: None,
+            agent,
+            connection: None,
+            acp_session_id: None,
+            setup: None,
+            options,
+            replaying: false,
+            accepts_images: true,
+            entries: Vec::new(),
+            saved: 0,
+            status: ThreadStatus::Idle,
+            scroller,
+            review_id: None,
+            parallel: false,
+            reads_this_turn: false,
+            app_tools_this_turn: false,
+            user_message_ids: HashMap::new(),
+            restoring: false,
+            note_for_agent: None,
+            usage: None,
+            _turn: None,
+            _cards: Vec::new(),
+        }
+    }
+
+    /// Makes this draft a PR review chat (the review run already exists).
+    pub fn set_review(&mut self, review_id: i64) {
+        self.review_id = Some(review_id);
+    }
+
+    pub fn review_id(&self) -> Option<i64> {
+        self.review_id
+    }
+
+    /// Makes this draft a parallel-run lane working in its worktree.
+    pub fn set_parallel(&mut self) {
+        self.parallel = true;
+    }
+
+    /// Lets the next turn read and search without asking (cleared when the
+    /// turn ends).
+    pub fn allow_reads_for_turn(&mut self) {
+        self.reads_this_turn = true;
+    }
+
+    /// Lets the next turn read and use PilotHouse's browser, device and
+    /// test tools without asking (cleared when the turn ends).
+    pub fn allow_app_tools_for_turn(&mut self) {
+        self.reads_this_turn = true;
+        self.app_tools_this_turn = true;
+    }
+
+    /// Forwards a review card's requests (open a file, review again).
+    fn watch_card(&mut self, entry: &Entry, cx: &mut Context<Self>) {
+        if let Entry::Review { card, .. } = entry {
+            self._cards
+                .push(cx.subscribe(card, |_, _, event: &ReviewCardEvent, cx| {
+                    cx.emit(ThreadEvent::Review(event.clone()))
+                }));
+        }
+    }
+
+    /// After a review chat's turn: reads the agent's findings from its reply,
+    /// matches them to the previous run, saves them, and shows the card.
+    fn record_review(&mut self, cx: &mut Context<Self>) {
+        let Some(review_id) = self.review_id else {
+            return;
+        };
+        let reply = self.entries.iter().rev().find_map(|entry| match entry {
+            Entry::Agent { text, .. } => Some(text.clone()),
+            Entry::User { .. } => Some(String::new()),
+            _ => None,
+        });
+        let Some(report) = reply.as_deref().and_then(ph_review::parse) else {
+            self.push(
+                Entry::Notice {
+                    text: "No findings block in that reply. Ask the agent to finish with the pilothouse-review block to see the findings here.".into(),
+                    is_error: false,
+                },
+                cx,
+            );
+            return;
+        };
+        let Ok(Some(review)) = self.store.pr_review(review_id) else {
+            return;
+        };
+        let previous = self
+            .store
+            .latest_pr_review(&review.pull, Some(review_id))
+            .ok()
+            .flatten()
+            .and_then(|earlier| self.store.pr_findings(earlier.id).ok())
+            .unwrap_or_default();
+        let findings = ph_review::merge::merge(review_id, &report, &previous);
+        if let Err(err) =
+            self.store
+                .finish_pr_review(review_id, &report.summary, &report.verdict, &findings)
+        {
+            self.push(
+                Entry::Notice {
+                    text: format!("Could not save the review: {err:#}"),
+                    is_error: true,
+                },
+                cx,
+            );
+            return;
+        }
+        let entry = Entry::review(review_id, cx);
+        self.watch_card(&entry, cx);
+        self.push(entry, cx);
+    }
+
+    /// A stored chat with its transcript.
+    pub fn open(
+        store: Store,
+        project: ThreadProject,
+        session: Session,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let agent = agents::find(&session.agent_id).unwrap_or(&agents::AGENTS[0]);
+        let entries: Vec<Entry> = store
+            .messages(session.id)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|message| Entry::from_stored(&message.body, cx))
+            .collect();
+        // A review chat works in its own worktree.
+        let mut project = project;
+        if let Some(cwd) = session
+            .cwd
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|cwd| cwd.is_dir())
+        {
+            project.path = cwd;
+        }
+        let review_id = store
+            .pr_review_for_session(session.id)
+            .ok()
+            .flatten()
+            .map(|review| review.id);
+        let mut thread = Self::draft(store, project, agent, cx);
+        thread.review_id = review_id;
+        for entry in &entries {
+            thread.watch_card(entry, cx);
+        }
+        thread.saved = entries.len();
+        thread.usage = thread.store.session_usage(session.id).ok().flatten();
+        thread.scroller = cx.new(|cx| MessageScrollerState::new(entries.len(), cx));
+        thread.entries = entries;
+        thread.session = Some(session);
+        thread
+    }
+
+    pub fn session(&self) -> Option<&Session> {
+        self.session.as_ref()
+    }
+
+    pub fn title(&self) -> SharedString {
+        self.session
+            .as_ref()
+            .map(|session| SharedString::from(session.title.clone()))
+            .unwrap_or_else(|| "New chat".into())
+    }
+
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    pub fn scroller(&self) -> &Entity<MessageScrollerState> {
+        &self.scroller
+    }
+
+    /// The agent waits for the user to answer a question (a permission).
+    pub fn is_waiting(&self, cx: &gpui_kit::App) -> bool {
+        self.entries.iter().rev().any(|entry| match entry {
+            Entry::Permission(request) => request.read(cx).is_pending(),
+            _ => false,
+        })
+    }
+
+    /// The text of the agent's newest message.
+    pub fn last_reply(&self) -> Option<String> {
+        self.entries.iter().rev().find_map(|entry| match entry {
+            Entry::Agent { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+    }
+
+    pub fn status(&self) -> &ThreadStatus {
+        &self.status
+    }
+
+    pub fn agent(&self) -> &'static AgentSpec {
+        self.agent
+    }
+
+    pub fn options(&self) -> &[AgentOption] {
+        &self.options
+    }
+
+    pub fn accepts_images(&self) -> bool {
+        self.accepts_images
+    }
+
+    /// Whether the agent session is running (the agent can no longer change).
+    pub fn has_started(&self) -> bool {
+        self.acp_session_id.is_some() || self.setup.is_some() || !self.entries.is_empty()
+    }
+
+    /// Changes the agent. Only allowed before the agent session started.
+    pub fn set_agent(&mut self, agent: &'static AgentSpec, cx: &mut Context<Self>) {
+        if self.has_started() || self.agent.id == agent.id {
+            return;
+        }
+        if let Some(session) = &mut self.session {
+            if self.store.set_session_agent(session.id, agent.id).is_err() {
+                return;
+            }
+            session.agent_id = agent.id.to_string();
+        }
+        self.agent = agent;
+        self.connection = None;
+        self.options = options::with_preferences(
+            options::cached(&self.store, agent.id),
+            &options::preferences(&self.store, agent.id),
+        );
+        cx.notify();
+    }
+
+    /// Starts the agent session ahead of the first message, so pickers fill
+    /// in and the first reply comes sooner. Errors surface on send instead.
+    pub fn warm_up(&mut self, connection: Entity<AgentConnection>, cx: &mut Context<Self>) {
+        if self.acp_session_id.is_none() {
+            let setup = self.ensure_session(connection, cx);
+            cx.background_spawn(async move {
+                let _ = setup.await;
+            })
+            .detach();
+        }
+    }
+
+    /// Picks `value` for option `option_id`, now and for future sessions.
+    pub fn set_option(&mut self, option_id: &str, value: &str, cx: &mut Context<Self>) {
+        options::remember(&self.store, self.agent.id, option_id, value);
+        let Some(option) = self
+            .options
+            .iter_mut()
+            .find(|option| option.id == option_id)
+        else {
+            return;
+        };
+        option.current = value.to_string();
+        let option = option.clone();
+        cx.notify();
+
+        let (Some(connection), Some(session_id)) = (&self.connection, &self.acp_session_id) else {
+            return; // Applied when the session starts.
+        };
+        let ready = connection.read(cx).ready();
+        let params = option.set_params(session_id, value);
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let ready = ready.await?;
+                ready
+                    .process
+                    .request("session/set_config_option", params)
+                    .await
+                    .map_err(|err| SharedString::from(format!("{err:#}")))
+            }
+            .await;
+            _ = this.update(cx, |this, cx| match result {
+                Ok(response) => this.update_options(response.get("configOptions"), cx),
+                Err(err) => this.push(
+                    Entry::Notice {
+                        text: format!("Could not change {}: {err}", option.name),
+                        is_error: true,
+                    },
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    /// Sends a prompt. `display` is what the user typed; `blocks` is what the
+    /// agent receives (it may carry files, cards and screenshots).
+    pub fn send(
+        &mut self,
+        display: String,
+        attachments: Vec<AttachmentSummary>,
+        title: String,
+        blocks: Vec<ContentBlock>,
+        connection: Entity<AgentConnection>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.status != ThreadStatus::Idle {
+            return;
+        }
+        if self.session.is_none() {
+            match self
+                .store
+                .create_session(self.project.id, &title, self.agent.id)
+            {
+                Ok(mut session) => {
+                    if let Some(acp_id) = &self.acp_session_id {
+                        let _ = self.store.set_session_acp_id(session.id, Some(acp_id));
+                        session.acp_session_id = Some(acp_id.clone());
+                    }
+                    if let Some(review_id) = self.review_id {
+                        let cwd = self.project.path.to_string_lossy().to_string();
+                        let _ = self
+                            .store
+                            .set_session_place(session.id, "review", Some(&cwd));
+                        let _ = self.store.set_pr_review_session(review_id, session.id);
+                        session.kind = "review".into();
+                        session.cwd = Some(cwd);
+                    } else if self.parallel {
+                        let cwd = self.project.path.to_string_lossy().to_string();
+                        let _ = self
+                            .store
+                            .set_session_place(session.id, "parallel", Some(&cwd));
+                        session.kind = "parallel".into();
+                        session.cwd = Some(cwd);
+                    }
+                    cx.emit(ThreadEvent::SessionCreated(session.clone()));
+                    self.session = Some(session);
+                }
+                Err(err) => {
+                    self.push(
+                        Entry::Notice {
+                            text: format!("Could not save the chat: {err:#}"),
+                            is_error: true,
+                        },
+                        cx,
+                    );
+                    return;
+                }
+            }
+        }
+
+        // A chat whose agent session cannot be resumed gets a recap of the past.
+        let needs_recap = self.acp_session_id.is_none()
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.acp_session_id.is_none())
+            && !self.entries.is_empty();
+        let preamble = needs_recap.then(|| self.history_preamble(cx)).flatten();
+
+        let user_ix = self.entries.len();
+        let first_message = !self
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::User { .. }));
+        let label = display.clone();
+        self.push(
+            Entry::User {
+                text: display,
+                attachments,
+                checkpoint: None,
+            },
+            cx,
+        );
+        self.persist(cx);
+        // The files as they are before the agent touches them, taken while
+        // the agent session starts. Reviews only read.
+        let checkpoint = self.review_id.is_none().then(|| {
+            let root = self.project.path.clone();
+            cx.background_spawn(async move { ph_git::checkpoint::create(&root, &label) })
+        });
+        self.status = ThreadStatus::Connecting;
+        cx.notify();
+
+        let mut prompt = Vec::new();
+        if let Some(preamble) = preamble {
+            prompt.push(ContentBlock::Text(TextContent::new(preamble)));
+        }
+        if let Some(note) = self.note_for_agent.take() {
+            prompt.push(ContentBlock::Text(TextContent::new(note)));
+        }
+        // A chat's first message says what the workspace is made of.
+        if first_message && let Some(note) = self.project.workspace_note() {
+            prompt.push(ContentBlock::Text(TextContent::new(note)));
+        }
+        prompt.extend(blocks);
+
+        let setup = self.ensure_session(connection.clone(), cx);
+        let ready = connection.read(cx).ready();
+        self._turn = Some(cx.spawn(async move |this, cx| {
+            let result: Result<StopReason, SharedString> = async {
+                let session_id = setup.await?;
+                let ready = ready.await?;
+                // Never let the agent start before the snapshot is taken.
+                if let Some(checkpoint) = checkpoint {
+                    match checkpoint.await {
+                        Ok(Some(commit)) => {
+                            _ = this
+                                .update(cx, |this, cx| this.set_checkpoint(user_ix, commit, cx));
+                        }
+                        Ok(None) => {}
+                        Err(err) => tracing::warn!("checkpoint failed: {err:#}"),
+                    }
+                }
+                _ = this.update(cx, |this, cx| {
+                    this.status = ThreadStatus::Working;
+                    cx.notify();
+                });
+                let request = PromptRequest::new(session_id, prompt);
+                let response = ready
+                    .process
+                    .request("session/prompt", to_value(&request))
+                    .await
+                    .map_err(|err| SharedString::from(format!("{err:#}")))?;
+                // Token totals, when the agent reports them (not in the stable
+                // schema yet, so read from the raw reply).
+                if let Some(report) = response.get("usage").and_then(turn_usage) {
+                    _ = this.update(cx, |this, cx| this.record_usage(report, cx));
+                }
+                let response: PromptResponse = serde_json::from_value(response)
+                    .map_err(|err| SharedString::from(format!("Unexpected prompt reply: {err}")))?;
+                Ok(response.stop_reason)
+            }
+            .await;
+            _ = this.update(cx, |this, cx| this.finish_turn(result, cx));
+        }));
+    }
+
+    /// Asks the agent to stop the current turn.
+    pub fn cancel(&mut self, cx: &mut Context<Self>) {
+        let (Some(connection), Some(session_id)) = (&self.connection, &self.acp_session_id) else {
+            return;
+        };
+        let ready = connection.read(cx).ready();
+        let params = to_value(&CancelNotification::new(session_id.clone()));
+        cx.background_spawn(async move {
+            if let Ok(ready) = ready.await {
+                let _ = ready.process.notify("session/cancel", params);
+            }
+        })
+        .detach();
+        self.cancel_pending_permissions(cx);
+    }
+
+    /// Runs an agent-handled sign-in, then asks the user to retry.
+    pub fn sign_in(&mut self, method: SignInMethod, cx: &mut Context<Self>) {
+        let Some(connection) = self.connection.clone() else {
+            return;
+        };
+        let task = connection.update(cx, |connection, cx| {
+            connection.sign_in(method.id.clone(), cx)
+        });
+        self.push(
+            Entry::Notice {
+                text: format!(
+                    "Signing in with {}… finish in your browser if it opens.",
+                    method.name
+                ),
+                is_error: false,
+            },
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            _ = this.update(cx, |this, cx| {
+                let text = match result {
+                    Ok(()) => "Signed in. Send your message again.".to_string(),
+                    Err(err) => err.to_string(),
+                };
+                // A failed session setup is forgotten, so the next send retries.
+                this.setup = None;
+                this.push(
+                    Entry::Notice {
+                        text,
+                        is_error: false,
+                    },
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    /// Applies one streamed update from the agent.
+    pub fn apply_update(&mut self, update: SessionUpdate, cx: &mut Context<Self>) {
+        match &update {
+            SessionUpdate::ConfigOptionUpdate(update) => {
+                let raw = serde_json::to_value(&update.config_options).unwrap_or(Value::Null);
+                self.update_options(Some(&raw), cx);
+                return;
+            }
+            SessionUpdate::CurrentModeUpdate(update) => {
+                if let Some(mode) = self
+                    .options
+                    .iter_mut()
+                    .find(|option| option.category == options::OptionCategory::Mode)
+                {
+                    mode.current = update.current_mode_id.0.to_string();
+                    cx.notify();
+                }
+                return;
+            }
+            SessionUpdate::UsageUpdate(update) => {
+                self.record_usage(
+                    UsageReport {
+                        cost: update
+                            .cost
+                            .as_ref()
+                            .map(|cost| (cost.amount, cost.currency.clone())),
+                        context: Some((update.used, update.size)),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                return;
+            }
+            // A resumed session replays its history; the transcript is already local.
+            _ if self.replaying => return,
+            _ => {}
+        }
+        match update {
+            SessionUpdate::AgentMessageChunk(chunk) => {
+                let Some(text) = block_text(&chunk.content) else {
+                    return;
+                };
+                if let Some(Entry::Agent {
+                    text: existing,
+                    view,
+                }) = self.entries.last_mut()
+                {
+                    existing.push_str(&text);
+                    view.update(cx, |view, cx| view.push_str(&text, cx));
+                    self.changed_last(cx);
+                } else {
+                    let entry = Entry::agent(text, cx);
+                    self.push(entry, cx);
+                }
+            }
+            SessionUpdate::AgentThoughtChunk(chunk) => {
+                let Some(text) = block_text(&chunk.content) else {
+                    return;
+                };
+                if let Some(Entry::Thought { text: existing, .. }) = self.entries.last_mut() {
+                    existing.push_str(&text);
+                    self.changed_last(cx);
+                } else {
+                    self.push(
+                        Entry::Thought {
+                            text,
+                            expanded: false,
+                        },
+                        cx,
+                    );
+                }
+            }
+            SessionUpdate::ToolCall(call) => {
+                let tool = ToolEntry::from_call(&call);
+                match self.tool_index(&tool.id) {
+                    Some(ix) => {
+                        self.entries[ix] = Entry::Tool(tool);
+                        self.changed(ix, cx);
+                    }
+                    None => self.push(Entry::Tool(tool), cx),
+                }
+            }
+            SessionUpdate::ToolCallUpdate(update) => {
+                if let Some(ix) = self.tool_index(&update.tool_call_id.0) {
+                    if let Entry::Tool(tool) = &mut self.entries[ix] {
+                        tool.apply(&update);
+                    }
+                    self.changed(ix, cx);
+                }
+            }
+            SessionUpdate::Plan(plan) => {
+                let items: Vec<PlanItem> = plan
+                    .entries
+                    .iter()
+                    .map(|item| PlanItem {
+                        content: item.content.clone(),
+                        status: (&item.status).into(),
+                    })
+                    .collect();
+                // One plan per turn: replace it as the agent revises it.
+                let turn_start = self
+                    .entries
+                    .iter()
+                    .rposition(|entry| matches!(entry, Entry::User { .. }))
+                    .unwrap_or(0);
+                let existing = self.entries[turn_start..]
+                    .iter()
+                    .position(|entry| matches!(entry, Entry::Plan(_)))
+                    .map(|offset| turn_start + offset);
+                match existing {
+                    Some(ix) => {
+                        self.entries[ix] = Entry::Plan(items);
+                        self.changed(ix, cx);
+                    }
+                    None => self.push(Entry::Plan(items), cx),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Shows a permission question inline and in the approval inbox.
+    pub fn request_permission(
+        &mut self,
+        request: RequestPermissionRequest,
+        respond: impl FnOnce(Option<String>, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let title = request
+            .tool_call
+            .fields
+            .title
+            .as_ref()
+            .map(|title| {
+                ToolEntry {
+                    title: title.clone(),
+                    ..ToolEntry::placeholder()
+                }
+                .display_title()
+            })
+            .or_else(|| {
+                self.tool_index(&request.tool_call.tool_call_id.0)
+                    .and_then(|ix| match &self.entries[ix] {
+                        Entry::Tool(tool) => Some(tool.display_title()),
+                        _ => None,
+                    })
+            })
+            .unwrap_or_else(|| "Use a tool".to_string());
+        // A review (or a quick question) only reads: let it, without waking
+        // anyone up.
+        if self.review_id.is_some() || self.reads_this_turn {
+            let known =
+                self.tool_index(&request.tool_call.tool_call_id.0)
+                    .and_then(|ix| match &self.entries[ix] {
+                        Entry::Tool(tool) => Some(tool.clone()),
+                        _ => None,
+                    });
+            use agent_client_protocol_schema::v1::ToolKind;
+            let kind =
+                request
+                    .tool_call
+                    .fields
+                    .kind
+                    .or(known.as_ref().map(|tool| match tool.kind {
+                        ToolKindLabel::Read => ToolKind::Read,
+                        ToolKindLabel::Search => ToolKind::Search,
+                        ToolKindLabel::Think => ToolKind::Think,
+                        ToolKindLabel::Execute => ToolKind::Execute,
+                        _ => ToolKind::Other,
+                    }));
+            let raw_input = request.tool_call.fields.raw_input.clone();
+            let allow = request.options.iter().find(|option| {
+                matches!(
+                    option.kind,
+                    agent_client_protocol_schema::v1::PermissionOptionKind::AllowOnce
+                )
+            });
+            if let Some(allow) = allow
+                && (crate::review_policy::allows(kind, raw_input.as_ref(), &title)
+                    || (self.app_tools_this_turn
+                        && crate::review_policy::is_app_tool(&title, raw_input.as_ref())))
+            {
+                respond(Some(allow.option_id.0.to_string()), cx);
+                return;
+            }
+        }
+        let source = format!("{} · {}", self.project.name, self.title());
+        let choices = request
+            .options
+            .iter()
+            .map(PermissionChoice::from_option)
+            .collect();
+        let permission =
+            cx.new(|_| PermissionRequest::new(source.into(), title.into(), choices, respond));
+        ApprovalInbox::add(&permission, cx);
+        // Redraw the inline card when it is answered from the inbox.
+        cx.observe(&permission, |_, _, cx| cx.notify()).detach();
+        self.push(Entry::Permission(permission), cx);
+    }
+
+    /// The agent process died: end the turn with its last words.
+    pub fn agent_exited(&mut self, message: SharedString, cx: &mut Context<Self>) {
+        self.acp_session_id = None;
+        self.reads_this_turn = false;
+        self.app_tools_this_turn = false;
+        self.setup = None;
+        self.connection = None;
+        if self.status != ThreadStatus::Idle {
+            self.finish_turn(Err(message), cx);
+        }
+    }
+
+    pub fn toggle_expanded(&mut self, ix: usize, cx: &mut Context<Self>) {
+        match self.entries.get_mut(ix) {
+            Some(Entry::Tool(tool)) => tool.expanded = !tool.expanded,
+            Some(Entry::Thought { expanded, .. }) => *expanded = !*expanded,
+            _ => return,
+        }
+        self.changed(ix, cx);
+    }
+
+    /// Sets up the agent session once: resume the stored one if the agent can,
+    /// else start a new one; then apply the user's remembered options.
+    fn ensure_session(
+        &mut self,
+        connection: Entity<AgentConnection>,
+        cx: &mut Context<Self>,
+    ) -> SetupTask {
+        if let Some(setup) = &self.setup {
+            return setup.clone();
+        }
+        self.connection = Some(connection.clone());
+        let ready = connection.read(cx).ready();
+        let cwd = self.project.path.clone();
+        let agent = self.agent;
+        let resume_id = self
+            .session
+            .as_ref()
+            .and_then(|session| session.acp_session_id.clone());
+        let prefs = options::preferences(&self.store, agent.id);
+        let mcp = pilothouse_mcp_server(&cwd, agent.id);
+        // The servers set up in Settings → MCP & skills, for every agent.
+        let extra_mcp = crate::mcp_config::for_session(&self.store);
+        let extra_dirs = self.project.extra_dirs.clone();
+
+        let task = cx.spawn(async move |this, cx| -> Result<String, SharedString> {
+            let ready: Ready = match ready.await {
+                Ok(ready) => ready,
+                Err(err) => {
+                    let _ = this.update(cx, |this, cx| this.offer_sign_in(&err, &[], cx));
+                    return Err(err);
+                }
+            };
+            let mcp_servers: Vec<McpServer> = mcp.into_iter().chain(extra_mcp).collect();
+            let extra: Vec<String> = extra_dirs
+                .iter()
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .collect();
+
+            // Resume when possible; fall back to a fresh session.
+            let mut response: Option<(String, Value)> = None;
+            if let (Some(resume_id), true) = (&resume_id, ready.load_session) {
+                let _ = this.update(cx, |this, _| this.replaying = true);
+                let mut params =
+                    json!({ "sessionId": resume_id, "cwd": cwd, "mcpServers": mcp_servers });
+                if !extra.is_empty() {
+                    params["additionalDirectories"] = json!(extra);
+                }
+                if let Ok(result) = ready.process.request("session/load", params).await {
+                    response = Some((resume_id.clone(), result));
+                }
+                let _ = this.update(cx, |this, _| this.replaying = false);
+            }
+            let (session_id, result) = match response {
+                Some(found) => found,
+                None => {
+                    let mut params = json!({ "cwd": cwd, "mcpServers": mcp_servers });
+                    if !extra.is_empty() {
+                        params["additionalDirectories"] = json!(extra);
+                    }
+                    let result = match ready.process.request("session/new", params).await {
+                        Ok(result) => result,
+                        Err(err) => {
+                            let err =
+                                SharedString::from(format!("Could not start a session: {err:#}"));
+                            let methods = ready.sign_in.clone();
+                            let _ =
+                                this.update(cx, |this, cx| this.offer_sign_in(&err, &methods, cx));
+                            return Err(err);
+                        }
+                    };
+                    let id = result
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| SharedString::from("The agent did not return a session id"))?
+                        .to_string();
+                    (id, result)
+                }
+            };
+
+            let offered =
+                options::parse_options(result.get("configOptions").unwrap_or(&Value::Null));
+            // Apply remembered choices the agent did not pick itself.
+            for option in &offered {
+                if let Some(value) = prefs
+                    .get(&option.id)
+                    .filter(|value| **value != option.current)
+                {
+                    let _ = ready
+                        .process
+                        .request(
+                            "session/set_config_option",
+                            option.set_params(&session_id, value),
+                        )
+                        .await;
+                }
+            }
+            let weak = this.clone();
+            let id = session_id.clone();
+            let _ = this.update(cx, |this, cx| {
+                this.acp_session_id = Some(id.clone());
+                this.accepts_images = ready.images;
+                if !offered.is_empty() {
+                    options::cache(&this.store, agent.id, &offered);
+                    this.options = options::with_preferences(offered, &prefs);
+                }
+                if let Some(session) = &mut this.session {
+                    session.acp_session_id = Some(id.clone());
+                    let _ = this.store.set_session_acp_id(session.id, Some(&id));
+                }
+                connection.update(cx, |connection, _| connection.register_thread(id, weak));
+                cx.notify();
+            });
+            Ok(session_id)
+        });
+        let setup = task.shared();
+        self.setup = Some(setup.clone());
+        setup
+    }
+
+    /// When setup failed for lack of a login, offer the agent's sign-in methods.
+    fn offer_sign_in(
+        &mut self,
+        error: &SharedString,
+        methods: &[SignInMethod],
+        cx: &mut Context<Self>,
+    ) {
+        self.setup = None;
+        if needs_login(error) && !methods.is_empty() {
+            self.push(
+                Entry::SignIn {
+                    message: error.to_string(),
+                    methods: methods.to_vec(),
+                },
+                cx,
+            );
+        }
+    }
+
+    fn update_options(&mut self, raw: Option<&Value>, cx: &mut Context<Self>) {
+        let Some(raw) = raw else {
+            return;
+        };
+        let options = options::parse_options(raw);
+        if options.is_empty() {
+            return;
+        }
+        options::cache(&self.store, self.agent.id, &options);
+        self.options = options;
+        cx.notify();
+    }
+
+    fn finish_turn(&mut self, result: Result<StopReason, SharedString>, cx: &mut Context<Self>) {
+        cx.emit(ThreadEvent::TurnEnded);
+        self.status = ThreadStatus::Idle;
+        self.reads_this_turn = false;
+        self.app_tools_this_turn = false;
+        self.cancel_pending_permissions(cx);
+        let notice = |text: &str, is_error| Entry::Notice {
+            text: text.to_string(),
+            is_error,
+        };
+        match result {
+            Ok(StopReason::EndTurn) => self.record_review(cx),
+            Ok(StopReason::Cancelled) => self.push(notice("Stopped.", false), cx),
+            Ok(StopReason::MaxTokens) => {
+                self.push(notice("The agent hit its output limit.", true), cx)
+            }
+            Ok(StopReason::Refusal) => {
+                self.push(notice("The agent declined to continue.", true), cx)
+            }
+            Ok(_) => {}
+            // A sign-in card was already shown for login problems.
+            Err(_) if matches!(self.entries.last(), Some(Entry::SignIn { .. })) => {}
+            Err(message) => {
+                let text = if needs_login(&message) {
+                    format!("{message}\n\n{}", self.agent.login_hint)
+                } else {
+                    message.to_string()
+                };
+                self.push(notice(&text, true), cx);
+            }
+        }
+        self.persist(cx);
+        cx.notify();
+    }
+
+    fn cancel_pending_permissions(&mut self, cx: &mut Context<Self>) {
+        let pending: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Permission(request) if request.read(cx).is_pending() => {
+                    Some(request.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for request in pending {
+            request.update(cx, |request, cx| request.cancel(cx));
+        }
+    }
+
+    /// Writes entries that are not stored yet (drafts store nothing).
+    fn persist(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        for (ix, entry) in self.entries.iter().enumerate().skip(self.saved) {
+            let Some((role, body)) = entry.to_stored(cx) else {
+                continue;
+            };
+            match self.store.append_message(session.id, role, &body) {
+                Ok(id) if matches!(entry, Entry::User { .. }) => {
+                    self.user_message_ids.insert(ix, id);
+                }
+                Ok(_) => {}
+                Err(err) => tracing::warn!("saving chat message failed: {err:#}"),
+            }
+        }
+        self.saved = self.entries.len();
+    }
+
+    /// Records the checkpoint taken before user message `ix`.
+    fn set_checkpoint(&mut self, ix: usize, commit: String, cx: &mut Context<Self>) {
+        let Some(Entry::User { checkpoint, .. }) = self.entries.get_mut(ix) else {
+            return;
+        };
+        *checkpoint = Some(commit);
+        if let (Some(id), Some((_, body))) = (
+            self.user_message_ids.get(&ix),
+            self.entries[ix].to_stored(cx),
+        ) && let Err(err) = self.store.update_message(*id, &body)
+        {
+            tracing::warn!("saving the checkpoint failed: {err:#}");
+        }
+        cx.notify();
+    }
+
+    pub fn usage(&self) -> Option<&SessionUsage> {
+        self.usage.as_ref()
+    }
+
+    /// Counts an agent's usage report for this chat (kept in memory for a
+    /// draft, stored once the chat is).
+    fn record_usage(&mut self, mut report: UsageReport, cx: &mut Context<Self>) {
+        report.agent_session = self
+            .acp_session_id
+            .as_ref()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        match &self.session {
+            Some(session) => match self.store.record_usage(session.id, &report) {
+                Ok(usage) => self.usage = Some(usage),
+                Err(err) => tracing::warn!("saving usage failed: {err:#}"),
+            },
+            None => {
+                let usage = self.usage.get_or_insert_with(SessionUsage::default);
+                if report.context.is_some() {
+                    usage.context = report.context;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Whether files can be restored now: not while the agent works on
+    /// them, nor during another restore.
+    pub fn can_restore(&self) -> bool {
+        self.status == ThreadStatus::Idle && !self.restoring
+    }
+
+    /// Puts the project's files back to `checkpoint`, noting it in the chat
+    /// with a way to undo. `message` is the user message the checkpoint was
+    /// taken before; `None` when undoing a restore.
+    pub fn restore_checkpoint(
+        &mut self,
+        checkpoint: String,
+        message: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_restore() {
+            return;
+        }
+        self.restoring = true;
+        cx.notify();
+        let root = self.project.path.clone();
+        let work =
+            cx.background_spawn(async move { ph_git::checkpoint::restore(&root, &checkpoint) });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            _ = this.update(cx, |this, cx| {
+                this.restoring = false;
+                let entry = match result {
+                    Ok(restored) => {
+                        this.note_for_agent = Some(
+                            "(Note from PilotHouse: the user restored the project's files to an earlier checkpoint. \
+                             Files may differ from what you read or wrote since; read them again before relying on them.)"
+                                .to_string(),
+                        );
+                        Entry::Restored {
+                            text: restore_summary(&restored, message.as_deref()),
+                            undo: Some(restored.undo),
+                        }
+                    }
+                    Err(err) => Entry::Notice {
+                        text: format!("Could not restore the files: {err:#}"),
+                        is_error: true,
+                    },
+                };
+                this.push(entry, cx);
+                this.persist(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Earlier conversation, for an agent session that could not be resumed.
+    fn history_preamble(&self, cx: &App) -> Option<String> {
+        let history = self.recent_history(cx)?;
+        Some(format!(
+            "Context: this continues an earlier conversation in PilotHouse. Here is the recent history:\n\n{history}\n\n---\n"
+        ))
+    }
+
+    /// What another agent needs to take this chat over: who had it and
+    /// what was said and done.
+    pub fn handoff_recap(&self, cx: &App) -> Option<String> {
+        let history = self.recent_history(cx)?;
+        Some(format!(
+            "Context: you are taking over work the user started with another coding agent ({}) in PilotHouse, \
+             in the chat “{}”. Here is its recent history:\n\n{history}\n\n---\n\
+             The project's files are as that agent left them; check their current state before relying on \
+             the history. Then continue with the user's message below.\n",
+            self.agent.name,
+            self.title()
+        ))
+    }
+
+    /// Starts this draft as a continuation: `note` goes to the agent with
+    /// the first message, and the chat says where it came from.
+    pub fn continue_from(&mut self, note: String, origin: String, cx: &mut Context<Self>) {
+        self.note_for_agent = Some(note);
+        self.push(
+            Entry::Notice {
+                text: origin,
+                is_error: false,
+            },
+            cx,
+        );
+    }
+
+    /// The transcript as plain lines, cut to the most recent part.
+    fn recent_history(&self, cx: &App) -> Option<String> {
+        let mut lines = Vec::new();
+        for entry in &self.entries {
+            match entry {
+                Entry::User { text, .. } => lines.push(format!("User: {text}")),
+                Entry::Agent { text, .. } => lines.push(format!("Assistant: {text}")),
+                Entry::Tool(tool) => lines.push(format!("(tool: {})", tool.title)),
+                Entry::Permission(request) => {
+                    lines.push(format!("(permission: {})", request.read(cx).summary()))
+                }
+                _ => {}
+            }
+        }
+        let mut history = lines.join("\n");
+        if history.trim().is_empty() {
+            return None;
+        }
+        if history.len() > HISTORY_PREAMBLE_CHARS {
+            let mut cut = history.len() - HISTORY_PREAMBLE_CHARS;
+            while !history.is_char_boundary(cut) {
+                cut += 1;
+            }
+            history = format!("…{}", &history[cut..]);
+        }
+        Some(history)
+    }
+
+    fn tool_index(&self, id: &str) -> Option<usize> {
+        self.entries
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::Tool(tool) if tool.id == id))
+    }
+
+    fn push(&mut self, entry: Entry, cx: &mut Context<Self>) {
+        self.entries.push(entry);
+        self.scroller.update(cx, |scroller, cx| {
+            scroller.append(1, cx);
+        });
+        cx.notify();
+    }
+
+    fn changed_last(&mut self, cx: &mut Context<Self>) {
+        if let Some(ix) = self.entries.len().checked_sub(1) {
+            self.changed(ix, cx);
+        }
+    }
+
+    /// Row `ix` changed height (streamed text, expanded tool, new status).
+    fn changed(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.scroller.update(cx, |scroller, cx| {
+            scroller.remeasure_items(ix..ix + 1, cx);
+        });
+        cx.notify();
+    }
+}
+
+/// Whether an error looks like "you need to log in first".
+fn needs_login(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    [
+        "auth",
+        "login",
+        "log in",
+        "sign in",
+        "api key",
+        "credential",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn to_value(value: &impl serde::Serialize) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
+}
+
+/// The PilotHouse MCP server, offered to every new agent session so agents
+/// can use the board, the browser and devices. It is this binary in `mcp` mode.
+fn pilothouse_mcp_server(project_path: &std::path::Path, agent_id: &str) -> Option<McpServer> {
+    let exe = std::env::current_exe().ok()?;
+    let mut env = Vec::new();
+    if let Some(dir) = std::env::var_os(ph_store::paths::DATA_DIR_ENV) {
+        env.push(EnvVariable::new(
+            ph_store::paths::DATA_DIR_ENV,
+            dir.to_string_lossy().to_string(),
+        ));
+    }
+    Some(McpServer::Stdio(
+        McpServerStdio::new("pilothouse", exe)
+            .args(vec![
+                "mcp".into(),
+                "--project".into(),
+                project_path.to_string_lossy().to_string(),
+                "--agent".into(),
+                agent_id.to_string(),
+            ])
+            .env(env),
+    ))
+}
+
+/// The prompt reply's `usage` (running totals for the agent session).
+fn turn_usage(usage: &Value) -> Option<UsageReport> {
+    let number = |key: &str| usage.get(key).and_then(Value::as_u64);
+    let report = UsageReport {
+        input_tokens: number("inputTokens"),
+        output_tokens: number("outputTokens"),
+        cached_tokens: number("cachedReadTokens"),
+        ..Default::default()
+    };
+    (report.input_tokens.is_some() || report.output_tokens.is_some()).then_some(report)
+}
+
+/// What a restore did, for the chat: "Restored 2 files and removed 1
+/// created since “Fix the login…”." (`message` is `None` for an undo.)
+fn restore_summary(restored: &ph_git::checkpoint::Restored, message: Option<&str>) -> String {
+    let files = |n: usize| format!("{n} file{}", if n == 1 { "" } else { "s" });
+    let Some(message) = message else {
+        return match restored.restored + restored.removed {
+            0 => "Undid the restore; the files already matched.".to_string(),
+            changed => format!("Undid the restore ({} changed back).", files(changed)),
+        };
+    };
+    let mut short: String = message.chars().take(60).collect();
+    if message.chars().count() > 60 {
+        short.push('…');
+    }
+    let message = short;
+    match (restored.restored, restored.removed) {
+        (0, 0) => format!("The files already matched how they were before “{message}”."),
+        (0, removed) => format!("Removed {} created since “{message}”.", files(removed)),
+        (written, 0) => format!("Restored {} to before “{message}”.", files(written)),
+        (written, removed) => format!(
+            "Restored {} and removed {} created since “{message}”.",
+            files(written),
+            files(removed)
+        ),
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    #[test]
+    fn restore_summaries_say_what_changed() {
+        let done = |restored, removed| ph_git::checkpoint::Restored {
+            restored,
+            removed,
+            undo: String::new(),
+        };
+        assert_eq!(
+            restore_summary(&done(0, 1), Some("Add hello")),
+            "Removed 1 file created since “Add hello”."
+        );
+        assert_eq!(
+            restore_summary(&done(2, 0), Some("Fix")),
+            "Restored 2 files to before “Fix”."
+        );
+        assert_eq!(
+            restore_summary(&done(1, 3), Some("x")),
+            "Restored 1 file and removed 3 files created since “x”."
+        );
+        assert!(
+            restore_summary(&done(0, 0), Some(&"a".repeat(80)))
+                .contains(&format!("{}…", "a".repeat(60)))
+        );
+        assert_eq!(
+            restore_summary(&done(1, 1), None),
+            "Undid the restore (2 files changed back)."
+        );
+    }
+}

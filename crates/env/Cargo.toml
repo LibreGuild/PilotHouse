@@ -1,0 +1,10 @@
+[package]
+name = "ph-env"
+description = "The user's login-shell environment (PATH and friends), for launching agents and terminals."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tracing.workspace = true

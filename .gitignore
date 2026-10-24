@@ -1,0 +1,16 @@
+# Build output
+/target/
+/dist/
+
+# The product plan is kept locally, not in the repository.
+/PLAN.md
+
+# Local tools and editors
+.DS_Store
+.claude/
+.idea/
+.vscode/
+*.swp
+
+# Logs and local data
+*.log

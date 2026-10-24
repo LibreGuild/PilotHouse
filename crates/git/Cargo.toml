@@ -1,0 +1,12 @@
+[package]
+name = "ph-git"
+description = "Git operations for PilotHouse over the git command line: status, diffs, commits, branches, stashes, history, blame, conflicts, remotes and worktrees."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ph-env.workspace = true
+tracing.workspace = true

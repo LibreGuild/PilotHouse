@@ -1,0 +1,16 @@
+[package]
+name = "ph-agy"
+description = "Google Antigravity (agy) as an ACP agent: a bridge between ACP and agy's headless stream-json mode."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ph-env.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+agent-client-protocol-schema.workspace = true

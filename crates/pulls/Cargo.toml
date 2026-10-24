@@ -1,0 +1,18 @@
+[package]
+name = "ph-pulls"
+description = "Pull requests in PilotHouse: GitHub accounts, the PR list and a full PR view (description, files, conversation, checks, review, merge)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+ph-changes.workspace = true
+ph-git.workspace = true
+ph-github.workspace = true
+ph-store.workspace = true
+ph-ui.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

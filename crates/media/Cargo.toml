@@ -1,0 +1,16 @@
+[package]
+name = "ph-media"
+description = "Live frames for device and browser panes: display, annotation, capture, recording and visual diff."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+ph-store.workspace = true
+ph-ui.workspace = true
+smol.workspace = true
+tracing.workspace = true

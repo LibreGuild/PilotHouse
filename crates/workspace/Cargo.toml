@@ -1,0 +1,44 @@
+[package]
+name = "ph-workspace"
+description = "The PilotHouse window shell: projects, sidebar, chat/context layout, command palette and settings."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+ph-agent.workspace = true
+ph-board.workspace = true
+ph-browser.workspace = true
+ph-changes.workspace = true
+ph-github.workspace = true
+ph-pulls.workspace = true
+ph-review.workspace = true
+ph-git.workspace = true
+ph-devices.workspace = true
+ph-env.workspace = true
+ph-runs.workspace = true
+ph-files.workspace = true
+ph-media.workspace = true
+ph-store.workspace = true
+ph-terminal.workspace = true
+ph-theme.workspace = true
+ph-ui.workspace = true
+ph-uitest.workspace = true
+ph-utils.workspace = true
+ignore.workspace = true
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+ph-store.workspace = true
+ph-theme.workspace = true

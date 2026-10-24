@@ -1,0 +1,353 @@
+//! Checkpoints: snapshots of the working tree taken before each agent turn,
+//! so the files can be put back as they were.
+//!
+//! A checkpoint is an ordinary commit of every tracked and untracked file
+//! (ignored files are left out), kept under `refs/pilothouse/checkpoints/`.
+//! It is built in a temporary index, so HEAD, the real index, branches and
+//! the stash are never touched, and it appears in no branch's history.
+//! Restoring writes the checkpoint's files over the working tree (the index
+//! still untouched) after taking one more checkpoint, so a restore can be
+//! undone the same way.
+
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use anyhow::{Context as _, Result, bail};
+
+use crate::run::command;
+
+/// Refs under this prefix hold the checkpoints.
+const REFS: &str = "refs/pilothouse/checkpoints";
+/// Newest checkpoints kept per repository; older refs are deleted (their
+/// objects go with the next `git gc`).
+const KEEP: usize = 200;
+/// Untracked files bigger than this are left out of a checkpoint (a stray
+/// dump or build artifact would bloat the repository).
+const MAX_UNTRACKED_BYTES: u64 = 20 << 20;
+/// More untracked files than this (an unignored `node_modules`) are left
+/// out too.
+const MAX_UNTRACKED_FILES: usize = 20_000;
+
+/// The author of checkpoint commits, so they work without a configured
+/// `user.name`.
+const IDENTITY: [(&str, &str); 4] = [
+    ("GIT_AUTHOR_NAME", "PilotHouse"),
+    ("GIT_AUTHOR_EMAIL", "checkpoints@pilothouse.invalid"),
+    ("GIT_COMMITTER_NAME", "PilotHouse"),
+    ("GIT_COMMITTER_EMAIL", "checkpoints@pilothouse.invalid"),
+];
+
+/// What a restore did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restored {
+    /// Files written back from the checkpoint (changed or deleted since).
+    pub restored: usize,
+    /// Files created since the checkpoint, now removed.
+    pub removed: usize,
+    /// The checkpoint taken just before, to undo the restore.
+    pub undo: String,
+}
+
+/// Runs git with the given index file and the checkpoint identity.
+fn git_in(root: &Path, index: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String> {
+    let mut command = command(root);
+    command
+        .args(args)
+        .env("GIT_INDEX_FILE", index)
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .envs(IDENTITY)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().context("running git (is it installed?)")?;
+    if let Some(input) = input {
+        use std::io::Write as _;
+        child.stdin.take().context("git stdin")?.write_all(input)?;
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A temporary index file in the repository's git folder, removed on drop.
+struct TempIndex(PathBuf);
+
+impl TempIndex {
+    fn new(git_dir: &Path) -> Result<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let name = format!(
+            "pilothouse-checkpoint-{}-{}.index",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = git_dir.join(name);
+        // Start from the real index: its file stats let `git add` skip
+        // hashing every unchanged file.
+        let real = git_dir.join("index");
+        if real.is_file() {
+            std::fs::copy(&real, &path).context("copying the index")?;
+        }
+        Ok(Self(path))
+    }
+}
+
+impl Drop for TempIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_file(self.0.with_extension("index.lock"));
+    }
+}
+
+/// Snapshots the working tree of the repository at `root`. Returns the
+/// checkpoint's commit, the newest one again when nothing changed since, or
+/// `None` when `root` is not in a Git repository.
+pub fn create(root: &Path, label: &str) -> Result<Option<String>> {
+    let Ok(git_dir) = crate::git(root, &["rev-parse", "--absolute-git-dir"]) else {
+        return Ok(None);
+    };
+    let top = PathBuf::from(crate::git(root, &["rev-parse", "--show-toplevel"])?.trim());
+    let index = TempIndex::new(Path::new(git_dir.trim()))?;
+    let index = index.0.as_path();
+
+    // Tracked files: changes and deletions.
+    git_in(&top, index, &["add", "--update", "--", "."], None)?;
+    // Untracked files, within reason.
+    let untracked = crate::git(&top, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let mut wanted: Vec<&str> = untracked
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .collect();
+    if wanted.len() > MAX_UNTRACKED_FILES {
+        tracing::info!(
+            "checkpoint: {} untracked files, leaving them out",
+            wanted.len()
+        );
+        wanted.clear();
+    }
+    wanted.retain(|path| {
+        std::fs::symlink_metadata(top.join(path))
+            .is_ok_and(|meta| meta.len() <= MAX_UNTRACKED_BYTES)
+    });
+    if !wanted.is_empty() {
+        let list = wanted.join("\0");
+        git_in(
+            &top,
+            index,
+            &["add", "--pathspec-from-file=-", "--pathspec-file-nul"],
+            Some(list.as_bytes()),
+        )?;
+    }
+    let tree = git_in(&top, index, &["write-tree"], None)?
+        .trim()
+        .to_string();
+
+    // Nothing changed since the newest checkpoint: reuse it.
+    if let Some(newest) = list(&top)?.into_iter().next()
+        && crate::git(&top, &["rev-parse", &format!("{newest}^{{tree}}")])
+            .is_ok_and(|newest_tree| newest_tree.trim() == tree)
+    {
+        return Ok(Some(newest));
+    }
+
+    let head = crate::git(&top, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .ok()
+        .map(|head| head.trim().to_string());
+    let message = format!("PilotHouse checkpoint\n\n{}", label.trim());
+    let mut args = vec!["commit-tree", tree.as_str(), "-m", message.as_str()];
+    if let Some(head) = &head {
+        args.extend(["-p", head.as_str()]);
+    }
+    let commit = git_in(&top, index, &args, None)?.trim().to_string();
+    let name = format!("{REFS}/{}", ref_name());
+    crate::git(&top, &["update-ref", &name, &commit])?;
+    prune(&top)?;
+    Ok(Some(commit))
+}
+
+/// A name that sorts by time: zero-padded milliseconds, then a counter for
+/// checkpoints taken within the same millisecond.
+fn ref_name() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    format!(
+        "{millis:015}-{:06}",
+        NEXT.fetch_add(1, Ordering::Relaxed) % 1_000_000
+    )
+}
+
+/// Checkpoint commits, newest first.
+pub fn list(root: &Path) -> Result<Vec<String>> {
+    let out = crate::git(
+        root,
+        &[
+            "for-each-ref",
+            "--sort=-refname",
+            "--format=%(objectname)",
+            REFS,
+        ],
+    )?;
+    Ok(out.lines().map(str::to_string).collect())
+}
+
+/// Keeps only the newest [`KEEP`] checkpoint refs.
+fn prune(root: &Path) -> Result<()> {
+    let out = crate::git(
+        root,
+        &[
+            "for-each-ref",
+            "--sort=-refname",
+            "--format=%(refname)",
+            REFS,
+        ],
+    )?;
+    for old in out.lines().skip(KEEP) {
+        crate::git(root, &["update-ref", "-d", old])?;
+    }
+    Ok(())
+}
+
+/// Puts the working tree back as it was at `checkpoint`: files changed or
+/// deleted since are written back, files created since are removed. The
+/// index and HEAD are left alone. Takes a checkpoint first (see
+/// [`Restored::undo`]).
+pub fn restore(root: &Path, checkpoint: &str) -> Result<Restored> {
+    crate::check_name("checkpoint", checkpoint)?;
+    let top = PathBuf::from(crate::git(root, &["rev-parse", "--show-toplevel"])?.trim());
+    crate::git(
+        &top,
+        &["cat-file", "-e", &format!("{checkpoint}^{{commit}}")],
+    )
+    .context("that checkpoint is gone")?;
+    let undo = create(&top, "Before restoring a checkpoint")?.context("not a Git repository")?;
+
+    let diff = crate::git(
+        &top,
+        &[
+            "diff",
+            "--name-status",
+            "--no-renames",
+            "-z",
+            checkpoint,
+            &undo,
+        ],
+    )?;
+    let mut parts = diff.split('\0').filter(|part| !part.is_empty());
+    let (mut write_back, mut remove) = (Vec::new(), Vec::new());
+    while let (Some(status), Some(path)) = (parts.next(), parts.next()) {
+        match status {
+            "A" => remove.push(path.to_string()),
+            _ => write_back.push(path.to_string()),
+        }
+    }
+    for path in &remove {
+        let file = top.join(path);
+        if file.is_file() || file.is_symlink() {
+            std::fs::remove_file(&file).with_context(|| format!("removing {path}"))?;
+        }
+    }
+    if !write_back.is_empty() {
+        let list = write_back.join("\0");
+        let index = TempIndex::new(Path::new(
+            crate::git(&top, &["rev-parse", "--absolute-git-dir"])?.trim(),
+        ))?;
+        git_in(
+            &top,
+            &index.0,
+            &[
+                "restore",
+                &format!("--source={checkpoint}"),
+                "--worktree",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+            ],
+            Some(list.as_bytes()),
+        )?;
+    }
+    Ok(Restored {
+        restored: write_back.len(),
+        removed: remove.len(),
+        undo,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::temp_repo;
+
+    #[test]
+    fn restores_tracked_untracked_and_removed_files() {
+        let root = &temp_repo("checkpoint");
+        std::fs::write(root.join("notes.txt"), "draft\n").unwrap();
+        let before = crate::git(root, &["status", "--porcelain"]).unwrap();
+        let index_before = std::fs::read(root.join(".git/index")).unwrap();
+
+        let checkpoint = create(root, "Before the agent").unwrap().unwrap();
+        assert_eq!(
+            create(root, "Again").unwrap().unwrap(),
+            checkpoint,
+            "nothing changed: the same checkpoint"
+        );
+        assert_eq!(
+            crate::git(root, &["status", "--porcelain"]).unwrap(),
+            before,
+            "taking a checkpoint changes nothing"
+        );
+        assert_eq!(
+            std::fs::read(root.join(".git/index")).unwrap(),
+            index_before
+        );
+
+        // The "agent" edits a file, deletes one, adds one.
+        std::fs::write(root.join("README.md"), "rewritten\n").unwrap();
+        std::fs::remove_file(root.join("notes.txt")).unwrap();
+        std::fs::write(root.join("new.rs"), "fn x() {}\n").unwrap();
+
+        let restored = restore(root, &checkpoint).unwrap();
+        assert_eq!((restored.restored, restored.removed), (2, 1));
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "draft\n"
+        );
+        assert!(!root.join("new.rs").exists());
+        assert_eq!(
+            crate::git(root, &["status", "--porcelain"]).unwrap(),
+            before
+        );
+
+        // And the restore can be undone.
+        restore(root, &restored.undo).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("README.md")).unwrap(),
+            "rewritten\n"
+        );
+        assert!(root.join("new.rs").exists());
+        assert!(!root.join("notes.txt").exists());
+        assert_eq!(
+            list(root).unwrap().len(),
+            3,
+            "the restores took checkpoints too"
+        );
+    }
+
+    #[test]
+    fn outside_a_repository_there_is_nothing_to_take() {
+        let dir = std::env::temp_dir().join(format!("ph-no-repo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(create(&dir, "x").unwrap(), None);
+    }
+}

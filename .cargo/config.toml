@@ -1,0 +1,7 @@
+# Shortcuts for development. Every alias builds into the shared `target/`
+# directory with the same feature set, so builds reuse each other's artifacts.
+[alias]
+# Run the app with the dev automation socket (ui.click, ui.screenshot, ...).
+dev = "run -p pilothouse --features automation"
+# Build the dev binary without running it.
+dev-build = "build -p pilothouse --features automation"
