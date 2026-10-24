@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+dirs.workspace = true
 gpui-kit.workspace = true
 ph-agent.workspace = true
 ph-board.workspace = true
@@ -17,6 +18,7 @@ ph-github.workspace = true
 ph-pulls.workspace = true
 ph-review.workspace = true
 ph-git.workspace = true
+ph-remote.workspace = true
 ph-devices.workspace = true
 ph-env.workspace = true
 ph-runs.workspace = true

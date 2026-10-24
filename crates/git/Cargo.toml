@@ -9,4 +9,5 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 ph-env.workspace = true
+ph-remote.workspace = true
 tracing.workspace = true

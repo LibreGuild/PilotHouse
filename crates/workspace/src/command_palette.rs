@@ -142,6 +142,14 @@ fn groups(workspace: &Workspace) -> Vec<(&'static str, Vec<Entry>)> {
         &["schedule", "cron", "timer", "summary", "nightly", "every"],
     ));
     general.push(Entry::action(
+        "Network drives…",
+        Icons::HardDrive,
+        ShowNetworkDrives,
+        &[
+            "ssh", "remote", "server", "samba", "smb", "share", "mapped", "drive",
+        ],
+    ));
+    general.push(Entry::action(
         "Keyboard shortcuts",
         Icons::Keyboard,
         ShowShortcuts,

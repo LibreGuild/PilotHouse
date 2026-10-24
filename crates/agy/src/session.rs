@@ -99,7 +99,17 @@ impl Session {
                     format!("Allow {}", turn.refused.join(", ")),
                 )
             });
-            let tool_call = json!({ "toolCallId": id, "title": title, "status": "pending" });
+            // Headless agy has no way to allow one action: continuing runs
+            // the rest of the turn with every permission. Said in the title,
+            // and never a read, so nothing approves it without the user.
+            let title =
+                format!("{title} (agy then runs the rest of this turn with every permission)");
+            let tool_call = json!({
+                "toolCallId": id,
+                "title": title,
+                "kind": "other",
+                "status": "pending",
+            });
             if bridge.ask_permission(&self.id, tool_call)? && !self.is_cancelled() {
                 let text = format!(
                     "The user granted permission for: {}. Continue where you left off.",

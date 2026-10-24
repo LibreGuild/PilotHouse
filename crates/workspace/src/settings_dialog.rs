@@ -29,6 +29,8 @@ pub(crate) fn open(project: Option<std::path::PathBuf>, window: &mut Window, cx:
     let fonts = font_options(cx);
     let store = AppState::store(cx).clone();
     let accounts = cx.new(|cx| ph_pulls::AccountsView::new(store.clone(), window, cx));
+    let drives =
+        cx.new(|cx| crate::network_drives::NetworkDrivesView::new(store.clone(), window, cx));
     let open_file: ph_agent::tools_view::OpenFile = std::rc::Rc::new(|path, window, cx| {
         use gpui_kit::component::WindowExt as _;
         window.close_dialog(cx);
@@ -57,6 +59,7 @@ pub(crate) fn open(project: Option<std::path::PathBuf>, window: &mut Window, cx:
                     agents_page(),
                     tools_page(tools.clone()),
                     github_page(accounts.clone()),
+                    drives_page(drives.clone()),
                     features_page(),
                     shortcuts_page(),
                     about_page(),
@@ -398,6 +401,17 @@ fn github_page(accounts: gpui_kit::Entity<ph_pulls::AccountsView>) -> SettingPag
         )
 }
 
+/// Settings → Network drives (see [`crate::network_drives`]).
+fn drives_page(view: gpui_kit::Entity<crate::network_drives::NetworkDrivesView>) -> SettingPage {
+    SettingPage::new("Network drives")
+        .icon(Icon::new(Icons::HardDrive))
+        .group(
+            SettingGroup::new().item(SettingItem::render(move |_, _, _| {
+                div().w_full().py_1().child(view.clone())
+            })),
+        )
+}
+
 /// Each agent's setup status, checked when the page renders.
 fn agents_page() -> SettingPage {
     SettingPage::new("Agents")
@@ -500,46 +514,20 @@ fn system_group() -> SettingGroup {
     )
 }
 
-/// The main shortcuts, written for this platform.
+/// Every shortcut: the same sheet as ⌘/, read from the key bindings.
 fn shortcuts_page() -> SettingPage {
-    const SHORTCUTS: &[(&str, &str)] = &[
-        ("Command palette", "secondary-k"),
-        ("New chat", "secondary-n"),
-        ("Search chats", "secondary-shift-k"),
-        ("Ask about selected code or terminal output", "secondary-l"),
-        ("Find a file", "secondary-p"),
-        ("Search in workspace", "secondary-shift-f"),
-        ("Send a screenshot to chat", "secondary-shift-s"),
-        ("Toggle sidebar", "secondary-b"),
-        ("Toggle side panel", "secondary-j"),
-        ("Maximize side panel", "secondary-shift-j"),
-        ("Files · Changes · Board · Terminal", "secondary-1"),
-        ("Browser · Devices · Run", "secondary-5"),
-        ("Settings", "secondary-,"),
-    ];
     SettingPage::new("Shortcuts")
         .icon(Icon::new(Icons::Keyboard))
         .group(
-            SettingGroup::new().items(SHORTCUTS.iter().map(|(name, binding)| {
-                SettingItem::render(move |_, _, cx| {
-                    h_flex()
+            SettingGroup::new().item(
+                SettingItem::render(|_, window, cx| {
+                    div()
                         .w_full()
-                        .justify_between()
-                        .text_sm()
-                        .child(*name)
-                        .child(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded(cx.theme().radius)
-                                .bg(cx.theme().muted)
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_xs()
-                                .child(ph_ui::platform::shortcut(binding)),
-                        )
+                        .py_1()
+                        .child(crate::shortcuts::render(window, cx))
                 })
-                .keywords(["shortcut", "keyboard", "key"])
-            })),
+                .keywords(["shortcut", "keyboard", "key"]),
+            ),
         )
 }
 
@@ -549,10 +537,7 @@ fn about_page() -> SettingPage {
         .group(
             SettingGroup::new()
                 .item(SettingItem::render(|_, _, cx| {
-                    note(
-                        format!("PilotHouse {} · Apache-2.0", env!("CARGO_PKG_VERSION")),
-                        cx,
-                    )
+                    note(format!("PilotHouse {} · Apache-2.0", ph_ui::version()), cx)
                 }))
                 .item(SettingItem::render(|_, _, cx| {
                     let data = ph_store::paths::data_dir();

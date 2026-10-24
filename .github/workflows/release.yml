@@ -200,7 +200,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$CHANNEL" = stable ]; then
-            echo "PilotHouse $VERSION." > notes.md
+            echo "PilotHouse ${VERSION/-/ }." > notes.md
           else
             printf 'A preview built from `main` (commit %s). For everyday use, take the [latest release](https://github.com/%s/releases/latest).\n' \
               "${GITHUB_SHA::7}" "$GH_REPO" > notes.md
@@ -223,7 +223,11 @@ jobs:
       - name: Publish
         run: |
           set -euo pipefail
-          if [ "$CHANNEL" = stable ]; then
+          if [ "$CHANNEL" = stable ] && [[ "$VERSION" == *-* ]]; then
+            # A beta (0.1.0-beta) is a pre-release, never the latest.
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --prerelease --latest=false \
+              --title "PilotHouse ${VERSION/-/ }" --notes-file notes.md
+          elif [ "$CHANNEL" = stable ]; then
             gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --latest \
               --title "PilotHouse $VERSION" --notes-file notes.md
           else

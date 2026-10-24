@@ -36,8 +36,15 @@ mod unix {
     impl Listener {
         pub fn bind(endpoint: &Path) -> Result<Self> {
             use std::os::unix::fs::PermissionsExt as _;
-            // A socket file left by a crashed run would make bind fail.
+            // A socket file left by a crashed run would make bind fail; one
+            // a running app answers on is not ours to take.
             if endpoint.exists() {
+                if UnixStream::connect(endpoint).is_ok() {
+                    anyhow::bail!(
+                        "another PilotHouse is running with this data folder ({})",
+                        endpoint.display()
+                    );
+                }
                 std::fs::remove_file(endpoint)
                     .with_context(|| format!("removing stale socket {}", endpoint.display()))?;
             }
@@ -107,6 +114,13 @@ mod windows {
 
     impl Listener {
         pub fn bind(endpoint: &Path) -> Result<Self> {
+            // The file names a running app's pipe: that one is not ours.
+            if connect(endpoint).is_ok() {
+                anyhow::bail!(
+                    "another PilotHouse is running with this data folder ({})",
+                    endpoint.display()
+                );
+            }
             let name = format!(r"\\.\pipe\pilothouse-{}", random_id());
             std::fs::write(endpoint, &name)
                 .with_context(|| format!("writing {}", endpoint.display()))?;

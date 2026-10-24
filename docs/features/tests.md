@@ -10,9 +10,11 @@ A UI test is a scenario in plain words plus the steps that carry it out, in the 
 
 - every action that succeeded (open, click, type, press, scroll; launch, tap, swipe, type, key) becomes a step, with the selector or coordinates the agent used; typing into the same field again replaces the earlier step;
 - looking (snapshots, screenshots, logs) is not recorded;
-- checks come from the `test_expect` tool (text shown, text not shown, URL contains), which checks at once so the agent knows it holds.
+- checks come from the `test_expect` tool (text shown, text not shown, URL contains), which checks at once so the agent knows it holds;
+- only this workspace's agents count: another workspace's actions at the same time are left out;
+- text typed into a password field is never saved: the step types `{{env:PILOTHOUSE_TEST_PASSWORD}}`, which a run fills from that variable in your shell's environment (any step's typed text can use `{{env:NAME}}` the same way). A run without the variable fails that step and says which one to set.
 
-For that turn the agent may use PilotHouse's own app tools without asking. Recording stops when the agent's turn ends (or with **Stop and save**).
+For that turn the agent may use PilotHouse's own app tools without asking (by the tool's name; a shell command still asks). Recording stops when the agent's turn ends (or with **Stop and save**).
 
 ## Running
 

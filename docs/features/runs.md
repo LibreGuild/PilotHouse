@@ -14,4 +14,4 @@ Listening TCP ports from `lsof`, refreshed every 3 s while the tab is visible. P
 
 Agents get `ports_list`, to find the dev server before `browser_open`.
 
-Not yet: Windows (no `lsof`).
+On Windows the ports come from `netstat`, without the working folder, so none is marked as this project's. In a workspace on a [network drive](network-drives.md) the ports are the server's, and opening one goes through an SSH tunnel.

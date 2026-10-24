@@ -32,11 +32,9 @@ use ph_store::projects::ProjectId;
 use crate::AppState;
 use crate::workspace_screen::WorkspaceScreen;
 
-/// `<data dir>/worktrees/<project>-run<run>-<agent>`.
-fn lane_path(project: ProjectId, run: i64, agent: &str) -> PathBuf {
-    ph_store::paths::data_dir()
-        .join("worktrees")
-        .join(format!("{project}-run{run}-{agent}"))
+/// `<copies>/<project>-run<run>-<agent>` (see [`crate::copies`]).
+fn lane_path(folder: &std::path::Path, project: ProjectId, run: i64, agent: &str) -> PathBuf {
+    folder.join(format!("{project}-run{run}-{agent}"))
 }
 
 /// Takes the snapshot and makes a worktree per agent (blocking). Returns the
@@ -51,12 +49,10 @@ fn prepare(
     let base = ph_git::checkpoint::create(root, &format!("Parallel run: {prompt}"))?
         .context("parallel runs need a Git repository")?;
     let run = store.create_parallel_run(project, prompt, &base)?;
+    let folder = crate::copies::folder(store, root)?;
     let mut lanes = Vec::new();
     for agent in agents {
-        let path = lane_path(project, run, agent.id);
-        if let Some(parent) = path.parent() {
-            ph_store::paths::ensure_private_dir(parent)?;
-        }
+        let path = lane_path(&folder, project, run, agent.id);
         ph_git::worktree::add_detached(root, &path, &base)
             .with_context(|| format!("making a worktree for {}", agent.name))?;
         let lane = store.add_parallel_lane(run, agent.id, &path.to_string_lossy())?;
@@ -384,22 +380,39 @@ impl RunsView {
 
     /// Removes a kept lane's worktree; it stays kept.
     fn remove_copy(&mut self, lane: Lane, cx: &mut Context<Self>) {
-        if let Err(err) =
-            ph_git::worktree::remove(&self.root, std::path::Path::new(&lane.worktree), true)
-        {
-            tracing::warn!("removing {} failed: {err:#}", lane.worktree);
-        }
-        self.reload(cx);
+        self.remove_worktree(lane, None, cx);
     }
 
     /// Removes a lane's worktree.
     fn discard(&mut self, lane: Lane, cx: &mut Context<Self>) {
+        self.remove_worktree(lane, Some("discarded"), cx);
+    }
+
+    /// Removes `lane`'s worktree in the background (a large checkout, or one
+    /// on a network drive's server, takes a while), then marks the lane
+    /// `state` once it is gone.
+    fn remove_worktree(&mut self, lane: Lane, state: Option<&'static str>, cx: &mut Context<Self>) {
         let root = self.root.clone();
-        let result = ph_git::worktree::remove(&root, std::path::Path::new(&lane.worktree), true);
-        if result.is_ok() || !std::path::Path::new(&lane.worktree).exists() {
-            let _ = AppState::store(cx).set_lane_state(lane.id, "discarded");
-        }
-        self.reload(cx);
+        let worktree = std::path::PathBuf::from(&lane.worktree);
+        let work = cx.background_spawn(async move {
+            let result = ph_git::worktree::remove(&root, &worktree, true);
+            if let Err(err) = &result {
+                tracing::warn!("removing {} failed: {err:#}", worktree.display());
+            }
+            result.is_ok() || !worktree.exists()
+        });
+        cx.spawn(async move |this, cx| {
+            let gone = work.await;
+            _ = this.update(cx, |this, cx| {
+                if let Some(state) = state
+                    && gone
+                {
+                    let _ = AppState::store(cx).set_lane_state(lane.id, state);
+                }
+                this.reload(cx);
+            });
+        })
+        .detach();
     }
 }
 

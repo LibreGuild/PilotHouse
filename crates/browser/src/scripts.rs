@@ -69,6 +69,9 @@ pub fn locate(selector: &str) -> String {
     )
 }
 
+/// Whether the focused element is a password field.
+pub const FOCUSED_IS_PASSWORD: &str = r#"(() => { const el = document.activeElement; return !!el && el.tagName === 'INPUT' && el.type === 'password'; })()"#;
+
 pub fn focus(selector: &str) -> String {
     let selector = serde_json::to_string(selector).unwrap_or_default();
     format!(

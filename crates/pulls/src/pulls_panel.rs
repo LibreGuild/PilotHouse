@@ -242,13 +242,35 @@ impl PullsPanel {
             async move {
                 let range = format!("origin/{base}..HEAD");
                 let commits = ph_git::log::summaries(&root, &range)?;
-                let stat = ph_git::git(&root, &["diff", "--stat", "--no-ext-diff", "--no-textconv", &format!("origin/{base}...HEAD")])?;
-                let diff = ph_git::git(&root, &["diff", "--no-color", "--no-ext-diff", "--no-textconv", &format!("origin/{base}...HEAD")])?;
+                let stat = ph_git::git(
+                    &root,
+                    &[
+                        "diff",
+                        "--stat",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        &format!("origin/{base}...HEAD"),
+                    ],
+                )?;
+                let diff = ph_git::git(
+                    &root,
+                    &[
+                        "diff",
+                        "--no-color",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        &format!("origin/{base}...HEAD"),
+                    ],
+                )?;
                 anyhow::Ok(format!(
-                    "Write a pull request description in Markdown for these changes: a short \\
-                     summary, then a bullet list of what changed and why, then how to test \\
-                     it. Reply with the description only and do not use tools.\\n\\nCommits:\\n{commits}\\n\\
-                     Files:\\n{stat}\\n\\nDiff:\\n```diff\\n{}\\n```",
+                    "Write a pull request description in Markdown for these changes: a short \
+                     summary, then a bullet list of what changed and why, then how to test \
+                     it. Reply with the description only and do not use tools.\n\nCommits:\n{}\n\
+                     Files:\n{}\n\nDiff:\n```diff\n{}\n```",
+                    // Every part is cut, so the whole fits any agent (agy
+                    // takes it as one command-line argument).
+                    cut(&commits, 4_000),
+                    cut(&stat, 4_000),
                     cut(&diff, 14_000)
                 ))
             }

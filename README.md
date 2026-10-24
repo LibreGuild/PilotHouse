@@ -30,6 +30,7 @@ A day with coding agents usually means several agent CLIs in terminals, an edito
 - **Browser and Android**: a browser pane and Android emulators or phones that you and the agents can see and drive; annotate a screen and send it to the chat.
 - **UI tests** recorded from what an agent does, replayed without AI on several screen sizes or devices, compared with accepted screens, and repaired by an agent. A board card can require them to pass before it is Done.
 - **Automation**: agent prompts and test runs at set times, or when files change, a commit lands, a pull request opens or checks fail.
+- **Network drives**: for code on a server's share (a mapped drive), Git, terminals and run configurations work on the server over SSH, next to the files.
 - **Inbox and to-dos**, and an offline utilities toolbox (JSON, JWT, hashes, times, cron, regex, SQLite…) for people and agents.
 
 ## Install

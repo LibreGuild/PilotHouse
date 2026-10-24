@@ -288,19 +288,24 @@ impl Store {
     ) -> Result<Schedule> {
         let name = checked(name, job, &timing)?;
         let now = now_millis();
-        self.conn().execute(
-            "INSERT INTO schedules (project_id, name, job, timing, enabled, next_run, created_at)
-             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)",
-            params![
-                project_id,
-                name,
-                serde_json::to_string(job)?,
-                serde_json::to_string(&timing)?,
-                timing.next_after(now)?,
-                now
-            ],
-        )?;
-        let id = self.conn().last_insert_rowid();
+        // One lock for both: another thread's insert in between would
+        // change the last row id.
+        let id = {
+            let conn = self.conn();
+            conn.execute(
+                "INSERT INTO schedules (project_id, name, job, timing, enabled, next_run, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)",
+                params![
+                    project_id,
+                    name,
+                    serde_json::to_string(job)?,
+                    serde_json::to_string(&timing)?,
+                    timing.next_after(now)?,
+                    now
+                ],
+            )?;
+            conn.last_insert_rowid()
+        };
         self.schedule(id)?.context("the schedule vanished")
     }
 

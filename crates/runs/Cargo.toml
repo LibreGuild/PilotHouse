@@ -10,6 +10,7 @@ publish.workspace = true
 anyhow.workspace = true
 gpui-kit.workspace = true
 ph-env.workspace = true
+ph-remote.workspace = true
 ph-control.workspace = true
 ph-store.workspace = true
 ph-ui.workspace = true

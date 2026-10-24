@@ -287,6 +287,18 @@ fn wait_for_port(port_file: &Path) -> Result<String> {
 #[cfg(not(unix))]
 fn stop_leftover(_: &Path) {}
 
+/// `command` (a process's command line) runs on `profile` exactly.
+#[cfg(unix)]
+fn on_profile(command: &str, profile: &Path) -> bool {
+    let option = format!("--user-data-dir={}", profile.display());
+    command.match_indices(&option).any(|(at, _)| {
+        command[at + option.len()..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+    })
+}
+
 #[cfg(unix)]
 fn stop_leftover(profile: &Path) {
     // `SingletonLock` is a symlink to `<host>-<pid>`.
@@ -307,9 +319,10 @@ fn stop_leftover(profile: &Path) {
     else {
         return;
     };
-    // Only ever a Chrome on this very profile.
+    // Only ever a Chrome on this very profile (not `…/browser/12` for
+    // `…/browser/1`).
     let command = String::from_utf8_lossy(&output.stdout);
-    if !command.contains(&format!("--user-data-dir={}", profile.display())) {
+    if !on_profile(&command, profile) {
         return;
     }
     tracing::info!(
@@ -325,6 +338,24 @@ fn stop_leftover(profile: &Path) {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_chrome_is_matched_by_its_whole_profile() {
+        let profile = Path::new("/data/browser/1");
+        assert!(on_profile(
+            "chrome --user-data-dir=/data/browser/1 --headless",
+            profile
+        ));
+        assert!(on_profile(
+            "chrome --user-data-dir=/data/browser/1",
+            profile
+        ));
+        assert!(!on_profile(
+            "chrome --user-data-dir=/data/browser/12 --x",
+            profile
+        ));
+    }
     use super::*;
 
     #[test]

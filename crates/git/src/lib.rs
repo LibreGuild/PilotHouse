@@ -14,6 +14,9 @@
 //! - [`worktree`]: extra working trees (PR reviews, parallel agents).
 //! - [`checkpoint`]: snapshots before agent turns, and restoring them.
 //! - [`parallel`]: comparing and keeping agents' work from parallel worktrees.
+//!
+//! In a folder on a mapped network drive, Git runs on the server over SSH
+//! ([`ph_remote`]); paths it prints are turned back into this computer's.
 
 pub mod blame;
 pub mod branches;
@@ -33,6 +36,7 @@ pub mod worktree;
 
 pub use diff::{FileChange, Hunk, parse_diff};
 pub use run::git;
+pub(crate) use run::{local_path, null_device};
 pub use status::{
     ApplyMode, Change, RepoStatus, WorkingChanges, apply, current_branch, is_repository,
     stage_path, staged_diff, status, unstage_path, working_changes,

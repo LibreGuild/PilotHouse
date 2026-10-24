@@ -47,8 +47,13 @@ pub fn parse(text: &str) -> Vec<Segment> {
     let mut segments = Vec::new();
     let mut plain = String::new();
     let mut conflict: Option<(Conflict, Part)> = None;
+    // The open block's lines as they are, kept if it never ends.
+    let mut raw = String::new();
     for line in text.split_inclusive('\n') {
         let bare = line.trim_end_matches(['\n', '\r']);
+        if conflict.is_some() {
+            raw.push_str(line);
+        }
         match &mut conflict {
             None => {
                 if let Some(label) = marker(bare, '<') {
@@ -64,6 +69,7 @@ pub fn parse(text: &str) -> Vec<Segment> {
                         base_label: String::new(),
                     };
                     conflict = Some((block, Part::Ours));
+                    raw = line.to_string();
                 } else {
                     plain.push_str(line);
                 }
@@ -91,12 +97,8 @@ pub fn parse(text: &str) -> Vec<Segment> {
         }
     }
     // An unterminated block is not a conflict: keep its text as it was.
-    if let Some((block, _)) = conflict {
-        plain.push_str(&format!("<<<<<<< {}\n{}", block.ours_label, block.ours));
-        if let Some(base) = block.base {
-            plain.push_str(&format!("||||||| {}\n{base}", block.base_label));
-        }
-        plain.push_str(&format!("=======\n{}", block.theirs));
+    if conflict.is_some() {
+        plain.push_str(&raw);
     }
     if !plain.is_empty() {
         segments.push(Segment::Text(plain));
@@ -170,19 +172,33 @@ pub fn mark_resolved(root: &Path, path: &str) -> Result<()> {
 
 /// What is in progress: a merge, rebase or cherry-pick, if any.
 pub fn operation(root: &Path) -> Option<&'static str> {
-    for (file, name) in [
+    const MARKERS: [(&str, &str); 5] = [
         ("MERGE_HEAD", "merge"),
         ("rebase-merge", "rebase"),
         ("rebase-apply", "rebase"),
         ("CHERRY_PICK_HEAD", "cherry-pick"),
         ("REVERT_HEAD", "revert"),
-    ] {
-        let path = git(root, &["rev-parse", "--git-path", file]).ok()?;
-        if root.join(path.trim()).exists() {
-            return Some(name);
-        }
+    ];
+    // One call for every marker (each is a run on a network drive's server).
+    let mut args = vec!["rev-parse"];
+    for (file, _) in MARKERS {
+        args.extend(["--git-path", file]);
     }
-    None
+    let paths = git(root, &args).ok()?;
+    MARKERS
+        .iter()
+        .zip(paths.lines())
+        .find(|(_, path)| {
+            let path = path.trim();
+            // Relative to `root`, or (a linked worktree) absolute, maybe
+            // the server's.
+            if path.starts_with('/') || Path::new(path).is_absolute() {
+                crate::local_path(root, path).exists()
+            } else {
+                root.join(path).exists()
+            }
+        })
+        .map(|((_, name), _)| *name)
 }
 
 /// Gives up on the operation in progress.
@@ -198,6 +214,14 @@ mod tests {
 
     const FILE: &str =
         "keep\n<<<<<<< HEAD\nours 1\nours 2\n=======\ntheirs\n>>>>>>> feature\nend\n";
+
+    #[test]
+    fn an_unterminated_block_stays_as_it_was() {
+        let text = "a\r\n<<<<<<<\r\nlone\r\n=======\r\nrest\r\n";
+        let segments = parse(text);
+        assert!(conflicts(&segments).is_empty());
+        assert_eq!(render(&segments, &[]), text);
+    }
 
     #[test]
     fn parses_and_resolves_blocks() {

@@ -5,11 +5,14 @@
 //!   for [`UNUSED`]; reviewing again makes a new one;
 //! - a parallel run's copy that was kept or discarded and is older than
 //!   [`UNUSED`] (open ones stay until the user decides);
-//! - any copy whose workspace no longer exists.
+//! - any copy whose workspace no longer exists, once unused for [`UNUSED`]
+//!   too (its work may still be wanted).
 //!
 //! Copies are removed with `git worktree remove`, so their repository
 //! forgets them too; one whose repository is gone is deleted directly. Only
-//! folders inside `<data dir>/worktrees` are ever removed.
+//! folders inside this install's copy folders are ever removed: the data
+//! folder's `worktrees`, and on each mapped network drive this install's own
+//! (never another person's sharing the drive; see [`crate::copies`]).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -62,11 +65,26 @@ pub fn tidy(store: &Store) -> usize {
     if !own {
         return 0;
     }
-    let folder = data.join("worktrees");
-    let Ok(entries) = std::fs::read_dir(&folder) else {
+    // Without the list every copy would look orphaned: tidy another time.
+    let projects = match store.projects() {
+        Ok(projects) => projects,
+        Err(err) => {
+            tracing::warn!("not tidying copies: reading workspaces failed: {err:#}");
+            return 0;
+        }
+    };
+    let mut removed = 0;
+    for folder in crate::copies::all_folders(store) {
+        removed += tidy_folder(store, &projects, &folder);
+    }
+    removed
+}
+
+/// [`tidy`] for one folder of copies.
+fn tidy_folder(store: &Store, projects: &[ph_store::projects::Project], folder: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(folder) else {
         return 0;
     };
-    let projects = store.projects().unwrap_or_default();
     let mut removed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -91,7 +109,7 @@ pub fn tidy(store: &Store) -> usize {
             .find(|project| project.id == project_id)
             .map(|project| project.path.clone());
         let stale = match (&copy, &root) {
-            (_, None) => true,
+            (_, None) => age > UNUSED,
             (Copy::Review { .. }, Some(_)) => age > UNUSED,
             (
                 Copy::Lane {
@@ -102,7 +120,7 @@ pub fn tidy(store: &Store) -> usize {
                 Some(_),
             ) => age > UNUSED && lane_finished(store, *project, *run, agent, &path),
         };
-        if stale && remove(&folder, root.as_deref(), &path) {
+        if stale && remove(folder, root.as_deref(), &path) {
             removed += 1;
         }
     }
@@ -112,10 +130,11 @@ pub fn tidy(store: &Store) -> usize {
 /// The lane of `run` (in `project`) for `agent` at `path` was kept or
 /// discarded, or its run is gone.
 fn lane_finished(store: &Store, project: i64, run: i64, agent: &str, path: &Path) -> bool {
-    store
-        .parallel_runs(project)
-        .unwrap_or_default()
-        .into_iter()
+    // Unknown (the read failed) is not finished.
+    let Ok(runs) = store.parallel_runs(project) else {
+        return false;
+    };
+    runs.into_iter()
         .find(|known| known.id == run)
         .and_then(|known| {
             known
@@ -137,13 +156,37 @@ fn remove(folder: &Path, root: Option<&Path>, path: &PathBuf) -> bool {
     {
         return true;
     }
+    // Its workspace is gone: the repository's entry for it goes too, as
+    // `git worktree remove` would.
+    let entry = admin_entry(path);
     match std::fs::remove_dir_all(path) {
-        Ok(()) => true,
+        Ok(()) => {
+            if let Some(entry) = entry {
+                let _ = std::fs::remove_dir_all(entry);
+            }
+            true
+        }
         Err(err) => {
             tracing::warn!("could not remove {}: {err}", path.display());
             false
         }
     }
+}
+
+/// The repository's folder for the worktree at `copy`
+/// (`<repo>/.git/worktrees/<name>`), when it names `copy` back.
+fn admin_entry(copy: &Path) -> Option<PathBuf> {
+    let link = std::fs::read_to_string(copy.join(".git")).ok()?;
+    let entry = copy.join(link.trim().strip_prefix("gitdir:")?.trim());
+    let entry = ph_store::paths::canonical(&entry).ok()?;
+    let back = std::fs::read_to_string(entry.join("gitdir")).ok()?;
+    let back = ph_store::paths::canonical(&entry.join(back.trim())).ok()?;
+    let copy = ph_store::paths::canonical(copy).ok()?;
+    let in_worktrees = entry
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "worktrees");
+    (in_worktrees && back == copy.join(".git")).then_some(entry)
 }
 
 #[cfg(test)]
@@ -177,5 +220,30 @@ mod tests {
             0,
             "never with a database that is not the data folder's"
         );
+    }
+
+    #[test]
+    fn an_orphaned_copy_leaves_no_entry_in_its_repository() {
+        let base = std::env::temp_dir().join(format!("ph-tidy-{}", std::process::id()));
+        let (repo, copies) = (base.join("repo"), base.join("worktrees"));
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&copies).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "start"]);
+        let copy = copies.join("9-pr-1");
+        git(&["worktree", "add", "-q", "--detach", copy.to_str().unwrap()]);
+        let entry = admin_entry(&copy).expect("the repository's entry");
+        assert!(remove(&copies, None, &copy));
+        assert!(!copy.exists() && !entry.exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

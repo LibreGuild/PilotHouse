@@ -179,10 +179,16 @@ impl DeviceManager {
             .name("adb-track-devices".into())
             .spawn(move || {
                 // The server can restart (`adb kill-server`, an SDK update):
-                // follow it again while anyone listens.
+                // follow it again while anyone listens, less often while it
+                // cannot be reached (a broken adb is not started every few
+                // seconds for good).
+                let mut wait = Duration::from_secs(5);
                 while !changes.is_closed() {
-                    track_devices(&track_adb, &changes);
-                    std::thread::sleep(Duration::from_secs(5));
+                    wait = match track_devices(&track_adb, &changes) {
+                        true => Duration::from_secs(5),
+                        false => (wait * 2).min(Duration::from_secs(5 * 60)),
+                    };
+                    std::thread::sleep(wait);
                 }
             })
             .ok();
@@ -383,7 +389,9 @@ fn wait_for_boot(adb: &Adb, avd: &str) -> Result<String> {
 /// `adb track-devices` does, and sends one message per change. A socket
 /// rather than that command: a helper process would outlive the app when
 /// it quits or is killed, and nothing reaps it until a device changes.
-fn track_devices(adb: &Adb, changes: &smol::channel::Sender<()>) {
+/// Follows the adb server's device list until it stops; false when it could
+/// not be reached at all.
+fn track_devices(adb: &Adb, changes: &smol::channel::Sender<()>) -> bool {
     // The server may not be running yet; this starts it (as any adb call
     // does) and returns once it listens.
     let _ = adb
@@ -398,7 +406,7 @@ fn track_devices(adb: &Adb, changes: &smol::channel::Sender<()>) {
         .unwrap_or(5037);
     let Ok(mut server) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
         tracing::warn!("cannot reach the adb server on port {port}");
-        return;
+        return false;
     };
     // Requests are a 4-digit hex length and the request; the server answers
     // OKAY, then a length-prefixed device list on every change.
@@ -411,7 +419,7 @@ fn track_devices(adb: &Adb, changes: &smol::channel::Sender<()>) {
         || &status != b"OKAY"
     {
         tracing::warn!("the adb server refused to report devices");
-        return;
+        return false;
     }
     let _ = changes.send_blocking(());
     loop {
@@ -426,4 +434,5 @@ fn track_devices(adb: &Adb, changes: &smol::channel::Sender<()>) {
             break;
         }
     }
+    true
 }

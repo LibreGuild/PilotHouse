@@ -1,6 +1,11 @@
 //! Draws one [`Terminal`] as styled text lines and turns keys, the mouse
 //! and the clipboard into input. The terminal itself (shell and screen)
 //! lives outside the view, so closing the view leaves the shell running.
+//!
+//! Keys that are not text (Enter, arrows, Ctrl-C) are sent from `key_down`.
+//! Text arrives through the platform's text input instead, so accents, input
+//! methods (Chinese, Japanese, Korean) and dictation work as anywhere else:
+//! text being composed is held until it is committed.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -12,10 +17,11 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermMode};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
-    App, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, Font,
-    FontStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
-    ParentElement as _, Pixels, Render, ScrollWheelEvent, StrikethroughStyle, Styled as _,
-    StyledText, Subscription, TextRun, UnderlineStyle, Window, canvas, div, font, px,
+    App, Bounds, ClipboardItem, Context, ElementInputHandler, Entity, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Pixels,
+    Render, ScrollWheelEvent, StrikethroughStyle, Styled as _, StyledText, Subscription, TextRun,
+    UTF16Selection, UnderlineStyle, Window, canvas, div, font, point, px, size,
 };
 
 use crate::palette::Palette;
@@ -40,6 +46,11 @@ pub struct TerminalView {
     cell: Cell<(f32, f32)>,
     /// A mouse drag is selecting text.
     selecting: bool,
+    /// Text an input method is composing, not sent yet.
+    composing: String,
+    /// Text typed since the last other key: an input method may replace
+    /// some of it (macOS press-and-hold turns `e` into `é`).
+    typed: String,
     _observe: Subscription,
 }
 
@@ -54,6 +65,8 @@ impl TerminalView {
             last_bounds: Rc::default(),
             cell: Cell::new((0., 0.)),
             selecting: false,
+            composing: String::new(),
+            typed: String::new(),
         }
     }
 
@@ -62,9 +75,45 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // Plain text is left to the text input (`replace_text_in_range`).
+        if is_text(&event.keystroke) || !self.composing.is_empty() {
+            return;
+        }
+        self.typed.clear();
+        self.send_keystroke(&event.keystroke, cx);
+    }
+
+    /// Sends typed text to the shell.
+    fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        let terminal = self.terminal.read(cx);
+        let mut term = terminal.term().lock();
+        term.selection = None;
+        term.scroll_display(Scroll::Bottom);
+        drop(term);
+        terminal.write(text.as_bytes().to_vec());
+        cx.notify();
+    }
+
+    fn key_action(&mut self, action: &crate::TerminalKey, _: &mut Window, cx: &mut Context<Self>) {
+        // Enter while composing commits the text in the input method; it
+        // must not also run the half-typed line.
+        if !self.composing.is_empty() {
+            return;
+        }
+        self.typed.clear();
+        if let Ok(keystroke) = gpui_kit::Keystroke::parse(&action.key) {
+            self.send_keystroke(&keystroke, cx);
+        }
+    }
+
+    /// Sends what `keystroke` types to the shell.
+    fn send_keystroke(&mut self, keystroke: &gpui_kit::Keystroke, cx: &mut Context<Self>) {
         let terminal = self.terminal.read(cx);
         let app_cursor = terminal.term().lock().mode().contains(TermMode::APP_CURSOR);
-        if let Some(bytes) = keys::to_bytes(&event.keystroke, app_cursor) {
+        if let Some(bytes) = keys::to_bytes(keystroke, app_cursor) {
             // Typing jumps back to the live screen, like every terminal does,
             // and drops the selection.
             let mut term = terminal.term().lock();
@@ -379,7 +428,12 @@ impl Render for TerminalView {
                     });
                 }
             },
-            |_, _, _, _| {},
+            {
+                let (focus, view) = (self.focus_handle.clone(), cx.entity());
+                move |bounds, _, window, cx| {
+                    window.handle_input(&focus, ElementInputHandler::new(bounds, view), cx)
+                }
+            },
         )
         .absolute()
         .size_full();
@@ -389,6 +443,7 @@ impl Render for TerminalView {
             .key_context(TERMINAL_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key_down))
+            .on_action(cx.listener(Self::key_action))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::ask))
@@ -417,5 +472,180 @@ impl Render for TerminalView {
                             .child(StyledText::new(line.text).with_runs(line.runs))
                     })),
             )
+    }
+}
+
+/// Where text replaced from UTF-16 offset `start` begins in `typed` (a byte
+/// index), and how many characters that erases.
+fn replaced_tail(typed: &str, start: usize) -> (usize, usize) {
+    let mut offset = 0;
+    let keep = typed
+        .char_indices()
+        .find(|(_, c)| {
+            let at = offset;
+            offset += c.len_utf16();
+            at >= start
+        })
+        .map(|(ix, _)| ix)
+        .unwrap_or(typed.len());
+    (keep, typed[keep..].chars().count())
+}
+
+/// A key that types text (a letter, digit, symbol or space, with Shift or
+/// none; on macOS with Option too, which types accents and symbols there),
+/// as opposed to Enter, arrows or a Ctrl, Alt or ⌘ shortcut.
+fn is_text(keystroke: &gpui_kit::Keystroke) -> bool {
+    let modifiers = &keystroke.modifiers;
+    let alt_is_shortcut = modifiers.alt && !cfg!(target_os = "macos");
+    !(modifiers.control || alt_is_shortcut || modifiers.platform || modifiers.function)
+        && keystroke
+            .key_char
+            .as_deref()
+            .is_some_and(|text| !text.is_empty() && !text.chars().any(char::is_control))
+}
+
+/// The platform's text input: typed and composed text. The text it sees is
+/// what was typed since the last other key, then what is being composed.
+impl EntityInputHandler for TerminalView {
+    fn text_for_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        adjusted: &mut Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        let utf16: Vec<u16> = self
+            .typed
+            .encode_utf16()
+            .chain(self.composing.encode_utf16())
+            .collect();
+        let range = range.start.min(utf16.len())..range.end.min(utf16.len());
+        *adjusted = Some(range.clone());
+        Some(String::from_utf16_lossy(&utf16[range]))
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let end = self.typed.encode_utf16().count() + self.composing.encode_utf16().count();
+        Some(UTF16Selection {
+            range: end..end,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        let start = self.typed.encode_utf16().count();
+        (!self.composing.is_empty()).then(|| start..start + self.composing.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
+        self.composing.clear();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.composing.clear();
+        // Replacing text already sent: erase it in the shell first.
+        if let Some(range) = range {
+            let (keep, erased) = replaced_tail(&self.typed, range.start);
+            if erased > 0 {
+                self.typed.truncate(keep);
+                self.terminal.read(cx).write(vec![0x7f; erased]);
+            }
+        }
+        self.type_text(text, cx);
+        self.typed.push_str(text);
+        // Only the last few characters can be replaced.
+        if self.typed.len() > 64 {
+            let cut = self.typed.len() - 32;
+            let cut = (cut..self.typed.len())
+                .find(|ix| self.typed.is_char_boundary(*ix))
+                .unwrap_or(self.typed.len());
+            self.typed.drain(..cut);
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<std::ops::Range<usize>>,
+        text: &str,
+        _: Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.composing = text.to_string();
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _: std::ops::Range<usize>,
+        element: Bounds<Pixels>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        // The input method's window goes at the cursor.
+        let (width, height) = self.cell.get();
+        let cursor = self.terminal.read(cx).term().lock().grid().cursor.point;
+        Some(Bounds::new(
+            point(
+                element.origin.x + px(width * cursor.column.0 as f32),
+                element.origin.y + px(height * cursor.line.0.max(0) as f32),
+            ),
+            size(px(width.max(1.)), px(height.max(1.))),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _: gpui_kit::Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    #[test]
+    fn replacing_typed_text_erases_only_what_is_replaced() {
+        // Press-and-hold: `e` was typed, then `é` replaces 0..1.
+        assert_eq!(replaced_tail("e", 0), (0, 1));
+        assert_eq!(replaced_tail("cafe", 3), (3, 1));
+        // A replacement after the typed text erases nothing.
+        assert_eq!(replaced_tail("cafe", 4), (4, 0));
+        // Offsets are UTF-16: 日 is one unit, 😀 two.
+        assert_eq!(replaced_tail("日本", 1), ("日".len(), 1));
+        assert_eq!(replaced_tail("😀x", 2), ("😀".len(), 1));
+    }
+
+    #[test]
+    fn text_keys_go_to_the_text_input() {
+        let key = |text: &str| {
+            gpui_kit::Keystroke::parse(text)
+                .unwrap()
+                .with_simulated_ime()
+        };
+        assert!(is_text(&key("a")));
+        assert!(is_text(&key("shift-a")));
+        assert!(!is_text(&key("enter")));
+        assert!(!is_text(&key("ctrl-c")));
+        assert!(!is_text(&key("cmd-v")));
     }
 }

@@ -57,6 +57,8 @@ pub struct Terminal {
     /// A fixed name (a run configuration's), shown instead of the shell's title.
     label: Option<SharedString>,
     exited: bool,
+    /// How the program ended, once it has (`Some(0)`: it succeeded).
+    exit_code: Option<i32>,
     columns: usize,
     rows: usize,
     _events: Task<()>,
@@ -66,16 +68,35 @@ impl EventEmitter<TerminalEvent> for Terminal {}
 
 impl Terminal {
     /// Starts the user's login shell in `cwd`. Done before creating the
-    /// terminal so a failure can be shown instead of an empty one.
+    /// terminal so a failure can be shown instead of an empty one. A folder
+    /// on a mapped network drive gets a shell on the server, in the same
+    /// folder there (through `ssh`, which may ask for a password).
     pub fn start(cwd: std::path::PathBuf) -> anyhow::Result<StartedShell> {
+        if let Some(remote) = ph_remote::remote_of(&cwd) {
+            let (program, args) = ph_remote::ssh::shell(&remote.mapping, &remote.path);
+            let mut shell = Self::start_program(&program, args, home_or(cwd))?;
+            shell.title = remote.mapping.host.clone().into();
+            return Ok(shell);
+        }
         let (shell, args) = ph_env::default_shell();
+        Self::start_program(&shell.to_string_lossy(), args, cwd)
+    }
+
+    /// Starts `program` with `args` in `cwd` on a PTY (a shell, `ssh`,
+    /// `ssh-keygen`). The terminal is named after the program.
+    pub fn start_program(
+        program: &str,
+        args: Vec<String>,
+        cwd: std::path::PathBuf,
+    ) -> anyhow::Result<StartedShell> {
+        let shell = std::path::PathBuf::from(program);
         let mut extra_env = ph_env::shell_env().clone();
         extra_env.insert("TERM".into(), "xterm-256color".into());
         extra_env.insert("COLORTERM".into(), "truecolor".into());
         extra_env.insert("TERM_PROGRAM".into(), "PilotHouse".into());
 
         let options = tty::Options {
-            shell: Some(tty::Shell::new(shell.to_string_lossy().into_owned(), args)),
+            shell: Some(tty::Shell::new(program.to_string(), args)),
             working_directory: Some(cwd),
             drain_on_exit: true,
             env: extra_env,
@@ -143,6 +164,7 @@ impl Terminal {
             title: shell.title,
             label: None,
             exited: false,
+            exit_code: None,
             columns: shell.columns,
             rows: shell.rows,
             _events: events,
@@ -176,6 +198,18 @@ impl Terminal {
         self.exited
     }
 
+    /// The program's exit code, once it has ended (`None` before, or when
+    /// it was ended by a signal).
+    pub fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    fn mark_exited(&mut self, cx: &mut Context<Self>) {
+        if !std::mem::replace(&mut self.exited, true) {
+            cx.emit(TerminalEvent::Exited);
+        }
+    }
+
     fn handle_events(&mut self, events: Vec<Event>, cx: &mut Context<Self>) {
         for event in events {
             match event {
@@ -187,10 +221,12 @@ impl Terminal {
                 Event::ClipboardStore(_, text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
-                Event::Exit | Event::ChildExit(_) => {
-                    self.exited = true;
-                    cx.emit(TerminalEvent::Exited);
+                // The exit code comes first, then the end of the screen.
+                Event::ChildExit(status) => {
+                    self.exit_code = status.code();
+                    self.mark_exited(cx);
                 }
+                Event::Exit => self.mark_exited(cx),
                 _ => {}
             }
         }
@@ -235,7 +271,7 @@ impl Terminal {
         if bracketed {
             bytes.extend_from_slice(b"\x1b[200~");
         }
-        bytes.extend_from_slice(text.replace("\r\n", "\r").replace('\n', "\r").as_bytes());
+        bytes.extend_from_slice(pasted(text, bracketed).as_bytes());
         if bracketed {
             bytes.extend_from_slice(b"\x1b[201~");
         }
@@ -278,5 +314,37 @@ impl Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = self.pty.send(Msg::Shutdown);
+    }
+}
+
+/// The home folder for a program that only needs some folder to start in
+/// (`ssh` to a server), else `fallback`.
+fn home_or(fallback: std::path::PathBuf) -> std::path::PathBuf {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(std::path::PathBuf::from)
+        .filter(|home| home.is_dir())
+        .unwrap_or(fallback)
+}
+
+/// `text` as typed by a paste: line breaks as Enter, and, while the
+/// program reads a bracketed paste, without ESC, which could end the paste
+/// early (`ESC [201~`) and run what follows as typed commands.
+fn pasted(text: &str, bracketed: bool) -> String {
+    let text = text.replace("\r\n", "\r").replace('\n', "\r");
+    match bracketed {
+        true => text.replace('\x1b', ""),
+        false => text,
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::pasted;
+
+    #[test]
+    fn a_paste_cannot_end_bracketed_mode() {
+        let text = "echo hi\x1b[201~rm -rf ~\n";
+        assert_eq!(pasted(text, true), "echo hi[201~rm -rf ~\r");
+        assert_eq!(pasted("a\r\nb", false), "a\rb");
     }
 }

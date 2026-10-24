@@ -35,6 +35,27 @@ impl BrowserHub {
         browser
     }
 
+    /// Workspace `project_id` was removed: its Chrome stops, and its profile
+    /// (cookies, logins) is deleted once Chrome has let go of it.
+    pub fn remove(project_id: i64, cx: &mut App) {
+        if cx.has_global::<Self>()
+            && let Some(browser) = cx.global_mut::<Self>().browsers.remove(&project_id)
+        {
+            browser.update(cx, |browser, cx| browser.stop(cx));
+        }
+        let profile = crate::chrome::profile_dir(project_id);
+        cx.background_spawn(async move {
+            for _ in 0..10 {
+                smol::Timer::after(std::time::Duration::from_millis(500)).await;
+                if !profile.exists() || std::fs::remove_dir_all(&profile).is_ok() {
+                    return;
+                }
+            }
+            tracing::warn!("could not delete the browser profile {}", profile.display());
+        })
+        .detach();
+    }
+
     /// The browser only if it already exists (it is never started here).
     pub fn existing(project_id: i64, cx: &App) -> Option<Entity<Browser>> {
         cx.try_global::<Self>()?.browsers.get(&project_id).cloned()

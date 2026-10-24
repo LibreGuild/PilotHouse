@@ -173,16 +173,28 @@ impl TestCase {
     }
 }
 
-/// `Sign in works` → `sign-in-works`.
+/// `Sign in works` → `sign-in-works`, `ログイン` → `ログイン`. A test's
+/// baselines and reports are kept under it, so names in any script keep
+/// theirs apart; one with no letters or digits at all (`🎉`) is named by a
+/// hash of it.
 pub fn slug(name: &str) -> String {
-    name.to_lowercase()
+    let slug = name
+        .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect::<String>()
         .split('-')
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
-        .join("-")
+        .join("-");
+    if !slug.is_empty() || name.trim().is_empty() {
+        return slug;
+    }
+    // FNV-1a: the same on every computer and Rust version.
+    let hash = name.bytes().fold(0x811c9dc5u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x01000193)
+    });
+    format!("test-{hash:08x}")
 }
 
 /// The project's tests, by name, each with its file.
@@ -230,6 +242,16 @@ pub fn create(root: &Path, test: &TestCase) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_in_any_script_keep_their_own_folder() {
+        assert_eq!(slug("Sign in works!"), "sign-in-works");
+        assert_eq!(slug("ログイン"), "ログイン");
+        assert_ne!(slug("ログイン"), slug("検索"));
+        assert_ne!(slug("🎉"), slug("🚀"));
+        assert!(slug("🎉").starts_with("test-"));
+        assert_eq!(slug("  "), "");
+    }
 
     #[test]
     fn steps_round_trip_as_readable_json() {

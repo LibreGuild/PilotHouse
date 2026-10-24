@@ -100,6 +100,7 @@ impl Automation {
                 .filter(|schedule| test(&schedule.timing))
                 .map(|schedule| schedule.project_id)
                 .collect();
+            projects.sort_unstable();
             projects.dedup();
             projects
         };

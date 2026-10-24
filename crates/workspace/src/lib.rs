@@ -14,11 +14,13 @@ mod arch_map;
 mod chat_search;
 mod command_palette;
 mod context_panel;
+mod copies;
 mod detect;
 mod file_window;
 mod housekeeping;
 mod inbox;
 mod instructions_view;
+mod network_drives;
 mod open;
 mod parallel;
 mod rename_dialog;
@@ -54,6 +56,7 @@ use gpui_kit::App;
 pub fn init(cx: &mut App) {
     review::install(AppState::store(cx).clone(), cx);
     actions::bind_keys(cx);
+    network_drives::install(cx);
     ph_files::init(cx, WORKSPACE_CONTEXT);
     ph_terminal::init(cx);
 }

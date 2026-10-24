@@ -90,11 +90,16 @@ impl Store {
         if text.is_empty() {
             bail!("Write what to do.");
         }
-        self.conn().execute(
-            "INSERT INTO todos (project_id, text, remind_at, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![project_id, text, remind_at, now_millis()],
-        )?;
-        let id = self.conn().last_insert_rowid();
+        // One lock for both: another thread's insert in between would
+        // change the last row id.
+        let id = {
+            let conn = self.conn();
+            conn.execute(
+                "INSERT INTO todos (project_id, text, remind_at, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![project_id, text, remind_at, now_millis()],
+            )?;
+            conn.last_insert_rowid()
+        };
         self.todo(id)?.context("the to-do vanished")
     }
 

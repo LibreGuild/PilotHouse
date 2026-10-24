@@ -50,6 +50,12 @@ fn open_paths(params: Value, cx: &mut App) -> Result<Value> {
         .filter_map(Value::as_str)
         .map(Into::into)
         .collect();
+    // Another launch (with folders or without) while every window is closed:
+    // on macOS the app keeps running, so the main window comes back.
+    if ph_workspace::main_workspace(cx).is_none() {
+        let (handle, workspace) = ph_workspace::open_window(None, cx)?;
+        ph_workspace::set_main_window(handle, &workspace, cx);
+    }
     ph_workspace::open_paths(&paths, cx)?;
     Ok(Value::Null)
 }

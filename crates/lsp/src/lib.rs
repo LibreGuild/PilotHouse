@@ -11,6 +11,7 @@
 
 mod client;
 mod manager;
+pub mod position;
 mod providers;
 pub mod servers;
 mod transport;

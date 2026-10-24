@@ -3,8 +3,11 @@
 //! CLI's own non-interactive mode instead of a chat session.
 //!
 //! The prompt goes on stdin where the CLI reads it (Claude Code, Codex,
-//! Gemini CLI), so long diffs and any characters are safe on every platform;
-//! `agy` takes it as an argument (it is a native executable).
+//! Gemini CLI), so long diffs and any characters are safe on every platform.
+//! `agy` takes it only as an argument (its stdin mode needs stream-json), so
+//! callers cut every part of a prompt: the largest, a pull request's, stays
+//! near 23 KB, inside Linux's 128 KB for one argument and Windows' 32,767
+//! characters for a whole command line.
 
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -52,10 +55,12 @@ pub fn ask(spec: &AgentSpec, prompt: &str, cwd: &Path) -> Result<String> {
     let program = ph_env::which(spec.cli).context("agent CLI not found")?;
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let job = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let last_message = std::env::temp_dir().join(format!(
-        "pilothouse-oneshot-{}-{job}.txt",
-        std::process::id()
-    ));
+    // In PilotHouse's own private folder: in a shared temp folder another
+    // user could put the file there first and write the answer.
+    let folder = ph_store::paths::data_dir().join("oneshot");
+    ph_store::paths::ensure_private_dir(&folder).context("making a folder for the answer")?;
+    let last_message = folder.join(format!("{}-{job}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&last_message);
     let (args, stdin): (Vec<String>, Option<&str>) = match spec.id {
         "claude" => (
             vec!["-p".into(), "--output-format".into(), "text".into()],

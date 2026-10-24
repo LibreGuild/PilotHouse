@@ -28,4 +28,5 @@ Short, practical notes on how PilotHouse is built. Start with **architecture**, 
 | [features/devices.md](features/devices.md) | Android emulators and phones: live screen, input, logcat, UI tree, files, agent tools |
 | [features/live-panes.md](features/live-panes.md) | Annotate, pick elements, capture, record, before/after, `@screenshot`, `@log` |
 | [features/runs.md](features/runs.md) | Run configurations and the ports panel |
+| [features/network-drives.md](features/network-drives.md) | Network drives: Git, terminals and runs on the server over SSH |
 

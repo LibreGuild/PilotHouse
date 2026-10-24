@@ -143,12 +143,13 @@ impl Store {
         let scratch = new_scratch(scratch_root)?;
         let id = {
             let conn = self.conn();
+            let id = next_project_id(&conn)?;
             conn.execute(
-                "INSERT INTO projects (name, path, created_at, last_opened_at, kind)
-                 VALUES (?1, ?2, ?3, ?3, 'empty')",
-                params![name, scratch.to_string_lossy(), now],
+                "INSERT INTO projects (id, name, path, created_at, last_opened_at, kind)
+                 VALUES (?4, ?1, ?2, ?3, ?3, 'empty')",
+                params![name, scratch.to_string_lossy(), now, id],
             )?;
-            conn.last_insert_rowid()
+            id
         };
         self.project(id)?.context("just created")
     }
@@ -326,11 +327,12 @@ impl Store {
         let now = now_millis();
 
         let conn = self.conn();
+        let id = next_project_id(&conn)?;
         conn.execute(
-            "INSERT INTO projects (name, path, created_at, last_opened_at)
-             VALUES (?1, ?2, ?3, ?3)
+            "INSERT INTO projects (id, name, path, created_at, last_opened_at)
+             VALUES (?4, ?1, ?2, ?3, ?3)
              ON CONFLICT(path) DO UPDATE SET last_opened_at = excluded.last_opened_at",
-            params![name, path_text, now],
+            params![name, path_text, now, id],
         )?;
         let project = conn.query_row(
             "SELECT * FROM projects WHERE path = ?1",
@@ -397,9 +399,18 @@ impl Store {
     }
 
     /// Removes the project from PilotHouse. The folder on disk is untouched.
+    /// Its id is never given to another (see [`next_project_id`]).
     pub fn remove_project(&self, id: ProjectId) -> Result<()> {
-        self.conn()
-            .execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE
+             SET value = max(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))",
+            params![LAST_REMOVED, id.to_string()],
+        )?;
+        tx.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -428,6 +439,24 @@ impl Store {
     }
 }
 
+/// The highest id a removed workspace had.
+const LAST_REMOVED: &str = "projects.last_removed_id";
+
+/// The id for a new workspace: above every workspace's, removed ones too.
+/// SQLite would reuse a removed last id, and what is kept by id (a browser
+/// profile with its logins, test baselines, settings) would pass to the
+/// new workspace.
+fn next_project_id(conn: &rusqlite::Connection) -> rusqlite::Result<ProjectId> {
+    conn.query_row(
+        "SELECT max(
+            coalesce((SELECT max(id) FROM projects), 0),
+            coalesce((SELECT CAST(value AS INTEGER) FROM settings WHERE key = ?1), 0)
+         ) + 1",
+        params![LAST_REMOVED],
+        |row| row.get(0),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,6 +465,22 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ph-store-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_removed_workspace_id_is_never_reused() {
+        let store = Store::open_in_memory().unwrap();
+        let (a, b) = (temp_folder("reuse-a"), temp_folder("reuse-b"));
+        let first = store.add_project(&a).unwrap();
+        store.remove_project(first.id).unwrap();
+        let second = store.add_project(&b).unwrap();
+        assert!(second.id > first.id);
+        let empty = store
+            .create_empty_workspace("Scratch", &temp_folder("reuse-scratch"))
+            .unwrap();
+        assert!(empty.id > second.id);
+        // Adding a folder again keeps its workspace.
+        assert_eq!(store.add_project(&b).unwrap().id, second.id);
     }
 
     #[test]

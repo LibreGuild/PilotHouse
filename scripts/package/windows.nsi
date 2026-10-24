@@ -8,6 +8,9 @@ Unicode true
 !ifndef VERSION
   !define VERSION "0.0.0"
 !endif
+!ifndef NUMERIC
+  !define NUMERIC "0.0.0"
+!endif
 
 Name "PilotHouse"
 OutFile "..\..\dist\PilotHouse-Windows-Setup-x64.exe"
@@ -15,10 +18,11 @@ InstallDir "$LOCALAPPDATA\Programs\PilotHouse"
 InstallDirRegKey HKCU "Software\PilotHouse" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
-VIProductVersion "${VERSION}.0"
+VIProductVersion "${NUMERIC}.0"
 VIAddVersionKey "ProductName" "PilotHouse"
 VIAddVersionKey "FileDescription" "PilotHouse installer"
-VIAddVersionKey "FileVersion" "${VERSION}"
+VIAddVersionKey "FileVersion" "${NUMERIC}"
+VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "Apache License 2.0"
 
 !define MUI_ICON "..\..\crates\app\assets\icon\PilotHouse.ico"

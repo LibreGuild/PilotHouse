@@ -69,6 +69,10 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
                     "Screen capture to the chat",
                     action(Box::new(CaptureToChat)),
                 ),
+                (
+                    "Ask about the selected code or output",
+                    Keys::Fixed(&["secondary-l"]),
+                ),
             ],
         ),
         (
@@ -102,7 +106,7 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
     ]
 }
 
-fn render(window: &mut Window, cx: &mut App) -> impl IntoElement {
+pub(crate) fn render(window: &mut Window, cx: &mut App) -> impl IntoElement {
     let muted = cx.theme().muted_foreground;
     let columns = groups().into_iter().map(|(title, rows)| {
         v_flex()

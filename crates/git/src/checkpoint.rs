@@ -45,9 +45,15 @@ pub struct Restored {
     pub restored: usize,
     /// Files created since the checkpoint, now removed.
     pub removed: usize,
+    /// Files not in the checkpoint that stay: it could not hold every
+    /// untracked file (too many, or too large), so they may be the user's.
+    pub kept: usize,
     /// The checkpoint taken just before, to undo the restore.
     pub undo: String,
 }
+
+/// Marks a checkpoint that left some untracked files out.
+const PARTIAL: &str = "PilotHouse-Untracked: partial";
 
 /// Git's empty tree, as a source of no attributes.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -58,7 +64,7 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// checkpoint stores the files' exact bytes and a restore writes them back
 /// exactly, or a Windows user's LF files would come back as CRLF.
 fn git_in(root: &Path, index: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String> {
-    let no_attributes = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let no_attributes = crate::null_device(root);
     let mut command = command(root);
     command
         .args([
@@ -74,7 +80,9 @@ fn git_in(root: &Path, index: &Path, args: &[&str], input: Option<&[u8]>) -> Res
         .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_INDEX_FILE", index)
         .env("GIT_LITERAL_PATHSPECS", "1")
-        .envs(IDENTITY)
+        .envs(IDENTITY);
+    let mut command = crate::run::ready(command);
+    command
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -90,9 +98,8 @@ fn git_in(root: &Path, index: &Path, args: &[&str], input: Option<&[u8]>) -> Res
     let output = child.wait_with_output()?;
     if !output.status.success() {
         bail!(
-            "git {} failed: {}",
-            args.first().unwrap_or(&""),
-            String::from_utf8_lossy(&output.stderr).trim()
+            "{}",
+            crate::run::failure(root, args.first().unwrap_or(&""), &output)
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -134,8 +141,8 @@ pub fn create(root: &Path, label: &str) -> Result<Option<String>> {
     let Ok(git_dir) = crate::git(root, &["rev-parse", "--absolute-git-dir"]) else {
         return Ok(None);
     };
-    let top = PathBuf::from(crate::git(root, &["rev-parse", "--show-toplevel"])?.trim());
-    let index = TempIndex::new(Path::new(git_dir.trim()))?;
+    let top = crate::local_path(root, &crate::git(root, &["rev-parse", "--show-toplevel"])?);
+    let index = TempIndex::new(&crate::local_path(root, &git_dir))?;
     let index = index.0.as_path();
 
     // Tracked files: changes and deletions.
@@ -146,6 +153,7 @@ pub fn create(root: &Path, label: &str) -> Result<Option<String>> {
         .split('\0')
         .filter(|path| !path.is_empty())
         .collect();
+    let all_untracked = wanted.len();
     if wanted.len() > MAX_UNTRACKED_FILES {
         tracing::info!(
             "checkpoint: {} untracked files, leaving them out",
@@ -157,6 +165,9 @@ pub fn create(root: &Path, label: &str) -> Result<Option<String>> {
         std::fs::symlink_metadata(top.join(path))
             .is_ok_and(|meta| meta.len() <= MAX_UNTRACKED_BYTES)
     });
+    // Some untracked files were left out: restoring cannot tell them from
+    // files made later, so it must keep both.
+    let partial = wanted.len() < all_untracked;
     if !wanted.is_empty() {
         let list = wanted.join("\0");
         git_in(
@@ -171,7 +182,8 @@ pub fn create(root: &Path, label: &str) -> Result<Option<String>> {
         .to_string();
 
     // Nothing changed since the newest checkpoint: reuse it.
-    if let Some(newest) = list(&top)?.into_iter().next()
+    if !partial
+        && let Some(newest) = list(&top)?.into_iter().next()
         && crate::git(&top, &["rev-parse", &format!("{newest}^{{tree}}")])
             .is_ok_and(|newest_tree| newest_tree.trim() == tree)
     {
@@ -181,7 +193,10 @@ pub fn create(root: &Path, label: &str) -> Result<Option<String>> {
     let head = crate::git(&top, &["rev-parse", "--verify", "--quiet", "HEAD"])
         .ok()
         .map(|head| head.trim().to_string());
-    let message = format!("PilotHouse checkpoint\n\n{}", label.trim());
+    let mut message = format!("PilotHouse checkpoint\n\n{}", label.trim());
+    if partial {
+        message.push_str(&format!("\n\n{PARTIAL}"));
+    }
     let mut args = vec!["commit-tree", tree.as_str(), "-m", message.as_str()];
     if let Some(head) = &head {
         args.extend(["-p", head.as_str()]);
@@ -244,7 +259,7 @@ fn prune(root: &Path) -> Result<()> {
 /// [`Restored::undo`]).
 pub fn restore(root: &Path, checkpoint: &str) -> Result<Restored> {
     crate::check_name("checkpoint", checkpoint)?;
-    let top = PathBuf::from(crate::git(root, &["rev-parse", "--show-toplevel"])?.trim());
+    let top = crate::local_path(root, &crate::git(root, &["rev-parse", "--show-toplevel"])?);
     crate::git(
         &top,
         &["cat-file", "-e", &format!("{checkpoint}^{{commit}}")],
@@ -271,6 +286,14 @@ pub fn restore(root: &Path, checkpoint: &str) -> Result<Restored> {
             _ => write_back.push(path.to_string()),
         }
     }
+    // A checkpoint that left untracked files out cannot say which files are
+    // new: removing them could delete the user's own.
+    let message = crate::git(&top, &["log", "-1", "--format=%B", checkpoint])?;
+    let kept = if message.lines().any(|line| line.trim() == PARTIAL) {
+        std::mem::take(&mut remove).len()
+    } else {
+        0
+    };
     for path in &remove {
         let file = top.join(path);
         if file.is_file() || file.is_symlink() {
@@ -279,8 +302,9 @@ pub fn restore(root: &Path, checkpoint: &str) -> Result<Restored> {
     }
     if !write_back.is_empty() {
         let list = write_back.join("\0");
-        let index = TempIndex::new(Path::new(
-            crate::git(&top, &["rev-parse", "--absolute-git-dir"])?.trim(),
+        let index = TempIndex::new(&crate::local_path(
+            &top,
+            &crate::git(&top, &["rev-parse", "--absolute-git-dir"])?,
         ))?;
         git_in(
             &top,
@@ -298,6 +322,7 @@ pub fn restore(root: &Path, checkpoint: &str) -> Result<Restored> {
     Ok(Restored {
         restored: write_back.len(),
         removed: remove.len(),
+        kept,
         undo,
     })
 }
@@ -306,6 +331,27 @@ pub fn restore(root: &Path, checkpoint: &str) -> Result<Restored> {
 mod tests {
     use super::*;
     use crate::testing::temp_repo;
+
+    /// When a checkpoint could not keep every untracked file, restoring it
+    /// keeps files it does not know, as they may be the user's.
+    #[test]
+    fn a_partial_checkpoint_never_removes_unknown_files() {
+        let root = temp_repo("partial");
+        std::fs::write(
+            root.join("big.bin"),
+            vec![0u8; (MAX_UNTRACKED_BYTES + 1) as usize],
+        )
+        .unwrap();
+        let checkpoint = create(&root, "before").unwrap().unwrap();
+        // The big file shrinks under the limit (the undo checkpoint keeps
+        // it), and the agent makes a file.
+        std::fs::write(root.join("big.bin"), b"small").unwrap();
+        std::fs::write(root.join("new.txt"), b"new").unwrap();
+        let restored = restore(&root, &checkpoint).unwrap();
+        assert_eq!((restored.removed, restored.kept), (0, 2));
+        assert!(root.join("big.bin").exists() && root.join("new.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// A Git set to convert line endings must not change a restored file.
     #[test]

@@ -1,8 +1,8 @@
 //! Running `git`. Every call blocks, so callers use a background thread.
 
 use std::io::Write as _;
-use std::path::Path;
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
 
 use anyhow::{Context as _, Result, bail};
 
@@ -15,25 +15,23 @@ const SAFE_CONFIG: &[&str] = &["-c", "core.fsmonitor=false", "-c", "diff.externa
 
 /// Runs `git args…` in `root` and returns stdout.
 pub fn git(root: &Path, args: &[&str]) -> Result<String> {
-    let output = command(root)
-        .args(args)
+    let mut command = command(root);
+    command.args(args);
+    let output = ready(command)
         .stdin(Stdio::null())
         .output()
         .context("running git (is it installed?)")?;
     if !output.status.success() {
-        bail!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        bail!("{}", failure(root, &args.join(" "), &output));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Like [`git`], with `input` on stdin.
 pub fn git_with_input(root: &Path, args: &[&str], input: &str) -> Result<String> {
-    let mut child = command(root)
-        .args(args)
+    let mut command = command(root);
+    command.args(args);
+    let mut child = ready(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -46,13 +44,46 @@ pub fn git_with_input(root: &Path, args: &[&str], input: &str) -> Result<String>
         .write_all(input.as_bytes())?;
     let output = child.wait_with_output()?;
     if !output.status.success() {
-        bail!(
-            "git {} failed: {}",
-            args.first().unwrap_or(&""),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        bail!("{}", failure(root, args.first().unwrap_or(&""), &output));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// `command`, made to run on the server when its folder is on a mapped
+/// network drive; as it is otherwise. Call it once arguments and variables
+/// are set, then set stdin and stdout on what it returns.
+pub(crate) fn ready(command: Command) -> Command {
+    ph_remote::route(&command).unwrap_or(command)
+}
+
+/// Why `git what` failed: what SSH said in words, when it was SSH.
+pub(crate) fn failure(root: &Path, what: &str, output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ph_remote::remote_of(root)
+        .and_then(|remote| {
+            ph_remote::explain_failure(output.status.code(), &stderr, &remote.mapping.host)
+        })
+        .unwrap_or_else(|| format!("git {what} failed: {}", stderr.trim()))
+}
+
+/// A path git printed for the repository at `root`, as this computer
+/// reaches it: git on a network drive's server prints the server's paths.
+/// Only that drive's mapping reads them (a local repository's paths are
+/// never touched).
+pub fn local_path(root: &Path, text: &str) -> PathBuf {
+    let text = text.trim();
+    ph_remote::remote_of(root)
+        .and_then(|remote| ph_remote::to_local(&remote.mapping, text))
+        .unwrap_or_else(|| PathBuf::from(text))
+}
+
+/// The empty file for git options that take one, where git runs.
+pub fn null_device(root: &Path) -> &'static str {
+    if cfg!(windows) && ph_remote::remote_of(root).is_none() {
+        "NUL"
+    } else {
+        "/dev/null"
+    }
 }
 
 /// A `git` command in `root` with the safe settings. Network commands

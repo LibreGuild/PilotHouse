@@ -24,6 +24,29 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// A random id for this install, made once: it keeps this computer's
+    /// files apart from others' in a folder they share (a network drive).
+    pub fn install_id(&self) -> String {
+        let id: String = self.setting("install_id");
+        if !id.is_empty() {
+            return id;
+        }
+        use std::hash::{BuildHasher as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default(),
+        );
+        hasher.write_u32(std::process::id());
+        let id = format!("{:016x}", hasher.finish());
+        if let Err(err) = self.set_setting("install_id", &id) {
+            tracing::warn!("saving the install id failed: {err:#}");
+        }
+        id
+    }
+
     pub fn set_setting<T: Serialize>(&self, key: &str, value: &T) -> Result<()> {
         let raw = serde_json::to_string(value)?;
         self.conn().execute(

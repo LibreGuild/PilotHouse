@@ -12,7 +12,7 @@ usage:
   pilothouse <path>...               open folders as projects and files in the editor
                                      (in the running app, if there is one)
   pilothouse ctl <method> [json]     call the running app's control socket
-  pilothouse mcp [--project PATH] [--agent NAME]
+  pilothouse mcp [--project PATH] [--agent NAME] [--workspace ID]
                                      run the MCP server agents use for board tools
   pilothouse agy-acp                 run Google Antigravity (agy) as an ACP agent
 ";
@@ -26,58 +26,70 @@ pub enum Launch {
 }
 
 /// Runs a subcommand if `args` names one, or hands paths to the running
-/// app; otherwise the app starts.
+/// app; otherwise the app starts. Subcommands come first: an agent starts
+/// `pilothouse mcp` in its project, which may well have a folder `mcp`.
 pub fn run(args: &[String]) -> Launch {
-    let first = args.first().map(String::as_str);
-    if first.is_some_and(|first| !first.starts_with('-') && Path::new(first).exists()) {
-        return open(args);
-    }
-    match subcommand(args) {
-        Some(code) => Launch::Exit(code),
-        None => Launch::App(Vec::new()),
+    let args: Vec<String> = args.iter().map(|arg| unquoted(arg)).collect();
+    let args = args.as_slice();
+    match args.first().map(String::as_str) {
+        Some("ctl") => Launch::Exit(ctl(&args[1..])),
+        Some("mcp") => Launch::Exit(mcp(&args[1..])),
+        Some("agy-acp") => Launch::Exit(agy_acp()),
+        Some("-h" | "--help" | "help") => {
+            print!("{USAGE}");
+            Launch::Exit(0)
+        }
+        Some("--version" | "-V") => {
+            println!("pilothouse {}", env!("CARGO_PKG_VERSION"));
+            Launch::Exit(0)
+        }
+        Some(first) if !first.starts_with('-') && Path::new(first).exists() => open(args),
+        // macOS passes `-psn_…` when launched from Finder; ignore unknown flags.
+        None => hand_over(Vec::new()),
+        Some(flag) if flag.starts_with('-') => hand_over(Vec::new()),
+        Some(other) => {
+            eprintln!("unknown command `{other}`\n\n{USAGE}");
+            Launch::Exit(2)
+        }
     }
 }
 
-/// `pilothouse <path>...`: the running app opens them, so a second window
-/// (and a second copy of every agent) never starts; with none running, this
-/// launch becomes the app.
+/// Explorer passes a drive root as `"C:\"`, whose backslash escapes the
+/// closing quote, so the argument arrives as `C:"`.
+fn unquoted(arg: &str) -> String {
+    match arg.strip_suffix('"') {
+        Some(root) if cfg!(windows) => format!("{root}\\"),
+        _ => arg.to_string(),
+    }
+}
+
+/// `pilothouse <path>...`: the running app opens them (see [`hand_over`]).
 fn open(args: &[String]) -> Launch {
     let paths: Vec<PathBuf> = args
         .iter()
         .filter(|arg| !arg.starts_with('-'))
         .map(|arg| paths::canonical(Path::new(arg)).unwrap_or_else(|_| PathBuf::from(arg)))
         .collect();
-    let forwarded = ControlClient::connect(&paths::control_socket_path()).and_then(|mut client| {
-        client.call(
-            "app.open",
-            serde_json::json!({ "paths": paths.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>() }),
-        )
-    });
-    match forwarded {
-        Ok(_) => Launch::Exit(0),
-        Err(_) => Launch::App(paths),
-    }
+    hand_over(paths)
 }
 
-fn subcommand(args: &[String]) -> Option<i32> {
-    match args.first().map(String::as_str) {
-        None => None,
-        Some("ctl") => Some(ctl(&args[1..])),
-        Some("mcp") => Some(mcp(&args[1..])),
-        Some("agy-acp") => Some(agy_acp()),
-        Some("-h" | "--help" | "help") => {
-            print!("{USAGE}");
-            Some(0)
-        }
-        Some("--version" | "-V") => {
-            println!("pilothouse {}", env!("CARGO_PKG_VERSION"));
-            Some(0)
-        }
-        // macOS passes `-psn_…` when launched from Finder; ignore unknown flags.
-        Some(flag) if flag.starts_with('-') => None,
-        Some(other) => {
-            eprintln!("unknown command `{other}`\n\n{USAGE}");
-            Some(2)
+/// With PilotHouse already running (on this data folder), it opens `paths`
+/// and comes to the front, and this launch exits: a second copy would share
+/// the database and run every schedule twice. With none running, this
+/// launch becomes the app.
+fn hand_over(paths: Vec<PathBuf>) -> Launch {
+    let Ok(mut client) = ControlClient::connect(&paths::control_socket_path()) else {
+        return Launch::App(paths);
+    };
+    let listed: Vec<String> = paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    match client.call("app.open", serde_json::json!({ "paths": listed })) {
+        Ok(_) => Launch::Exit(0),
+        Err(err) => {
+            eprintln!("PilotHouse is running but could not open that: {err:#}");
+            Launch::Exit(1)
         }
     }
 }
@@ -88,13 +100,17 @@ fn subcommand(args: &[String]) -> Option<i32> {
 fn mcp(args: &[String]) -> i32 {
     let mut project_path = std::env::current_dir().unwrap_or_default();
     let mut agent_name = "agent".to_string();
+    let mut project_id = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match (arg.as_str(), args.next()) {
             ("--project", Some(path)) => project_path = path.into(),
             ("--agent", Some(name)) => agent_name = name.clone(),
+            ("--workspace", Some(id)) if id.parse::<i64>().is_ok() => {
+                project_id = id.parse().ok();
+            }
             _ => {
-                eprintln!("usage: pilothouse mcp [--project PATH] [--agent NAME]");
+                eprintln!("usage: pilothouse mcp [--project PATH] [--agent NAME] [--workspace ID]");
                 return 2;
             }
         }
@@ -103,6 +119,7 @@ fn mcp(args: &[String]) -> i32 {
         socket_path: paths::control_socket_path(),
         project_path,
         agent_name,
+        project_id,
     };
     match ph_mcp::run_stdio(options) {
         Ok(()) => 0,

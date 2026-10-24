@@ -45,13 +45,20 @@ pub struct Change {
 }
 
 /// The project's instruction files, in the order `AGENTS.md`, `CLAUDE.md`,
-/// `GEMINI.md`.
-pub fn read(root: &Path) -> Vec<InstructionFile> {
+/// `GEMINI.md`. Fails when one is there but cannot be read (not UTF-8, no
+/// permission): taken as missing, it would be written over.
+pub fn read(root: &Path) -> anyhow::Result<Vec<InstructionFile>> {
     std::iter::once(SHARED)
         .chain(IMPORTERS)
-        .map(|name| InstructionFile {
-            name,
-            text: std::fs::read_to_string(root.join(name)).ok(),
+        .map(|name| {
+            let text = match std::fs::read_to_string(root.join(name)) {
+                Ok(text) => Some(text),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                Err(err) => {
+                    anyhow::bail!("{name} could not be read ({err}), so nothing is changed")
+                }
+            };
+            Ok(InstructionFile { name, text })
         })
         .collect()
 }
@@ -218,12 +225,16 @@ mod tests {
         let root = std::env::temp_dir().join(format!("ph-instructions-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("CLAUDE.md"), "Use tabs.\n").unwrap();
-        let written = apply(&root, &plan(&read(&root))).unwrap();
+        let written = apply(&root, &plan(&read(&root).unwrap())).unwrap();
         assert_eq!(written.len(), 3);
         assert_eq!(
             std::fs::read_to_string(root.join(SHARED)).unwrap(),
             "Use tabs.\n"
         );
-        assert!(plan(&read(&root)).is_empty(), "synced");
+        assert!(plan(&read(&root).unwrap()).is_empty(), "synced");
+        // A file that is not UTF-8 is never taken for a missing one.
+        std::fs::write(root.join("GEMINI.md"), b"caf\xe9\n").unwrap();
+        assert!(read(&root).is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

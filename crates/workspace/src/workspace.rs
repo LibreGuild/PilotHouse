@@ -283,6 +283,14 @@ impl Workspace {
         }
     }
 
+    /// Runs Git again in every open workspace (network drives changed).
+    pub(crate) fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        for space in self.spaces.values() {
+            space.update(cx, |space, cx| space.refresh_git(cx));
+        }
+        cx.notify();
+    }
+
     /// What workspace `id` is doing (as of the last second).
     pub fn status(&self, id: ProjectId) -> WorkspaceStatus {
         self.statuses.get(&id).copied().unwrap_or_default()
@@ -656,6 +664,7 @@ impl Workspace {
         ph_agent::ChatHub::remove(id, cx);
         ph_terminal::TerminalHub::remove(id, cx);
         ph_uitest::runner::TestRunHub::remove(id, cx);
+        ph_browser::BrowserHub::remove(id, cx);
         self.projects_changed(cx);
         crate::schedules::Automation::global(cx).update(cx, |automation, _| automation.forget(id));
         if self.active_project == Some(id) {
@@ -899,6 +908,12 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|_, _: &ShowShortcuts, window, cx| crate::shortcuts::open(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &ShowNetworkDrives, window, cx| {
+                let drive = this
+                    .active_space()
+                    .and_then(|space| space.read(cx).network_drive().cloned());
+                crate::network_drives::open(drive, window, cx)
+            }))
             .on_action(cx.listener(|_, _: &ShowUtilities, window, cx| {
                 crate::utilities::open(None, window, cx)
             }))
