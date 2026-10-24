@@ -21,6 +21,8 @@ A workspace keeps its chats, shells and test runs going while you look at anothe
 
 ## Shortcuts
 
+The welcome screen shows three steps to start; **⌘/** shows every shortcut in the app.
+
 | Keys (Ctrl on Windows and Linux) | Does |
 |---|---|
 | ⌘K | Search or run a command |
@@ -36,6 +38,7 @@ A workspace keeps its chats, shells and test runs going while you look at anothe
 | ⌘⇧S | Send the browser or device screen (with your marks) to the chat |
 | ⌘L | Ask about the selected code or terminal output |
 | ⌘, | Settings |
+| ⌘/ | All shortcuts, read from the keys in force |
 
 ## Your data
 

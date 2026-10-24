@@ -26,6 +26,7 @@ mod review;
 mod schedules;
 mod settings_dialog;
 mod shell_integration;
+mod shortcuts;
 mod sidebar;
 mod status;
 mod status_bar;

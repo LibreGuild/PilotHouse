@@ -896,6 +896,9 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|_, _: &ShowUsage, window, cx| crate::usage_view::open(window, cx)),
             )
+            .on_action(
+                cx.listener(|_, _: &ShowShortcuts, window, cx| crate::shortcuts::open(window, cx)),
+            )
             .on_action(cx.listener(|_, _: &ShowUtilities, window, cx| {
                 crate::utilities::open(None, window, cx)
             }))
