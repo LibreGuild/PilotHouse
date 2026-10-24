@@ -58,6 +58,9 @@ pub struct ProjectUiState {
     pub chats_folded: bool,
     /// The chats PilotHouse started (schedules, tests, reviews) are listed.
     pub runs_open: bool,
+    /// Height of the sidebar's Files section (pixels) when Chats is open
+    /// below it, as last dragged.
+    pub files_height: Option<f32>,
 }
 
 impl Project {

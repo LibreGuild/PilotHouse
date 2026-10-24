@@ -16,15 +16,15 @@ use ph_theme::Appearance;
 use crate::actions::*;
 use crate::app_state::{AppState, keys};
 use crate::context_panel::ContextTab;
-use crate::project_space::{ProjectSpace, ProjectSpaceEvent};
 use crate::status::WorkspaceStatus;
+use crate::workspace_screen::{WorkspaceScreen, WorkspaceScreenEvent};
 use crate::{command_palette, settings_dialog, sidebar, status_bar, title_bar, welcome};
 use ph_files::{FindInProject, QuickOpen};
 
 /// A hidden workspace's screen is closed after this long with nothing going on.
 const UNLOAD_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
-/// Owns the project list and the open [`ProjectSpace`]s, and routes workspace
+/// Owns the project list and the open [`WorkspaceScreen`]s, and routes workspace
 /// actions to whichever project is active.
 pub struct Workspace {
     focus_handle: FocusHandle,
@@ -32,7 +32,7 @@ pub struct Workspace {
     handle: gpui_kit::AnyWindowHandle,
     projects: Vec<Project>,
     /// Spaces stay alive after switching away so their state survives.
-    spaces: HashMap<ProjectId, Entity<ProjectSpace>>,
+    spaces: HashMap<ProjectId, Entity<WorkspaceScreen>>,
     active_project: Option<ProjectId>,
     /// The workspace shown before the one in front (Ctrl+Tab goes back).
     previous_project: Option<ProjectId>,
@@ -169,7 +169,7 @@ impl Workspace {
         self.active_project
     }
 
-    pub fn active_space(&self) -> Option<&Entity<ProjectSpace>> {
+    pub fn active_space(&self) -> Option<&Entity<WorkspaceScreen>> {
         self.active_project.and_then(|id| self.spaces.get(&id))
     }
 
@@ -288,17 +288,18 @@ impl Workspace {
         self.statuses.get(&id).copied().unwrap_or_default()
     }
 
-    /// Closes the screens of workspaces hidden for [`UNLOAD_AFTER`] with
-    /// nothing going on and nothing to lose, so memory stays flat however
-    /// many are visited. Their chats and shells live on; opening one again
-    /// rebuilds its screen from what was saved.
-    fn unload_idle(&mut self, cx: &mut Context<Self>) {
+    /// Closes the screens of workspaces hidden for `hidden_for` (every
+    /// second: [`UNLOAD_AFTER`]) with nothing going on and nothing to lose,
+    /// so memory stays flat however many are visited. Their chats and
+    /// shells live on; opening one again rebuilds its screen from what was
+    /// saved.
+    pub fn unload_idle(&mut self, hidden_for: std::time::Duration, cx: &mut Context<Self>) {
         let idle: Vec<ProjectId> = self
             .hidden_since
             .iter()
             .filter(|(id, since)| {
                 let status = self.status(**id);
-                since.elapsed() >= UNLOAD_AFTER
+                since.elapsed() >= hidden_for
                     && status.working == 0
                     && status.waiting == 0
                     && self
@@ -316,7 +317,7 @@ impl Workspace {
     }
 
     fn refresh_statuses(&mut self, cx: &mut Context<Self>) {
-        self.unload_idle(cx);
+        self.unload_idle(UNLOAD_AFTER, cx);
         let statuses: HashMap<ProjectId, WorkspaceStatus> = self
             .projects
             .iter()
@@ -350,7 +351,7 @@ impl Workspace {
         id: ProjectId,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<Entity<ProjectSpace>> {
+    ) -> Option<Entity<WorkspaceScreen>> {
         if let Some(space) = self.spaces.get(&id) {
             return Some(space.clone());
         }
@@ -359,22 +360,22 @@ impl Workspace {
             .iter()
             .find(|project| project.id == id)
             .cloned()?;
-        let space = cx.new(|cx| ProjectSpace::new(project, window, cx));
+        let space = cx.new(|cx| WorkspaceScreen::new(project, window, cx));
         let subscription = cx.subscribe_in(
             &space,
             window,
-            move |this, space, event: &ProjectSpaceEvent, window, cx| match event {
-                ProjectSpaceEvent::SessionsChanged => cx.notify(),
-                ProjectSpaceEvent::RevealFiles => {
+            move |this, space, event: &WorkspaceScreenEvent, window, cx| match event {
+                WorkspaceScreenEvent::SessionsChanged => cx.notify(),
+                WorkspaceScreenEvent::RevealFiles => {
                     if this.sidebar_collapsed {
                         this.set_sidebar_collapsed(false, cx);
                     }
                     space.update(cx, |_, cx| cx.notify());
                 }
-                ProjectSpaceEvent::MakePrimary(path) => {
+                WorkspaceScreenEvent::MakePrimary(path) => {
                     this.make_primary_folder(id, path, window, cx)
                 }
-                ProjectSpaceEvent::RemoveFolder(path) => {
+                WorkspaceScreenEvent::RemoveFolder(path) => {
                     this.remove_folder_path(id, path, window, cx)
                 }
             },
@@ -670,7 +671,7 @@ impl Workspace {
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        update: impl FnOnce(&mut ProjectSpace, &mut Window, &mut Context<ProjectSpace>),
+        update: impl FnOnce(&mut WorkspaceScreen, &mut Window, &mut Context<WorkspaceScreen>),
     ) {
         if let Some(space) = self.active_space() {
             space.update(cx, |space, cx| update(space, window, cx));
@@ -894,6 +895,9 @@ impl Render for Workspace {
             }))
             .on_action(
                 cx.listener(|_, _: &ShowUsage, window, cx| crate::usage_view::open(window, cx)),
+            )
+            .on_action(
+                cx.listener(|_, _: &ShowShortcuts, window, cx| crate::shortcuts::open(window, cx)),
             )
             .on_action(cx.listener(|_, _: &ShowUtilities, window, cx| {
                 crate::utilities::open(None, window, cx)

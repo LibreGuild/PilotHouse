@@ -306,3 +306,136 @@ fn a_due_reminder_shows_in_the_inbox(cx: &mut TestAppContext) {
         assert!(store.due_todos(i64::MAX).unwrap().is_empty(), "done");
     });
 }
+
+/// Adds two workspaces, `alpha` then `beta` (which ends up in front), in
+/// folders named after `test` (tests run at the same time).
+fn two_workspaces(
+    test: &str,
+    window: AnyWindowHandle,
+    workspace: &Entity<Workspace>,
+    cx: &mut TestAppContext,
+) -> (ph_store::projects::ProjectId, ph_store::projects::ProjectId) {
+    let alpha = temp_project(&format!("{test}-alpha"));
+    let beta = temp_project(&format!("{test}-beta"));
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.add_project_path(&alpha, window, cx);
+            workspace.add_project_path(&beta, window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let workspace = workspace.read(cx);
+        let id = |name: &str| {
+            workspace
+                .projects()
+                .iter()
+                .find(|project| project.name.contains(name))
+                .unwrap()
+                .id
+        };
+        (id("alpha"), id("beta"))
+    })
+}
+
+fn click(window: AnyWindowHandle, id: &'static str, cx: &mut TestAppContext) {
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let at = window.find(id).bounds().center();
+        gpui_kit::test::TestEventExt::pointer_down(window, at, gpui_kit::MouseButton::Left, cx);
+        gpui_kit::test::TestEventExt::pointer_up(window, at, gpui_kit::MouseButton::Left, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+}
+
+fn press(window: AnyWindowHandle, key: &str, cx: &mut TestAppContext) {
+    cx.update_window(window, |_, window, cx| window.press(key, cx))
+        .unwrap();
+    cx.run_until_parked();
+}
+
+/// The switcher in the title bar: type part of a name, Enter opens it.
+#[gpui_kit::test]
+fn the_switcher_opens_a_workspace_from_the_keyboard(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let (alpha, beta) = two_workspaces("switcher", window, &workspace, cx);
+    cx.update(|cx| assert_eq!(workspace.read(cx).active_project_id(), Some(beta)));
+
+    click(window, "project-switcher", cx);
+    cx.update_window(window, |_, window, cx| window.input("alph", cx))
+        .unwrap();
+    cx.run_until_parked();
+    press(window, "enter", cx);
+    cx.update(|cx| assert_eq!(workspace.read(cx).active_project_id(), Some(alpha)));
+}
+
+/// A workspace moved to a window of its own leaves this one, which shows
+/// the other workspace.
+#[gpui_kit::test]
+fn a_workspace_moves_to_a_window_of_its_own(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let (alpha, beta) = two_workspaces("new-window", window, &workspace, cx);
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_in_new_window(beta, window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert_eq!(cx.windows().len(), 2);
+        let workspace = workspace.read(cx);
+        assert!(!workspace.has_space(beta));
+        assert_eq!(workspace.active_project_id(), Some(alpha));
+    });
+}
+
+/// Hidden, idle workspaces close their screens; one with a message being
+/// written keeps it, and a closed one comes back when opened.
+#[gpui_kit::test]
+fn idle_hidden_workspaces_close_their_screens(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let (alpha, beta) = two_workspaces("unload", window, &workspace, cx);
+    let unload = |cx: &mut TestAppContext| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.unload_idle(std::time::Duration::ZERO, cx)
+        });
+    };
+
+    // Beta has a draft, then alpha comes to the front.
+    cx.update_window(window, |_, window, cx| {
+        let space = workspace.read(cx).active_space().unwrap().clone();
+        space.update(cx, |space, cx| space.focus_chat(window, cx));
+        window.input("half a thought", cx);
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_project(alpha, window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    unload(cx);
+    cx.update(|cx| assert!(workspace.read(cx).has_space(beta), "the draft keeps it"));
+
+    // Alpha, idle and hidden, closes; opening it again rebuilds it.
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| workspace.open_project(beta, window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    unload(cx);
+    cx.update(|cx| assert!(!workspace.read(cx).has_space(alpha)));
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_project(alpha, window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let workspace = workspace.read(cx);
+        assert!(workspace.has_space(alpha));
+        assert_eq!(workspace.active_project_id(), Some(alpha));
+    });
+}

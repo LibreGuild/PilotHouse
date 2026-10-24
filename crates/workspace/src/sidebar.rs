@@ -26,8 +26,8 @@ use ph_theme::layout;
 use ph_ui::Icons;
 
 use crate::actions::{AddFolderToWorkspace, AddProject, NewSession, NewWorkspace, SearchChats};
-use crate::project_space::ProjectSpace;
 use crate::workspace::Workspace;
+use crate::workspace_screen::WorkspaceScreen;
 
 pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let body = match workspace.active_space().cloned() {
@@ -45,14 +45,15 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
 }
 
 /// Files over chats, as folded and sized.
-fn sections(space: &Entity<ProjectSpace>, cx: &mut Context<Workspace>) -> AnyElement {
-    let (tree, files_folded, chats_folded, project_id) = {
+fn sections(space: &Entity<WorkspaceScreen>, cx: &mut Context<Workspace>) -> AnyElement {
+    let (tree, files_folded, chats_folded, project_id, files_height) = {
         let space = space.read(cx);
         (
             space.file_tree().cloned(),
             space.files_folded(),
             space.chats_folded(),
             space.project().id,
+            space.files_height(),
         )
     };
     let chats = chats_section(space, chats_folded, cx);
@@ -67,9 +68,21 @@ fn sections(space: &Entity<ProjectSpace>, cx: &mut Context<Workspace>) -> AnyEle
     let files = files_section(space, &tree, files_folded, cx);
     match (files_folded, chats_folded) {
         (false, false) => v_resizable(("sidebar-split", project_id as u64))
+            // Where the divider was left is kept for the workspace.
+            .on_resize({
+                let space = space.downgrade();
+                move |state, _, cx| {
+                    let Some(height) = state.read(cx).sizes().first().copied() else {
+                        return;
+                    };
+                    _ = space.update(cx, |space, cx| {
+                        space.set_files_height(f32::from(height), cx)
+                    });
+                }
+            })
             .child(
                 resizable_panel()
-                    .size(px(380.))
+                    .size(px(files_height.unwrap_or(380.)))
                     .size_range(px(120.)..gpui_kit::Pixels::MAX)
                     .child(files),
             )
@@ -99,7 +112,7 @@ fn sections(space: &Entity<ProjectSpace>, cx: &mut Context<Workspace>) -> AnyEle
 }
 
 fn files_section(
-    space: &Entity<ProjectSpace>,
+    space: &Entity<WorkspaceScreen>,
     tree: &Entity<ph_files::FileTree>,
     folded: bool,
     cx: &mut Context<Workspace>,
@@ -163,7 +176,7 @@ fn files_section(
 }
 
 fn chats_section(
-    space: &Entity<ProjectSpace>,
+    space: &Entity<WorkspaceScreen>,
     folded: bool,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
@@ -219,7 +232,7 @@ fn chats_section(
 
 /// The chats in groups by day, the user's own first and PilotHouse's in
 /// *Runs* at the end.
-fn chat_list(space: &Entity<ProjectSpace>, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
+fn chat_list(space: &Entity<WorkspaceScreen>, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
     let (sessions, active, runs_open, project_id) = {
         let space = space.read(cx);
         (
@@ -295,7 +308,7 @@ fn chat_list(space: &Entity<ProjectSpace>, cx: &mut Context<Workspace>) -> Vec<A
 }
 
 fn chat_row(
-    space: &Entity<ProjectSpace>,
+    space: &Entity<WorkspaceScreen>,
     session: &Session,
     active: Option<i64>,
     chats: Option<&Entity<ph_agent::WorkspaceChats>>,

@@ -5,9 +5,12 @@
 #
 # Build on the oldest system you support (CI uses Ubuntu 22.04), since the
 # binary needs that glibc or newer. The AppImage is made with appimagetool,
-# downloaded at a pinned version and checked against its SHA-256.
+# downloaded at a pinned version and checked against its SHA-256; it checks
+# the desktop entry with `desktop-file-validate` (package desktop-file-utils).
 set -eu
 cd "$(dirname "$0")/../.."
+command -v desktop-file-validate >/dev/null ||
+  { echo "desktop-file-validate is missing: install desktop-file-utils" >&2; exit 1; }
 VERSION=$(scripts/package/version.sh)
 DIST=dist
 mkdir -p "$DIST"

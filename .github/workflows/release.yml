@@ -2,7 +2,8 @@ name: Release
 
 # A tag `vX.Y.Z` (matching Cargo.toml) builds and publishes that release.
 # Once a day, when `main` has moved since the last nightly, a "nightly"
-# pre-release is built from it; it can also be started by hand.
+# pre-release is built from it; it can also be started by hand. Started on
+# another branch, it only builds the installers (a check before merging).
 on:
   push:
     tags: ["v*"]
@@ -157,7 +158,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
             libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
-            libssl-dev libzstd-dev libdbus-1-dev pkg-config file
+            libssl-dev libzstd-dev libdbus-1-dev pkg-config file desktop-file-utils
       - name: Build
         run: scripts/package/linux.sh
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -178,6 +179,7 @@ jobs:
   publish:
     name: Publish
     needs: [plan, macos, windows, linux]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write

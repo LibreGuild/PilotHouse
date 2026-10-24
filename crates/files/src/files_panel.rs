@@ -496,6 +496,7 @@ impl FilesPanel {
         let panel = cx.weak_entity();
         let menu_panel = cx.weak_entity();
         let changes = self.changes.clone();
+        let ignored = self.tree.ignored();
         let multi = self.roots.list().len() > 1;
         let primary = self.roots.list().first().map(|root| root.name.clone());
         let roots: Vec<(String, PathBuf)> = self
@@ -514,6 +515,7 @@ impl FilesPanel {
             let change = changes.files.get(&path).copied();
             let holds_changes = !is_file && changes.dirs.contains(&path);
             let tint = change.map(|change| change_color(change, cx));
+            let is_ignored = ignored.contains(&path);
             let icon = if is_file {
                 ph_ui::file_icon_element(&item.label, px(16.))
             } else {
@@ -546,6 +548,7 @@ impl FilesPanel {
                         .gap_1()
                         .pl(TREE_INDENT * depth)
                         .text_sm()
+                        .when(is_ignored, |this| this.opacity(0.5))
                         // A line per level, through the rows, under each
                         // folder's chevron.
                         .children((0..depth).map(|level| {

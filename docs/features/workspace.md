@@ -10,8 +10,8 @@ Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 └ status bar: folder · branch                                detected stack · version ┘
 ```
 
-- **`Workspace`** (`workspace.rs`) is a window's root: the title bar, the sidebar, the workspace in front and the status bar. It keeps one `ProjectSpace` per workspace opened in the window.
-- **`ProjectSpace`** (`project_space.rs`) is a workspace's screen: the editor column (only while a file is open), the chat, the tool panel and the icon bar on the right that picks the tool. Panels are made the first time they are shown. Its layout is saved per workspace: tool, panel open, chat, open files, sidebar folds.
+- **`Workspace`** (`workspace.rs`) is a window's root: the title bar, the sidebar, the workspace in front and the status bar. It keeps one `WorkspaceScreen` per workspace opened in the window.
+- **`WorkspaceScreen`** (`workspace_screen.rs`) is a workspace's screen: the editor column (only while a file is open), the chat, the tool panel and the icon bar on the right that picks the tool. Panels are made the first time they are shown. Its layout is saved per workspace: tool, panel open, chat, open files, sidebar folds.
 - **Running work outlives the screen.** Chats (`ph_agent::chats`), shells (`ph_terminal::TerminalHub`), test runs (`ph_uitest::runner`) and schedules (`schedules::Automation`) belong to the workspace or the app, not to a window. A screen can be closed and rebuilt (another window, folders changed, idle) without stopping anything.
 - **Actions** (`actions.rs`) are the single source for every command. Shortcuts, the palette, menus and buttons all dispatch them.
 
@@ -94,5 +94,5 @@ Stored in the `settings` table:
 ## Adding a tool
 
 1. Create a feature crate with a view entity. Anything that must keep running when the panel closes (a process, a task) goes in a model held by a global keyed by workspace, like `TerminalHub`.
-2. Add a `ContextTab` variant (`context_panel.rs`) with a label, icon, key and action, and say when it is relevant in `ProjectSpace::is_relevant`.
-3. Create the panel in `ProjectSpace::ensure_panel` and render it in `render_tab_content`.
+2. Add a `ContextTab` variant (`context_panel.rs`) with a label, icon, key and action, and say when it is relevant in `WorkspaceScreen::is_relevant`.
+3. Create the panel in `WorkspaceScreen::ensure_panel` and render it in `render_tab_content`.

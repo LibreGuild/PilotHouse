@@ -28,6 +28,8 @@ actions!(
         SearchChats,
         /// Tokens and cost by agent or project.
         ShowUsage,
+        /// The keyboard shortcuts sheet.
+        ShowShortcuts,
         /// Agent prompts and test runs at set times.
         ShowSchedules,
         /// Offline tools: formats, encodings, hashes, times, regex, SQLite.
@@ -100,6 +102,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-9", ShowTests, context),
         KeyBinding::new("secondary-shift-s", CaptureToChat, context),
         KeyBinding::new("secondary-,", OpenSettings, context),
+        KeyBinding::new("secondary-/", ShowShortcuts, context),
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("ctrl-tab", PreviousWorkspace, context),
     ]);

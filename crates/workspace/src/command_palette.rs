@@ -142,6 +142,12 @@ fn groups(workspace: &Workspace) -> Vec<(&'static str, Vec<Entry>)> {
         &["schedule", "cron", "timer", "summary", "nightly", "every"],
     ));
     general.push(Entry::action(
+        "Keyboard shortcuts",
+        Icons::Keyboard,
+        ShowShortcuts,
+        &["keys", "keymap", "hotkeys", "help", "cheat sheet"],
+    ));
+    general.push(Entry::action(
         "Usage…",
         IconName::ChartPie,
         ShowUsage,
