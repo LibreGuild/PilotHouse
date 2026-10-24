@@ -271,7 +271,7 @@ impl Terminal {
         if bracketed {
             bytes.extend_from_slice(b"\x1b[200~");
         }
-        bytes.extend_from_slice(text.replace("\r\n", "\r").replace('\n', "\r").as_bytes());
+        bytes.extend_from_slice(pasted(text, bracketed).as_bytes());
         if bracketed {
             bytes.extend_from_slice(b"\x1b[201~");
         }
@@ -324,4 +324,27 @@ fn home_or(fallback: std::path::PathBuf) -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .filter(|home| home.is_dir())
         .unwrap_or(fallback)
+}
+
+/// `text` as typed by a paste: line breaks as Enter, and, while the
+/// program reads a bracketed paste, without ESC, which could end the paste
+/// early (`ESC [201~`) and run what follows as typed commands.
+fn pasted(text: &str, bracketed: bool) -> String {
+    let text = text.replace("\r\n", "\r").replace('\n', "\r");
+    match bracketed {
+        true => text.replace('\x1b', ""),
+        false => text,
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::pasted;
+
+    #[test]
+    fn a_paste_cannot_end_bracketed_mode() {
+        let text = "echo hi\x1b[201~rm -rf ~\n";
+        assert_eq!(pasted(text, true), "echo hi[201~rm -rf ~\r");
+        assert_eq!(pasted("a\r\nb", false), "a\rb");
+    }
 }

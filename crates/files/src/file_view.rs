@@ -177,6 +177,11 @@ pub struct FileView {
     /// The text came back from changes kept after a crash or quit
     /// ([`crate::unsaved`]), not from the file.
     restored: bool,
+    /// The file is not UTF-8: it is shown read-only, as saving the text
+    /// would replace every byte that is not.
+    not_utf8: bool,
+    /// Why the last save failed; the text stays, to save again.
+    save_error: Option<SharedString>,
     /// Keeps the unsaved text a second after the last change.
     _keep: Option<Task<()>>,
     /// Line to reveal once loading finishes (0-based).
@@ -257,6 +262,8 @@ impl FileView {
             content: Content::Loading,
             dirty: false,
             restored: false,
+            not_utf8: false,
+            save_error: None,
             _keep: None,
             pending_line: None,
             asks: true,
@@ -378,9 +385,10 @@ impl FileView {
             let decorations: Vec<TextDecoration> = diagnostics
                 .iter()
                 .filter_map(|diagnostic| {
-                    let start = text.position_to_offset(&diagnostic.range.start);
+                    let range = ph_lsp::position::range_to_editor(&text, diagnostic.range);
+                    let start = text.position_to_offset(&range.start);
                     let end = text
-                        .position_to_offset(&diagnostic.range.end)
+                        .position_to_offset(&range.end)
                         .max(start + 1)
                         .min(text.len());
                     let color = match diagnostic.severity {
@@ -424,7 +432,11 @@ impl FileView {
                 uri: ph_lsp::uri::from_path(&self.absolute)
                     .unwrap_or_else(|| "file:///".parse().expect("valid uri")),
             },
-            position: self.editor.read(cx).cursor_position(),
+            position: {
+                let editor = self.editor.read(cx);
+                let text = gpui_kit::component::input::Rope::from(editor.value().as_ref());
+                ph_lsp::position::to_server(&text, editor.cursor_position())
+            },
         }
     }
 
@@ -714,19 +726,20 @@ impl FileView {
         }
         let path = self.absolute.clone();
         let read = cx.background_spawn(async move {
-            let text = read_text(&path)?;
+            let (text, not_utf8) = read_text(&path)?;
             // Changes kept from a crash or quit come back, still unsaved.
             let kept = crate::unsaved::kept(&path).filter(|kept| *kept != text);
             if kept.is_none() {
                 crate::unsaved::forget(&path);
             }
-            Ok((text, kept))
+            Ok((text, kept, not_utf8))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = read.await;
             _ = this.update_in(cx, |this, window, cx| {
                 match result {
-                    Ok((text, kept)) => {
+                    Ok((text, kept, not_utf8)) => {
+                        this.not_utf8 = not_utf8;
                         this.attach_lsp(&text, cx);
                         let restored = kept.is_some();
                         let shown = kept.unwrap_or(text);
@@ -785,7 +798,7 @@ impl FileView {
     }
 
     fn save(&mut self, _: &SaveFile, _: &mut Window, cx: &mut Context<Self>) {
-        if self.content != Content::Text {
+        if self.content != Content::Text || self.not_utf8 {
             return;
         }
         let text = self.editor.read(cx).value().to_string();
@@ -798,6 +811,7 @@ impl FileView {
                     Ok(()) => {
                         this.dirty = false;
                         this.restored = false;
+                        this.save_error = None;
                         this._keep = None;
                         crate::unsaved::forget(&this.absolute);
                         if let Some(lsp) = this.lsp.clone() {
@@ -808,9 +822,7 @@ impl FileView {
                             this.load_blame(cx);
                         }
                     }
-                    Err(err) => {
-                        this.content = Content::Failed(format!("Could not save: {err}").into())
-                    }
+                    Err(err) => this.save_error = Some(format!("Could not save: {err}").into()),
                 }
                 cx.notify();
             });
@@ -819,8 +831,9 @@ impl FileView {
     }
 }
 
-/// Reads a file as text, or explains why it cannot be shown as text.
-fn read_text(path: &std::path::Path) -> Result<String, Content> {
+/// Reads a file as text (and whether it was not UTF-8, so shown with
+/// replacement characters), or explains why it cannot be shown as text.
+fn read_text(path: &std::path::Path) -> Result<(String, bool), Content> {
     let size = std::fs::metadata(path)
         .map_err(|err| Content::Failed(err.to_string().into()))?
         .len();
@@ -840,7 +853,10 @@ fn read_text(path: &std::path::Path) -> Result<String, Content> {
     if bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
         return Err(Content::Binary);
     }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok((text, false)),
+        Err(err) => Ok((String::from_utf8_lossy(err.as_bytes()).into_owned(), true)),
+    }
 }
 
 /// The highlighter accepts a file extension or a well-known file name.
@@ -894,6 +910,7 @@ impl Render for FileView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.content {
             Content::Text => Editor::new(&self.editor)
+                .readonly(self.not_utf8)
                 .bordered(false)
                 .size_full()
                 .context_menu({
@@ -1115,6 +1132,18 @@ impl FileView {
                 )))
             })
             .children(self.server_label(cx))
+            .when(self.not_utf8, |this| {
+                this.child(
+                    div()
+                        .text_color(cx.theme().warning)
+                        .child("Not UTF-8: read-only"),
+                )
+            })
+            .children(
+                self.save_error
+                    .clone()
+                    .map(|error| div().text_color(cx.theme().danger).child(error)),
+            )
             .when(self.restored, |this| {
                 this.child(
                     div()
@@ -1238,6 +1267,12 @@ mod tests {
         assert_eq!(read_text(&binary), Err(Content::Binary));
         let text = dir.join("note.txt");
         std::fs::write(&text, "hello").unwrap();
-        assert_eq!(read_text(&text).unwrap(), "hello");
+        assert_eq!(read_text(&text).unwrap(), ("hello".to_string(), false));
+        let latin1 = dir.join("latin1.txt");
+        std::fs::write(&latin1, b"caf\xe9").unwrap();
+        assert_eq!(
+            read_text(&latin1).unwrap(),
+            ("caf\u{fffd}".to_string(), true)
+        );
     }
 }

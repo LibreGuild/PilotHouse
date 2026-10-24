@@ -8,6 +8,9 @@ use crate::protocol::{Request, Response};
 use crate::transport;
 
 /// A blocking connection to the running app's control endpoint.
+/// The error when the app closes the connection.
+const CLOSED: &str = "PilotHouse closed the control connection";
+
 pub struct ControlClient {
     reader: BufReader<Box<dyn Read + Send>>,
     writer: Box<dyn Write + Send>,
@@ -25,6 +28,14 @@ impl ControlClient {
     }
 
     /// Sends one request and waits for its response.
+    /// Whether `err` (from [`ControlClient::call`]) means the connection is
+    /// gone (the app quit or restarted), rather than the app's answer.
+    pub fn is_disconnect(err: &anyhow::Error) -> bool {
+        err.downcast_ref::<std::io::Error>().is_some()
+            || err.downcast_ref::<serde_json::Error>().is_some()
+            || err.to_string() == CLOSED
+    }
+
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value> {
         let request = Request {
             id: self.next_id,
@@ -40,7 +51,7 @@ impl ControlClient {
 
         let mut answer = String::new();
         if self.reader.read_line(&mut answer)? == 0 {
-            bail!("PilotHouse closed the control connection");
+            bail!(CLOSED);
         }
         let response: Response = serde_json::from_str(&answer)?;
         match (response.result, response.error) {

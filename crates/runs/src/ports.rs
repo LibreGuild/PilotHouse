@@ -94,15 +94,20 @@ fn windows_listening() -> Vec<Port> {
     ports
 }
 
-/// `  TCP    0.0.0.0:5173    0.0.0.0:0    LISTENING    4242`
+/// `  TCP    0.0.0.0:5173    0.0.0.0:0    LISTENING    4242`. The state is in
+/// Windows' language (`ABHÖREN`), so a listening port is told by having no
+/// remote end (port 0).
 fn parse_netstat(text: &str) -> Vec<Port> {
     let mut ports: Vec<Port> = Vec::new();
     for line in text.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        let [protocol, local, _, state, pid] = fields[..] else {
+        let (Some(protocol), Some(local), Some(remote), Some(pid)) =
+            (fields.first(), fields.get(1), fields.get(2), fields.last())
+        else {
             continue;
         };
-        if !protocol.eq_ignore_ascii_case("TCP") || state != "LISTENING" {
+        let listening = remote.rsplit_once(':').is_some_and(|(_, port)| port == "0");
+        if !protocol.eq_ignore_ascii_case("TCP") || !listening || fields.len() < 5 {
             continue;
         }
         let Some((address, port)) = local.rsplit_once(':') else {
@@ -325,6 +330,8 @@ mod tests {
         );
         assert_eq!(windows.len(), 1);
         assert_eq!((windows[0].port, windows[0].pid), (5173, 4242));
+        let german = parse_netstat("  TCP    0.0.0.0:3000   0.0.0.0:0   ABHÖREN   99\n");
+        assert_eq!((german[0].port, german[0].pid), (3000, 99));
         assert_eq!(
             parse_tasklist("\"node.exe\",\"4242\",\"Console\",\"1\",\"52,000 K\"\n"),
             vec![(4242, "node.exe".to_string())]

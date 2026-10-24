@@ -664,6 +664,7 @@ impl Workspace {
         ph_agent::ChatHub::remove(id, cx);
         ph_terminal::TerminalHub::remove(id, cx);
         ph_uitest::runner::TestRunHub::remove(id, cx);
+        ph_browser::BrowserHub::remove(id, cx);
         self.projects_changed(cx);
         crate::schedules::Automation::global(cx).update(cx, |automation, _| automation.forget(id));
         if self.active_project == Some(id) {

@@ -383,8 +383,12 @@ async fn run_async(
             continue;
         }
         let started = Instant::now();
-        let result = match step.call(project_id, serial.as_deref()) {
-            Some((method, params)) => {
+        let result = match step
+            .call(project_id, serial.as_deref())
+            .map(|(method, params)| with_secrets(params).map(|params| (method, params)))
+        {
+            Some(Err(err)) => Err(err),
+            Some(Ok((method, params))) => {
                 // One retry: a page still loading (or a browser just
                 // started) can turn away the first try.
                 let mut done = call(method, params.clone(), cx).await.map(|_| ());
@@ -495,9 +499,50 @@ fn now_millis() -> i64 {
         .unwrap_or_default()
 }
 
+/// `params` with each `{{env:NAME}}` in its typed text replaced by that
+/// environment variable (a password kept out of the test file).
+fn with_secrets(mut params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let Some(text) = params["text"].as_str() else {
+        return Ok(params);
+    };
+    let mut filled = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("{{env:") {
+        let Some(end) = rest[start..].find("}}") else {
+            break;
+        };
+        let name = &rest[start + 6..start + end];
+        // As the login shell has it, like every tool PilotHouse starts.
+        let value = ph_env::var(name).ok_or_else(|| {
+            anyhow::anyhow!("set {name} in your shell's environment: this step types it")
+        })?;
+        filled.push_str(&rest[..start]);
+        filled.push_str(value);
+        rest = &rest[start + end + 2..];
+    }
+    filled.push_str(rest);
+    params["text"] = serde_json::Value::String(filled);
+    Ok(params)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_secrets_come_from_the_environment() {
+        let plain = serde_json::json!({ "text": "ada" });
+        assert_eq!(with_secrets(plain.clone()).unwrap(), plain);
+        let secret = serde_json::json!({ "text": "{{env:PH_SURELY_UNSET_VARIABLE}}" });
+        let err = with_secrets(secret).unwrap_err().to_string();
+        assert!(err.contains("PH_SURELY_UNSET_VARIABLE"), "{err}");
+        let path = serde_json::json!({ "text": "at {{env:PATH}}!" });
+        let filled = with_secrets(path).unwrap();
+        assert_eq!(
+            filled["text"],
+            format!("at {}!", ph_env::var("PATH").unwrap())
+        );
+    }
 
     #[test]
     fn checks_read_the_screen_without_case() {

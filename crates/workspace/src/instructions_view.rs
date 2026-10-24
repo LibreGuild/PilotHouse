@@ -46,8 +46,17 @@ impl InstructionsView {
     }
 
     fn reload(&mut self) {
-        self.files = instructions::read(&self.root);
-        self.plan = instructions::plan(&self.files);
+        match instructions::read(&self.root) {
+            Ok(files) => {
+                self.plan = instructions::plan(&files);
+                self.files = files;
+            }
+            Err(err) => {
+                self.files.clear();
+                self.plan.clear();
+                self.message = Some((format!("{err:#}").into(), true));
+            }
+        }
     }
 
     fn sync(&mut self, cx: &mut Context<Self>) {

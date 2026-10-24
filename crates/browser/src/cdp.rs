@@ -15,6 +15,9 @@ use serde_json::{Value, json};
 
 type Replies = Arc<Mutex<HashMap<u64, smol::channel::Sender<Result<Value>>>>>;
 
+/// The longest a command may take.
+const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A DevTools event: `Page.loadEventFired`, `Runtime.consoleAPICalled`…
 #[derive(Debug, Clone)]
 pub struct CdpEvent {
@@ -68,14 +71,27 @@ impl Cdp {
         self.session.as_deref()
     }
 
-    /// Sends a command and waits for its result.
+    /// Sends a command and waits for its result, for at most [`CALL_TIMEOUT`]:
+    /// a page that never settles (a script awaiting a promise that never
+    /// resolves) must not hold up the agent asking.
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
         let (reply, answer) = smol::channel::bounded(1);
-        self.send(method, params, Some(reply))?;
-        answer
-            .recv()
-            .await
-            .map_err(|_| anyhow!("the browser closed"))?
+        let id = self.send(method, params, Some(reply))?;
+        let answer = async { Some(answer.recv().await) };
+        let late = async {
+            smol::Timer::after(CALL_TIMEOUT).await;
+            None
+        };
+        match smol::future::or(answer, late).await {
+            Some(answer) => answer.map_err(|_| anyhow!("the browser closed"))?,
+            None => {
+                self.replies.lock().expect("cdp replies").remove(&id);
+                Err(anyhow!(
+                    "the browser did not answer {method} within {} seconds",
+                    CALL_TIMEOUT.as_secs()
+                ))
+            }
+        }
     }
 
     /// Sends a command without waiting (input events, frame acks).
@@ -90,7 +106,7 @@ impl Cdp {
         method: &str,
         params: Value,
         reply: Option<smol::channel::Sender<Result<Value>>>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         if let Some(reply) = reply {
             self.replies.lock().expect("cdp replies").insert(id, reply);
@@ -108,7 +124,8 @@ impl Cdp {
         writer.write_all(&bytes).map_err(|err| {
             self.replies.lock().expect("cdp replies").remove(&id);
             anyhow!("sending {method}: {err}")
-        })
+        })?;
+        Ok(id)
     }
 }
 

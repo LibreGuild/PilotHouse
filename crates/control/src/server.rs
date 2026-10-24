@@ -13,7 +13,8 @@ use crate::transport::{Connection, Listener};
 type SyncHandler = dyn Fn(Value, &mut App) -> Result<Value>;
 type AsyncHandler = dyn Fn(Value, &mut App) -> Task<Result<Value>>;
 /// Told of each request from outside that succeeded: method and params.
-pub type Observer = Rc<dyn Fn(&str, &Value, &mut App)>;
+/// Sees each successful request: its method, parameters and result.
+pub type Observer = Rc<dyn Fn(&str, &Value, &Value, &mut App)>;
 
 /// A method handler. Quick ones answer at once; slow ones (a browser page
 /// load, an adb command) return a task so the UI keeps running meanwhile.
@@ -111,16 +112,16 @@ impl ControlServer {
                 );
                 match cx.update(|cx| dispatch(pending.request, cx)) {
                     Dispatched::Ready(result) => {
-                        if result.is_ok() {
-                            cx.update(|cx| observe(&method, &params, cx));
+                        if let Ok(value) = &result {
+                            cx.update(|cx| observe(&method, &params, value, cx));
                         }
                         let _ = pending.reply.send(Response::from_result(id, result)).await;
                     }
                     Dispatched::Later(task) => {
                         cx.spawn(async move |cx: &mut AsyncApp| {
                             let result = task.await;
-                            if result.is_ok() {
-                                cx.update(|cx| observe(&method, &params, cx));
+                            if let Ok(value) = &result {
+                                cx.update(|cx| observe(&method, &params, value, cx));
                             }
                             let _ = pending.reply.send(Response::from_result(id, result)).await;
                         })
@@ -136,12 +137,12 @@ impl ControlServer {
     }
 }
 
-fn observe(method: &str, params: &Value, cx: &mut App) {
+fn observe(method: &str, params: &Value, result: &Value, cx: &mut App) {
     let observer = cx
         .try_global::<ControlServer>()
         .and_then(|server| server.observer.clone());
     if let Some(observer) = observer {
-        observer(method, params, cx);
+        observer(method, params, result, cx);
     }
 }
 

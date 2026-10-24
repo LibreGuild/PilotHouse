@@ -59,12 +59,13 @@ pub fn detect(root: &Path) -> Vec<RunConfig> {
                     .position(|first| first == name)
                     .unwrap_or(99)
             });
-            for name in names {
-                // Script names come from the repository and are typed into a
-                // shell, so anything unusual is quoted rather than trusted.
+            // Script names come from the repository and are typed into a
+            // shell (POSIX on a server, PowerShell or cmd on Windows), so only
+            // names no shell reads anything into are offered.
+            for name in names.into_iter().filter(|name| plain_word(name)) {
                 configs.push(RunConfig::detected(
                     name.clone(),
-                    format!("{runner} {}", shell_word(name)),
+                    format!("{runner} {name}"),
                 ));
             }
         }
@@ -137,17 +138,14 @@ pub fn detect(root: &Path) -> Vec<RunConfig> {
     configs
 }
 
-/// `word` as one shell word: as-is when plainly safe, else single-quoted.
-fn shell_word(word: &str) -> String {
-    let safe = !word.is_empty()
+/// A word every shell takes as it is (no quotes, variables or operators in
+/// POSIX shells, PowerShell or cmd; `@` starts a splat in PowerShell).
+fn plain_word(word: &str) -> bool {
+    !word.is_empty()
+        && !word.starts_with('-')
         && word
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_:.@/+=".contains(c));
-    if safe {
-        word.to_string()
-    } else {
-        format!("'{}'", word.replace('\'', r"'\''"))
-    }
+            .all(|c| c.is_ascii_alphanumeric() || "-_:./+".contains(c))
 }
 
 /// `name:` at the start of a line, skipping special and pattern targets.
@@ -181,7 +179,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("package.json"),
-            r#"{"scripts":{"lint":"eslint .","dev":"vite","x; rm -rf ~":"true"}}"#,
+            r#"{"scripts":{"lint":"eslint .","dev":"vite","build:prod":"vite build","x; rm -rf ~":"true","a';calc;'":"true","@x":"true"}}"#,
         )
         .unwrap();
         std::fs::write(root.join("pnpm-lock.yaml"), "").unwrap();
@@ -199,7 +197,7 @@ mod tests {
             vec![
                 "pnpm dev",
                 "pnpm lint",
-                "pnpm 'x; rm -rf ~'",
+                "pnpm build:prod",
                 "make all",
                 "make build"
             ]

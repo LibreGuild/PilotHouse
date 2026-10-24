@@ -5675,6 +5675,7 @@ version = "0.1.0-beta"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "dirs 7.0.0",
  "gpui-kit",
  "ph-control",
  "ph-env",
@@ -5890,6 +5891,7 @@ dependencies = [
  "base64 0.22.1",
  "gpui-kit",
  "ph-control",
+ "ph-env",
  "ph-media",
  "ph-store",
  "ph-ui",

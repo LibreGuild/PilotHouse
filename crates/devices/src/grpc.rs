@@ -144,12 +144,20 @@ impl GrpcClient {
         Ok(receiver)
     }
 
-    /// A unary call: waits for its one reply.
+    /// A unary call: waits for its one reply (half a minute at most).
     pub fn unary(&self, path: &str, message: &[u8]) -> Result<GrpcMessage> {
         let replies = self.start(path, message)?;
-        match replies.recv_blocking() {
-            Ok(Some(reply)) => Ok(reply),
-            _ => Err(anyhow!("the emulator refused {path}")),
+        let reply = smol::block_on(smol::future::or(
+            async { Some(replies.recv().await) },
+            async {
+                smol::Timer::after(std::time::Duration::from_secs(30)).await;
+                None
+            },
+        ));
+        match reply {
+            Some(Ok(Some(reply))) => Ok(reply),
+            Some(_) => Err(anyhow!("the emulator refused {path}")),
+            None => Err(anyhow!("the emulator did not answer {path}")),
         }
     }
 
@@ -187,7 +195,7 @@ impl GrpcClient {
         let mut data = payload;
         if flags & 0x8 != 0 {
             padding = *data.first().unwrap_or(&0) as usize;
-            data = &data[1..];
+            data = data.get(1..).unwrap_or_default();
         }
         let data = &data[..data.len().saturating_sub(padding)];
         let received = payload.len() as u32;

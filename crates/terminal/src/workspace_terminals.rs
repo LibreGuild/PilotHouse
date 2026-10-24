@@ -153,6 +153,15 @@ impl WorkspaceTerminals {
         cwd: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Option<Entity<Terminal>> {
+        // One whose program ended (a shell on a server that could not be
+        // reached keeps its tab) takes nothing more: a fresh one replaces it.
+        if let Some(ix) = self.terminals.iter().position(|terminal| {
+            let terminal = terminal.read(cx);
+            terminal.has_exited() && terminal.label().is_some_and(|name| name == label)
+        }) {
+            self.terminals.remove(ix);
+            self.active = active_after_close(self.active, ix, self.terminals.len());
+        }
         let existing = self
             .terminals
             .iter()

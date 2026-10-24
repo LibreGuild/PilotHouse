@@ -856,7 +856,7 @@ impl ChatThread {
             if let Some(allow) = allow
                 && (crate::review_policy::allows(kind, raw_input.as_ref(), &title)
                     || (self.app_tools_this_turn
-                        && crate::review_policy::is_app_tool(&title, raw_input.as_ref())))
+                        && crate::review_policy::is_app_tool(kind, &title, raw_input.as_ref())))
             {
                 respond(Some(allow.option_id.0.to_string()), cx);
                 return;
@@ -916,7 +916,7 @@ impl ChatThread {
             .as_ref()
             .and_then(|session| session.acp_session_id.clone());
         let prefs = options::preferences(&self.store, agent.id);
-        let mcp = pilothouse_mcp_server(&cwd, agent.id);
+        let mcp = pilothouse_mcp_server(&cwd, agent.id, self.project.id);
         // The servers set up in Settings → MCP & skills, for every agent.
         let extra_mcp = crate::mcp_config::for_session(&self.store);
         let extra_dirs = self.project.extra_dirs.clone();
@@ -1326,7 +1326,13 @@ fn to_value(value: &impl serde::Serialize) -> Value {
 
 /// The PilotHouse MCP server, offered to every new agent session so agents
 /// can use the board, the browser and devices. It is this binary in `mcp` mode.
-fn pilothouse_mcp_server(project_path: &std::path::Path, agent_id: &str) -> Option<McpServer> {
+/// `project_id` names the workspace outright: the agent may work in a copy
+/// (a review, a parallel lane) that no workspace's folder holds.
+fn pilothouse_mcp_server(
+    project_path: &std::path::Path,
+    agent_id: &str,
+    project_id: ProjectId,
+) -> Option<McpServer> {
     let exe = std::env::current_exe().ok()?;
     let mut env = Vec::new();
     if let Some(dir) = std::env::var_os(ph_store::paths::DATA_DIR_ENV) {
@@ -1343,6 +1349,8 @@ fn pilothouse_mcp_server(project_path: &std::path::Path, agent_id: &str) -> Opti
                 project_path.to_string_lossy().to_string(),
                 "--agent".into(),
                 agent_id.to_string(),
+                "--workspace".into(),
+                project_id.to_string(),
             ])
             .env(env),
     ))
@@ -1375,7 +1383,7 @@ fn restore_summary(restored: &ph_git::checkpoint::Restored, message: Option<&str
         short.push('…');
     }
     let message = short;
-    match (restored.restored, restored.removed) {
+    let said = match (restored.restored, restored.removed) {
         (0, 0) => format!("The files already matched how they were before “{message}”."),
         (0, removed) => format!("Removed {} created since “{message}”.", files(removed)),
         (written, 0) => format!("Restored {} to before “{message}”.", files(written)),
@@ -1383,6 +1391,13 @@ fn restore_summary(restored: &ph_git::checkpoint::Restored, message: Option<&str
             "Restored {} and removed {} created since “{message}”.",
             files(written),
             files(removed)
+        ),
+    };
+    match restored.kept {
+        0 => said,
+        kept => format!(
+            "{said} Kept {} that may be new: the checkpoint could not hold every untracked file.",
+            files(kept)
         ),
     }
 }
@@ -1396,6 +1411,7 @@ mod restore_tests {
         let done = |restored, removed| ph_git::checkpoint::Restored {
             restored,
             removed,
+            kept: 0,
             undo: String::new(),
         };
         assert_eq!(

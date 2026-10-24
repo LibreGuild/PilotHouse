@@ -108,6 +108,8 @@ pub struct Browser {
     status: BrowserStatus,
     running: Option<Running>,
     starting: Option<StartTask>,
+    /// Counts stops, so a start that finishes after one is dropped.
+    generation: u64,
     url: String,
     title: String,
     loading: bool,
@@ -121,7 +123,10 @@ pub struct Browser {
     emulation: Option<Emulation>,
     /// Whether the pane wants a live stream.
     screencast: bool,
-    load_waiters: Vec<smol::channel::Sender<()>>,
+    /// Navigations waited on, by the loader Chrome gave each.
+    load_waiters: Vec<(String, smol::channel::Sender<()>)>,
+    /// The latest loaders that finished, for a wait that starts late.
+    loaded: std::collections::VecDeque<String>,
     dialog: Option<Dialog>,
     /// A new pane size waiting to settle.
     pending_viewport: Option<Viewport>,
@@ -151,6 +156,7 @@ impl Browser {
             status: BrowserStatus::Stopped,
             running: None,
             starting: None,
+            generation: 0,
             url,
             title: String::new(),
             loading: false,
@@ -162,6 +168,7 @@ impl Browser {
             emulation: None,
             screencast: false,
             load_waiters: Vec::new(),
+            loaded: std::collections::VecDeque::new(),
             dialog: None,
             pending_viewport: None,
             _resize: None,
@@ -265,6 +272,7 @@ impl Browser {
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
+        self.generation += 1;
         self.running = None;
         self.starting = None;
         self._events = None;
@@ -303,6 +311,7 @@ impl Browser {
         cx.notify();
         let profile = chrome::profile_dir(self.project_id);
         let open_port = self.devtools_port_enabled();
+        let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let launched = cx
                 .background_spawn(async move {
@@ -319,6 +328,11 @@ impl Browser {
                 Ok((chrome, browser, events)) => match prepare(&browser).await {
                     Ok((cdp, target_id)) => this
                         .update(cx, |this, cx| {
+                            // Stopped while starting: this Chrome (dropped
+                            // here, which ends it) is not wanted any more.
+                            if this.generation != generation {
+                                return Err(anyhow!("the browser was stopped"));
+                            }
                             let running = Running {
                                 _chrome: chrome,
                                 browser,
@@ -326,10 +340,11 @@ impl Browser {
                                 target_id,
                                 devtools: None,
                             };
-                            this.started(running, events, cx)
+                            this.started(running, events, cx);
+                            Ok(cdp)
                         })
-                        .map(|()| cdp)
-                        .map_err(|err| anyhow!("{err}")),
+                        .map_err(|err| anyhow!("{err}"))
+                        .and_then(|started| started),
                     Err(err) => Err(err),
                 },
                 Err(err) => Err(err),
@@ -337,6 +352,10 @@ impl Browser {
             result.map_err(|err| {
                 let message: SharedString = format!("{err:#}").into();
                 let _ = this.update(cx, |this, cx| {
+                    // A later start is not this one's to clear.
+                    if this.generation != generation {
+                        return;
+                    }
                     this.starting = None;
                     this.status = BrowserStatus::Failed(message.clone());
                     cx.notify();
@@ -447,11 +466,30 @@ impl Browser {
                     || params["frameId"].as_str() == self.main_frame.as_deref()
                 {
                     self.loading = false;
-                    for waiter in self.load_waiters.drain(..) {
-                        let _ = waiter.try_send(());
-                    }
                     self.refresh_title(cx);
                 }
+            }
+            // A navigation's own load: an earlier page finishing loading
+            // must not end the wait for a later one.
+            "Page.lifecycleEvent" => {
+                if params["name"] != "load"
+                    || params["frameId"].as_str() != self.main_frame.as_deref()
+                {
+                    return;
+                }
+                let loader = params["loaderId"].as_str().unwrap_or_default().to_string();
+                self.load_waiters.retain(|(waiting, done)| {
+                    let finished = *waiting == loader;
+                    if finished {
+                        let _ = done.try_send(());
+                    }
+                    !finished && !done.is_closed()
+                });
+                self.loaded.push_back(loader);
+                if self.loaded.len() > 16 {
+                    self.loaded.pop_front();
+                }
+                return;
             }
             "Page.javascriptDialogOpening" => self.open_dialog(params),
             "Page.javascriptDialogClosed" => self.dialog = None,
@@ -788,11 +826,9 @@ impl Browser {
 
     // ---- Agent actions (used by the control socket) ----
 
-    /// Navigates and waits for the load event (or a timeout).
+    /// Navigates and waits for that page's load event (or a timeout).
     pub fn navigate(&mut self, url: &str, cx: &mut Context<Self>) -> Task<Result<Value>> {
         let url = normalize_url(url);
-        let (done, loaded) = smol::channel::bounded(1);
-        self.load_waiters.push(done);
         let connection = self.connection(cx);
         cx.spawn(async move |this, cx| {
             let cdp = connection.await?;
@@ -800,7 +836,18 @@ impl Browser {
             if let Some(error) = result["errorText"].as_str() {
                 bail!("could not open {url}: {error}");
             }
-            wait_for_load(loaded, cx).await;
+            // A move within the page (`#section`) has no loader and no load.
+            if let Some(loader) = result["loaderId"].as_str() {
+                let (done, loaded) = smol::channel::bounded(1);
+                this.update(cx, |this, _| {
+                    if this.loaded.iter().any(|known| known == loader) {
+                        let _ = done.try_send(());
+                    } else {
+                        this.load_waiters.push((loader.to_string(), done));
+                    }
+                })?;
+                wait_for_load(loaded, cx).await;
+            }
             let title = evaluate(&cdp, "document.title").await.unwrap_or_default();
             let mut summary = page_summary(&this, cx)?;
             summary["title"] = title;
@@ -871,6 +918,8 @@ impl Browser {
                     bail!("no element matches `{selector}`");
                 }
             }
+            // Said in the result, so a recording never keeps a password.
+            let secret = evaluate(&cdp, scripts::FOCUSED_IS_PASSWORD).await? == Value::Bool(true);
             cdp.call("Input.insertText", json!({ "text": text }))
                 .await?;
             if submit {
@@ -879,7 +928,11 @@ impl Browser {
                 }
             }
             settle(cx).await;
-            page_summary(&this, cx)
+            let mut summary = page_summary(&this, cx)?;
+            if secret {
+                summary["secret"] = json!(true);
+            }
+            Ok(summary)
         })
     }
 
@@ -900,7 +953,11 @@ impl Browser {
     }
 
     pub fn scroll(&mut self, dy: f32, cx: &mut Context<Self>) -> Task<Result<Value>> {
-        let Viewport { width, height, .. } = self.viewport;
+        // The middle of the page as laid out: an emulated screen when set.
+        let (width, height) = match &self.emulation {
+            Some(emulation) => (emulation.width, emulation.height),
+            None => (self.viewport.width, self.viewport.height),
+        };
         let connection = self.connection(cx);
         cx.spawn(async move |this, cx| {
             let cdp = connection.await?;
@@ -989,6 +1046,9 @@ async fn prepare(browser: &Cdp) -> Result<(Cdp, String)> {
     ] {
         page.call(domain, json!({})).await?;
     }
+    // `Page.lifecycleEvent`s name the loader, so a wait ends on its own load.
+    page.call("Page.setLifecycleEventsEnabled", json!({ "enabled": true }))
+        .await?;
     page.call(
         "Page.addScriptToEvaluateOnNewDocument",
         json!({ "source": scripts::SINGLE_PANE }),

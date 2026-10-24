@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -315,6 +315,24 @@ pub fn apply_edit(
             }
         }
     }
+    // A file with unsaved changes in another tab would overwrite the
+    // rename when saved: none is changed until those are saved.
+    let unsaved: Vec<String> = by_file
+        .keys()
+        .filter(|path| !same_file(path, open_path) && crate::unsaved::kept(path).is_some())
+        .map(|path| {
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    if !unsaved.is_empty() {
+        bail!(
+            "save {} first: the rename changes it too",
+            unsaved.join(", ")
+        );
+    }
     let mut open_result = None;
     let files = by_file.len();
     for (path, edits) in by_file {
@@ -331,18 +349,22 @@ pub fn apply_edit(
     Ok((open_result, files))
 }
 
+/// The same file, however the server spelled the path (case only where the
+/// file system ignores it: the real paths are compared).
 fn same_file(a: &Path, b: &Path) -> bool {
-    a == b || dunce_like(a) == dunce_like(b)
+    a == b
+        || std::fs::canonicalize(a)
+            .ok()
+            .zip(std::fs::canonicalize(b).ok())
+            .is_some_and(|(a, b)| a == b)
 }
 
-fn dunce_like(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "/")
-        .to_ascii_lowercase()
-}
-
-/// Applies edits from last to first, so earlier positions stay valid.
+/// Applies a server's edits to `text`, from last to first, so earlier
+/// positions stay valid.
 pub fn apply_text_edits(mut text: Rope, mut edits: Vec<TextEdit>) -> String {
+    for edit in &mut edits {
+        edit.range = ph_lsp::position::range_to_editor(&text, edit.range);
+    }
     edits
         .sort_by_key(|edit| std::cmp::Reverse((edit.range.start.line, edit.range.start.character)));
     for edit in edits {

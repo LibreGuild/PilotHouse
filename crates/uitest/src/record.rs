@@ -41,6 +41,9 @@ pub fn start(project_id: i64, path: PathBuf, steps: Vec<Step>, cx: &mut App) {
     ControlServer::set_observer(Some(Rc::new(observe)), cx);
 }
 
+/// Where a test finds the password typed while it was recorded.
+pub const PASSWORD_VARIABLE: &str = "PILOTHOUSE_TEST_PASSWORD";
+
 /// Stops recording and returns it.
 pub fn stop(cx: &mut App) -> Option<Recording> {
     ControlServer::set_observer(None, cx);
@@ -51,17 +54,28 @@ pub fn current(cx: &App) -> Option<&Recording> {
     cx.try_global::<Recorder>()?.session.as_ref()
 }
 
-fn observe(method: &str, params: &Value, cx: &mut App) {
+fn observe(method: &str, params: &Value, result: &Value, cx: &mut App) {
     let Some(recording) = cx.default_global::<Recorder>().session.as_mut() else {
         return;
     };
-    // Browser calls name their project; device calls act on the device in
-    // view, which belongs to whoever is recording.
-    if method.starts_with("browser.") && params["project_id"].as_i64() != Some(recording.project_id)
+    // Agents' calls name their workspace: another workspace's are not this
+    // test's. Browser calls must name it; a device call without one (from
+    // `pilothouse ctl`) acts on the device in view.
+    let project = params["project_id"].as_i64();
+    if project.is_some_and(|project| project != recording.project_id)
+        || (method.starts_with("browser.") && project.is_none())
     {
         return;
     }
-    if let Some(step) = step_for(method, params) {
+    if let Some(mut step) = step_for(method, params) {
+        // A password typed while recording is never written to the test
+        // (which is shared with the project): it is read from the
+        // environment when the test runs.
+        if let Step::Type { text, .. } = &mut step
+            && result["secret"] == true
+        {
+            *text = format!("{{{{env:{PASSWORD_VARIABLE}}}}}");
+        }
         // Typing into the same field again replaces what was typed.
         if let (Some(Step::Type { selector: last, .. }), Step::Type { selector, .. }) =
             (recording.steps.last(), &step)
@@ -207,24 +221,46 @@ mod tests {
             observe(
                 "browser.open",
                 &json!({ "project_id": 7, "url": "http://x" }),
+                &json!({}),
                 cx,
             );
             observe(
                 "browser.open",
                 &json!({ "project_id": 8, "url": "http://other" }),
+                &json!({}),
                 cx,
             );
             observe(
                 "browser.type",
                 &json!({ "project_id": 7, "selector": "#q", "text": "a" }),
+                &json!({}),
                 cx,
             );
             observe(
                 "browser.type",
                 &json!({ "project_id": 7, "selector": "#q", "text": "ab" }),
+                &json!({}),
                 cx,
             );
-            observe("browser.snapshot", &json!({ "project_id": 7 }), cx);
+            observe(
+                "browser.snapshot",
+                &json!({ "project_id": 7 }),
+                &json!({}),
+                cx,
+            );
+            // Another workspace's device tap, and a password.
+            observe(
+                "device.tap",
+                &json!({ "project_id": 8, "x": 1, "y": 2 }),
+                &json!({}),
+                cx,
+            );
+            observe(
+                "browser.type",
+                &json!({ "project_id": 7, "selector": "#pw", "text": "hunter2" }),
+                &json!({ "secret": true }),
+                cx,
+            );
             let recording = stop(cx).unwrap();
             assert_eq!(
                 recording.steps,
@@ -235,6 +271,11 @@ mod tests {
                     Step::Type {
                         text: "ab".into(),
                         selector: Some("#q".into()),
+                        submit: false
+                    },
+                    Step::Type {
+                        text: "{{env:PILOTHOUSE_TEST_PASSWORD}}".into(),
+                        selector: Some("#pw".into()),
                         submit: false
                     },
                 ]

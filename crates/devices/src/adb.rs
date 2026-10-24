@@ -1,7 +1,9 @@
 //! Blocking calls to `adb`. Run them off the UI thread.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use ph_media::Frame;
@@ -58,12 +60,17 @@ impl Adb {
         command
     }
 
-    /// Runs adb and returns stdout; fails with stderr on a non-zero exit.
+    /// Runs adb and returns stdout; fails with stderr on a non-zero exit, or
+    /// when adb takes too long (a device that went away mid-command): an
+    /// agent waits on these.
     pub fn run(&self, serial: Option<&str>, args: &[&str]) -> Result<Vec<u8>> {
-        let output = self
-            .command(serial)
-            .args(args)
-            .output()
+        let limit = match args.first() {
+            Some(&("install" | "push" | "pull")) => Duration::from_secs(10 * 60),
+            _ => Duration::from_secs(60),
+        };
+        let mut command = self.command(serial);
+        command.args(args);
+        let output = output_within(command, limit)
             .with_context(|| format!("running adb {}", args.join(" ")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -265,6 +272,43 @@ fn parse_raw_screencap(bytes: &[u8]) -> Option<Frame> {
         .iter_mut()
         .for_each(|pixel| pixel[3] = 255);
     Some(Frame::from_rgba(width, height, rgba))
+}
+
+/// [`Command::output`], killed after `limit`.
+fn output_within(mut command: Command, limit: Duration) -> std::io::Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let read = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = read(child.stdout.take().map(|pipe| Box::new(pipe) as _));
+    let stderr = read(child.stderr.take().map(|pipe| Box::new(pipe) as _));
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("no answer within {} seconds", limit.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
 }
 
 /// `input text` takes no spaces (`%s` stands for one) and runs in a shell.

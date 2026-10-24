@@ -150,7 +150,10 @@ mod unix {
         let output = match receiver.recv_timeout(SHELL_TIMEOUT) {
             Ok(output) => output,
             Err(_) => {
+                // Reaped, or it stays a zombie. The reader thread ends when
+                // whatever the shell started lets go of its output.
                 let _ = child.kill();
+                let _ = child.wait();
                 return None;
             }
         };

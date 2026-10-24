@@ -27,6 +27,10 @@ pub struct BridgeOptions {
     pub project_path: PathBuf,
     /// Shown as the author of card notes and as the card assignee.
     pub agent_name: String,
+    /// The workspace, when PilotHouse started the bridge (`--workspace`):
+    /// the agent may work in a copy (a review, a parallel lane) that no
+    /// workspace's folder holds. Otherwise found from `project_path`.
+    pub project_id: Option<i64>,
 }
 
 /// Serves MCP on stdin/stdout until stdin closes.
@@ -59,9 +63,9 @@ pub struct Session {
 impl Session {
     pub fn new(options: BridgeOptions) -> Self {
         Self {
+            project_id: options.project_id,
             options,
             client: None,
-            project_id: None,
         }
     }
 
@@ -132,7 +136,19 @@ impl Session {
         let project_id = self.project_id()?;
         let agent = self.options.agent_name.clone();
         let (method, params) = (tool.build)(arguments, project_id, &agent)?;
-        let result = self.client()?.call(method, params)?;
+        let result = match self.client()?.call(method, params) {
+            Ok(result) => result,
+            // The app quit or restarted: connect again for the next call
+            // (not now: the call may have run before the connection broke).
+            Err(err) if ControlClient::is_disconnect(&err) => {
+                self.client = None;
+                if self.options.project_id.is_none() {
+                    self.project_id = None;
+                }
+                return Err(err.context("PilotHouse restarted; try the tool again"));
+            }
+            Err(err) => return Err(err),
+        };
         let images = result
             .get("images")
             .and_then(Value::as_array)
@@ -178,6 +194,7 @@ mod tests {
             socket_path: PathBuf::from("/nonexistent/pilothouse.sock"),
             project_path: PathBuf::from("/tmp"),
             agent_name: "test".into(),
+            project_id: None,
         })
     }
 

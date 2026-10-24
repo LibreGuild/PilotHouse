@@ -17,7 +17,7 @@ PilotHouse runs on your machine with your permissions and has no server. The thi
 
 ## Agent boundaries
 
-- **One workspace's tools.** The MCP bridge resolves the workspace from the agent's folder (any of its folders) and adds it to every call, overriding anything the agent passes. Board calls that take a card id check the card belongs to it; to-dos and tests are its own.
+- **One workspace's tools.** The MCP bridge PilotHouse starts is given its workspace (a review or a parallel lane works in a copy no workspace folder holds); one you set up yourself resolves it from the agent's folder (any of its folders). The bridge adds it to every call, overriding anything the agent passes. Board calls that take a card id check the card belongs to it; to-dos and tests are its own.
 - **Mentions stay in the workspace.** `@path` and `@path:line` attach only files inside the workspace's folders (symlinks resolved), and `#12` only its cards.
 - **Utilities.** An agent's `util_run sqlite` opens only SQLite files inside its workspace's folders, read-only; the Utilities dialog (you) can open any.
 - **Text from others is data.** A pull request's title, author and description reach agents (reviews, `@pr:`, schedules started by a pull request or failing checks) marked as material to work on, never instructions; reviews report such text as a finding.
@@ -25,6 +25,7 @@ PilotHouse runs on your machine with your permissions and has no server. The thi
 - **No silent confirmations.** Web pages' `confirm()` and `prompt()` dialogs are shown to you in the pane. With nobody watching they are cancelled, so an agent driving the browser can never confirm "Delete…?" by itself. Alerts are acknowledged, and every dialog is logged for the agent.
 - **Links in agent output** open only for `http`, `https` and `mailto`. Agent text can echo pages it read, and a `file://` or custom-scheme link could start a program.
 - Agents ask permission for tools through their own prompts (the approval inbox). PilotHouse advertises no file or terminal capabilities over ACP, and refuses those requests.
+- **What is approved without you.** A review chat (and a quick question) gets reads, searches and a short list of read-only commands approved by itself: a system `git` with reading subcommands, `rg`, `grep`, `ls` and the like, without shell operators, without `git -c` or other options before the subcommand, and without options that run another program (`rg --pre`, `git grep -O`, `--ext-diff`, `--textconv`) or write a file. A program named by a path (`./git`, which a pull request can add) is never approved, except from the system's folders. While a UI test is recorded or repaired, PilotHouse's own browser, device and check tools are approved by the tool's name only; a shell command that mentions them still asks.
 
 ## Untrusted repositories
 
@@ -32,12 +33,15 @@ Opening a project should not run its code:
 
 - `git` runs with `core.fsmonitor` off and without external diff or text conversion drivers (`--no-ext-diff`, `--no-textconv` on every diff, stash preview and blame), which a repository's config could otherwise point at programs. A test (`reading_a_repository_runs_none_of_its_programs`) sets them all and checks none runs.
 - Checkpoints store and restore files' exact bytes, with line-ending conversion and attributes off.
-- Detected run configurations quote script names, since names come from the repository and are typed into a shell. Running a configuration still runs that project's scripts, as it would in a terminal.
+- Detected run configurations offer only scripts whose names no shell reads anything into (letters, digits and `-_:./+`), since names come from the repository and are typed into a shell (PowerShell or cmd on Windows, a POSIX shell on a server). Running a configuration still runs that project's scripts, as it would in a terminal.
 - Nothing is executed during detection; files are only read.
+- Restoring a checkpoint removes files created since only when the checkpoint holds every untracked file; one that left some out (over 20,000 files, or a file over 20 MB) keeps files it does not know and says so.
 
 ## Housekeeping
 
-Copies PilotHouse made for agents (review checkouts, parallel-run lanes) are removed when unused, at startup, only inside `<data dir>/worktrees`, and only when the database in use is that data folder's own (so tests on a temporary database never touch it). Open lanes stay until you decide.
+Copies PilotHouse made for agents (review checkouts, parallel-run lanes) are removed when unused, at startup, only inside its own copies folders (`<data dir>/worktrees`, and this install's folder on a network drive), and only when the database in use is that data folder's own (so tests on a temporary database never touch it). Open lanes stay until you decide. When the workspaces cannot be read, nothing is removed. A removed workspace's copies stay unused for three days too, in case their work is wanted.
+
+A removed workspace's browser profile (its cookies and logins) is deleted with it, and its id is never given to a new workspace, so nothing kept by id passes on.
 
 ## On-device
 
@@ -45,6 +49,7 @@ Chrome starts with sync, component updates, metrics and other Google services of
 
 ## Known limits
 
-- Any process running as **you** can use the control socket, as it can read your files. That is the same trust boundary as your shell.
+- Any process running as **you** can use the control socket, as it can read your files. That is the same trust boundary as your shell. One PilotHouse runs per data folder: a second launch hands its folders to the running one and exits.
+- **Language servers** start when you open a file in a workspace folder, as in most editors, and some run the project's code to understand it (rust-analyzer runs build scripts and procedural macros; TypeScript's may load the project's own `typescript`). Copies made for reviews get none. Open a repository you do not trust as a plain folder only once you have read it.
 - Git **filter** programs (`filter.<name>.clean` in a repository's own `.git/config`) still run when Git compares or stages files, as in every Git tool: turning them off would break Git LFS and git-crypt. A repository you clone has no such config; a folder copied with its `.git` from someone else can. Clone repositories you do not trust instead of copying them.
 - The browser pane is macOS and Linux only for now; Windows needs the handle-based pipe variant.

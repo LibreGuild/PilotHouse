@@ -371,10 +371,11 @@ impl DevicesPanel {
             return;
         };
         let remote = format!("{}/{}", self.files_dir.trim_end_matches('/'), file.name);
-        let downloads = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default()
-            .join("Downloads");
+        let Some(downloads) =
+            dirs::download_dir().or_else(|| dirs::home_dir().map(|home| home.join("Downloads")))
+        else {
+            return;
+        };
         let local = unused_path(&downloads, &file.name);
         let shown = local.display().to_string();
         self.run(
