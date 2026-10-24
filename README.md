@@ -56,7 +56,7 @@ cd PilotHouse
 cargo run --release -p pilothouse
 ```
 
-`cargo dev` runs a development build with the UI automation socket used by the tests. See [docs/development.md](docs/development.md).
+`cargo dev` runs a development build with the UI automation socket used by the tests. See [docs/development.md](docs/development.md), and [docs/packaging.md](docs/packaging.md) for installers.
 
 ## Documentation
 

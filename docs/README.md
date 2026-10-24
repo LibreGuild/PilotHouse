@@ -7,6 +7,7 @@ Short, practical notes on how PilotHouse is built. Start with **architecture**, 
 | [architecture.md](architecture.md) | Crates, how they depend on each other, the main data flows, key decisions |
 | [user-guide.md](user-guide.md) | Using PilotHouse: first steps, the screen, shortcuts |
 | [development.md](development.md) | Build, run, disk-friendly setup, code conventions |
+| [packaging.md](packaging.md) | Installers for macOS, Windows and Linux, and releases |
 | [testing.md](testing.md) | Test levels and the UI automation harness (`pilothouse ctl`) |
 | [performance.md](performance.md) | Budgets, how they are measured, current numbers |
 | [control-socket.md](control-socket.md) | The local socket and every method on it |
