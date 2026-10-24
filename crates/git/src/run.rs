@@ -7,8 +7,10 @@ use std::process::Stdio;
 use anyhow::{Context as _, Result, bail};
 
 /// Settings that stop a repository's own config from running programs when
-/// PilotHouse reads it (fsmonitor hooks, external diff and text converters).
-/// Opening a project should never execute code from it.
+/// PilotHouse reads it (fsmonitor hooks, external diff). Text converters
+/// are per driver, so every call that shows content passes `--no-textconv`
+/// and `--no-ext-diff` (see the test below). Opening a project should never
+/// execute code from it.
 const SAFE_CONFIG: &[&str] = &["-c", "core.fsmonitor=false", "-c", "diff.external="];
 
 /// Runs `git args…` in `root` and returns stdout.
@@ -63,4 +65,43 @@ pub fn command(root: &Path) -> std::process::Command {
         .current_dir(root)
         .env("GIT_TERMINAL_PROMPT", "0");
     command
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use crate::testing::temp_repo;
+
+    /// A repository whose config and attributes point every diff at a
+    /// program: reading it must not run that program.
+    #[test]
+    fn reading_a_repository_runs_none_of_its_programs() {
+        let root = temp_repo("programs");
+        let marker = root.join("ran");
+        let program = format!("sh -c 'touch {}' --", marker.display());
+        let run = |args: &[&str]| crate::git(&root, args).unwrap();
+        run(&["config", "diff.evil.textconv", &program]);
+        run(&["config", "diff.evil.command", &program]);
+        run(&["config", "diff.external", &program]);
+        run(&["config", "core.fsmonitor", &program]);
+        std::fs::write(root.join(".gitattributes"), "* diff=evil\n").unwrap();
+        std::fs::write(root.join("README.md"), "# Test\nchanged\n").unwrap();
+        run(&["add", ".gitattributes"]);
+        run(&["commit", "-q", "-m", "attributes"]);
+
+        crate::status::status(&root).unwrap();
+        crate::status::working_changes(&root).unwrap();
+        crate::blame::blame(&root, "README.md").unwrap();
+        crate::stash::push(&root, "work").unwrap();
+        crate::stash::show(&root, 0).unwrap();
+        crate::stash::pop(&root, 0).unwrap();
+        run(&["add", "README.md"]);
+        crate::status::staged_diff(&root).unwrap();
+        let head = run(&["rev-parse", "HEAD"]);
+        crate::parallel::changes_since(&root, head.trim()).unwrap();
+        let commits = crate::log::log(&root, 2, 0, false).unwrap();
+        crate::log::changes(&root, &commits[0]).unwrap();
+
+        assert!(!marker.exists(), "a repository program ran");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

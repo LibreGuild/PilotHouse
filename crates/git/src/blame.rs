@@ -26,7 +26,7 @@ impl BlameLine {
 /// One entry per line of `path` (relative to `root`), as in the working tree.
 pub fn blame(root: &Path, path: &str) -> Result<Vec<BlameLine>> {
     crate::check_name("path", path)?;
-    let out = git(root, &["blame", "--porcelain", "--", path])?;
+    let out = git(root, &["blame", "--porcelain", "--no-textconv", "--", path])?;
     Ok(parse_blame(&out))
 }
 
