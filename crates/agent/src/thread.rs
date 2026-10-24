@@ -353,6 +353,13 @@ impl ChatThread {
         &self.entries
     }
 
+    /// Readies entry `ix` to be drawn (see [`Entry::prepare`]).
+    pub fn prepare_entry(&mut self, ix: usize, cx: &mut App) {
+        if let Some(entry) = self.entries.get_mut(ix) {
+            entry.prepare(cx);
+        }
+    }
+
     pub fn scroller(&self) -> &Entity<MessageScrollerState> {
         &self.scroller
     }
@@ -715,7 +722,9 @@ impl ChatThread {
                 }) = self.entries.last_mut()
                 {
                     existing.push_str(&text);
-                    view.update(cx, |view, cx| view.push_str(&text, cx));
+                    if let Some(view) = view {
+                        view.update(cx, |view, cx| view.push_str(&text, cx));
+                    }
                     self.changed_last(cx);
                 } else {
                     let entry = Entry::agent(text, cx);

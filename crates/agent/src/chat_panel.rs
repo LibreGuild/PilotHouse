@@ -1087,6 +1087,7 @@ impl ChatPanel {
         let thread = self.active.clone();
         let scroller = thread.read(cx).scroller().clone();
         MessageScroller::new("chat-transcript", scroller, move |ix, _, cx| {
+            thread.update(cx, |thread, cx| thread.prepare_entry(ix, cx));
             render_entry(&thread, ix, cx)
         })
         .size_full()

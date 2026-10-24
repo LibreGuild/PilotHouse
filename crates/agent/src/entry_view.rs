@@ -66,12 +66,16 @@ pub fn render_entry(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> 
             .id(("agent-message", ix))
             .group("agent-message")
             .gap_1()
-            .child(
-                TextView::new(view)
-                    .selectable(true)
-                    .w_full()
-                    .on_link_click(|url, _, _, cx| open_link(url, cx)),
-            )
+            .map(|this| match view {
+                Some(view) => this.child(
+                    TextView::new(view)
+                        .selectable(true)
+                        .w_full()
+                        .on_link_click(|url, _, _, cx| open_link(url, cx)),
+                ),
+                // Not prepared yet (the list prepares a row before drawing it).
+                None => this.child(text.clone()),
+            })
             .child(
                 h_flex()
                     .invisible()

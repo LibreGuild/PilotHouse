@@ -31,7 +31,9 @@ pub enum Entry {
     },
     Agent {
         text: String,
-        view: Entity<TextViewState>,
+        /// The rendered markdown, made when the reply is first shown: a
+        /// long stored chat opens without parsing replies no one scrolls to.
+        view: Option<Entity<TextViewState>>,
     },
     /// Files were put back to a checkpoint; `undo` reverses it.
     Restored {
@@ -364,7 +366,19 @@ impl Entry {
 
     pub fn agent(text: String, cx: &mut App) -> Self {
         let view = cx.new(|cx| TextViewState::markdown(&text, cx));
-        Entry::Agent { text, view }
+        Entry::Agent {
+            text,
+            view: Some(view),
+        }
+    }
+
+    /// Makes the markdown of an agent reply if it has none yet (see
+    /// [`Entry::Agent::view`]).
+    pub fn prepare(&mut self, cx: &mut App) {
+        if let Entry::Agent { text, view: None } = self {
+            let text = text.clone();
+            *self = Entry::agent(text, cx);
+        }
     }
 
     pub fn to_stored(&self, cx: &App) -> Option<(&'static str, String)> {
@@ -425,7 +439,7 @@ impl Entry {
                 checkpoint,
             },
             StoredEntry::Restored { text, undo } => Entry::Restored { text, undo },
-            StoredEntry::Agent { text } => Entry::agent(text, cx),
+            StoredEntry::Agent { text } => Entry::Agent { text, view: None },
             StoredEntry::Thought { text } => Entry::Thought {
                 text,
                 expanded: false,
