@@ -24,7 +24,7 @@ pub struct Resolved {
 }
 
 pub fn resolve(mapping: &Mapping) -> Result<Resolved> {
-    let mut command = ph_env::command("ssh");
+    let mut command = ssh::ssh();
     command.arg("-G");
     if let Some(port) = mapping.port {
         command.args(["-p", &port.to_string()]);
@@ -53,11 +53,11 @@ fn parse_resolved(config: &str) -> Result<Resolved> {
         .and_then(|port| port.parse().ok())
         .unwrap_or(22);
     let user = value("user").unwrap_or_default();
-    let name = value("hostkeyalias").unwrap_or_else(|| hostname.clone());
-    let key_name = if port == 22 {
-        name
-    } else {
-        format!("[{name}]:{port}")
+    // A host-key alias is the name as it is, whatever the port.
+    let key_name = match value("hostkeyalias") {
+        Some(alias) => alias,
+        None if port == 22 => hostname.clone(),
+        None => format!("[{hostname}]:{port}"),
     };
     Ok(Resolved {
         hostname,
@@ -72,35 +72,64 @@ fn parse_resolved(config: &str) -> Result<Resolved> {
 pub struct HostKey {
     /// `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ssh-rsa`…
     pub kind: String,
-    /// The key itself, Base64.
-    pub key: String,
     /// `SHA256:…`, as `ssh-keygen -l` and the server's admin show it.
     pub fingerprint: String,
+    /// The `known_hosts` line for it, as `ssh` wrote it (under the name
+    /// `ssh` looks it up by).
+    pub line: String,
 }
 
-/// The keys the server presents (`ssh-keyscan`), to show before trusting.
-pub fn host_keys(resolved: &Resolved) -> Result<Vec<HostKey>> {
-    let output = ph_env::command("ssh-keyscan")
-        .args(["-T", "8", "-p", &resolved.port.to_string(), "--"])
-        .arg(&resolved.hostname)
+/// The key the server presents, to show before trusting. `ssh` itself
+/// fetches it, into a scratch `known_hosts`, so `~/.ssh/config` applies as
+/// for every other connection (jump hosts, host-key aliases, ports).
+pub fn host_keys(mapping: &Mapping) -> Result<Vec<HostKey>> {
+    let dir = known_hosts_file()
+        .and_then(|file| file.parent().map(PathBuf::from))
+        .context("PilotHouse's SSH folder is not set")?;
+    ssh::private_dir(&dir)?;
+    let scratch = dir.join(format!("scan-{:016x}", probe_id()));
+    let mut command = ssh::ssh();
+    command
+        .args([
+            "-T",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+        ])
+        .args(["-o", "ControlPath=none", "-o", "ConnectTimeout=10"])
+        .arg("-o")
+        .arg(format!(
+            "UserKnownHostsFile=\"{}\"",
+            scratch.to_string_lossy().replace('\\', "/")
+        ));
+    if let Some(port) = mapping.port {
+        command.args(["-p", &port.to_string()]);
+    }
+    let output = command
+        .arg("--")
+        .arg(&mapping.host)
+        .arg("true")
         .stdin(std::process::Stdio::null())
         .output()
-        .context("running ssh-keyscan (is OpenSSH installed?)")?;
-    let keys = parse_keyscan(&String::from_utf8_lossy(&output.stdout));
+        .context("running ssh (is OpenSSH installed?)");
+    let text = std::fs::read_to_string(&scratch).unwrap_or_default();
+    let _ = std::fs::remove_file(&scratch);
+    let _ = std::fs::remove_file(scratch.with_extension("old"));
+    let keys = parse_known_hosts(&text);
     if keys.is_empty() {
-        bail!(
-            "{} sent no host key (is it reachable on port {}?)",
-            resolved.hostname,
-            resolved.port
-        );
+        let stderr = output
+            .map(|output| String::from_utf8_lossy(&output.stderr).trim().to_string())
+            .unwrap_or_else(|err| format!("{err:#}"));
+        bail!("{} sent no host key: {stderr}", mapping.host);
     }
     Ok(keys)
 }
 
-fn parse_keyscan(text: &str) -> Vec<HostKey> {
+fn parse_known_hosts(text: &str) -> Vec<HostKey> {
     let mut keys: Vec<HostKey> = text
         .lines()
-        .filter(|line| !line.starts_with('#'))
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
             let (_, kind, key) = (fields.next()?, fields.next()?, fields.next()?);
@@ -108,36 +137,65 @@ fn parse_keyscan(text: &str) -> Vec<HostKey> {
             let digest = sha2::Sha256::digest(&blob);
             Some(HostKey {
                 kind: kind.to_string(),
-                key: key.to_string(),
                 fingerprint: format!(
                     "SHA256:{}",
                     base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest)
                 ),
+                line: line.trim().to_string(),
             })
         })
         .collect();
-    keys.dedup_by(|a, b| a.key == b.key);
+    keys.dedup_by(|a, b| a.fingerprint == b.fingerprint);
     keys
 }
 
 /// Files `keys` as the server's in PilotHouse's `known_hosts`.
-pub fn trust(resolved: &Resolved, keys: &[HostKey]) -> Result<()> {
+pub fn trust(keys: &[HostKey]) -> Result<()> {
     let file = known_hosts_file().context("PilotHouse's SSH folder is not set")?;
     if let Some(dir) = file.parent() {
         ssh::private_dir(dir)?;
     }
     let mut text = std::fs::read_to_string(&file).unwrap_or_default();
     for key in keys {
-        let line = format!("{} {} {}", resolved.key_name, key.kind, key.key);
-        if !text.lines().any(|existing| existing == line) {
+        if !text.lines().any(|existing| existing == key.line) {
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');
             }
-            text.push_str(&line);
+            text.push_str(&key.line);
             text.push('\n');
         }
     }
     std::fs::write(&file, text).with_context(|| format!("writing {}", file.display()))
+}
+
+/// Removes the server's keys trusted in PilotHouse (after the server was
+/// reinstalled, say). Keys in the user's own `known_hosts` stay; for those
+/// the user runs [`forget_command`] themselves.
+pub fn forget(mapping: &Mapping) -> Result<()> {
+    let resolved = resolve(mapping)?;
+    let Some(file) = known_hosts_file().filter(|file| file.exists()) else {
+        return Ok(());
+    };
+    let output = ph_env::command("ssh-keygen")
+        .args(["-R", &resolved.key_name, "-f"])
+        .arg(&file)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .context("running ssh-keygen")?;
+    let _ = std::fs::remove_file(file.with_extension("old"));
+    if !output.status.success() {
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
+}
+
+/// The command that removes the server's key from the user's own
+/// `known_hosts`.
+pub fn forget_command(mapping: &Mapping) -> String {
+    let name = resolve(mapping)
+        .map(|resolved| resolved.key_name)
+        .unwrap_or_else(|_| mapping.host.clone());
+    format!("ssh-keygen -R \"{name}\"")
 }
 
 /// Whether signing in works, and if not, why.
@@ -154,7 +212,9 @@ pub enum Access {
 }
 
 pub fn access(mapping: &Mapping) -> Access {
-    let output = ssh::command(mapping, "true")
+    // A connection of its own: a shared one someone signed in to with a
+    // password would pass the check.
+    let output = ssh::command(mapping, "true", ssh::Connection::Own)
         .stdin(std::process::Stdio::null())
         .output();
     let output = match output {
@@ -216,7 +276,7 @@ pub fn same_folder(mapping: &Mapping) -> Result<Checked> {
         "test -f {} && echo same; git --version 2>/dev/null || true",
         quote(&remote)
     );
-    let output = ssh::command(mapping, &script)
+    let output = ssh::command(mapping, &script, ssh::Connection::Own)
         .stdin(std::process::Stdio::null())
         .output();
     let _ = std::fs::remove_file(&probe);
@@ -262,12 +322,15 @@ pub fn share_path(mapping: &Mapping, share: &str) -> Option<String> {
         "testparm -s --section-name={} --parameter-name=path 2>/dev/null",
         quote(share)
     );
-    let output = ssh::command(mapping, &script)
+    let output = ssh::command(mapping, &script, ssh::Connection::Own)
         .stdin(std::process::Stdio::null())
         .output()
         .ok()?;
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (output.status.success() && path.starts_with('/')).then_some(path)
+    // `testparm` exits 1 for a mere warning about the config, the path
+    // printed all the same; only ssh's own failure (255) means no answer.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let path = stdout.lines().next().unwrap_or_default().trim().to_string();
+    (output.status.code() != Some(255) && path.starts_with('/')).then_some(path)
 }
 
 /// The user's public key (`~/.ssh/id_ed25519.pub`, else ECDSA, else RSA).
@@ -286,14 +349,16 @@ pub fn public_key() -> Option<(PathBuf, String)> {
 /// file) to the user's SSH agent, for a terminal: it asks for the
 /// passphrase once, then commands can use the key.
 pub fn agent_add_args(public: &std::path::Path) -> (String, Vec<String>) {
-    let private = public.with_extension("");
-    let mut args = Vec::new();
+    let private = public.with_extension("").to_string_lossy().into_owned();
     if cfg!(target_os = "macos") {
-        // Kept in the keychain, so it is there again after a restart.
-        args.push("--apple-use-keychain".to_string());
+        // Apple's own ssh-add (Homebrew's lacks the option), keeping the
+        // passphrase in the keychain so the key is there after a restart.
+        return (
+            "/usr/bin/ssh-add".into(),
+            vec!["--apple-use-keychain".into(), private],
+        );
     }
-    args.push(private.to_string_lossy().into_owned());
-    ("ssh-add".into(), args)
+    ("ssh-add".into(), vec![private])
 }
 
 /// `~/.ssh`.
@@ -341,7 +406,9 @@ pub fn install_key_args(mapping: &Mapping, key: &str) -> Option<(String, Vec<Str
     let script = format!(
         "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && {{ grep -qxF {key} ~/.ssh/authorized_keys || echo {key} >> ~/.ssh/authorized_keys; }} && echo 'PilotHouse: your key is installed. You can close this.'"
     );
-    let mut args = ssh::options(mapping, true);
+    // Not shared: signing in with the password must not leave a shared
+    // connection that would pass the next check without the key.
+    let mut args = ssh::options(mapping, true, ssh::Connection::Own);
     args.extend(["--".into(), mapping.host.clone(), script]);
     Some(("ssh".into(), args))
 }
@@ -356,15 +423,15 @@ mod tests {
         let resolved = parse_resolved(config).unwrap();
         assert_eq!(resolved.hostname, "10.0.0.5");
         assert_eq!(resolved.key_name, "[10.0.0.5]:2222");
-        let aliased = parse_resolved("hostname nas\nport 22\nhostkeyalias buildbox\n").unwrap();
-        assert_eq!(aliased.key_name, "buildbox");
+        let aliased = parse_resolved("hostname nas\nport 2222\nhostkeyalias buildbox\n").unwrap();
+        assert_eq!(aliased.key_name, "buildbox", "an alias has no port");
     }
 
     #[test]
     fn host_keys_have_their_fingerprints() {
         // A key and the fingerprint `ssh-keygen -lf` gives for it.
         let scan = "# nas:22 SSH-2.0-OpenSSH_9.7\nnas ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF8DM4HgKqFlPkGHaNV6c9sAw4uGyStK/hW5D7Ichg8q\n";
-        let keys = parse_keyscan(scan);
+        let keys = parse_known_hosts(scan);
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].kind, "ssh-ed25519");
         assert_eq!(

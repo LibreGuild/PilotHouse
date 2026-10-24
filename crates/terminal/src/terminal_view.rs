@@ -48,6 +48,9 @@ pub struct TerminalView {
     selecting: bool,
     /// Text an input method is composing, not sent yet.
     composing: String,
+    /// Text typed since the last other key: an input method may replace
+    /// some of it (macOS press-and-hold turns `e` into `é`).
+    typed: String,
     _observe: Subscription,
 }
 
@@ -63,6 +66,7 @@ impl TerminalView {
             cell: Cell::new((0., 0.)),
             selecting: false,
             composing: String::new(),
+            typed: String::new(),
         }
     }
 
@@ -75,6 +79,7 @@ impl TerminalView {
         if is_text(&event.keystroke) || !self.composing.is_empty() {
             return;
         }
+        self.typed.clear();
         self.send_keystroke(&event.keystroke, cx);
     }
 
@@ -93,6 +98,12 @@ impl TerminalView {
     }
 
     fn key_action(&mut self, action: &crate::TerminalKey, _: &mut Window, cx: &mut Context<Self>) {
+        // Enter while composing commits the text in the input method; it
+        // must not also run the half-typed line.
+        if !self.composing.is_empty() {
+            return;
+        }
+        self.typed.clear();
         if let Ok(keystroke) = gpui_kit::Keystroke::parse(&action.key) {
             self.send_keystroke(&keystroke, cx);
         }
@@ -464,18 +475,37 @@ impl Render for TerminalView {
     }
 }
 
+/// Where text replaced from UTF-16 offset `start` begins in `typed` (a byte
+/// index), and how many characters that erases.
+fn replaced_tail(typed: &str, start: usize) -> (usize, usize) {
+    let mut offset = 0;
+    let keep = typed
+        .char_indices()
+        .find(|(_, c)| {
+            let at = offset;
+            offset += c.len_utf16();
+            at >= start
+        })
+        .map(|(ix, _)| ix)
+        .unwrap_or(typed.len());
+    (keep, typed[keep..].chars().count())
+}
+
 /// A key that types text (a letter, digit, symbol or space, with Shift or
-/// none), as opposed to Enter, arrows or a Ctrl, Alt or ⌘ shortcut.
+/// none; on macOS with Option too, which types accents and symbols there),
+/// as opposed to Enter, arrows or a Ctrl, Alt or ⌘ shortcut.
 fn is_text(keystroke: &gpui_kit::Keystroke) -> bool {
     let modifiers = &keystroke.modifiers;
-    !(modifiers.control || modifiers.alt || modifiers.platform || modifiers.function)
+    let alt_is_shortcut = modifiers.alt && !cfg!(target_os = "macos");
+    !(modifiers.control || alt_is_shortcut || modifiers.platform || modifiers.function)
         && keystroke
             .key_char
             .as_deref()
             .is_some_and(|text| !text.is_empty() && !text.chars().any(char::is_control))
 }
 
-/// The platform's text input: typed and composed text.
+/// The platform's text input: typed and composed text. The text it sees is
+/// what was typed since the last other key, then what is being composed.
 impl EntityInputHandler for TerminalView {
     fn text_for_range(
         &mut self,
@@ -484,7 +514,11 @@ impl EntityInputHandler for TerminalView {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<String> {
-        let utf16: Vec<u16> = self.composing.encode_utf16().collect();
+        let utf16: Vec<u16> = self
+            .typed
+            .encode_utf16()
+            .chain(self.composing.encode_utf16())
+            .collect();
         let range = range.start.min(utf16.len())..range.end.min(utf16.len());
         *adjusted = Some(range.clone());
         Some(String::from_utf16_lossy(&utf16[range]))
@@ -496,7 +530,7 @@ impl EntityInputHandler for TerminalView {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        let end = self.composing.encode_utf16().count();
+        let end = self.typed.encode_utf16().count() + self.composing.encode_utf16().count();
         Some(UTF16Selection {
             range: end..end,
             reversed: false,
@@ -508,7 +542,8 @@ impl EntityInputHandler for TerminalView {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<std::ops::Range<usize>> {
-        (!self.composing.is_empty()).then(|| 0..self.composing.encode_utf16().count())
+        let start = self.typed.encode_utf16().count();
+        (!self.composing.is_empty()).then(|| start..start + self.composing.encode_utf16().count())
     }
 
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
@@ -517,13 +552,30 @@ impl EntityInputHandler for TerminalView {
 
     fn replace_text_in_range(
         &mut self,
-        _: Option<std::ops::Range<usize>>,
+        range: Option<std::ops::Range<usize>>,
         text: &str,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.composing.clear();
+        // Replacing text already sent: erase it in the shell first.
+        if let Some(range) = range {
+            let (keep, erased) = replaced_tail(&self.typed, range.start);
+            if erased > 0 {
+                self.typed.truncate(keep);
+                self.terminal.read(cx).write(vec![0x7f; erased]);
+            }
+        }
         self.type_text(text, cx);
+        self.typed.push_str(text);
+        // Only the last few characters can be replaced.
+        if self.typed.len() > 64 {
+            let cut = self.typed.len() - 32;
+            let cut = (cut..self.typed.len())
+                .find(|ix| self.typed.is_char_boundary(*ix))
+                .unwrap_or(self.typed.len());
+            self.typed.drain(..cut);
+        }
     }
 
     fn replace_and_mark_text_in_range(
@@ -564,5 +616,36 @@ impl EntityInputHandler for TerminalView {
         _: &mut Context<Self>,
     ) -> Option<usize> {
         None
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    #[test]
+    fn replacing_typed_text_erases_only_what_is_replaced() {
+        // Press-and-hold: `e` was typed, then `é` replaces 0..1.
+        assert_eq!(replaced_tail("e", 0), (0, 1));
+        assert_eq!(replaced_tail("cafe", 3), (3, 1));
+        // A replacement after the typed text erases nothing.
+        assert_eq!(replaced_tail("cafe", 4), (4, 0));
+        // Offsets are UTF-16: 日 is one unit, 😀 two.
+        assert_eq!(replaced_tail("日本", 1), ("日".len(), 1));
+        assert_eq!(replaced_tail("😀x", 2), ("😀".len(), 1));
+    }
+
+    #[test]
+    fn text_keys_go_to_the_text_input() {
+        let key = |text: &str| {
+            gpui_kit::Keystroke::parse(text)
+                .unwrap()
+                .with_simulated_ime()
+        };
+        assert!(is_text(&key("a")));
+        assert!(is_text(&key("shift-a")));
+        assert!(!is_text(&key("enter")));
+        assert!(!is_text(&key("ctrl-c")));
+        assert!(!is_text(&key("cmd-v")));
     }
 }

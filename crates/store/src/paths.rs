@@ -24,31 +24,61 @@ pub fn data_dir() -> PathBuf {
 /// `cmd.exe`, which agents' tools often run in, cannot start in a share.
 pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
     #[cfg(windows)]
-    if on_mapped_drive(path) {
-        let absolute = std::path::absolute(path)?;
-        std::fs::metadata(&absolute)?;
-        return Ok(absolute);
+    if let Some(letter) = mapped_drive(path) {
+        return on_drive(letter, path);
     }
     dunce::canonicalize(path)
 }
 
-/// `Z:\\…` where `Z:` is a network drive.
+/// The letter of the network drive `path` is on (`Z:\\…`), if it is on one.
 #[cfg(windows)]
-fn on_mapped_drive(path: &Path) -> bool {
+fn mapped_drive(path: &Path) -> Option<char> {
     use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
     /// `DRIVE_REMOTE` from `GetDriveTypeW`.
     const DRIVE_REMOTE: u32 = 4;
     let text = path.to_string_lossy();
     let mut chars = text.chars();
     let (Some(letter), Some(':')) = (chars.next(), chars.next()) else {
-        return false;
+        return None;
     };
     if !letter.is_ascii_alphabetic() {
-        return false;
+        return None;
     }
     let root: Vec<u16> = format!("{letter}:\\\0").encode_utf16().collect();
     // SAFETY: `root` is a NUL-terminated UTF-16 string.
-    unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
+    (unsafe { GetDriveTypeW(root.as_ptr()) } == DRIVE_REMOTE).then_some(letter)
+}
+
+/// [`canonical`] on network drive `letter`: the system resolves the path to
+/// its share, with each name's real case (the server's names are
+/// case-sensitive); the share is then written as the drive again.
+#[cfg(windows)]
+fn on_drive(letter: char, path: &Path) -> std::io::Result<PathBuf> {
+    use windows_sys::Win32::NetworkManagement::WNet::WNetGetConnectionW;
+    let resolved = dunce::canonicalize(path)?;
+    let device: Vec<u16> = format!("{letter}:\0").encode_utf16().collect();
+    let mut buffer = vec![0u16; 1024];
+    let mut length = buffer.len() as u32;
+    // SAFETY: `device` is NUL-terminated and `buffer` holds `length` u16s.
+    let status = unsafe { WNetGetConnectionW(device.as_ptr(), buffer.as_mut_ptr(), &mut length) };
+    let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+    let share = String::from_utf16_lossy(&buffer[..end]);
+    let text = resolved.to_string_lossy();
+    if status == 0
+        && text.len() >= share.len()
+        && text.is_char_boundary(share.len())
+        && text[..share.len()].eq_ignore_ascii_case(&share)
+    {
+        let rest = text[share.len()..].trim_start_matches('\\');
+        return Ok(PathBuf::from(format!(
+            "{}:\\{rest}",
+            letter.to_ascii_uppercase()
+        )));
+    }
+    // Not the drive's share after all: as typed, made absolute.
+    let absolute = std::path::absolute(path)?;
+    std::fs::metadata(&absolute)?;
+    Ok(absolute)
 }
 
 /// Where workspaces without folders keep their scratch folders.

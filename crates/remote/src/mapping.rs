@@ -33,14 +33,19 @@ pub struct Mapping {
 impl Mapping {
     /// What is wrong with it, for the form; `None` when it can be used.
     pub fn problem(&self) -> Option<&'static str> {
+        self.connect_problem().or_else(|| {
+            (!self.remote.starts_with('/'))
+                .then_some("Give the folder on the server as a full path, like /srv/code.")
+        })
+    }
+
+    /// What stops connecting to the server, before its folder is known.
+    pub fn connect_problem(&self) -> Option<&'static str> {
         if self.local.trim().is_empty() {
             return Some("Choose the folder on this computer.");
         }
         if !valid_host(&self.host) {
             return Some("Give the server as user@host, or a host from your SSH config.");
-        }
-        if !self.remote.starts_with('/') {
-            return Some("Give the folder on the server as a full path, like /srv/code.");
         }
         if self.port == Some(0) {
             return Some("The port must be between 1 and 65535.");
@@ -99,10 +104,16 @@ pub fn remote_of(path: &Path) -> Option<Remote> {
     remote_in(&mappings, &path.to_string_lossy(), cfg!(windows))
 }
 
-/// The folder here that is `remote` on a server, if a mapping covers it.
-pub fn to_local(remote: &str) -> Option<PathBuf> {
-    let mappings = MAPPINGS.read().unwrap_or_else(|err| err.into_inner());
-    local_in(&mappings, remote, cfg!(windows)).map(PathBuf::from)
+/// Where `path` is on a server, if it is under one of `mappings`.
+pub fn remote_of_in(mappings: &[Mapping], path: &Path) -> Option<Remote> {
+    remote_in(mappings, &path.to_string_lossy(), cfg!(windows))
+}
+
+/// The folder here that is `remote` on `mapping`'s server, if it is under
+/// the mapping. Only the mapping that ran a command can read its paths: two
+/// servers can have the same folder names.
+pub fn to_local(mapping: &Mapping, remote: &str) -> Option<PathBuf> {
+    local_in(std::slice::from_ref(mapping), remote, cfg!(windows)).map(PathBuf::from)
 }
 
 /// [`remote_of`] over `mappings`, with Windows or Unix paths.

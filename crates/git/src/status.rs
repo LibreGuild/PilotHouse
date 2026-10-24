@@ -24,7 +24,12 @@ pub struct WorkingChanges {
 /// be reached reads as that (Git fails with why), not as "no repository".
 pub fn is_repository(root: &Path) -> bool {
     if ph_remote::remote_of(root).is_some() {
-        return root.ancestors().any(|dir| dir.join(".git").exists());
+        // Not above the drive: a repository of this computer's there is not
+        // the server's.
+        return root
+            .ancestors()
+            .take_while(|dir| ph_remote::remote_of(dir).is_some())
+            .any(|dir| dir.join(".git").exists());
     }
     git(root, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true")
 }

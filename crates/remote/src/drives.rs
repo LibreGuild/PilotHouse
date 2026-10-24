@@ -25,12 +25,40 @@ fn split_source(source: &str) -> Option<(String, String)> {
     if let Some(rest) = source.strip_prefix("//") {
         let (host, share) = rest.split_once('/')?;
         let server = host.rsplit_once('@').map_or(host, |(_, server)| server);
-        let share = share.trim_end_matches('/');
-        return (!server.is_empty() && !share.is_empty())
-            .then(|| (server.to_string(), share.to_string()));
+        // macOS writes names as in a URL (`My%20Share`), and a server found
+        // by Bonjour as its service (`nas._smb._tcp.local`, the host
+        // `nas.local`).
+        let server = percent_decoded(server);
+        let server = server
+            .strip_suffix("._smb._tcp.local")
+            .map(|name| format!("{name}.local"))
+            .unwrap_or(server);
+        let share = percent_decoded(share.trim_end_matches('/'));
+        return (!server.is_empty() && !share.is_empty()).then_some((server, share));
     }
     let (server, export) = source.split_once(":/")?;
     (!server.is_empty()).then(|| (server.to_string(), format!("/{export}")))
+}
+
+/// `My%20Share` as `My Share`.
+#[cfg_attr(windows, allow(dead_code))] // Windows asks the system instead.
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut ix = 0;
+    while ix < bytes.len() {
+        let hex = |at: usize| (bytes.get(at).copied().map(char::from)?).to_digit(16);
+        if bytes[ix] == b'%'
+            && let (Some(high), Some(low)) = (hex(ix + 1), hex(ix + 2))
+        {
+            out.push((high * 16 + low) as u8);
+            ix += 3;
+        } else {
+            out.push(bytes[ix]);
+            ix += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// File systems that are another computer's folders.
@@ -206,6 +234,13 @@ mod tests {
             ("nas", "/export/home")
         );
         assert!(mount_holding("/Users/dev/app", &mounts).is_none());
+        let finder =
+            parse_mount("//dev@nas._smb._tcp.local/My%20Share on /Volumes/My Share (smbfs)\n");
+        let drive = mount_holding("/Volumes/My Share/app", &finder).unwrap();
+        assert_eq!(
+            (drive.server.as_str(), drive.share.as_str()),
+            ("nas.local", "My Share")
+        );
         assert!(mount_holding("/Volumes/codex", &mounts).is_none());
     }
 

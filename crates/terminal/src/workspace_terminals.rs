@@ -125,6 +125,13 @@ impl WorkspaceTerminals {
         self._subscriptions.push(cx.subscribe(
             &terminal,
             |this, terminal, event: &TerminalEvent, cx| match event {
+                // A program that failed (an `ssh` that could not connect)
+                // keeps its tab, so what it said can be read.
+                TerminalEvent::Exited
+                    if terminal.read(cx).exit_code().is_some_and(|code| code != 0) =>
+                {
+                    cx.notify()
+                }
                 TerminalEvent::Exited => this.close(&terminal, cx),
                 TerminalEvent::TitleChanged => cx.notify(),
             },

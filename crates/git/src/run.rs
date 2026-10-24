@@ -66,11 +66,15 @@ pub(crate) fn failure(root: &Path, what: &str, output: &Output) -> String {
         .unwrap_or_else(|| format!("git {what} failed: {}", stderr.trim()))
 }
 
-/// A path git printed, as this computer reaches it: git on a server prints
-/// the server's paths.
-pub fn local_path(text: &str) -> PathBuf {
+/// A path git printed for the repository at `root`, as this computer
+/// reaches it: git on a network drive's server prints the server's paths.
+/// Only that drive's mapping reads them (a local repository's paths are
+/// never touched).
+pub fn local_path(root: &Path, text: &str) -> PathBuf {
     let text = text.trim();
-    ph_remote::to_local(text).unwrap_or_else(|| PathBuf::from(text))
+    ph_remote::remote_of(root)
+        .and_then(|remote| ph_remote::to_local(&remote.mapping, text))
+        .unwrap_or_else(|| PathBuf::from(text))
 }
 
 /// The empty file for git options that take one, where git runs.

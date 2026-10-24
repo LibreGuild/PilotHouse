@@ -191,7 +191,7 @@ pub fn operation(root: &Path) -> Option<&'static str> {
             // Relative to `root`, or (a linked worktree) absolute, maybe
             // the server's.
             if path.starts_with('/') || Path::new(path).is_absolute() {
-                crate::local_path(path).exists()
+                crate::local_path(root, path).exists()
             } else {
                 root.join(path).exists()
             }

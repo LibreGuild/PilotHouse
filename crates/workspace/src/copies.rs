@@ -12,6 +12,12 @@ use ph_store::Store;
 pub fn folder(store: &Store, root: &Path) -> Result<PathBuf> {
     if let Some(home) = ph_git::worktree::home(root, &store.install_id()) {
         std::fs::create_dir_all(&home)?;
+        // The share can be the repository itself: keep the copies out of it.
+        if let Some(ours) = home.parent().and_then(Path::parent)
+            && let Err(err) = ph_git::worktree::keep_out(root, ours)
+        {
+            tracing::warn!("keeping {} out of Git failed: {err:#}", ours.display());
+        }
         return Ok(home);
     }
     let folder = ph_store::paths::data_dir().join("worktrees");

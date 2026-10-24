@@ -47,19 +47,61 @@ pub fn share_home(mapping: &ph_remote::Mapping, owner: &str) -> PathBuf {
 /// Checks out `commit` (detached) at `path`.
 pub fn add_detached(root: &Path, path: &Path, commit: &str) -> Result<()> {
     check_name("commit", commit)?;
-    let path = path.to_string_lossy();
-    git(root, &["worktree", "add", "--detach", "--", &path, commit]).map(|_| ())
+    let text = path.to_string_lossy();
+    git(root, &["worktree", "add", "--detach", "--", &text, commit])?;
+    reachable_here(root, path)
 }
 
 /// Creates branch `branch` at `start` and checks it out at `path`.
 pub fn add_branch(root: &Path, path: &Path, branch: &str, start: &str) -> Result<()> {
     check_name("branch", branch)?;
     check_name("start point", start)?;
-    let path = path.to_string_lossy();
-    git(root, &["worktree", "add", "-b", branch, "--", &path, start]).map(|_| ())
+    let text = path.to_string_lossy();
+    git(root, &["worktree", "add", "-b", branch, "--", &text, start])?;
+    reachable_here(root, path)
+}
+
+/// A worktree Git made on a network drive's server records where its
+/// repository is as a server path (`gitdir: /srv/code/app/.git/worktrees/x`),
+/// which this computer, where agents run Git in it, cannot follow. The link
+/// becomes relative, which both sides read.
+fn reachable_here(root: &Path, path: &Path) -> Result<()> {
+    if ph_remote::remote_of(root).is_none() {
+        return Ok(());
+    }
+    let link = path.join(".git");
+    let text = std::fs::read_to_string(&link)?;
+    let Some(target) = text.trim().strip_prefix("gitdir:") else {
+        return Ok(());
+    };
+    let target = crate::local_path(root, target.trim());
+    if let Some(relative) = relative_path(path, &target) {
+        std::fs::write(&link, format!("gitdir: {relative}\n"))?;
+    }
+    Ok(())
+}
+
+/// `to` from the folder `from`, as `../../x/y` with `/` (Git reads that on
+/// every system); `None` when they share no root.
+fn relative_path(from: &Path, to: &Path) -> Option<String> {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    if common == 0 {
+        return None;
+    }
+    let mut parts: Vec<String> = vec!["..".into(); from.len() - common];
+    parts.extend(
+        to[common..]
+            .iter()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned()),
+    );
+    Some(parts.join("/"))
 }
 
 /// Removes the working tree at `path` (`force`: even with changes in it).
+/// Other worktrees are left alone: `git worktree prune` on a server would
+/// drop ones made from this computer, whose paths the server cannot see.
 pub fn remove(root: &Path, path: &Path, force: bool) -> Result<()> {
     let path = path.to_string_lossy();
     let mut args = vec!["worktree", "remove"];
@@ -67,8 +109,48 @@ pub fn remove(root: &Path, path: &Path, force: bool) -> Result<()> {
         args.push("--force");
     }
     args.extend(["--", &path]);
-    git(root, &args)?;
-    git(root, &["worktree", "prune"]).map(|_| ())
+    git(root, &args).map(|_| ())
+}
+
+/// Keeps `folder` (one of PilotHouse's, like the copies on a share) out of
+/// the repository at `root` when it is inside its working tree, through the
+/// repository's own `info/exclude`. Nothing happens when it is not.
+pub fn keep_out(root: &Path, folder: &Path) -> Result<()> {
+    let top = crate::local_path(root, &git(root, &["rev-parse", "--show-toplevel"])?);
+    let Ok(inside) = folder.strip_prefix(&top) else {
+        return Ok(());
+    };
+    let parts: Vec<String> = inside
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if parts.is_empty() {
+        return Ok(());
+    }
+    exclude(root, &format!("/{}/", parts.join("/")))
+}
+
+/// Adds `pattern` to the repository's `info/exclude`, once.
+fn exclude(root: &Path, pattern: &str) -> Result<()> {
+    let dir = crate::local_path(root, &git(root, &["rev-parse", "--git-common-dir"])?);
+    let dir = if dir.is_absolute() || dir.starts_with("/") {
+        dir
+    } else {
+        root.join(dir)
+    };
+    let file = dir.join("info").join("exclude");
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    if text.lines().any(|line| line.trim() == pattern) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir.join("info"))?;
+    let separator = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    std::fs::write(&file, format!("{text}{separator}{pattern}\n"))?;
+    Ok(())
 }
 
 pub fn list(root: &Path) -> Result<Vec<Worktree>> {
@@ -79,7 +161,7 @@ pub fn list(root: &Path) -> Result<Vec<Worktree>> {
         if let Some(path) = line.strip_prefix("worktree ") {
             list.extend(current.take());
             current = Some(Worktree {
-                path: crate::local_path(path),
+                path: crate::local_path(root, path),
                 head: String::new(),
                 branch: None,
             });
@@ -109,6 +191,37 @@ pub fn fetch_ref(root: &Path, remote: &str, refspec: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn links_between_worktrees_become_relative() {
+        assert_eq!(
+            relative_path(
+                Path::new("/share/.pilothouse/id/worktrees/3-pr-12"),
+                Path::new("/share/app/.git/worktrees/3-pr-12"),
+            )
+            .as_deref(),
+            Some("../../../../app/.git/worktrees/3-pr-12")
+        );
+    }
+
+    #[test]
+    fn excluded_folders_stay_out_of_the_status() {
+        let root = temp_repo("exclude");
+        std::fs::create_dir_all(root.join(".pilothouse/x")).unwrap();
+        std::fs::write(root.join(".pilothouse/x/file"), "x").unwrap();
+        let root = crate::local_path(
+            &root,
+            &crate::git(&root, &["rev-parse", "--show-toplevel"]).unwrap(),
+        );
+        keep_out(&root, &root.join(".pilothouse")).unwrap();
+        keep_out(&root, &root.join(".pilothouse")).unwrap();
+        keep_out(&root, Path::new("/elsewhere/.pilothouse")).unwrap();
+        let status = crate::status::status(&root).unwrap();
+        assert!(status.changes.is_empty(), "{status:?}");
+        let text = std::fs::read_to_string(root.join(".git/info/exclude")).unwrap();
+        assert_eq!(text.matches("/.pilothouse/").count(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn checkout_size_adds_up_tracked_files() {

@@ -401,7 +401,7 @@ fn github_page(accounts: gpui_kit::Entity<ph_pulls::AccountsView>) -> SettingPag
         )
 }
 
-/// Each agent's setup status, checked when the page renders.
+/// Settings → Network drives (see [`crate::network_drives`]).
 fn drives_page(view: gpui_kit::Entity<crate::network_drives::NetworkDrivesView>) -> SettingPage {
     SettingPage::new("Network drives")
         .icon(Icon::new(Icons::HardDrive))
@@ -412,6 +412,7 @@ fn drives_page(view: gpui_kit::Entity<crate::network_drives::NetworkDrivesView>)
         )
 }
 
+/// Each agent's setup status, checked when the page renders.
 fn agents_page() -> SettingPage {
     SettingPage::new("Agents")
         .icon(Icon::new(Icons::Bot))

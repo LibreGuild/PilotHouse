@@ -189,24 +189,23 @@ fn parse_cwds(text: &str) -> Vec<(u32, PathBuf)> {
     cwds
 }
 
-/// Asks a process to stop: SIGTERM, or on Windows `taskkill` (forced, with
-/// its children, since console servers ignore a polite close).
 /// Listening ports on `mapping`'s server (`ss`, Linux), with the working
 /// folders of the user's own processes as this computer's paths. Empty when
 /// the server cannot be reached or has no `ss`.
 pub fn listening_on(mapping: &ph_remote::Mapping) -> Vec<Port> {
-    let script = "ss -ltnpH 2>/dev/null; echo '--- cwd'; for pid in $(ss -ltnpH 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do printf '%s %s\\n' \"$pid\" \"$(readlink /proc/$pid/cwd 2>/dev/null)\"; done";
-    let Ok(output) = ph_remote::ssh::command(mapping, script)
+    // One `ss`, for the ports and their processes' folders alike.
+    let script = "listing=$(ss -ltnpH 2>/dev/null); printf '%s\\n' \"$listing\"; echo '--- cwd'; for pid in $(printf '%s\\n' \"$listing\" | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do printf '%s %s\\n' \"$pid\" \"$(readlink /proc/$pid/cwd 2>/dev/null)\"; done";
+    let Ok(output) = ph_remote::ssh::command(mapping, script, ph_remote::Connection::Shared)
         .stdin(std::process::Stdio::null())
         .output()
     else {
         return Vec::new();
     };
-    parse_ss(&String::from_utf8_lossy(&output.stdout))
+    parse_ss(&String::from_utf8_lossy(&output.stdout), mapping)
 }
 
 /// `ss -ltnpH` lines, then `--- cwd` and `<pid> <folder>` lines.
-fn parse_ss(text: &str) -> Vec<Port> {
+fn parse_ss(text: &str, mapping: &ph_remote::Mapping) -> Vec<Port> {
     let (listing, cwds) = text.split_once("--- cwd").unwrap_or((text, ""));
     let cwds: Vec<(u32, String)> = cwds
         .lines()
@@ -247,7 +246,7 @@ fn parse_ss(text: &str) -> Vec<Port> {
         let cwd = cwds
             .iter()
             .find(|(known, _)| *known == pid && pid != 0)
-            .and_then(|(_, cwd)| ph_remote::to_local(cwd));
+            .and_then(|(_, cwd)| ph_remote::to_local(mapping, cwd));
         ports.push(Port {
             port,
             address: address.trim_matches(['[', ']']).to_string(),
@@ -262,9 +261,16 @@ fn parse_ss(text: &str) -> Vec<Port> {
 
 /// Stops process `pid` on `mapping`'s server.
 pub fn stop_on(mapping: &ph_remote::Mapping, pid: u32) -> anyhow::Result<()> {
-    let output = ph_remote::ssh::command(mapping, &format!("kill {pid}"))
-        .stdin(std::process::Stdio::null())
-        .output()?;
+    // `ss` shows no process for other users' ports; `kill 0` would signal
+    // the command's own group.
+    anyhow::ensure!(pid != 0, "that port's process belongs to another user");
+    let output = ph_remote::ssh::command(
+        mapping,
+        &format!("kill {pid}"),
+        ph_remote::Connection::Shared,
+    )
+    .stdin(std::process::Stdio::null())
+    .output()?;
     anyhow::ensure!(
         output.status.success(),
         "could not stop process {pid} on {}: {}",
@@ -274,6 +280,8 @@ pub fn stop_on(mapping: &ph_remote::Mapping, pid: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Asks a process to stop: SIGTERM, or on Windows `taskkill` (forced, with
+/// its children, since console servers ignore a polite close).
 pub fn stop(pid: u32) -> anyhow::Result<()> {
     let status = if cfg!(windows) {
         ph_env::command("taskkill")
@@ -293,7 +301,7 @@ mod tests {
     #[test]
     fn parses_ss_output_from_a_server() {
         let text = "LISTEN 0 511 127.0.0.1:5173 0.0.0.0:* users:((\"node\",pid=812,fd=21))\nLISTEN 0 128 [::]:22 [::]:*\nLISTEN 0 511 [::1]:5173 [::]:* users:((\"node\",pid=812,fd=22))\n--- cwd\n812 /srv/code/app\n";
-        let ports = parse_ss(text);
+        let ports = parse_ss(text, &ph_remote::Mapping::default());
         assert_eq!(ports.len(), 2);
         assert_eq!((ports[0].port, ports[0].pid), (22, 0));
         assert_eq!(ports[0].process, "(another user)");

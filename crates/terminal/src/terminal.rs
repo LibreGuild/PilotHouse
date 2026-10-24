@@ -57,6 +57,8 @@ pub struct Terminal {
     /// A fixed name (a run configuration's), shown instead of the shell's title.
     label: Option<SharedString>,
     exited: bool,
+    /// How the program ended, once it has (`Some(0)`: it succeeded).
+    exit_code: Option<i32>,
     columns: usize,
     rows: usize,
     _events: Task<()>,
@@ -162,6 +164,7 @@ impl Terminal {
             title: shell.title,
             label: None,
             exited: false,
+            exit_code: None,
             columns: shell.columns,
             rows: shell.rows,
             _events: events,
@@ -195,6 +198,18 @@ impl Terminal {
         self.exited
     }
 
+    /// The program's exit code, once it has ended (`None` before, or when
+    /// it was ended by a signal).
+    pub fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    fn mark_exited(&mut self, cx: &mut Context<Self>) {
+        if !std::mem::replace(&mut self.exited, true) {
+            cx.emit(TerminalEvent::Exited);
+        }
+    }
+
     fn handle_events(&mut self, events: Vec<Event>, cx: &mut Context<Self>) {
         for event in events {
             match event {
@@ -206,10 +221,12 @@ impl Terminal {
                 Event::ClipboardStore(_, text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
-                Event::Exit | Event::ChildExit(_) => {
-                    self.exited = true;
-                    cx.emit(TerminalEvent::Exited);
+                // The exit code comes first, then the end of the screen.
+                Event::ChildExit(status) => {
+                    self.exit_code = status.code();
+                    self.mark_exited(cx);
                 }
+                Event::Exit => self.mark_exited(cx),
                 _ => {}
             }
         }

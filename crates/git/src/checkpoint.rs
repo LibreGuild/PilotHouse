@@ -135,8 +135,8 @@ pub fn create(root: &Path, label: &str) -> Result<Option<String>> {
     let Ok(git_dir) = crate::git(root, &["rev-parse", "--absolute-git-dir"]) else {
         return Ok(None);
     };
-    let top = crate::local_path(&crate::git(root, &["rev-parse", "--show-toplevel"])?);
-    let index = TempIndex::new(&crate::local_path(&git_dir))?;
+    let top = crate::local_path(root, &crate::git(root, &["rev-parse", "--show-toplevel"])?);
+    let index = TempIndex::new(&crate::local_path(root, &git_dir))?;
     let index = index.0.as_path();
 
     // Tracked files: changes and deletions.
@@ -245,7 +245,7 @@ fn prune(root: &Path) -> Result<()> {
 /// [`Restored::undo`]).
 pub fn restore(root: &Path, checkpoint: &str) -> Result<Restored> {
     crate::check_name("checkpoint", checkpoint)?;
-    let top = crate::local_path(&crate::git(root, &["rev-parse", "--show-toplevel"])?);
+    let top = crate::local_path(root, &crate::git(root, &["rev-parse", "--show-toplevel"])?);
     crate::git(
         &top,
         &["cat-file", "-e", &format!("{checkpoint}^{{commit}}")],
@@ -280,10 +280,10 @@ pub fn restore(root: &Path, checkpoint: &str) -> Result<Restored> {
     }
     if !write_back.is_empty() {
         let list = write_back.join("\0");
-        let index = TempIndex::new(&crate::local_path(&crate::git(
+        let index = TempIndex::new(&crate::local_path(
             &top,
-            &["rev-parse", "--absolute-git-dir"],
-        )?))?;
+            &crate::git(&top, &["rev-parse", "--absolute-git-dir"])?,
+        ))?;
         git_in(
             &top,
             &index.0,

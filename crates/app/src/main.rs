@@ -68,7 +68,17 @@ fn run_app(open: Vec<std::path::PathBuf>) -> Result<()> {
         ph_theme::init(cx);
         ph_browser::init(store.clone(), cx);
         ph_devices::init(cx);
-        ph_runs::init(cx);
+        let projects = store.clone();
+        ph_runs::init(
+            move |id| {
+                projects
+                    .project(id)
+                    .ok()
+                    .flatten()
+                    .map(|project| project.path)
+            },
+            cx,
+        );
         ph_uitest::init(store.clone(), cx);
         AppState::install(store, cx);
         ph_workspace::init(cx);

@@ -284,9 +284,9 @@ impl RunsPanel {
 
     /// Opens `port` in the browser pane (`copy`: copies its address): on a
     /// server, through a tunnel to a port here.
-    fn reach_port(&mut self, port: u16, copy: bool, cx: &mut Context<Self>) {
+    fn reach_port(&mut self, port: &Port, copy: bool, cx: &mut Context<Self>) {
         let Some(server) = self.server.clone() else {
-            let url = format!("http://localhost:{port}");
+            let url = port.url();
             if copy {
                 cx.write_to_clipboard(ClipboardItem::new_string(url));
             } else {
@@ -294,19 +294,22 @@ impl RunsPanel {
             }
             return;
         };
-        self.status = Some(format!("Connecting to port {port} on {}…", server.host).into());
+        let (number, address) = (port.port, port.address.clone());
+        self.status = Some(format!("Connecting to port {number} on {}…", server.host).into());
         cx.notify();
         cx.spawn(async move |this, cx| {
             let host = server.host.clone();
             let local = cx
-                .background_spawn(async move { crate::forward::open(&server, port) })
+                .background_spawn(async move { crate::forward::open(&server, number, &address) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 match local {
                     Ok(local) => {
-                        let url = format!("http://localhost:{local}");
+                        // The tunnel listens on 127.0.0.1 only: `localhost`
+                        // could be ::1, and another program there.
+                        let url = format!("http://127.0.0.1:{local}");
                         this.status = Some(
-                            format!("Port {port} on {host} is at localhost:{local} here.").into(),
+                            format!("Port {number} on {host} is at 127.0.0.1:{local} here.").into(),
                         );
                         if copy {
                             cx.write_to_clipboard(ClipboardItem::new_string(url));
@@ -323,7 +326,9 @@ impl RunsPanel {
     }
 
     fn render_port(&self, ix: usize, port: &Port, cx: &mut Context<Self>) -> AnyElement {
-        let number = port.port;
+        let (open_port, copy_port) = (port.clone(), port.clone());
+        // `ss` gives no process for other users' ports: nothing to stop.
+        let can_stop = port.pid != 0;
         let stop = port.clone();
         let ours = self
             .folders
@@ -375,7 +380,7 @@ impl RunsPanel {
                     .tooltip("Open in the browser pane")
                     .accessibility_label(format!("Open port {}", port.port))
                     .on_click(
-                        cx.listener(move |this, _, _, cx| this.reach_port(number, false, cx)),
+                        cx.listener(move |this, _, _, cx| this.reach_port(&open_port, false, cx)),
                     ),
             )
             .child(
@@ -385,17 +390,21 @@ impl RunsPanel {
                     .icon(IconName::Copy)
                     .tooltip("Copy the address")
                     .accessibility_label("Copy the address")
-                    .on_click(cx.listener(move |this, _, _, cx| this.reach_port(number, true, cx))),
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.reach_port(&copy_port, true, cx)),
+                    ),
             )
-            .child(
-                Button::new(("stop-port", ix))
-                    .ghost()
-                    .xsmall()
-                    .icon(Icons::SquareStop)
-                    .tooltip(format!("Stop {} (pid {})", port.process, port.pid))
-                    .accessibility_label("Stop the process")
-                    .on_click(cx.listener(move |this, _, _, cx| this.stop_port(&stop, cx))),
-            )
+            .when(can_stop, |this| {
+                this.child(
+                    Button::new(("stop-port", ix))
+                        .ghost()
+                        .xsmall()
+                        .icon(Icons::SquareStop)
+                        .tooltip(format!("Stop {} (pid {})", port.process, port.pid))
+                        .accessibility_label("Stop the process")
+                        .on_click(cx.listener(move |this, _, _, cx| this.stop_port(&stop, cx))),
+                )
+            })
             .into_any_element()
     }
 }

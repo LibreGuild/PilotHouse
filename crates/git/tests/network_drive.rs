@@ -10,6 +10,18 @@
 
 use std::path::PathBuf;
 
+/// Removes what the test made, even when it fails: its repository, and its
+/// own install's folder of copies (never other installs' on the share).
+struct Cleanup(Vec<PathBuf>);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
 fn setup() -> Option<(ph_remote::Mapping, PathBuf)> {
     std::env::var_os("PH_SSH_TEST")?;
     let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"));
@@ -36,6 +48,13 @@ fn git_runs_on_the_server_and_its_paths_come_back() {
     let Some((mapping, root)) = setup() else {
         return;
     };
+    let owner = format!("test-install-{}", std::process::id());
+    let _cleanup = Cleanup(vec![
+        root.clone(),
+        PathBuf::from(&mapping.local)
+            .join(".pilothouse")
+            .join(&owner),
+    ]);
     let git = |args: &[&str]| ph_git::git(&root, args).unwrap();
     git(&["init", "-q", "-b", "main"]);
     git(&["config", "user.email", "test@example.test"]);
@@ -43,6 +62,7 @@ fn git_runs_on_the_server_and_its_paths_come_back() {
     // The server says where it ran: its own folder, not this computer's.
     let remote = git(&["rev-parse", "--show-toplevel"]);
     assert!(remote.trim().starts_with(&mapping.remote), "{remote}");
+    assert!(ph_git::is_repository(&root));
 
     std::fs::write(root.join("README.md"), "# Test\n").unwrap();
     git(&["add", "README.md"]);
@@ -66,7 +86,7 @@ fn git_runs_on_the_server_and_its_paths_come_back() {
     assert!(root.join("new.txt").exists() && !root.join("later.txt").exists());
 
     // Extra working trees go in the share, and list as this computer's paths.
-    let home = ph_git::worktree::home(&root, "test-install").unwrap();
+    let home = ph_git::worktree::home(&root, &owner).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     let lane = home.join(format!("lane-{}", std::process::id()));
     let head = git(&["rev-parse", "HEAD"]);
@@ -75,11 +95,11 @@ fn git_runs_on_the_server_and_its_paths_come_back() {
         lane.join("README.md").exists(),
         "made on the server, seen here"
     );
+    // Its link to the repository works from this computer too.
+    let link = std::fs::read_to_string(lane.join(".git")).unwrap();
+    assert!(link.trim().starts_with("gitdir: ../"), "{link}");
     let listed = ph_git::worktree::list(&root).unwrap();
     assert!(listed.iter().any(|tree| tree.path == lane), "{listed:?}");
     ph_git::worktree::remove(&root, &lane, true).unwrap();
     assert!(!lane.exists());
-
-    let _ = std::fs::remove_dir_all(&root);
-    let _ = std::fs::remove_dir_all(PathBuf::from(&mapping.local).join(".pilothouse"));
 }

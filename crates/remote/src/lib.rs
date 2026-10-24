@@ -23,4 +23,4 @@ pub mod mapping;
 pub mod ssh;
 
 pub use mapping::{Mapping, Remote, mappings, remote_of, set_mappings, to_local};
-pub use ssh::{close_shared, configure, explain_failure, route};
+pub use ssh::{Connection, close_shared, configure, explain_failure, route};

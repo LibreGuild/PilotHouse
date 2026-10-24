@@ -23,7 +23,7 @@ use gpui_kit::{
     PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task, Window, div, px,
 };
 use ph_remote::Mapping;
-use ph_remote::check::{self, Access, HostKey, Resolved};
+use ph_remote::check::{self, Access, HostKey};
 use ph_remote::drives::NetworkDrive;
 use ph_store::Store;
 use ph_terminal::{Terminal, TerminalEvent, TerminalView};
@@ -84,8 +84,13 @@ enum Step {
     Working(SharedString),
     /// The server's key is new: show its fingerprints.
     Trust {
-        resolved: Resolved,
+        hostname: String,
         keys: Vec<HostKey>,
+    },
+    /// The server's key is not the one trusted before.
+    Changed {
+        mapping: Mapping,
+        again: bool,
     },
     /// No key of the user's is accepted. `key`: their public key file and
     /// text, if they have one.
@@ -105,6 +110,9 @@ pub struct NetworkDrivesView {
     remote: Entity<InputState>,
     /// The share's name, to ask Samba where it is on the server.
     share: String,
+    /// The folder of the drive being changed ("Change"), which saving
+    /// replaces even if the form now names another.
+    editing: Option<String>,
     step: Step,
     /// A terminal here for making, installing or unlocking a key.
     terminal: Option<(Entity<TerminalView>, Subscription)>,
@@ -135,6 +143,7 @@ impl NetworkDrivesView {
             port: input("Port (22)", window, cx),
             remote: input("The same folder on the server, e.g. /srv/code", window, cx),
             share: String::new(),
+            editing: None,
             step: Step::Idle,
             terminal: None,
             installed: false,
@@ -144,10 +153,12 @@ impl NetworkDrivesView {
 
     /// Fills the form from a detected network drive.
     fn fill(&mut self, drive: &NetworkDrive, window: &mut Window, cx: &mut Context<Self>) {
+        let root = PathBuf::from(&drive.root);
         let known = self.mappings.iter().find(|mapping| {
             mapping.local == drive.root
-                || ph_remote::remote_of(&PathBuf::from(&drive.root)).is_some()
+                || ph_remote::mapping::remote_of_in(std::slice::from_ref(mapping), &root).is_some()
         });
+        self.editing = known.map(|mapping| mapping.local.clone());
         let (local, host, port, remote) = match known {
             Some(mapping) => (
                 mapping.local.clone(),
@@ -194,6 +205,7 @@ impl NetworkDrivesView {
         ] {
             input.update(cx, |input, cx| input.set_value(value, window, cx));
         }
+        self.editing = Some(mapping.local);
         self.step = Step::Idle;
         cx.notify();
     }
@@ -283,19 +295,8 @@ impl NetworkDrivesView {
             Ok(mapping) => mapping,
             Err(problem) => return self.set_step(Step::Failed(problem.into()), cx),
         };
-        if mapping.local.is_empty() {
-            return self.set_step(
-                Step::Failed("Choose the folder on this computer.".into()),
-                cx,
-            );
-        }
-        if !ph_remote::mapping::valid_host(&mapping.host) {
-            return self.set_step(
-                Step::Failed(
-                    "Give the server as user@host, or a host from your SSH config.".into(),
-                ),
-                cx,
-            );
+        if let Some(problem) = mapping.connect_problem() {
+            return self.set_step(Step::Failed(problem.into()), cx);
         }
         self.set_step(
             Step::Working(format!("Connecting to {}…", mapping.host).into()),
@@ -313,23 +314,21 @@ impl NetworkDrivesView {
                     let probe = mapping.clone();
                     let keys = cx
                         .background_spawn(async move {
-                            let resolved = check::resolve(&probe)?;
-                            let keys = check::host_keys(&resolved)?;
-                            anyhow::Ok((resolved, keys))
+                            let hostname = check::resolve(&probe)
+                                .map(|resolved| resolved.hostname)
+                                .unwrap_or_else(|_| probe.host.clone());
+                            anyhow::Ok((hostname, check::host_keys(&probe)?))
                         })
                         .await;
                     Some(match keys {
-                        Ok((resolved, keys)) => Step::Trust { resolved, keys },
+                        Ok((hostname, keys)) => Step::Trust { hostname, keys },
                         Err(err) => Step::Failed(format!("{err:#}").into()),
                     })
                 }
-                Access::ChangedHost => Some(Step::Failed(
-                    format!(
-                        "{}'s key is not the one trusted before. This can mean someone is intercepting the connection. Check with whoever runs the server; if the server was really reinstalled, remove its old key (ssh-keygen -R {}) and check again.",
-                        mapping.host, mapping.host
-                    )
-                    .into(),
-                )),
+                Access::ChangedHost => Some(Step::Changed {
+                    mapping: mapping.clone(),
+                    again: false,
+                }),
                 Access::NoKey => {
                     let key = cx.background_spawn(async { check::public_key() }).await;
                     Some(Step::NeedKey { key })
@@ -342,10 +341,31 @@ impl NetworkDrivesView {
                 _ = this.update(cx, |this, cx| this.set_step(step, cx));
                 return;
             }
-            // Signed in. Where is the folder on the server?
+            // Signed in. Where is the folder on the server? Samba knows by
+            // the share's name: as detected, else the drive's, else the
+            // folder's own (a share is often named like its folder).
+            let mut share = share;
+            if mapping.remote.is_empty() && share.is_empty() {
+                let local = PathBuf::from(&mapping.local);
+                share = cx
+                    .background_spawn(async move {
+                        ph_remote::drives::network_drive_of(&local)
+                            .map(|drive| drive.share)
+                            .or_else(|| {
+                                local
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                            })
+                            .unwrap_or_default()
+                    })
+                    .await;
+            }
             if mapping.remote.is_empty() && !share.is_empty() {
                 _ = this.update(cx, |this, cx| {
-                    this.set_step(Step::Working("Asking the server where the share is…".into()), cx)
+                    this.set_step(
+                        Step::Working("Asking the server where the share is…".into()),
+                        cx,
+                    )
                 });
                 let probe = mapping.clone();
                 if let Some(path) = cx
@@ -360,7 +380,9 @@ impl NetworkDrivesView {
                 }
             }
             if let Some(problem) = mapping.problem() {
-                _ = this.update(cx, |this, cx| this.set_step(Step::Failed(problem.into()), cx));
+                _ = this.update(cx, |this, cx| {
+                    this.set_step(Step::Failed(problem.into()), cx)
+                });
                 return;
             }
             _ = this.update(cx, |this, cx| {
@@ -376,7 +398,9 @@ impl NetworkDrivesView {
                     let git = checked.git.unwrap_or_else(|| {
                         "no Git on the server: Git features will not work there".into()
                     });
-                    this.mappings.retain(|known| known.local != mapping.local);
+                    let replaced = this.editing.take().unwrap_or_else(|| mapping.local.clone());
+                    this.mappings
+                        .retain(|known| known.local != mapping.local && known.local != replaced);
                     this.mappings.push(mapping.clone());
                     let step = match save(&this.store, this.mappings.clone(), cx) {
                         Ok(()) => Step::Saved(
@@ -397,17 +421,47 @@ impl NetworkDrivesView {
     }
 
     fn trust(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Step::Trust { resolved, keys } = &self.step else {
+        let Step::Trust { keys, .. } = &self.step else {
             return;
         };
-        let (resolved, keys) = (resolved.clone(), keys.clone());
+        let keys = keys.clone();
         self.set_step(Step::Working("Trusting the server…".into()), cx);
         self._task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { check::trust(&resolved, &keys) })
+                .background_spawn(async move { check::trust(&keys) })
                 .await;
             _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(()) => this.check(window, cx),
+                Err(err) => this.set_step(Step::Failed(format!("{err:#}").into()), cx),
+            });
+        }));
+    }
+
+    /// Forgets the server's old key (it was reinstalled), then checks again.
+    /// A key still differing after that is in the user's own `known_hosts`.
+    fn forget(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Step::Changed { mapping, .. } = &self.step else {
+            return;
+        };
+        let mapping = mapping.clone();
+        self.set_step(Step::Working("Forgetting the old key…".into()), cx);
+        self._task = Some(cx.spawn_in(window, async move |this, cx| {
+            let probe = mapping.clone();
+            let result = cx
+                .background_spawn(async move {
+                    check::forget(&probe)?;
+                    anyhow::Ok(check::access(&probe))
+                })
+                .await;
+            _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(Access::ChangedHost) => this.set_step(
+                    Step::Changed {
+                        mapping,
+                        again: true,
+                    },
+                    cx,
+                ),
+                Ok(_) => this.check(window, cx),
                 Err(err) => this.set_step(Step::Failed(format!("{err:#}").into()), cx),
             });
         }));
@@ -436,8 +490,14 @@ impl NetworkDrivesView {
         let view = cx.new(|cx| TerminalView::new(terminal.clone(), cx));
         let subscription = cx.subscribe_in(&terminal, window, move |this, _, event, window, cx| {
             if let TerminalEvent::Exited = event {
+                // Installed only if that worked (a wrong password exits 255).
+                let succeeded = this
+                    .terminal
+                    .as_ref()
+                    .and_then(|(view, _)| view.read(cx).terminal().read(cx).exit_code())
+                    == Some(0);
                 this.terminal = None;
-                this.installed |= installs;
+                this.installed |= installs && succeeded;
                 this.check(window, cx);
             }
         });
@@ -485,15 +545,48 @@ impl NetworkDrivesView {
             Step::Working(text) => note(text.clone(), theme.muted_foreground),
             Step::Failed(text) => note(text.clone(), theme.danger),
             Step::Saved(text) => note(text.clone(), theme.success),
-            Step::Trust { resolved, keys } => v_flex()
+            Step::Changed { mapping, again } => {
+                let text = if *again {
+                    format!(
+                        "The old key is in your own SSH settings, not PilotHouse's. If the server really was reinstalled, remove it there (in a terminal: {}) and check again.",
+                        check::forget_command(mapping)
+                    )
+                } else {
+                    format!(
+                        "{}'s key is not the one trusted before. This can mean someone is intercepting the connection. Ask whoever runs the server; only if it was reinstalled, forget the old key and check the new one.",
+                        mapping.host
+                    )
+                };
+                v_flex()
+                    .gap_2()
+                    .p_3()
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(theme.danger.opacity(0.6))
+                    .child(div().text_sm().child(text))
+                    .when(!*again, |this| {
+                        this.child(
+                            h_flex().child(
+                                Button::new("forget-key")
+                                    .small()
+                                    .danger()
+                                    .label("Forget the old key")
+                                    .on_click(
+                                        cx.listener(|this, _, window, cx| this.forget(window, cx)),
+                                    ),
+                            ),
+                        )
+                    })
+                    .into_any_element()
+            }
+            Step::Trust { hostname, keys } => v_flex()
                 .gap_2()
                 .p_3()
                 .rounded(theme.radius)
                 .border_1()
                 .border_color(theme.warning.opacity(0.5))
                 .child(div().text_sm().child(format!(
-                    "{} is new to this computer. Trust it if its fingerprint is the one its admin gives you:",
-                    resolved.hostname
+                    "{hostname} is new to this computer. Trust it if its fingerprint is the one its admin gives you:"
                 )))
                 .children(keys.iter().map(|key| {
                     h_flex()
