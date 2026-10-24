@@ -1,10 +1,10 @@
 //! Which devices exist: connected phones and emulators, and AVDs to start.
 //!
-//! One manager for the app (devices are not per project). It follows
-//! `adb track-devices`, which reports changes as they happen, so the list is
-//! current without polling.
+//! One manager for the app (devices are not per project). It follows device
+//! changes as the adb server reports them, so the list is current without
+//! polling.
 
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -174,38 +174,16 @@ impl DeviceManager {
         self.tracking = true;
         let emulator = self.sdk.emulator.clone();
         let (changes, receiver) = smol::channel::unbounded::<()>();
-        // `track-devices` prints a length-prefixed list on every change.
         let track_adb = adb.clone();
         std::thread::Builder::new()
             .name("adb-track-devices".into())
             .spawn(move || {
-                let Ok(mut child) = track_adb
-                    .command(None)
-                    .arg("track-devices")
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-                else {
-                    return;
-                };
-                let mut stdout = child.stdout.take().expect("piped stdout");
-                let _ = changes.send_blocking(());
-                loop {
-                    let mut length = [0u8; 4];
-                    if stdout.read_exact(&mut length).is_err() {
-                        break;
-                    }
-                    let length =
-                        usize::from_str_radix(std::str::from_utf8(&length).unwrap_or("0"), 16)
-                            .unwrap_or(0);
-                    let mut payload = vec![0; length];
-                    if stdout.read_exact(&mut payload).is_err()
-                        || changes.send_blocking(()).is_err()
-                    {
-                        break;
-                    }
+                // The server can restart (`adb kill-server`, an SDK update):
+                // follow it again while anyone listens.
+                while !changes.is_closed() {
+                    track_devices(&track_adb, &changes);
+                    std::thread::sleep(Duration::from_secs(5));
                 }
-                let _ = child.kill();
             })
             .ok();
         self._track = Some(cx.spawn(async move |this, cx| {
@@ -399,4 +377,53 @@ fn wait_for_boot(adb: &Adb, avd: &str) -> Result<String> {
         "{avd} did not finish booting within {} seconds",
         BOOT_TIMEOUT.as_secs()
     )
+}
+
+/// Follows device changes on the adb server's own socket, the way
+/// `adb track-devices` does, and sends one message per change. A socket
+/// rather than that command: a helper process would outlive the app when
+/// it quits or is killed, and nothing reaps it until a device changes.
+fn track_devices(adb: &Adb, changes: &smol::channel::Sender<()>) {
+    // The server may not be running yet; this starts it (as any adb call
+    // does) and returns once it listens.
+    let _ = adb
+        .command(None)
+        .arg("start-server")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let port = std::env::var("ANDROID_ADB_SERVER_PORT")
+        .ok()
+        .and_then(|port| port.parse::<u16>().ok())
+        .unwrap_or(5037);
+    let Ok(mut server) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+        tracing::warn!("cannot reach the adb server on port {port}");
+        return;
+    };
+    // Requests are a 4-digit hex length and the request; the server answers
+    // OKAY, then a length-prefixed device list on every change.
+    let request = "host:track-devices";
+    let mut status = [0u8; 4];
+    if server
+        .write_all(format!("{:04x}{request}", request.len()).as_bytes())
+        .is_err()
+        || server.read_exact(&mut status).is_err()
+        || &status != b"OKAY"
+    {
+        tracing::warn!("the adb server refused to report devices");
+        return;
+    }
+    let _ = changes.send_blocking(());
+    loop {
+        let mut length = [0u8; 4];
+        if server.read_exact(&mut length).is_err() {
+            break;
+        }
+        let length =
+            usize::from_str_radix(std::str::from_utf8(&length).unwrap_or("0"), 16).unwrap_or(0);
+        let mut payload = vec![0; length];
+        if server.read_exact(&mut payload).is_err() || changes.send_blocking(()).is_err() {
+            break;
+        }
+    }
 }
