@@ -65,6 +65,8 @@ pub fn show(root: &Path, index: usize) -> Result<String> {
             "show",
             "-p",
             "--include-untracked",
+            "--no-ext-diff",
+            "--no-textconv",
             "--no-color",
             &reference(index),
         ],

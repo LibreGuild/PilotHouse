@@ -27,7 +27,8 @@ PilotHouse runs on your machine with your permissions and has no server. The thi
 
 Opening a project should not run its code:
 
-- `git` runs with `core.fsmonitor` off and without external diff or text conversion drivers, which a repository's config could otherwise point at programs.
+- `git` runs with `core.fsmonitor` off and without external diff or text conversion drivers (`--no-ext-diff`, `--no-textconv` on every diff, stash preview and blame), which a repository's config could otherwise point at programs. A test (`reading_a_repository_runs_none_of_its_programs`) sets them all and checks none runs.
+- Checkpoints store and restore files' exact bytes, with line-ending conversion and attributes off.
 - Detected run configurations quote script names, since names come from the repository and are typed into a shell. Running a configuration still runs that project's scripts, as it would in a terminal.
 - Nothing is executed during detection; files are only read.
 
@@ -42,4 +43,5 @@ Chrome starts with sync, component updates, metrics and other Google services of
 ## Known limits
 
 - Any process running as **you** can use the control socket, as it can read your files. That is the same trust boundary as your shell.
+- Git **filter** programs (`filter.<name>.clean` in a repository's own `.git/config`) still run when Git compares or stages files, as in every Git tool: turning them off would break Git LFS and git-crypt. A repository you clone has no such config; a folder copied with its `.git` from someone else can. Clone repositories you do not trust instead of copying them.
 - The browser pane is macOS and Linux only for now; Windows needs the handle-based pipe variant.

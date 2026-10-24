@@ -48,7 +48,15 @@ pub fn changes_since(worktree: &Path, base: &str) -> Result<DiffStat> {
     let now = snapshot(worktree)?;
     let out = git(
         worktree,
-        &["diff", "--shortstat", "--no-renames", base, &now],
+        &[
+            "diff",
+            "--shortstat",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+            &now,
+        ],
     )?;
     Ok(parse_shortstat(&out))
 }

@@ -242,8 +242,8 @@ impl PullsPanel {
             async move {
                 let range = format!("origin/{base}..HEAD");
                 let commits = ph_git::log::summaries(&root, &range)?;
-                let stat = ph_git::git(&root, &["diff", "--stat", &format!("origin/{base}...HEAD")])?;
-                let diff = ph_git::git(&root, &["diff", "--no-color", "--no-ext-diff", &format!("origin/{base}...HEAD")])?;
+                let stat = ph_git::git(&root, &["diff", "--stat", "--no-ext-diff", "--no-textconv", &format!("origin/{base}...HEAD")])?;
+                let diff = ph_git::git(&root, &["diff", "--no-color", "--no-ext-diff", "--no-textconv", &format!("origin/{base}...HEAD")])?;
                 anyhow::Ok(format!(
                     "Write a pull request description in Markdown for these changes: a short \\
                      summary, then a bullet list of what changed and why, then how to test \\
