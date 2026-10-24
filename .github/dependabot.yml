@@ -7,6 +7,9 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
+      # The RustCrypto crates share the `digest` traits: they move together.
+      rustcrypto:
+        patterns: [digest, hmac, md-5, sha1, sha2]
       cargo-minor:
         update-types: [minor, patch]
   - package-ecosystem: github-actions

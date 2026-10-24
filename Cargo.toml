@@ -14,7 +14,7 @@ publish = false
 # GPUI Kit pins one exact GPUI snapshot; bump deliberately (see docs/architecture.md).
 gpui-kit = { version = "=0.8.0", features = ["syntect"] }
 anyhow = "1"
-dirs = "6"
+dirs = "7"
 dunce = "1"
 agent-client-protocol-schema = { version = "=1.12.0", default-features = false }
 futures = "0.3"
