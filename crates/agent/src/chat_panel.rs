@@ -839,6 +839,10 @@ impl ChatPanel {
                 cx.notify();
             }
         }
+        // The picker stays open: the keyboard stays in it, so the arrows,
+        // typing and Escape still work after a click.
+        self.picker_search
+            .update(cx, |search, cx| search.focus(window, cx));
     }
 
     /// The picker opened: this chat's agent, no filter, typing goes there.
