@@ -1,6 +1,11 @@
 //! Draws one [`Terminal`] as styled text lines and turns keys, the mouse
 //! and the clipboard into input. The terminal itself (shell and screen)
 //! lives outside the view, so closing the view leaves the shell running.
+//!
+//! Keys that are not text (Enter, arrows, Ctrl-C) are sent from `key_down`.
+//! Text arrives through the platform's text input instead, so accents, input
+//! methods (Chinese, Japanese, Korean) and dictation work as anywhere else:
+//! text being composed is held until it is committed.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -12,10 +17,11 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermMode};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
-    App, Bounds, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, Font,
-    FontStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
-    ParentElement as _, Pixels, Render, ScrollWheelEvent, StrikethroughStyle, Styled as _,
-    StyledText, Subscription, TextRun, UnderlineStyle, Window, canvas, div, font, px,
+    App, Bounds, ClipboardItem, Context, ElementInputHandler, Entity, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Pixels,
+    Render, ScrollWheelEvent, StrikethroughStyle, Styled as _, StyledText, Subscription, TextRun,
+    UTF16Selection, UnderlineStyle, Window, canvas, div, font, point, px, size,
 };
 
 use crate::palette::Palette;
@@ -40,6 +46,8 @@ pub struct TerminalView {
     cell: Cell<(f32, f32)>,
     /// A mouse drag is selecting text.
     selecting: bool,
+    /// Text an input method is composing, not sent yet.
+    composing: String,
     _observe: Subscription,
 }
 
@@ -54,6 +62,7 @@ impl TerminalView {
             last_bounds: Rc::default(),
             cell: Cell::new((0., 0.)),
             selecting: false,
+            composing: String::new(),
         }
     }
 
@@ -62,7 +71,25 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // Plain text is left to the text input (`replace_text_in_range`).
+        if is_text(&event.keystroke) || !self.composing.is_empty() {
+            return;
+        }
         self.send_keystroke(&event.keystroke, cx);
+    }
+
+    /// Sends typed text to the shell.
+    fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        let terminal = self.terminal.read(cx);
+        let mut term = terminal.term().lock();
+        term.selection = None;
+        term.scroll_display(Scroll::Bottom);
+        drop(term);
+        terminal.write(text.as_bytes().to_vec());
+        cx.notify();
     }
 
     fn key_action(&mut self, action: &crate::TerminalKey, _: &mut Window, cx: &mut Context<Self>) {
@@ -390,7 +417,12 @@ impl Render for TerminalView {
                     });
                 }
             },
-            |_, _, _, _| {},
+            {
+                let (focus, view) = (self.focus_handle.clone(), cx.entity());
+                move |bounds, _, window, cx| {
+                    window.handle_input(&focus, ElementInputHandler::new(bounds, view), cx)
+                }
+            },
         )
         .absolute()
         .size_full();
@@ -429,5 +461,108 @@ impl Render for TerminalView {
                             .child(StyledText::new(line.text).with_runs(line.runs))
                     })),
             )
+    }
+}
+
+/// A key that types text (a letter, digit, symbol or space, with Shift or
+/// none), as opposed to Enter, arrows or a Ctrl, Alt or ⌘ shortcut.
+fn is_text(keystroke: &gpui_kit::Keystroke) -> bool {
+    let modifiers = &keystroke.modifiers;
+    !(modifiers.control || modifiers.alt || modifiers.platform || modifiers.function)
+        && keystroke
+            .key_char
+            .as_deref()
+            .is_some_and(|text| !text.is_empty() && !text.chars().any(char::is_control))
+}
+
+/// The platform's text input: typed and composed text.
+impl EntityInputHandler for TerminalView {
+    fn text_for_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        adjusted: &mut Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        let utf16: Vec<u16> = self.composing.encode_utf16().collect();
+        let range = range.start.min(utf16.len())..range.end.min(utf16.len());
+        *adjusted = Some(range.clone());
+        Some(String::from_utf16_lossy(&utf16[range]))
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let end = self.composing.encode_utf16().count();
+        Some(UTF16Selection {
+            range: end..end,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        (!self.composing.is_empty()).then(|| 0..self.composing.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
+        self.composing.clear();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _: Option<std::ops::Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.composing.clear();
+        self.type_text(text, cx);
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<std::ops::Range<usize>>,
+        text: &str,
+        _: Option<std::ops::Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.composing = text.to_string();
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _: std::ops::Range<usize>,
+        element: Bounds<Pixels>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        // The input method's window goes at the cursor.
+        let (width, height) = self.cell.get();
+        let cursor = self.terminal.read(cx).term().lock().grid().cursor.point;
+        Some(Bounds::new(
+            point(
+                element.origin.x + px(width * cursor.column.0 as f32),
+                element.origin.y + px(height * cursor.line.0.max(0) as f32),
+            ),
+            size(px(width.max(1.)), px(height.max(1.))),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _: gpui_kit::Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
     }
 }

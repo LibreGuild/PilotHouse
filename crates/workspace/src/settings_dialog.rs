@@ -513,46 +513,20 @@ fn system_group() -> SettingGroup {
     )
 }
 
-/// The main shortcuts, written for this platform.
+/// Every shortcut: the same sheet as ⌘/, read from the key bindings.
 fn shortcuts_page() -> SettingPage {
-    const SHORTCUTS: &[(&str, &str)] = &[
-        ("Command palette", "secondary-k"),
-        ("New chat", "secondary-n"),
-        ("Search chats", "secondary-shift-k"),
-        ("Ask about selected code or terminal output", "secondary-l"),
-        ("Find a file", "secondary-p"),
-        ("Search in workspace", "secondary-shift-f"),
-        ("Send a screenshot to chat", "secondary-shift-s"),
-        ("Toggle sidebar", "secondary-b"),
-        ("Toggle side panel", "secondary-j"),
-        ("Maximize side panel", "secondary-shift-j"),
-        ("Files · Changes · Board · Terminal", "secondary-1"),
-        ("Browser · Devices · Run", "secondary-5"),
-        ("Settings", "secondary-,"),
-    ];
     SettingPage::new("Shortcuts")
         .icon(Icon::new(Icons::Keyboard))
         .group(
-            SettingGroup::new().items(SHORTCUTS.iter().map(|(name, binding)| {
-                SettingItem::render(move |_, _, cx| {
-                    h_flex()
+            SettingGroup::new().item(
+                SettingItem::render(|_, window, cx| {
+                    div()
                         .w_full()
-                        .justify_between()
-                        .text_sm()
-                        .child(*name)
-                        .child(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded(cx.theme().radius)
-                                .bg(cx.theme().muted)
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_xs()
-                                .child(ph_ui::platform::shortcut(binding)),
-                        )
+                        .py_1()
+                        .child(crate::shortcuts::render(window, cx))
                 })
-                .keywords(["shortcut", "keyboard", "key"])
-            })),
+                .keywords(["shortcut", "keyboard", "key"]),
+            ),
         )
 }
 
