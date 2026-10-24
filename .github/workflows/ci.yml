@@ -61,7 +61,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --features pilothouse/automation -- -D warnings
       - name: Tests
-        run: cargo test --workspace --features pilothouse/automation
+        run: cargo test --workspace --features pilothouse/automation --no-fail-fast
       - name: Release build
         run: cargo build --release -p pilothouse
 

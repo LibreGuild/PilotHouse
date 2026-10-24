@@ -14,6 +14,9 @@ pub fn temp_repo(name: &str) -> PathBuf {
     run(&["config", "user.email", "test@example.com"]);
     run(&["config", "user.name", "Test"]);
     run(&["config", "commit.gpgsign", "false"]);
+    // Files as written, whatever this machine's Git does with line endings
+    // (Windows runners convert them by default).
+    run(&["config", "core.autocrlf", "false"]);
     std::fs::write(root.join("README.md"), "# Test\n").unwrap();
     run(&["add", "README.md"]);
     run(&["commit", "-q", "-m", "init"]);

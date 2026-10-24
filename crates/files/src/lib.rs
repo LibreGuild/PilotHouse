@@ -35,6 +35,8 @@ actions!(
     [
         /// Fuzzy-find a file and open it (⌘P).
         QuickOpen,
+        /// Open the file selected in the tree (Enter; arrows move and fold).
+        OpenSelected,
         /// Search the whole project for text (⌘⇧F).
         FindInProject,
         /// Save the file in the focused editor (⌘S).
@@ -63,6 +65,7 @@ actions!(
 pub fn init(cx: &mut App, workspace_context: &'static str) {
     cx.bind_keys([
         KeyBinding::new("secondary-p", QuickOpen, Some(workspace_context)),
+        KeyBinding::new("enter", OpenSelected, Some("Tree")),
         KeyBinding::new("secondary-shift-f", FindInProject, Some(workspace_context)),
         KeyBinding::new("secondary-s", SaveFile, Some(file_view::FILE_VIEW_CONTEXT)),
         KeyBinding::new(

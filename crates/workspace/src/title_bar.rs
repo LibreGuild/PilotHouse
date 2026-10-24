@@ -7,6 +7,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::{Enter, Input, MoveDown, MoveUp},
     kbd::Kbd,
     menu::PopupMenuItem,
     popover::Popover,
@@ -206,6 +207,23 @@ fn switcher(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         })
         .collect();
     let current = rows.iter().find(|row| Some(row.id) == active).cloned();
+    // The filter keeps each row's place in the full list (its shortcut).
+    let query = workspace
+        .switcher_search
+        .read(cx)
+        .value()
+        .trim()
+        .to_lowercase();
+    let listed: Vec<(usize, Row)> = rows
+        .iter()
+        .cloned()
+        .enumerate()
+        .filter(|(_, row)| query.is_empty() || row.name.to_lowercase().contains(&query))
+        .collect();
+    let highlight = workspace
+        .switcher_highlight
+        .min(listed.len().saturating_sub(1));
+    let search = workspace.switcher_search.clone();
     let others_want_you = rows
         .iter()
         .filter(|row| Some(row.id) != active && row.status.wants_you())
@@ -231,19 +249,55 @@ fn switcher(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .tooltip("Switch workspace")
         .accessibility_label("Switch workspace");
     let entity = cx.entity().downgrade();
+    let opened = entity.clone();
     let popover = Popover::new("workspace-switcher")
         .offset(ph_ui::POPUP_GAP)
         .anchor(gpui_kit::Anchor::TopLeft)
         .trigger(trigger)
+        .on_open_change(move |open, window, cx| {
+            if *open {
+                _ = opened.update(cx, |workspace, cx| workspace.switcher_opened(window, cx));
+            }
+        })
         .content(move |_, _, cx| {
             let popover = cx.entity().downgrade();
             let dark = cx.theme().is_dark();
             let close = move |window: &mut Window, cx: &mut App| {
                 _ = popover.update(cx, |popover, cx| popover.dismiss(window, cx));
             };
-            let list = rows.iter().enumerate().map(|(ix, row)| {
+            // ↑/↓ move the highlight, Enter opens it.
+            let step = |by: isize| {
+                let (entity, count) = (entity.clone(), listed.len());
+                move |window: &mut Window, cx: &mut App| {
+                    let _ = window;
+                    cx.stop_propagation();
+                    _ = entity.update(cx, |workspace, cx| {
+                        let next =
+                            workspace.switcher_highlight.min(count.saturating_sub(1)) as isize + by;
+                        workspace.switcher_highlight =
+                            next.clamp(0, count.saturating_sub(1) as isize) as usize;
+                        cx.notify();
+                    });
+                }
+            };
+            let (up, down) = (step(-1), step(1));
+            let enter = {
+                let (entity, close) = (entity.clone(), close.clone());
+                let target = listed.get(highlight).map(|(_, row)| row.id);
+                move |window: &mut Window, cx: &mut App| {
+                    cx.stop_propagation();
+                    if let Some(id) = target {
+                        _ = entity
+                            .update(cx, |workspace, cx| workspace.open_project(id, window, cx));
+                        close(window, cx);
+                    }
+                }
+            };
+            let list = listed.iter().enumerate().map(|(shown, (ix, row))| {
+                let ix = *ix;
                 let (entity, close, id) = (entity.clone(), close.clone(), row.id);
                 let selected = Some(row.id) == active;
+                let highlighted = shown == highlight;
                 let summary = row.status.summary(cx);
                 h_flex()
                     .id(("switch-workspace", ix))
@@ -254,6 +308,9 @@ fn switcher(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
                     .rounded(cx.theme().radius)
                     .cursor_pointer()
                     .when(selected, |this| this.bg(cx.theme().secondary))
+                    .when(highlighted && !selected, |this| {
+                        this.bg(cx.theme().secondary_hover)
+                    })
                     .hover(|style| style.bg(cx.theme().secondary_hover))
                     .on_click(move |_, window, cx| {
                         _ = entity
@@ -319,7 +376,17 @@ fn switcher(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
             v_flex()
                 .w(px(340.))
                 .gap_0p5()
+                .capture_action(move |_: &MoveUp, window, cx| up(window, cx))
+                .capture_action(move |_: &MoveDown, window, cx| down(window, cx))
+                .capture_action(move |_: &Enter, window, cx| enter(window, cx))
                 .child(section_label("Workspaces", cx))
+                .child(
+                    div().px_1().pb_1().child(
+                        Input::new(&search)
+                            .small()
+                            .prefix(Icon::new(IconName::Search).xsmall()),
+                    ),
+                )
                 .children(list)
                 .child(div().my_1().h_px().bg(cx.theme().border))
                 .child(action(

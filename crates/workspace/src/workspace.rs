@@ -41,6 +41,9 @@ pub struct Workspace {
     statuses: HashMap<ProjectId, WorkspaceStatus>,
     /// When each loaded but hidden workspace was last shown.
     hidden_since: HashMap<ProjectId, std::time::Instant>,
+    /// The workspace switcher's filter, and its keyboard highlight.
+    pub(crate) switcher_search: Entity<gpui_kit::component::input::InputState>,
+    pub(crate) switcher_highlight: usize,
     _status_poll: gpui_kit::Task<()>,
     _subscriptions: Vec<Subscription>,
     /// The title bar's inbox and to-dos.
@@ -80,6 +83,18 @@ impl Workspace {
         let weak = cx.weak_entity();
         let inbox = cx.new(|cx| crate::inbox::InboxView::new(weak, window, cx));
         let inbox_subscription = cx.observe(&inbox, |_, _, cx| cx.notify());
+        let switcher_search = cx.new(|cx| {
+            gpui_kit::component::input::InputState::new(window, cx).placeholder("Find a workspace")
+        });
+        let switcher_subscription = cx.subscribe(
+            &switcher_search,
+            |this, _, event: &gpui_kit::component::input::InputEvent, cx| {
+                if let gpui_kit::component::input::InputEvent::Change = event {
+                    this.switcher_highlight = 0;
+                    cx.notify();
+                }
+            },
+        );
         // Schedules run app-wide; the inbox shows what they did.
         let automation = crate::schedules::Automation::global(cx);
         let automation_subscription = cx.subscribe(
@@ -96,6 +111,8 @@ impl Workspace {
             sidebar_collapsed,
             statuses: HashMap::new(),
             hidden_since: HashMap::new(),
+            switcher_search,
+            switcher_highlight: 0,
             // Status comes from chats and test runs outside this window; a
             // cheap look each second catches every change.
             _status_poll: cx.spawn(async move |this, cx| {
@@ -115,6 +132,7 @@ impl Workspace {
                 appearance_subscription,
                 inbox_subscription,
                 automation_subscription,
+                switcher_subscription,
             ],
             inbox,
         };
@@ -151,6 +169,18 @@ impl Workspace {
 
     pub fn is_sidebar_collapsed(&self) -> bool {
         self.sidebar_collapsed
+    }
+
+    /// The switcher opened: no filter, typing goes there.
+    pub(crate) fn switcher_opened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.switcher_highlight = 0;
+        let search = self.switcher_search.clone();
+        window.defer(cx, move |window, cx| {
+            search.update(cx, |search, cx| {
+                search.set_value("", window, cx);
+                search.focus(window, cx);
+            })
+        });
     }
 
     /// This window has a screen for workspace `id`.

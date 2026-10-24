@@ -49,11 +49,29 @@ pub struct Restored {
     pub undo: String,
 }
 
+/// Git's empty tree, as a source of no attributes.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 /// Runs git with the given index file and the checkpoint identity.
+///
+/// Line-ending conversion is off (`core.autocrlf`, `.gitattributes`): a
+/// checkpoint stores the files' exact bytes and a restore writes them back
+/// exactly, or a Windows user's LF files would come back as CRLF.
 fn git_in(root: &Path, index: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String> {
+    let no_attributes = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let mut command = command(root);
     command
+        .args([
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.safecrlf=false",
+            "-c",
+            &format!("core.attributesFile={no_attributes}"),
+        ])
         .args(args)
+        .env("GIT_ATTR_SOURCE", EMPTY_TREE)
+        .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_INDEX_FILE", index)
         .env("GIT_LITERAL_PATHSPECS", "1")
         .envs(IDENTITY)
@@ -288,6 +306,31 @@ pub fn restore(root: &Path, checkpoint: &str) -> Result<Restored> {
 mod tests {
     use super::*;
     use crate::testing::temp_repo;
+
+    /// A Git set to convert line endings must not change a restored file.
+    #[test]
+    fn restores_files_byte_for_byte() {
+        let root = temp_repo("crlf");
+        let run = |args: &[&str]| crate::git(&root, args).unwrap();
+        run(&["config", "core.autocrlf", "true"]);
+        std::fs::write(root.join("unix.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(root.join("dos.txt"), "one\r\ntwo\r\n").unwrap();
+        let checkpoint = create(&root, "before").unwrap().unwrap();
+        std::fs::write(root.join("unix.txt"), "changed\n").unwrap();
+        std::fs::write(root.join("dos.txt"), "changed\r\n").unwrap();
+        restore(&root, &checkpoint).unwrap();
+        assert_eq!(
+            std::fs::read(root.join("unix.txt")).unwrap(),
+            b"one\ntwo\n",
+            "LF stays LF"
+        );
+        assert_eq!(
+            std::fs::read(root.join("dos.txt")).unwrap(),
+            b"one\r\ntwo\r\n",
+            "CRLF stays CRLF"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn restores_tracked_untracked_and_removed_files() {

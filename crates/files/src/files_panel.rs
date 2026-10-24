@@ -350,6 +350,19 @@ impl FilesPanel {
         !self.open_files.is_empty()
     }
 
+    /// Opens the file selected in the tree (folders fold with the arrows).
+    pub fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self
+            .tree_state
+            .read(cx)
+            .selected_entry()
+            .filter(|entry| !entry.is_folder())
+            .map(|entry| entry.item().id.to_string());
+        if let Some(path) = selected {
+            self.open_file(&path, None, window, cx);
+        }
+    }
+
     /// The tree or the search results, for [`FileTree`].
     fn render_browser(&self, cx: &mut Context<Self>) -> AnyElement {
         match self.browse {
@@ -820,6 +833,12 @@ impl FileTree {
 impl Render for FileTree {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = self.files.update(cx, |files, cx| files.render_browser(cx));
-        div().size_full().child(body)
+        div()
+            .size_full()
+            .on_action(cx.listener(|this, _: &crate::OpenSelected, window, cx| {
+                this.files
+                    .update(cx, |files, cx| files.open_selected(window, cx))
+            }))
+            .child(body)
     }
 }

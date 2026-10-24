@@ -11,7 +11,10 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Enter, Escape, IndentInline, InputEvent, MoveDown, MoveUp, Textarea, TextareaState},
+    input::{
+        Enter, Escape, IndentInline, InputEvent, InputState, MoveDown, MoveUp, Textarea,
+        TextareaState,
+    },
     menu::{PopupMenu, PopupMenuItem},
     message_scroller::MessageScroller,
     popover::Popover,
@@ -37,7 +40,7 @@ use crate::chats::{ChatHub, DEFAULT_AGENT_KEY, WorkspaceChats, default_agent};
 use crate::connection::AgentConnection;
 use crate::entry_view::render_entry;
 use crate::mention_complete;
-use crate::model_picker::{self, Pick, PickerData};
+use crate::model_picker::{self, Pick, PickerData, PickerKey};
 use crate::options::{self, AgentOption, OptionCategory, OptionKind};
 use crate::review_card::ReviewCardEvent;
 use crate::thread::{ChatThread, ThreadEvent, ThreadProject, ThreadStatus};
@@ -125,6 +128,10 @@ pub struct ChatPanel {
     /// The model picker's search field.
     /// The agent whose models the open picker shows (`None`: this chat's).
     picker_view: Option<&'static AgentSpec>,
+    /// The picker's filter, and which of the models it lists is highlighted
+    /// for the keyboard.
+    picker_search: Entity<InputState>,
+    picker_highlight: usize,
     /// The mention suggestions open under the cursor.
     mention: Option<MentionMenu>,
     /// The project's files for `@` suggestions, and when they were listed.
@@ -182,6 +189,14 @@ impl ChatPanel {
                 }
             },
         );
+        let picker_search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter models"));
+        let picker_subscription =
+            cx.subscribe(&picker_search, |this, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    this.picker_highlight = 0;
+                    cx.notify();
+                }
+            });
         // The chats may predate this panel (a schedule started one), so
         // they get the folders as they are now.
         let chats = ChatHub::chats(&store, &project, cx);
@@ -196,6 +211,8 @@ impl ChatPanel {
             active: draft,
             composer,
             picker_view: None,
+            picker_search,
+            picker_highlight: 0,
             mention: None,
             files: None,
             symbols: Default::default(),
@@ -207,7 +224,7 @@ impl ChatPanel {
             next_title: None,
             live: None,
             history_menu: false,
-            _subscriptions: vec![subscription],
+            _subscriptions: vec![subscription, picker_subscription],
             _active_subscriptions: Vec::new(),
         };
         panel.watch_active(cx);
@@ -788,6 +805,8 @@ impl ChatPanel {
             started: thread.has_started(),
             agents,
             viewing: self.picker_view.unwrap_or(active),
+            query: self.picker_search.read(cx).value().to_string(),
+            highlight: self.picker_highlight,
         }
     }
 
@@ -816,9 +835,59 @@ impl ChatPanel {
             }
             Pick::View(agent) => {
                 self.picker_view = Some(agent);
+                self.picker_highlight = 0;
                 cx.notify();
             }
         }
+    }
+
+    /// The picker opened: this chat's agent, no filter, typing goes there.
+    fn picker_opened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.picker_view = None;
+        self.picker_highlight = 0;
+        let search = self.picker_search.clone();
+        window.defer(cx, move |window, cx| {
+            search.update(cx, |search, cx| {
+                search.set_value("", window, cx);
+                search.focus(window, cx);
+            })
+        });
+    }
+
+    /// The picker's keys: ↑/↓ move the highlight, Enter picks it, Tab shows
+    /// the next agent.
+    pub(crate) fn picker_key(
+        &mut self,
+        key: PickerKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let data = self.picker_data(cx);
+        let models = model_picker::listed_models(&data);
+        match key {
+            PickerKey::Up => {
+                self.picker_highlight = self.picker_highlight.saturating_sub(1);
+            }
+            PickerKey::Down => {
+                self.picker_highlight =
+                    (self.picker_highlight + 1).min(models.len().saturating_sub(1));
+            }
+            PickerKey::Pick => {
+                if let Some(pick) = models.into_iter().nth(self.picker_highlight) {
+                    self.pick(pick, window, cx);
+                }
+            }
+            PickerKey::NextAgent => {
+                let ix = data
+                    .agents
+                    .iter()
+                    .position(|(agent, _)| agent.id == data.viewing.id)
+                    .unwrap_or_default();
+                let next = data.agents[(ix + 1) % data.agents.len()].0;
+                self.pick(Pick::View(next), window, cx);
+            }
+        }
+        cx.notify();
     }
 
     /// Continues this chat with `agent` in a new chat: the new agent gets a
@@ -1425,16 +1494,17 @@ fn model_button(
         .on_open_change({
             let panel = panel.clone();
             // Each opening shows this chat's agent first.
-            move |open, _, cx| {
+            move |open, window, cx| {
                 if *open {
-                    _ = panel.update(cx, |panel, _| panel.picker_view = None);
+                    _ = panel.update(cx, |panel, cx| panel.picker_opened(window, cx));
                 }
             }
         })
         .content(move |_, _, cx| match panel.upgrade() {
             Some(chat) => {
                 let data = chat.read(cx).picker_data(cx);
-                model_picker::render(&data, panel.clone(), cx)
+                let search = chat.read(cx).picker_search.clone();
+                model_picker::render(&data, &search, panel.clone(), cx)
             }
             None => div().into_any_element(),
         })
