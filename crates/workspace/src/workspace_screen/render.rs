@@ -3,7 +3,7 @@
 
 use super::*;
 
-impl ProjectSpace {
+impl WorkspaceScreen {
     /// The chat, under what finished while the workspace was away.
     pub(super) fn render_chat(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(away) = &self.away else {
@@ -431,7 +431,7 @@ impl ProjectSpace {
     }
 }
 
-impl Render for ProjectSpace {
+impl Render for WorkspaceScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let labels = ph_theme::preferences::preferences(cx).tool_labels;
         let sidebar = if self.sidebar_shown {

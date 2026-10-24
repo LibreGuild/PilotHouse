@@ -93,7 +93,7 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
 
 /// Branch, ahead/behind and a running operation; opens the branch picker.
 fn branch_item(
-    space: &gpui_kit::Entity<crate::project_space::ProjectSpace>,
+    space: &gpui_kit::Entity<crate::workspace_screen::WorkspaceScreen>,
     cx: &Context<Workspace>,
 ) -> Option<AnyElement> {
     let space_ref = space.read(cx);

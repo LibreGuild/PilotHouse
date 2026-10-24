@@ -3,7 +3,7 @@
 
 use super::*;
 
-impl ProjectSpace {
+impl WorkspaceScreen {
     /// Selected code goes to the chat: attached, with a prompt for the
     /// chosen intent (or left for the user to finish typing).
     pub(super) fn ask_about_code(

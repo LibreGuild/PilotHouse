@@ -2,7 +2,7 @@
 //! is open), the chat, the tool panel and the icon bar that picks the tool,
 //! plus what the window's sidebar shows for it (the file tree, the chats).
 //!
-//! A `ProjectSpace` is the screen of a workspace. Its running work (chats,
+//! A `WorkspaceScreen` is the screen of a workspace. Its running work (chats,
 //! shells, test runs) belongs to the workspace and outlives the screen (see
 //! [`ph_agent::chats`], [`ph_terminal::TerminalHub`],
 //! [`ph_uitest::runner`]), so a space can be rebuilt without stopping any.
@@ -56,7 +56,7 @@ mod to_chat;
 
 /// Emitted when something the sidebar or title bar shows has changed.
 #[derive(Debug, Clone)]
-pub enum ProjectSpaceEvent {
+pub enum WorkspaceScreenEvent {
     SessionsChanged,
     /// Show the sidebar's file tree (it may be hidden).
     RevealFiles,
@@ -93,7 +93,7 @@ struct Away {
     tests: bool,
 }
 
-pub struct ProjectSpace {
+pub struct WorkspaceScreen {
     project: Project,
     sessions: Vec<Session>,
     active_session: Option<SessionId>,
@@ -136,9 +136,9 @@ pub struct ProjectSpace {
     _subscriptions: Vec<Subscription>,
 }
 
-impl EventEmitter<ProjectSpaceEvent> for ProjectSpace {}
+impl EventEmitter<WorkspaceScreenEvent> for WorkspaceScreen {}
 
-impl ProjectSpace {
+impl WorkspaceScreen {
     pub fn new(project: Project, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store = AppState::store(cx);
         let saved = store.project_ui_state(project.id).unwrap_or_default();
@@ -571,10 +571,10 @@ impl ProjectSpace {
                 FilesPanelEvent::OpenFilesChanged => this.save_layout(cx),
                 FilesPanelEvent::Ask(ask) => this.ask_about_code(ask.clone(), window, cx),
                 FilesPanelEvent::MakePrimary(path) => {
-                    cx.emit(ProjectSpaceEvent::MakePrimary(path.clone()))
+                    cx.emit(WorkspaceScreenEvent::MakePrimary(path.clone()))
                 }
                 FilesPanelEvent::RemoveFolder(path) => {
-                    cx.emit(ProjectSpaceEvent::RemoveFolder(path.clone()))
+                    cx.emit(WorkspaceScreenEvent::RemoveFolder(path.clone()))
                 }
             },
         ));
@@ -633,7 +633,7 @@ impl ProjectSpace {
     }
 
     /// One watcher per folder, in the order of the workspace's roots. Their
-    /// changes are passed on as [`ProjectSpaceEvent::FilesChanged`].
+    /// changes are passed on as [`WorkspaceScreenEvent::FilesChanged`].
     fn watchers(&mut self, cx: &mut Context<Self>) -> Vec<Entity<ProjectWatcher>> {
         if self.watchers.is_empty() {
             self.watchers = self
@@ -755,7 +755,7 @@ impl ProjectSpace {
             let (chats, runs) = (self.saved.chats_folded, self.saved.runs_open);
             self.set_sidebar_folds(false, chats, runs, cx);
         }
-        cx.emit(ProjectSpaceEvent::RevealFiles);
+        cx.emit(WorkspaceScreenEvent::RevealFiles);
     }
 
     /// Opens `relative` in the editor beside the chat, optionally at a
@@ -797,7 +797,7 @@ impl ProjectSpace {
         self.chat
             .update(cx, |chat, cx| chat.set_session(session, cx));
         self.save_layout(cx);
-        cx.emit(ProjectSpaceEvent::SessionsChanged);
+        cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
     }
 
@@ -810,7 +810,7 @@ impl ProjectSpace {
             chat.focus_composer(window, cx);
         });
         self.save_layout(cx);
-        cx.emit(ProjectSpaceEvent::SessionsChanged);
+        cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
     }
 
@@ -821,7 +821,7 @@ impl ProjectSpace {
             .unwrap_or_default();
         self.active_session = self.chat.read(cx).active_session_id(cx);
         self.save_layout(cx);
-        cx.emit(ProjectSpaceEvent::SessionsChanged);
+        cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
     }
 

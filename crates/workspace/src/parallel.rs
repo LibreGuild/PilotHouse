@@ -30,7 +30,7 @@ use ph_store::parallel::{Lane, ParallelRun};
 use ph_store::projects::ProjectId;
 
 use crate::AppState;
-use crate::project_space::ProjectSpace;
+use crate::workspace_screen::WorkspaceScreen;
 
 /// `<data dir>/worktrees/<project>-run<run>-<agent>`.
 fn lane_path(project: ProjectId, run: i64, agent: &str) -> PathBuf {
@@ -67,7 +67,7 @@ fn prepare(
 
 /// The dialog that picks agents for `prompt` and starts the run.
 pub fn open_start(
-    space: WeakEntity<ProjectSpace>,
+    space: WeakEntity<WorkspaceScreen>,
     root: PathBuf,
     prompt: String,
     window: &mut Window,
@@ -83,7 +83,7 @@ pub fn open_start(
 }
 
 struct StartView {
-    space: WeakEntity<ProjectSpace>,
+    space: WeakEntity<WorkspaceScreen>,
     root: PathBuf,
     prompt: Entity<TextareaState>,
     /// Installed agents and whether each is picked.
@@ -97,7 +97,7 @@ struct StartView {
 
 impl StartView {
     fn new(
-        space: WeakEntity<ProjectSpace>,
+        space: WeakEntity<WorkspaceScreen>,
         root: PathBuf,
         prompt: String,
         window: &mut Window,
@@ -260,7 +260,7 @@ impl Render for StartView {
 
 /// The dialog comparing the project's runs, to keep one lane's work.
 pub fn open_runs(
-    space: WeakEntity<ProjectSpace>,
+    space: WeakEntity<WorkspaceScreen>,
     project: ProjectId,
     root: PathBuf,
     window: &mut Window,
@@ -276,7 +276,7 @@ pub fn open_runs(
 }
 
 struct RunsView {
-    space: WeakEntity<ProjectSpace>,
+    space: WeakEntity<WorkspaceScreen>,
     project: ProjectId,
     root: PathBuf,
     runs: Vec<ParallelRun>,
@@ -288,7 +288,7 @@ struct RunsView {
 
 impl RunsView {
     fn new(
-        space: WeakEntity<ProjectSpace>,
+        space: WeakEntity<WorkspaceScreen>,
         project: ProjectId,
         root: PathBuf,
         cx: &mut Context<Self>,

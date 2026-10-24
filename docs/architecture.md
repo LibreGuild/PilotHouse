@@ -52,7 +52,7 @@ app ──► workspace ──► agent, board, files, changes, terminal, browse
 
 ```
 ┌──────────────────── PilotHouse process ────────────────────┐
-│ Windows: Workspace ─ ProjectSpace (a workspace's screen)   │
+│ Windows: Workspace ─ WorkspaceScreen (a workspace's screen)   │
 │   ├ ChatPanel ─────────┐   ├ FilesPanel / FileTree          │
 │   ├ TerminalPanel ───┐ │   ├ ChangesPanel ─ Repo            │
 │   ├ TestsPanel ────┐ │ │   ├ BrowserPanel / DevicesPanel    │
@@ -69,7 +69,7 @@ app ──► workspace ──► agent, board, files, changes, terminal, browse
 ```
 
 - **Running work is not on the screen.** Chats, shells, test runs, browsers and folder watchers live in globals keyed by workspace; panels only show them. A workspace's screen can be closed and rebuilt (its folders changed, it moved to another window, it sat idle) without stopping anything. Schedules run app-wide, whatever window is open.
-- **Panels are lazy.** A `ProjectSpace` creates a panel the first time its tool is shown, so an unused feature never starts a process, a watcher or a shell.
+- **Panels are lazy.** A `WorkspaceScreen` creates a panel the first time its tool is shown, so an unused feature never starts a process, a watcher or a shell.
 - **One window per workspace.** A workspace shows in one window at a time (`windows.rs`); idle hidden screens are closed after 30 minutes.
 - **One agent process per (workspace, agent)**, shared by that workspace's chats.
 
@@ -82,6 +82,10 @@ Agents run as child processes speaking the [Agent Client Protocol](https://agent
 Every new agent session is given one MCP server: this same binary in `pilothouse mcp` mode. It speaks MCP on stdio and forwards tool calls to the running app over the [control socket](control-socket.md). The app owns all state; the bridge holds none. Tools: board, browser, devices and ports (see each feature page). Screenshots come back as MCP image content.
 
 Slow tools (a page load, an adb call) use async control handlers, so the UI never waits on them.
+
+## Names
+
+The app says **workspace**; the code says it two ways. The window and screens use workspace names (`Workspace` is a window's shell, `WorkspaceScreen` one workspace's screen). Stored data and the protocols agents and tools speak keep the older name, **project**: the `projects` table, `Project`, `ProjectId`, and `project_id` in control-socket and MCP messages. Renaming those would break existing databases and clients for no gain.
 
 ## Persistence
 

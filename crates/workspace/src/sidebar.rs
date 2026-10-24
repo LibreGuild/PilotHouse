@@ -26,8 +26,8 @@ use ph_theme::layout;
 use ph_ui::Icons;
 
 use crate::actions::{AddFolderToWorkspace, AddProject, NewSession, NewWorkspace, SearchChats};
-use crate::project_space::ProjectSpace;
 use crate::workspace::Workspace;
+use crate::workspace_screen::WorkspaceScreen;
 
 pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let body = match workspace.active_space().cloned() {
@@ -45,7 +45,7 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
 }
 
 /// Files over chats, as folded and sized.
-fn sections(space: &Entity<ProjectSpace>, cx: &mut Context<Workspace>) -> AnyElement {
+fn sections(space: &Entity<WorkspaceScreen>, cx: &mut Context<Workspace>) -> AnyElement {
     let (tree, files_folded, chats_folded, project_id) = {
         let space = space.read(cx);
         (
@@ -99,7 +99,7 @@ fn sections(space: &Entity<ProjectSpace>, cx: &mut Context<Workspace>) -> AnyEle
 }
 
 fn files_section(
-    space: &Entity<ProjectSpace>,
+    space: &Entity<WorkspaceScreen>,
     tree: &Entity<ph_files::FileTree>,
     folded: bool,
     cx: &mut Context<Workspace>,
@@ -163,7 +163,7 @@ fn files_section(
 }
 
 fn chats_section(
-    space: &Entity<ProjectSpace>,
+    space: &Entity<WorkspaceScreen>,
     folded: bool,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
@@ -219,7 +219,7 @@ fn chats_section(
 
 /// The chats in groups by day, the user's own first and PilotHouse's in
 /// *Runs* at the end.
-fn chat_list(space: &Entity<ProjectSpace>, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
+fn chat_list(space: &Entity<WorkspaceScreen>, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
     let (sessions, active, runs_open, project_id) = {
         let space = space.read(cx);
         (
@@ -295,7 +295,7 @@ fn chat_list(space: &Entity<ProjectSpace>, cx: &mut Context<Workspace>) -> Vec<A
 }
 
 fn chat_row(
-    space: &Entity<ProjectSpace>,
+    space: &Entity<WorkspaceScreen>,
     session: &Session,
     active: Option<i64>,
     chats: Option<&Entity<ph_agent::WorkspaceChats>>,

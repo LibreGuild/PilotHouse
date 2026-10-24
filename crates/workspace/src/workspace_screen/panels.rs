@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl ProjectSpace {
+impl WorkspaceScreen {
     /// The changes panel, created on first use.
     pub fn changes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<ChangesPanel> {
         if let Some(changes) = self.changes.get(&self.git_folder) {

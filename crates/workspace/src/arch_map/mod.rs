@@ -18,7 +18,7 @@ use gpui_kit::{
     Task, WeakEntity, Window, canvas, div, point, px,
 };
 
-use crate::project_space::ProjectSpace;
+use crate::workspace_screen::WorkspaceScreen;
 use scan::{Map, Source};
 
 const BOX_W: f32 = 176.;
@@ -26,7 +26,7 @@ const BOX_H: f32 = 54.;
 const GAP_X: f32 = 16.;
 const GAP_Y: f32 = 44.;
 
-pub fn open(space: WeakEntity<ProjectSpace>, root: PathBuf, window: &mut Window, cx: &mut App) {
+pub fn open(space: WeakEntity<WorkspaceScreen>, root: PathBuf, window: &mut Window, cx: &mut App) {
     let view = cx.new(|cx| ArchMap::new(space, root, cx));
     let viewport = window.viewport_size();
     let width = (viewport.width - px(80.)).clamp(px(560.), px(1100.));
@@ -39,13 +39,13 @@ pub fn open(space: WeakEntity<ProjectSpace>, root: PathBuf, window: &mut Window,
 }
 
 struct ArchMap {
-    space: WeakEntity<ProjectSpace>,
+    space: WeakEntity<WorkspaceScreen>,
     map: Option<Map>,
     _scan: Task<()>,
 }
 
 impl ArchMap {
-    fn new(space: WeakEntity<ProjectSpace>, root: PathBuf, cx: &mut Context<Self>) -> Self {
+    fn new(space: WeakEntity<WorkspaceScreen>, root: PathBuf, cx: &mut Context<Self>) -> Self {
         let scan = cx.spawn(async move |this, cx| {
             let map = cx.background_spawn(async move { scan::scan(&root) }).await;
             _ = this.update(cx, |this, cx| {
