@@ -46,13 +46,14 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
 
 /// Files over chats, as folded and sized.
 fn sections(space: &Entity<WorkspaceScreen>, cx: &mut Context<Workspace>) -> AnyElement {
-    let (tree, files_folded, chats_folded, project_id) = {
+    let (tree, files_folded, chats_folded, project_id, files_height) = {
         let space = space.read(cx);
         (
             space.file_tree().cloned(),
             space.files_folded(),
             space.chats_folded(),
             space.project().id,
+            space.files_height(),
         )
     };
     let chats = chats_section(space, chats_folded, cx);
@@ -67,9 +68,21 @@ fn sections(space: &Entity<WorkspaceScreen>, cx: &mut Context<Workspace>) -> Any
     let files = files_section(space, &tree, files_folded, cx);
     match (files_folded, chats_folded) {
         (false, false) => v_resizable(("sidebar-split", project_id as u64))
+            // Where the divider was left is kept for the workspace.
+            .on_resize({
+                let space = space.downgrade();
+                move |state, _, cx| {
+                    let Some(height) = state.read(cx).sizes().first().copied() else {
+                        return;
+                    };
+                    _ = space.update(cx, |space, cx| {
+                        space.set_files_height(f32::from(height), cx)
+                    });
+                }
+            })
             .child(
                 resizable_panel()
-                    .size(px(380.))
+                    .size(px(files_height.unwrap_or(380.)))
                     .size_range(px(120.)..gpui_kit::Pixels::MAX)
                     .child(files),
             )

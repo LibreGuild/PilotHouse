@@ -120,6 +120,7 @@ impl Roots {
                 .map(|root| DirEntry {
                     name: root.name.clone(),
                     is_dir: true,
+                    ignored: false,
                 })
                 .collect();
         }

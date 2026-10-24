@@ -151,6 +151,8 @@ impl Render for UtilitiesView {
         let muted = cx.theme().muted_foreground;
         let output = self.output.clone();
         let copy = output.clone().unwrap_or_default();
+        // A QR code is a picture made of text: rows touch, or it won't scan.
+        let picture = self.utility().id == "qr";
         h_flex()
             .items_start()
             .gap_3()
@@ -218,13 +220,16 @@ impl Render for UtilitiesView {
                     .child(
                         div()
                             .id("utility-output")
-                            .h(px(180.))
+                            .h(px(if picture { 320. } else { 180. }))
                             .overflow_y_scroll()
                             .p_2()
                             .rounded(cx.theme().radius)
                             .bg(cx.theme().muted.opacity(0.5))
                             .font_family(cx.theme().mono_font_family.clone())
                             .text_xs()
+                            .when(picture && output.is_ok(), |this| {
+                                this.text_size(px(9.)).line_height(px(9.))
+                            })
                             .when(output.is_err(), |this| this.text_color(cx.theme().danger))
                             .child(SharedString::from(match output {
                                 Ok(text) | Err(text) => text,

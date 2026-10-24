@@ -2,13 +2,15 @@
 //! the Utilities dialog and agents (the `util_*` tools) run the same code.
 //! Nothing here touches the network.
 //!
-//! - [`data`]: JSON, TOML, XML, CSV.
+//! - [`data`]: JSON, TOML, YAML, XML, CSV.
 //! - [`encode`]: Base64, URL, hex, HTML, JWT.
+//! - [`cert`]: X.509 certificates, QR codes.
 //! - [`hash`]: MD5, SHA-256/512, HMAC, UUID, ULID.
 //! - [`time`]: Unix times and dates, cron.
 //! - [`text`]: regex, diff, colors, Markdown.
 //! - [`sqlite`]: read-only queries on a SQLite file.
 
+pub mod cert;
 pub mod data;
 pub mod encode;
 pub mod hash;
@@ -72,6 +74,16 @@ pub const UTILITIES: &[Utility] = &[
         second: None,
         modes: &["To JSON", "Format"],
         run: data::toml,
+    },
+    Utility {
+        id: "yaml",
+        name: "YAML",
+        group: "Data",
+        keywords: &["format", "validate", "kubernetes", "compose", "workflow"],
+        input: "YAML (JSON for From JSON)",
+        second: None,
+        modes: &["To JSON", "Format", "From JSON"],
+        run: data::yaml,
     },
     Utility {
         id: "xml",
@@ -152,6 +164,34 @@ pub const UTILITIES: &[Utility] = &[
         second: Some("Secret to check an HS256 signature (optional)"),
         modes: &["Decode"],
         run: encode::jwt,
+    },
+    Utility {
+        id: "x509",
+        name: "X.509 certificate",
+        group: "Encoding",
+        keywords: &[
+            "certificate",
+            "pem",
+            "tls",
+            "ssl",
+            "cert",
+            "expiry",
+            "chain",
+        ],
+        input: "PEM certificate or chain",
+        second: None,
+        modes: &["Describe"],
+        run: cert::x509,
+    },
+    Utility {
+        id: "qr",
+        name: "QR code",
+        group: "Encoding",
+        keywords: &["qrcode", "barcode", "phone", "link", "scan"],
+        input: "Text or link",
+        second: None,
+        modes: &["For a dark screen", "For a light screen"],
+        run: cert::qr,
     },
     Utility {
         id: "hash",

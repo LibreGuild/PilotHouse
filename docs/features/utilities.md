@@ -4,8 +4,8 @@ Crate: `ph-utils` (each utility a function from text to text, with tests); dialo
 
 | Group | Utilities |
 |---|---|
-| Data | JSON (format, minify, to TOML), TOML (to JSON, format), XML (format, minify, checks it is well-formed), CSV/TSV (to JSON, to an aligned table), SQLite (a file's tables with row counts, or a read-only query, 200 rows at most) |
-| Encoding | Base64 (standard and URL-safe), URL (encode, decode, split a URL into parts), hex, HTML entities, JWT (header, claims, readable `iat`/`exp`, HS256 signature check with a secret) |
+| Data | JSON (format, minify, to TOML), TOML (to JSON, format), YAML (to JSON, format, from JSON; several `---` documents become a JSON array), XML (format, minify, checks it is well-formed), CSV/TSV (to JSON, to an aligned table), SQLite (a file's tables with row counts, or a read-only query, 200 rows at most) |
+| Encoding | Base64 (standard and URL-safe), URL (encode, decode, split a URL into parts), hex, HTML entities, JWT (header, claims, readable `iat`/`exp`, HS256 signature check with a secret), X.509 certificates (subject, issuer, validity and days left, names, key, CA, SHA-256 fingerprint; a whole chain at once), QR codes drawn in text, for a dark or a light screen |
 | Crypto and ids | SHA-256, SHA-512, MD5; HMAC-SHA256 (hex or Base64); UUID v4 and ULID |
 | Time | Unix time ↔ dates (seconds or milliseconds; UTC, local, any time zone), cron lines (the next five runs) |
 | Text | Regex (matches and groups, or as JSON), text diff (unified), colors (hex ↔ RGB ↔ HSL), Markdown to HTML |

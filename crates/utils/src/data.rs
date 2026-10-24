@@ -1,4 +1,4 @@
-//! Data formats: JSON, TOML, XML and CSV.
+//! Data formats: JSON, TOML, YAML, XML and CSV.
 
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
@@ -31,6 +31,90 @@ pub fn toml(input: &Input) -> Result<String> {
         0 => serde_json::to_string_pretty(&value)?,
         _ => ::toml::to_string_pretty(&value)?,
     })
+}
+
+/// To JSON, formatted, or JSON to YAML. Several documents (`---`) become a
+/// JSON array.
+pub fn yaml(input: &Input) -> Result<String> {
+    use yaml_rust2::{Yaml, YamlLoader};
+    if input.mode == 2 {
+        let value: Value = serde_json::from_str(input.text.trim())
+            .map_err(|err| anyhow::anyhow!("Not valid JSON: {err}"))?;
+        return emit_yaml(&yaml_of(&value));
+    }
+    let docs = YamlLoader::load_from_str(&input.text)
+        .map_err(|err| anyhow::anyhow!("Not valid YAML: {err}"))?;
+    if input.mode == 1 {
+        let parts: Result<Vec<String>> = docs.iter().map(emit_yaml).collect();
+        return Ok(parts?.join("\n---\n"));
+    }
+    let value = match docs.as_slice() {
+        [] => Value::Null,
+        [one] => json_of(one)?,
+        many => Value::Array(many.iter().map(json_of).collect::<Result<_>>()?),
+    };
+    return Ok(serde_json::to_string_pretty(&value)?);
+
+    fn json_of(yaml: &Yaml) -> Result<Value> {
+        Ok(match yaml {
+            Yaml::Null | Yaml::BadValue => Value::Null,
+            Yaml::Boolean(value) => Value::Bool(*value),
+            Yaml::Integer(value) => Value::from(*value),
+            Yaml::Real(text) => match text
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+            {
+                Some(number) => Value::Number(number),
+                None => Value::String(text.clone()),
+            },
+            Yaml::String(text) => Value::String(text.clone()),
+            Yaml::Array(items) => Value::Array(items.iter().map(json_of).collect::<Result<_>>()?),
+            Yaml::Hash(map) => {
+                let mut object = serde_json::Map::new();
+                for (key, value) in map {
+                    let key = match key {
+                        Yaml::String(text) | Yaml::Real(text) => text.clone(),
+                        Yaml::Integer(number) => number.to_string(),
+                        Yaml::Boolean(value) => value.to_string(),
+                        Yaml::Null => "null".to_string(),
+                        _ => bail!("JSON keys must be text; this YAML has a list or map as a key."),
+                    };
+                    object.insert(key, json_of(value)?);
+                }
+                Value::Object(object)
+            }
+            Yaml::Alias(_) => bail!("YAML aliases (*name) are not supported."),
+        })
+    }
+}
+
+fn yaml_of(value: &Value) -> yaml_rust2::Yaml {
+    use yaml_rust2::Yaml;
+    match value {
+        Value::Null => Yaml::Null,
+        Value::Bool(value) => Yaml::Boolean(*value),
+        Value::Number(number) => match number.as_i64() {
+            Some(integer) => Yaml::Integer(integer),
+            None => Yaml::Real(number.to_string()),
+        },
+        Value::String(text) => Yaml::String(text.clone()),
+        Value::Array(items) => Yaml::Array(items.iter().map(yaml_of).collect()),
+        Value::Object(object) => Yaml::Hash(
+            object
+                .iter()
+                .map(|(key, value)| (Yaml::String(key.clone()), yaml_of(value)))
+                .collect(),
+        ),
+    }
+}
+
+fn emit_yaml(doc: &yaml_rust2::Yaml) -> Result<String> {
+    let mut out = String::new();
+    yaml_rust2::YamlEmitter::new(&mut out)
+        .dump(doc)
+        .map_err(|err| anyhow::anyhow!("Cannot write YAML: {err}"))?;
+    Ok(out.strip_prefix("---\n").unwrap_or(&out).to_string())
 }
 
 /// Formatted with two-space indents, or minified; refuses malformed XML.
@@ -153,6 +237,24 @@ fn parse_csv(text: &str) -> Vec<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yaml_goes_to_json_and_back() {
+        let yaml = "name: app\nports: [80, 443]\nratio: 0.5\nenabled: true\n";
+        let json = super::yaml(&Input::new(yaml)).unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["ports"][1], 443);
+        assert_eq!(value["ratio"], 0.5);
+        let back = super::yaml(&Input {
+            mode: 2,
+            ..Input::new(json)
+        })
+        .unwrap();
+        assert!(back.contains("name: app"), "{back}");
+        let two = super::yaml(&Input::new("a: 1\n---\na: 2\n")).unwrap();
+        assert!(two.trim_start().starts_with('['));
+        assert!(super::yaml(&Input::new("a: [1")).is_err());
+    }
 
     fn with(text: &str, mode: usize) -> Input {
         Input {

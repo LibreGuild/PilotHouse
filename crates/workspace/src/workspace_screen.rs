@@ -618,6 +618,18 @@ impl WorkspaceScreen {
 
     /// Folds or unfolds the sidebar's Files or Chats section, or lists the
     /// chats PilotHouse started.
+    pub fn files_height(&self) -> Option<f32> {
+        self.saved.files_height
+    }
+
+    /// The Files/Chats divider was dragged: Files is now `height` tall.
+    pub fn set_files_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        if self.saved.files_height != Some(height) {
+            self.saved.files_height = Some(height);
+            self.save_layout(cx);
+        }
+    }
+
     pub fn set_sidebar_folds(
         &mut self,
         files_folded: bool,
