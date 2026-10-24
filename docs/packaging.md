@@ -12,7 +12,7 @@ Everything lands in `dist/` (git-ignored). The version comes from `Cargo.toml` (
 
 - **macOS:** the script builds both architectures, joins them with `lipo`, makes `PilotHouse.app` (`Info.plist` with the folder and text document types that Finder's *Open With* uses, the icon), signs it ad hoc and wraps it in a DMG with a shortcut to Applications.
 - **Windows:** the icon is built into `pilothouse.exe` by `crates/app/build.rs` (resource 1, which GPUI shows for the window and the taskbar). The installer puts the app in `%LOCALAPPDATA%\Programs\PilotHouse`, adds a Start menu entry (a desktop shortcut is optional) and an uninstaller; uninstalling keeps your data.
-- **Linux:** one desktop entry for all three packages (`Categories=Development;IDE;`, folders and text files). The AppImage is made with `appimagetool`, pinned and checked against its SHA-256.
+- **Linux:** one desktop entry for all three packages (`Categories=Development;IDE;`, folders and text files). The AppImage is made with `appimagetool`, pinned and checked against its SHA-256; it needs `desktop-file-validate` (`desktop-file-utils`), which checks the desktop entry.
 
 ## Releases
 
