@@ -5764,7 +5764,7 @@ dependencies = [
  "md-5",
  "quick-xml",
  "regex",
- "roxmltree 0.20.0",
+ "roxmltree 0.21.1",
  "rusqlite",
  "serde_json",
  "sha2 0.10.9",
