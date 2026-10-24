@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 base64 = "0.22"
-getrandom = "0.3"
+getrandom = "0.4"
 hex = "0.4"
 hmac = "0.12"
 jiff.workspace = true
