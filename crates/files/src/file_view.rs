@@ -174,6 +174,11 @@ pub struct FileView {
     editor: Entity<EditorState>,
     content: Content,
     dirty: bool,
+    /// The text came back from changes kept after a crash or quit
+    /// ([`crate::unsaved`]), not from the file.
+    restored: bool,
+    /// Keeps the unsaved text a second after the last change.
+    _keep: Option<Task<()>>,
     /// Line to reveal once loading finishes (0-based).
     pending_line: Option<u32>,
     /// How Files names the file (its folder's name first in a multi-folder
@@ -235,6 +240,7 @@ impl FileView {
                     cx.notify();
                 }
                 this.schedule_sync(cx);
+                this.schedule_keep(cx);
             }
         });
         // The footer follows the cursor.
@@ -250,6 +256,8 @@ impl FileView {
             editor,
             content: Content::Loading,
             dirty: false,
+            restored: false,
+            _keep: None,
             pending_line: None,
             asks: true,
             label: SharedString::default(),
@@ -261,6 +269,17 @@ impl FileView {
             _sync: None,
             _intel: None,
         };
+        // Closing the file or the window keeps unsaved text right away (the
+        // timer may not have fired yet).
+        cx.on_release(|this, cx| {
+            if this.dirty && this.content == Content::Text {
+                let text = this.editor.read(cx).value().to_string();
+                if let Err(err) = crate::unsaved::keep(&this.absolute, &text) {
+                    tracing::warn!("keeping unsaved changes failed: {err}");
+                }
+            }
+        })
+        .detach();
         if let Some(lsp) = lsp {
             let diagnostics =
                 cx.subscribe(
@@ -694,17 +713,28 @@ impl FileView {
             self.load_blame(cx);
         }
         let path = self.absolute.clone();
-        let read = cx.background_spawn(async move { read_text(&path) });
+        let read = cx.background_spawn(async move {
+            let text = read_text(&path)?;
+            // Changes kept from a crash or quit come back, still unsaved.
+            let kept = crate::unsaved::kept(&path).filter(|kept| *kept != text);
+            if kept.is_none() {
+                crate::unsaved::forget(&path);
+            }
+            Ok((text, kept))
+        });
         cx.spawn_in(window, async move |this, cx| {
             let result = read.await;
             _ = this.update_in(cx, |this, window, cx| {
                 match result {
-                    Ok(text) => {
+                    Ok((text, kept)) => {
                         this.attach_lsp(&text, cx);
+                        let restored = kept.is_some();
+                        let shown = kept.unwrap_or(text);
                         this.editor
-                            .update(cx, |editor, cx| editor.set_value(text, window, cx));
+                            .update(cx, |editor, cx| editor.set_value(shown, window, cx));
                         this.content = Content::Text;
-                        this.dirty = false;
+                        this.dirty = restored;
+                        this.restored = restored;
                         if let Some(line) = this.pending_line.take() {
                             this.go_to_line(line, window, cx);
                         }
@@ -722,6 +752,38 @@ impl FileView {
         .detach();
     }
 
+    /// Keeps the unsaved text on disk a second after the last change, so a
+    /// crash or quit loses at most that second.
+    fn schedule_keep(&mut self, cx: &mut Context<Self>) {
+        self._keep = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            let Ok((path, text)) = this.update(cx, |this, cx| {
+                (
+                    this.absolute.clone(),
+                    this.editor.read(cx).value().to_string(),
+                )
+            }) else {
+                return;
+            };
+            let keep = cx
+                .background_spawn(async move { crate::unsaved::keep(&path, &text) })
+                .await;
+            if let Err(err) = keep {
+                tracing::warn!("keeping unsaved changes failed: {err}");
+            }
+        }));
+    }
+
+    /// Throws away changes restored after a crash: the file as it is on disk.
+    fn discard_restored(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::unsaved::forget(&self.absolute);
+        self.restored = false;
+        self._keep = None;
+        self.load(window, cx);
+    }
+
     fn save(&mut self, _: &SaveFile, _: &mut Window, cx: &mut Context<Self>) {
         if self.content != Content::Text {
             return;
@@ -735,6 +797,9 @@ impl FileView {
                 match result {
                     Ok(()) => {
                         this.dirty = false;
+                        this.restored = false;
+                        this._keep = None;
+                        crate::unsaved::forget(&this.absolute);
                         if let Some(lsp) = this.lsp.clone() {
                             lsp.update(cx, |lsp, _| lsp.saved(&this.absolute));
                         }
@@ -1050,7 +1115,24 @@ impl FileView {
                 )))
             })
             .children(self.server_label(cx))
-            .when(self.dirty, |this| this.child("Unsaved"))
+            .when(self.restored, |this| {
+                this.child(
+                    div()
+                        .text_color(cx.theme().warning)
+                        .child("Restored unsaved changes"),
+                )
+                .child(
+                    Button::new("discard-restored")
+                        .ghost()
+                        .xsmall()
+                        .label("Discard")
+                        .tooltip("Back to the file as saved")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.discard_restored(window, cx)),
+                        ),
+                )
+            })
+            .when(self.dirty && !self.restored, |this| this.child("Unsaved"))
     }
 
     /// The language server for this file and how it is doing.

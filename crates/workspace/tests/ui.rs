@@ -26,6 +26,9 @@ fn open_workspace(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Workspace
         ph_theme::init(cx);
         AppState::install(Store::open_in_memory().unwrap(), cx);
         ph_workspace::init(cx);
+        // Real file watchers run on their own threads, which the test
+        // scheduler cannot follow.
+        ph_files::WatcherHub::turn_off(cx);
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(

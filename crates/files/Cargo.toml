@@ -18,6 +18,7 @@ memchr.workspace = true
 notify.workspace = true
 ph-git.workspace = true
 ph-lsp.workspace = true
+ph-store.workspace = true
 ph-theme.workspace = true
 ph-ui.workspace = true
 smol.workspace = true

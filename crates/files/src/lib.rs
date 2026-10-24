@@ -20,6 +20,7 @@ mod quick_open;
 pub mod roots;
 mod search;
 pub mod symbols;
+pub mod unsaved;
 mod watcher;
 
 pub use file_index::{FileList, index_files};

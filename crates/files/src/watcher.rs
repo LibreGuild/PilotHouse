@@ -38,6 +38,14 @@ impl ProjectWatcher {
         }
     }
 
+    /// A watcher that reports nothing (see [`WatcherHub::turn_off`]).
+    fn inert(root: PathBuf) -> Self {
+        Self {
+            root,
+            _watcher: None,
+        }
+    }
+
     /// Watches one file opened outside any project: its folder, not
     /// recursively (it may be a big one, like Downloads), keeping only
     /// events for the file.
@@ -60,6 +68,9 @@ impl ProjectWatcher {
 #[derive(Default)]
 pub struct WatcherHub {
     watchers: HashMap<PathBuf, WeakEntity<ProjectWatcher>>,
+    /// No OS watchers (UI tests, whose scheduler must see every thread's
+    /// work): folders are shown but not followed.
+    off: bool,
 }
 
 impl Global for WatcherHub {}
@@ -74,12 +85,24 @@ impl WatcherHub {
         if let Some(watcher) = existing {
             return watcher;
         }
-        let watcher = cx.new(|cx| ProjectWatcher::new(root.clone(), cx));
+        let off = cx.try_global::<Self>().is_some_and(|hub| hub.off);
+        let watcher = cx.new(|cx| {
+            if off {
+                ProjectWatcher::inert(root.clone())
+            } else {
+                ProjectWatcher::new(root.clone(), cx)
+            }
+        });
         let hub = cx.default_global::<Self>();
         hub.watchers
             .retain(|_, watcher| watcher.upgrade().is_some());
         hub.watchers.insert(root, watcher.downgrade());
         watcher
+    }
+
+    /// Stops new watchers from following the file system (for UI tests).
+    pub fn turn_off(cx: &mut App) {
+        cx.default_global::<Self>().off = true;
     }
 }
 
@@ -139,7 +162,7 @@ fn forward(receiver: smol::channel::Receiver<PathBuf>, cx: &mut Context<ProjectW
     cx.spawn(async move |this, cx| {
         while let Ok(first) = receiver.recv().await {
             let mut paths = vec![first];
-            smol::Timer::after(WATCH_DEBOUNCE).await;
+            cx.background_executor().timer(WATCH_DEBOUNCE).await;
             while let Ok(path) = receiver.try_recv() {
                 paths.push(path);
             }

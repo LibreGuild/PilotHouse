@@ -16,6 +16,7 @@
 
 mod cli;
 mod control_handlers;
+mod logs;
 mod menus;
 
 use anyhow::Result;
@@ -31,7 +32,13 @@ fn main() {
     if args.first().is_some_and(|command| command == "ctl") {
         attach_console();
     }
-    init_logging();
+    // The helpers run beside the app and keep to stderr.
+    let helper = matches!(
+        args.first().map(String::as_str),
+        Some("ctl" | "mcp" | "agy-acp")
+    );
+    logs::init(!helper);
+    logs::install_crash_handler();
 
     let open = match cli::run(&args) {
         cli::Launch::Exit(code) => std::process::exit(code),
@@ -107,18 +114,6 @@ fn open_main_window(cx: &mut App) -> Result<()> {
 /// The local path of a `file://` URL.
 fn file_url_path(url: &str) -> Option<std::path::PathBuf> {
     url::Url::parse(url).ok()?.to_file_path().ok()
-}
-
-/// Logs go to stderr. `RUST_LOG` overrides the default level, e.g.
-/// `RUST_LOG=ph_store=debug pilothouse`.
-fn init_logging() {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("warn,pilothouse=info,ph_=info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
 }
 
 /// Lets `pilothouse ctl …` print in the terminal it was run from. The MCP

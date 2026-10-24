@@ -5578,6 +5578,7 @@ dependencies = [
  "notify",
  "ph-git",
  "ph-lsp",
+ "ph-store",
  "ph-theme",
  "ph-ui",
  "regex",

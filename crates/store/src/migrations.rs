@@ -242,8 +242,16 @@ const MIGRATIONS: &[&str] = &[
     "#,
 ];
 
+/// Backups kept of a database file, newest first; older ones are deleted.
+const BACKUPS_KEPT: usize = 3;
+
 pub fn apply(connection: &Connection) -> Result<()> {
     let current: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    // An existing database about to change gets a copy first, so a
+    // migration that goes wrong cannot cost the user their data.
+    if current > 0 && (current as usize) < MIGRATIONS.len() {
+        backup(connection, current).context("backing up the database before updating it")?;
+    }
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(current.max(0) as usize) {
         let version = index + 1;
         connection
@@ -254,4 +262,88 @@ pub fn apply(connection: &Connection) -> Result<()> {
         tracing::info!("applied database migration {version}");
     }
     Ok(())
+}
+
+/// Copies the database (consistently, even while open in WAL mode) to
+/// `<file>.v<version>.bak` beside it, keeping the newest [`BACKUPS_KEPT`].
+/// An in-memory database has nothing to back up.
+fn backup(connection: &Connection, version: i64) -> Result<()> {
+    let Some(file) = connection.path().filter(|path| !path.is_empty()) else {
+        return Ok(());
+    };
+    let file = std::path::Path::new(file);
+    let name = file
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let target = file.with_file_name(format!("{name}.v{version}.bak"));
+    let _ = std::fs::remove_file(&target);
+    connection.execute("VACUUM INTO ?1", [target.to_string_lossy()])?;
+    tracing::info!("backed up the database to {}", target.display());
+    // The oldest backups go.
+    let folder = file.parent().unwrap_or(std::path::Path::new("."));
+    let mut backups: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(folder)?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .map(|other| other.to_string_lossy())
+                .is_some_and(|other| {
+                    other.starts_with(&format!("{name}.v")) && other.ends_with(".bak")
+                })
+        })
+        .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
+        .collect();
+    backups.sort_by_key(|backup| std::cmp::Reverse(backup.0));
+    for (_, old) in backups.into_iter().skip(BACKUPS_KEPT) {
+        let _ = std::fs::remove_file(old);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_existing_database_is_backed_up_before_it_changes() {
+        let dir = std::env::temp_dir().join(format!("ph-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("pilothouse.db");
+        {
+            // An old database: the first migration only, with a row in it.
+            let connection = Connection::open(&file).unwrap();
+            connection
+                .execute_batch(&format!("{}; PRAGMA user_version = 1;", MIGRATIONS[0]))
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO projects (name, path, created_at, last_opened_at) VALUES ('old', '/tmp/old', 0, 0)",
+                    [],
+                )
+                .unwrap();
+        }
+        let connection = Connection::open(&file).unwrap();
+        apply(&connection).unwrap();
+        let backup = dir.join("pilothouse.db.v1.bak");
+        assert!(backup.is_file(), "a copy before the update");
+        let copy = Connection::open(&backup).unwrap();
+        let (version, rows): (i64, i64) = (
+            copy.pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            copy.query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
+                .unwrap(),
+        );
+        assert_eq!((version, rows), (1, 1), "the copy is the old database");
+        // Up to date: nothing more is copied.
+        apply(&connection).unwrap();
+        let backups = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".bak"))
+            .count();
+        assert_eq!(backups, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
