@@ -41,7 +41,9 @@ Opening a project should not run its code:
 
 - Reviews run in PilotHouse's own clone of the repository (`<data dir>/github/…`, a private folder), never in the user's checkouts, and the pull request's head is a detached worktree beside it. Opening that clone as a workspace is refused.
 - Git reaches the host over HTTPS with the account's token, passed per call in the environment as a header scoped to that host's URL (`http.https://HOST/.extraHeader` through `GIT_CONFIG_*`): never on a command line other processes can list, in the remote URL, or in a config file. Error messages name only the Git command, not its settings.
-- Files a chat names open from the GitHub view only when they are inside those clones.
+- Files a chat names open from the GitHub view only when their real path (links and `..` resolved) is inside those clones.
+- Chats in the GitHub view only read: edits, deletes and moves are refused without asking, and no checkpoints are taken. Antigravity's "go on with every permission for the rest of the turn" is never given automatically, in these chats or in reviews.
+- A repository's own review rules are read from its base branch, never from the pull request's head.
 
 ## Housekeeping
 

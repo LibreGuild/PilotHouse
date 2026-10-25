@@ -21,7 +21,7 @@ A workspace keeps its chats, shells and test runs going while you look at anothe
 
 ## The GitHub view
 
-*GitHub* in the title bar (⌘⇧G) shows what you would see on GitHub, apart from your workspaces: the pull requests waiting for your review, your own, those assigned to you, and the repositories you follow (your workspaces' and any you add). Open a pull request to read it, comment, approve or merge, and **Review with agent**: PilotHouse keeps its own copy of the repository for this, so your checkouts are never touched, and the review chat runs beside the PR. Ask the agent about the change afterwards in the same chat. Add a GitHub account first in Settings → GitHub. See [pull requests](features/pulls.md).
+*GitHub* in the title bar (⌘⇧G) shows what you would see on GitHub, apart from your workspaces: the pull requests waiting for your review, your own, those assigned to you, and the repositories you follow (your workspaces' and any you add). Open a pull request to read it, comment, approve or merge. The chat beside it is that PR's: ask about the change, or start with a template (*Review this PR*, *Security review*, *Explain this PR*, *Test plan*, or your own from Settings → Templates). PilotHouse keeps its own copy of the repository for this, so your checkouts are never touched, and these chats only read. Reviews list each finding with its evidence and fix, ready to post as line comments. A repository can add its own review rules in `.pilothouse/review.md`. Add a GitHub account first in Settings → GitHub. See [pull requests](features/pulls.md).
 
 ## Code on a network drive
 

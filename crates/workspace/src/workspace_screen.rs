@@ -187,6 +187,8 @@ impl WorkspaceScreen {
                     }
                 }
                 ChatPanelEvent::WantPulls => this.feed_pulls(window, cx),
+                // A workspace's chat has no starters of its own.
+                ChatPanelEvent::Starter(_) => {}
                 ChatPanelEvent::RunParallel { prompt } => {
                     let root = this.project.path.clone();
                     crate::parallel::open_start(

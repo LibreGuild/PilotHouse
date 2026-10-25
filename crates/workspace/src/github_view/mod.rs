@@ -26,6 +26,7 @@ use ph_github::models::PullRequest;
 use ph_github::search::{FoundPull, Inbox};
 use ph_pulls::clones::RepoId;
 use ph_pulls::{Hosting, PullsPanel, PullsPanelEvent};
+use ph_review::templates::Template;
 use ph_store::Store;
 use ph_store::projects::Project;
 use ph_store::sessions::SessionId;
@@ -79,9 +80,11 @@ pub struct GithubView {
     from_workspaces: Vec<(RepoId, String)>,
     pub(crate) page: Page,
     /// Each repository's pull requests (and the PR open in it).
-    panels: HashMap<RepoId, (Entity<PullsPanel>, Subscription)>,
-    /// Each repository space's chat.
+    panels: HashMap<RepoId, (Entity<PullsPanel>, Subscription, Subscription)>,
+    /// Each repository space's chat, and the pull request it is about (the
+    /// one open in that repository's panel).
     chats: HashMap<RepoId, (Entity<ChatPanel>, Subscription)>,
+    attached: HashMap<RepoId, u64>,
     /// The "add a repository" box, while open.
     pub(crate) adding: Option<(Entity<InputState>, Subscription)>,
     pub(crate) sidebar_shown: bool,
@@ -110,6 +113,7 @@ impl GithubView {
             page: Page::Inbox(Inbox::ReviewRequested),
             panels: HashMap::new(),
             chats: HashMap::new(),
+            attached: HashMap::new(),
             adding: None,
             sidebar_shown: true,
             _load: None,
@@ -245,7 +249,6 @@ impl GithubView {
     /// Shows repository `id`'s pull requests (and its chat).
     pub(crate) fn show_repo(&mut self, id: RepoId, window: &mut Window, cx: &mut Context<Self>) {
         self.panel(&id, window, cx);
-        self.chat(&id, window, cx);
         self.page = Page::Repo(id);
         cx.notify();
     }
@@ -263,19 +266,20 @@ impl GithubView {
         self.show_repo(id, window, cx);
     }
 
-    /// The repository's pull requests panel, made the first time.
+    /// The repository's pull requests panel, made the first time. When it
+    /// opens a pull request, the chat beside it becomes that PR's.
     fn panel(
         &mut self,
         id: &RepoId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<PullsPanel> {
-        if let Some((panel, _)) = self.panels.get(id) {
+        if let Some((panel, _, _)) = self.panels.get(id) {
             return panel.clone();
         }
         let store = self.store.clone();
         let panel = cx.new(|cx| PullsPanel::for_repo(store, id.clone(), cx));
-        let subscription = cx.subscribe_in(
+        let events = cx.subscribe_in(
             &panel,
             window,
             |this, _, event: &PullsPanelEvent, window, cx| match event {
@@ -283,34 +287,141 @@ impl GithubView {
                     window.dispatch_action(Box::new(crate::actions::OpenSettings), cx)
                 }
                 PullsPanelEvent::ReviewWithAgent { hosting, pull } => {
-                    this.review((**hosting).clone(), (**pull).clone(), window, cx)
+                    let template = ph_review::templates::default_review(&this.store);
+                    this.review((**hosting).clone(), (**pull).clone(), template, window, cx)
                 }
                 PullsPanelEvent::OpenSession(session) => this.show_session_id(*session, window, cx),
             },
         );
+        let repo = id.clone();
+        let opened = cx.observe_in(&panel, window, move |this, panel, window, cx| {
+            let showing = panel.read(cx).showing(cx);
+            if this.attached.get(&repo).copied() != showing {
+                match showing {
+                    Some(number) => this.attach_pull(&repo, number, window, cx),
+                    None => {
+                        this.attached.remove(&repo);
+                    }
+                }
+                cx.notify();
+            }
+        });
         self.panels
-            .insert(id.clone(), (panel.clone(), subscription));
+            .insert(id.clone(), (panel.clone(), events, opened));
         panel
     }
 
     /// The panel of repository `id`, if made.
     pub(crate) fn panel_of(&self, id: &RepoId) -> Option<&Entity<PullsPanel>> {
-        self.panels.get(id).map(|(panel, _)| panel)
+        self.panels.get(id).map(|(panel, _, _)| panel)
     }
 
-    /// The chat of repository `id`'s space, made once the space exists (its
-    /// first review makes it).
-    fn chat(
+    /// The repository's space: its chats live there. Made (with the folder
+    /// the clone will go to) the first time.
+    fn space(&self, id: &RepoId) -> anyhow::Result<Project> {
+        let clone = id.clone_dir();
+        if !clone.exists() {
+            ph_store::paths::ensure_private_dir(&clone)?;
+        }
+        self.store.github_space(&id.full_name(), &clone)
+    }
+
+    /// Makes the chat beside the PR view the chat about pull request
+    /// `number`: its latest chat, or a new one, ready to ask; templates as
+    /// starters. The repository is cloned and the PR checked out when the
+    /// first message is sent.
+    fn attach_pull(
         &mut self,
         id: &RepoId,
+        number: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<Entity<ChatPanel>> {
-        if let Some((chat, _)) = self.chats.get(id) {
-            return Some(chat.clone());
-        }
-        let project = self.store.github_space_at(&id.clone_dir()).ok().flatten()?;
-        Some(self.chat_for(id, project, window, cx))
+    ) {
+        let project = match self.space(id) {
+            Ok(project) => project,
+            Err(err) => {
+                window.push_notification(Notification::error(format!("{err:#}")), cx);
+                return;
+            }
+        };
+        self.attached.insert(id.clone(), number);
+        let chat = self.chat_for(id, project.clone(), window, cx);
+        let cwd = id.pull_dir(number);
+        let title = self.pull_title(id, number, cx);
+        let cloned = id.clone_dir().join(".git").exists();
+        let (store, repo) = (self.store.clone(), id.clone());
+        let prepare = ph_agent::Prepare {
+            label: if cloned {
+                format!("Checking out #{number}…")
+            } else {
+                format!("Cloning {} and checking out #{number}…", id.full_name())
+            },
+            run: std::rc::Rc::new(move |cx: &mut gpui_kit::App| {
+                let (store, repo) = (store.clone(), repo.clone());
+                cx.background_spawn(async move {
+                    let hosting = ph_pulls::hosting::for_repo(&store, &repo)
+                        .map_err(|missing| anyhow::anyhow!("{}", missing.explain()))?;
+                    ph_pulls::clones::check_out_pull(&hosting, number).map(|_| ())
+                })
+            }),
+        };
+        let templates = self.store.clone();
+        let starters = std::rc::Rc::new(move || {
+            ph_review::templates::all(&templates)
+                .into_iter()
+                .map(|template| ph_agent::Starter {
+                    id: template.id,
+                    title: template.name,
+                    hint: template.description,
+                })
+                .collect()
+        });
+        let context = ph_agent::ChatContext {
+            title: match &title {
+                Some(title) => format!("#{number} {title}"),
+                None => format!("Pull request #{number}"),
+            },
+            subtitle: "Ask about the change, or start with a template. Chats here only read: nothing is edited or pushed.".into(),
+            starters,
+            placeholder: format!("Ask about #{number}…"),
+            cwd: cwd.clone(),
+            prepare: Some(prepare),
+        };
+        let cwd_text = cwd.to_string_lossy().into_owned();
+        let latest = self
+            .store
+            .sessions(project.id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|session| session.cwd.as_deref() == Some(cwd_text.as_str()));
+        // This PR's latest chat, else a new one: never another PR's.
+        chat.update(cx, |chat, cx| {
+            chat.set_context(Some(context), window, cx);
+            chat.set_session(latest, cx);
+        });
+    }
+
+    /// The title of pull request `number`, as a list read it.
+    fn pull_title(&self, id: &RepoId, number: u64, cx: &gpui_kit::App) -> Option<String> {
+        let from_panel = self.panel_of(id).and_then(|panel| {
+            panel
+                .read(cx)
+                .list()
+                .iter()
+                .find(|pull| pull.number == number)
+                .map(|pull| pull.title.clone())
+        });
+        from_panel.or_else(|| {
+            self.inbox
+                .values()
+                .flat_map(|list| &list.items)
+                .find_map(|(host, pull)| {
+                    let same = *host == id.host
+                        && pull.number == number
+                        && pull.repo() == Some((id.owner.clone(), id.name.clone()));
+                    same.then(|| pull.title.clone())
+                })
+        })
     }
 
     fn chat_for(
@@ -328,11 +439,6 @@ impl GithubView {
             let mut chat = ChatPanel::new(store.clone(), project.clone(), window, cx);
             // Its chats are listed in the chat's own header.
             chat.set_history_menu(true, cx);
-            let latest = store
-                .sessions(project.id)
-                .ok()
-                .and_then(|mut sessions| (!sessions.is_empty()).then(|| sessions.remove(0)));
-            chat.set_session(latest, cx);
             chat
         });
         let repo = id.clone();
@@ -340,7 +446,14 @@ impl GithubView {
             &chat,
             window,
             move |this, chat, event: &ChatPanelEvent, window, cx| match event {
-                ChatPanelEvent::SessionsChanged | ChatPanelEvent::TurnEnded => cx.notify(),
+                ChatPanelEvent::SessionsChanged => cx.notify(),
+                // A review's findings are in: the PR's header shows them.
+                ChatPanelEvent::TurnEnded => {
+                    if let Some(panel) = this.panel_of(&repo).cloned() {
+                        panel.update(cx, |panel, cx| panel.review_changed(cx));
+                    }
+                    cx.notify();
+                }
                 ChatPanelEvent::SelectSession(id) => {
                     let session = id.and_then(|id| this.store.session(id).ok().flatten());
                     chat.update(cx, |chat, cx| chat.set_session(session, cx));
@@ -355,6 +468,11 @@ impl GithubView {
                         chat.update(cx, |chat, cx| chat.set_pulls(briefs, cx));
                     }
                 }
+                ChatPanelEvent::Starter(template) => {
+                    if let Some(number) = this.attached.get(&repo).copied() {
+                        this.run_template(&repo, number, template, window, cx)
+                    }
+                }
                 ChatPanelEvent::RunParallel { .. } => window.push_notification(
                     Notification::info("Run with several agents from a workspace."),
                     cx,
@@ -365,11 +483,13 @@ impl GithubView {
         chat
     }
 
-    /// The chat of the repository in view, if it has one.
+    /// The chat beside the pull request in view, if one is open.
     pub(crate) fn current_chat(&self) -> Option<&Entity<ChatPanel>> {
         match &self.page {
-            Page::Repo(id) => self.chats.get(id).map(|(chat, _)| chat),
-            Page::Inbox(_) => None,
+            Page::Repo(id) if self.attached.contains_key(id) => {
+                self.chats.get(id).map(|(chat, _)| chat)
+            }
+            _ => None,
         }
     }
 
@@ -387,8 +507,7 @@ impl GithubView {
             _ => path.to_path_buf(),
         };
         // Only files of the view's own clones open from here.
-        if !ph_pulls::clones::is_managed(&ph_store::paths::canonical(&full).unwrap_or(full.clone()))
-        {
+        if !ph_pulls::clones::is_managed(&full) {
             return;
         }
         if let Err(err) = crate::file_window::open(full, cx) {
@@ -405,7 +524,7 @@ impl GithubView {
         true
     }
 
-    /// ⌘N: a new chat in the repository in view.
+    /// ⌘N: a new chat about the pull request in view.
     pub fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(chat) = self.current_chat().cloned() {
             chat.update(cx, |chat, cx| {
@@ -415,62 +534,161 @@ impl GithubView {
         }
     }
 
-    /// Starts an agent review of `pull`: checks it out beside the
-    /// repository's clone (made the first time), then opens a review chat
-    /// there that starts by itself.
+    /// Runs template `template_id` on pull request `number`: a review
+    /// template starts a review, a prompt template asks its request in a
+    /// new chat.
+    fn run_template(
+        &mut self,
+        id: &RepoId,
+        number: u64,
+        template_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(template) = ph_review::templates::get(&self.store, template_id) else {
+            return;
+        };
+        let Some(chat) = self.chats.get(id).map(|(chat, _)| chat.clone()) else {
+            return;
+        };
+        let cloned = id.clone_dir().join(".git").exists();
+        chat.update(cx, |chat, cx| {
+            chat.set_busy(
+                Some(if cloned {
+                    format!("Getting #{number} ready…")
+                } else {
+                    format!("Cloning {} and checking out #{number}…", id.full_name())
+                }),
+                cx,
+            )
+        });
+        let (store, repo) = (self.store.clone(), id.clone());
+        let find = cx.background_spawn(async move {
+            let hosting = ph_pulls::hosting::for_repo(&store, &repo)
+                .map_err(|missing| anyhow::anyhow!("{}", missing.explain()))?;
+            let pull = ph_github::pulls::get(&hosting.client, &hosting.repo, number)?;
+            anyhow::Ok((hosting, pull))
+        });
+        self._work.push(cx.spawn_in(window, async move |this, cx| {
+            let result = find.await;
+            _ = this.update_in(cx, |this, window, cx| match result {
+                Ok((hosting, pull)) => match template.kind {
+                    ph_review::templates::TemplateKind::Review => {
+                        this.review(hosting, pull, template, window, cx)
+                    }
+                    ph_review::templates::TemplateKind::Prompt => {
+                        this.ask(hosting, pull, template, window, cx)
+                    }
+                },
+                Err(err) => chat.update(cx, |chat, cx| chat.set_failed(format!("{err:#}"), cx)),
+            });
+        }));
+    }
+
+    /// Asks prompt `template`'s request about `pull` in a new chat, once
+    /// the PR is checked out.
+    fn ask(
+        &mut self,
+        hosting: Hosting,
+        pull: PullRequest,
+        template: Template,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = RepoId::of(&hosting);
+        let Some(chat) = self.chats.get(&id).map(|(chat, _)| chat.clone()) else {
+            return;
+        };
+        let work = cx.background_spawn(async move {
+            let (_, sha) = ph_pulls::clones::check_out_pull(&hosting, pull.number)?;
+            let info = ph_review::prompt::PullInfo {
+                number: pull.number,
+                title: &pull.title,
+                body: pull.body.as_deref().unwrap_or_default(),
+                author: &pull.user.login,
+                owner: &hosting.repo.owner,
+                repo: &hosting.repo.name,
+                base: &pull.base.name,
+                head: &pull.head.name,
+                head_sha: &sha,
+            };
+            let prompt = ph_review::prompt::request_prompt(&info, &template.instructions);
+            anyhow::Ok((
+                format!("{} #{}: {}", template.name, pull.number, pull.title),
+                format!("{} (#{} “{}”).", template.name, pull.number, pull.title),
+                prompt,
+            ))
+        });
+        self._work.push(cx.spawn_in(window, async move |_, cx| {
+            let result = work.await;
+            _ = chat.update_in(cx, |chat, window, cx| match result {
+                Ok((title, display, prompt)) => {
+                    chat.start_prompt(title, display, prompt, window, cx)
+                }
+                Err(err) => chat.set_failed(format!("{err:#}"), cx),
+            });
+        }));
+    }
+
+    /// Starts an agent review of `pull` with review `template`: checks it
+    /// out beside the repository's clone (made the first time), then opens
+    /// a review chat there that starts by itself.
     pub fn review(
         &mut self,
         hosting: Hosting,
         pull: PullRequest,
+        template: Template,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let id = RepoId::of(&hosting);
         let number = pull.number;
         self.show_pull(id.clone(), number, window, cx);
+        let project = match self.space(&id) {
+            Ok(project) => project,
+            Err(err) => {
+                window.push_notification(Notification::error(format!("{err:#}")), cx);
+                return;
+            }
+        };
+        let chat = self.chat_for(&id, project.clone(), window, cx);
         let first = !id.clone_dir().join(".git").exists();
-        window.push_notification(
-            Notification::info(if first {
-                format!("Cloning {} for the review of #{number}…", id.full_name())
-            } else {
-                format!("Getting #{number} ready for the review…")
-            }),
-            cx,
-        );
+        chat.update(cx, |chat, cx| {
+            chat.set_busy(
+                Some(if first {
+                    format!("Cloning {} for the review of #{number}…", id.full_name())
+                } else {
+                    format!("Getting #{number} ready for the review…")
+                }),
+                cx,
+            )
+        });
         let store = self.store.clone();
         let work = cx.background_spawn(async move {
-            let clone = ph_pulls::clones::ensure(&hosting)?;
-            let project = store.github_space(&RepoId::of(&hosting).full_name(), &clone)?;
-            let prepared = crate::review::prepare(&store, project.id, &hosting, &pull)?;
-            anyhow::Ok((project, prepared))
+            crate::review::prepare(&store, project.id, &hosting, &pull, &template)
         });
         self._work.push(cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
-            _ = this.update_in(cx, |this, window, cx| match result {
-                Ok((project, prepared)) => {
-                    let chat = this.chat_for(&id, project, window, cx);
-                    chat.update(cx, |chat, cx| {
-                        chat.start_review(
-                            prepared.review_id,
-                            prepared.worktree,
-                            prepared.title,
-                            prepared.display,
-                            prepared.prompt,
-                            window,
-                            cx,
-                        )
-                    });
-                    cx.notify();
-                }
-                Err(err) => window.push_notification(
-                    Notification::error(format!("{err:#}")).title("Could not start the review"),
-                    cx,
-                ),
+            _ = this.update_in(cx, |_, window, cx| {
+                chat.update(cx, |chat, cx| match result {
+                    Ok(prepared) => chat.start_review(
+                        prepared.review_id,
+                        prepared.worktree,
+                        prepared.title,
+                        prepared.display,
+                        prepared.prompt,
+                        window,
+                        cx,
+                    ),
+                    Err(err) => chat.set_failed(format!("Could not start the review: {err:#}"), cx),
+                });
+                cx.notify();
             });
         }));
     }
 
-    /// A new run of review `review_id`, on its pull request's latest head.
+    /// A new run of review `review_id`, on its pull request's latest head,
+    /// with the default review template.
     pub fn review_again(&mut self, review_id: i64, window: &mut Window, cx: &mut Context<Self>) {
         let store = self.store.clone();
         let find = cx.background_spawn(async move {
@@ -490,13 +708,17 @@ impl GithubView {
         self._work.push(cx.spawn_in(window, async move |this, cx| {
             let result = find.await;
             _ = this.update_in(cx, |this, window, cx| match result {
-                Ok((hosting, pull)) => this.review(hosting, pull, window, cx),
+                Ok((hosting, pull)) => {
+                    let template = ph_review::templates::default_review(&this.store);
+                    this.review(hosting, pull, template, window, cx)
+                }
                 Err(err) => window.push_notification(Notification::error(format!("{err:#}")), cx),
             });
         }));
     }
 
-    /// Shows chat `session` of repository space `project`.
+    /// Shows chat `session` of repository space `project`, beside its pull
+    /// request when it is about one.
     pub fn show_session(
         &mut self,
         project: Project,
@@ -507,10 +729,26 @@ impl GithubView {
         let Some(id) = RepoId::from_clone_dir(&project.path) else {
             return;
         };
+        let Some(found) = self.store.session(session).ok().flatten() else {
+            return;
+        };
+        let number = found.cwd.as_deref().and_then(|cwd| {
+            std::path::Path::new(cwd)
+                .file_name()?
+                .to_str()?
+                .strip_prefix("pr-")?
+                .parse::<u64>()
+                .ok()
+        });
+        match number {
+            Some(number) => {
+                self.show_pull(id.clone(), number, window, cx);
+                self.attach_pull(&id, number, window, cx);
+            }
+            None => self.show_repo(id.clone(), window, cx),
+        }
         let chat = self.chat_for(&id, project, window, cx);
-        let session = self.store.session(session).ok().flatten();
-        chat.update(cx, |chat, cx| chat.set_session(session, cx));
-        self.show_repo(id, window, cx);
+        chat.update(cx, |chat, cx| chat.set_session(Some(found), cx));
     }
 
     /// Shows chat `session`, which may be one of a workspace's (an earlier

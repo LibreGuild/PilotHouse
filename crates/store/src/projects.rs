@@ -386,30 +386,44 @@ impl Store {
     /// The space for chats outside any workspace, made (with a scratch
     /// folder under `scratch_root`) the first time.
     pub fn chats_space(&self, scratch_root: &Path) -> Result<Project> {
-        let existing = self
-            .conn()
-            .query_row(
+        let find = |conn: &rusqlite::Connection| {
+            conn.query_row(
                 "SELECT * FROM projects WHERE kind = 'chats' ORDER BY id LIMIT 1",
                 [],
                 Project::from_row,
             )
-            .optional()?;
+            .optional()
+        };
+        // Bound first: the connection's lock is let go before the next use.
+        let existing = find(&self.conn())?;
         if let Some(project) = existing {
             return self.with_folders(project);
         }
-        let now = now_millis();
         let scratch = new_scratch(scratch_root)?;
-        let id = {
-            let conn = self.conn();
-            let id = next_project_id(&conn)?;
-            conn.execute(
-                "INSERT INTO projects (id, name, path, created_at, last_opened_at, kind)
-                 VALUES (?3, 'Chats', ?1, ?2, ?2, 'chats')",
-                params![scratch.to_string_lossy(), now, id],
-            )?;
-            id
+        // Looked for again and made in one transaction: two windows starting
+        // together make one.
+        let project = {
+            let mut conn = self.conn();
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let project = match find(&tx)? {
+                Some(project) => project,
+                None => {
+                    let id = next_project_id(&tx)?;
+                    tx.execute(
+                        "INSERT INTO projects (id, name, path, created_at, last_opened_at, kind)
+                         VALUES (?3, 'Chats', ?1, ?2, ?2, 'chats')",
+                        params![scratch.to_string_lossy(), now_millis(), id],
+                    )?;
+                    find(&tx)?.context("just created")?
+                }
+            };
+            tx.commit()?;
+            project
         };
-        self.project(id)?.context("just created")
+        if project.path != scratch {
+            let _ = std::fs::remove_dir(&scratch);
+        }
+        self.with_folders(project)
     }
 
     /// The space of the GitHub repository whose managed clone is `clone`

@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -200,6 +201,13 @@ impl PullsPanel {
         match &self.source {
             Source::Local { repo, root } => Some((repo, root)),
             Source::Named(_) => None,
+        }
+    }
+
+    /// An agent review ended: the pull request in view reads it again.
+    pub fn review_changed(&mut self, cx: &mut Context<Self>) {
+        if let Some((view, _)) = &self.open {
+            view.update(cx, |view, cx| view.review_changed(cx));
         }
     }
 
@@ -720,6 +728,7 @@ impl PullsPanel {
         let review_me = pull.requested_reviewers.iter().any(|user| user.login == me);
         v_flex()
             .id(("pull", number))
+            .aria_label(SharedString::from(format!("#{number} {}", pull.title)))
             .flex_none()
             .gap_0p5()
             .px_2p5()
@@ -778,6 +787,7 @@ impl PullsPanel {
                             .child(label.name.clone())
                     })),
             )
+            .test_support()
             .into_any_element()
     }
 }

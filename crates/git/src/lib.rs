@@ -42,6 +42,12 @@ pub use status::{
     stage_path, staged_diff, status, unstage_path, working_changes,
 };
 
+/// Refuses a branch or ref name git would read as an option, for callers
+/// outside this crate.
+pub fn check_ref(name: &str) -> anyhow::Result<()> {
+    check_name("name", name)
+}
+
 /// Refuses names that git would read as options (`-x`) or that hold
 /// control characters, before they reach the command line.
 pub(crate) fn check_name(kind: &str, name: &str) -> anyhow::Result<()> {

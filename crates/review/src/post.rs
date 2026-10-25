@@ -90,13 +90,13 @@ pub fn finding_markdown(finding: &Finding) -> String {
         finding.title
     );
     if !finding.body.trim().is_empty() {
-        text.push_str(&format!("\n\n{}", finding.body.trim()));
+        text.push_str(&format!("\n\n**Issue:** {}", finding.body.trim()));
+    }
+    if !finding.evidence.trim().is_empty() {
+        text.push_str(&format!("\n\n**Evidence:** {}", finding.evidence.trim()));
     }
     if !finding.suggestion.trim().is_empty() {
-        text.push_str(&format!(
-            "\n\n**Suggestion:** {}",
-            finding.suggestion.trim()
-        ));
+        text.push_str(&format!("\n\n**Fix:** {}", finding.suggestion.trim()));
     }
     text
 }
@@ -113,17 +113,17 @@ fn finding_item(finding: &Finding) -> String {
         icon(&finding.severity),
         finding.title
     );
-    if !finding.body.trim().is_empty() {
-        item.push_str(&format!(
-            "\n  {}",
-            finding.body.trim().replace('\n', "\n  ")
-        ));
-    }
-    if !finding.suggestion.trim().is_empty() {
-        item.push_str(&format!(
-            "\n  *Suggestion:* {}",
-            finding.suggestion.trim().replace('\n', "\n  ")
-        ));
+    for (label, text) in [
+        ("Issue", &finding.body),
+        ("Evidence", &finding.evidence),
+        ("Fix", &finding.suggestion),
+    ] {
+        if !text.trim().is_empty() {
+            item.push_str(&format!(
+                "\n  *{label}:* {}",
+                text.trim().replace('\n', "\n  ")
+            ));
+        }
     }
     item
 }
@@ -326,6 +326,7 @@ mod tests {
             end_line: None,
             title: "Unbounded retry".into(),
             body: "Spins forever.".into(),
+            evidence: "`loop {}` at line 4 never breaks.".into(),
             suggestion: "Cap attempts.".into(),
             status: "new".into(),
             comment_id: None,
@@ -334,7 +335,8 @@ mod tests {
         };
         let text = finding_markdown(&finding);
         assert!(text.starts_with("🟠 **Major: Unbounded retry**"));
-        assert!(text.contains("**Suggestion:** Cap attempts."));
+        assert!(text.contains("**Fix:** Cap attempts."));
+        assert!(text.contains("**Evidence:** `loop {}`"));
         assert!(finding_item(&finding).contains("`src/a.rs:4`"));
     }
 }

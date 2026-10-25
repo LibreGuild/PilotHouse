@@ -76,11 +76,12 @@ impl GithubView {
                     )
                 })
             });
+            // The name, its owner muted after it (a long one is cut first).
             row(
                 SharedString::from(format!("github-repo-{}", repo.id.key())),
                 Icons::GitPullRequest,
-                repo.id.full_name(),
-                None,
+                repo.id.name.clone(),
+                Some(repo.id.owner.clone()),
                 selected,
                 cx,
             )
@@ -170,6 +171,10 @@ impl GithubView {
                     .unwrap_or_default();
                 v_flex()
                     .id(("github-found", ix))
+                    .aria_label(SharedString::from(format!(
+                        "{place} #{number} {}",
+                        pull.title
+                    )))
                     .flex_none()
                     .gap_0p5()
                     .px_2p5()
@@ -213,6 +218,7 @@ impl GithubView {
                                 ph_pulls::short_date(&pull.updated_at)
                             )),
                     )
+                    .test_support()
                     .into_any_element()
             });
         let empty = list.is_none_or(|list| list.items.is_empty()) && !self.loading;
@@ -310,34 +316,6 @@ impl GithubView {
             },
         }
     }
-
-    /// The repository's chat, or what will be there.
-    fn render_chat(&self, _: &mut Context<Self>) -> AnyElement {
-        if let Some(chat) = self.current_chat() {
-            return chat.clone().into_any_element();
-        }
-        let (title, text) = match &self.page {
-            Page::Repo(id) => (
-                format!("Chats about {}", id.full_name()),
-                "Open a pull request and pick Review with agent: PilotHouse clones the repository for the view, checks the PR out beside it, and the review chat runs here. Ask the agent about the change afterwards in the same chat.",
-            ),
-            Page::Inbox(_) => (
-                "Pick a pull request".to_string(),
-                "The chat of its repository shows here: agent reviews, and your questions about the change.",
-            ),
-        };
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .p_6()
-            .child(
-                EmptyState::new(title)
-                    .icon(Icons::Sparkles)
-                    .description(text),
-            )
-            .into_any_element()
-    }
 }
 
 impl Render for GithubView {
@@ -348,9 +326,25 @@ impl Render for GithubView {
             px(0.)
         };
         let available = window.viewport_size().width - sidebar - px(16.);
-        let chat_width = (available * 0.4).max(layout::CHAT_MIN);
+        let chat_width = (available * 0.45).max(layout::CHAT_MIN);
         let page = Surface::new().child(self.render_page(cx));
-        let chat = Surface::new().child(self.render_chat(cx));
+        // The chat is the pull request's: it shows while one is open.
+        let body = match self.current_chat().cloned() {
+            Some(chat) => h_resizable("github-split")
+                .child(
+                    resizable_panel()
+                        .size_range(layout::CONTEXT_PANEL_MIN..gpui_kit::Pixels::MAX)
+                        .child(div().size_full().pr_1().child(page)),
+                )
+                .child(
+                    resizable_panel()
+                        .size(chat_width)
+                        .size_range(layout::CHAT_MIN..gpui_kit::Pixels::MAX)
+                        .child(div().size_full().pl_1().child(Surface::new().child(chat))),
+                )
+                .into_any_element(),
+            None => page.into_any_element(),
+        };
         h_flex()
             .id("github-view")
             .size_full()
@@ -358,22 +352,7 @@ impl Render for GithubView {
             .when(self.sidebar_shown, |this| {
                 this.child(self.render_sidebar(cx))
             })
-            .child(
-                div().flex_1().min_w_0().h_full().pr_2().pb_2().child(
-                    h_resizable("github-split")
-                        .child(
-                            resizable_panel()
-                                .size_range(layout::CONTEXT_PANEL_MIN..gpui_kit::Pixels::MAX)
-                                .child(div().size_full().pr_1().child(page)),
-                        )
-                        .child(
-                            resizable_panel()
-                                .size(chat_width)
-                                .size_range(layout::CHAT_MIN..gpui_kit::Pixels::MAX)
-                                .child(div().size_full().pl_1().child(chat)),
-                        ),
-                ),
-            )
+            .child(div().flex_1().min_w_0().h_full().pr_2().pb_2().child(body))
     }
 }
 
@@ -391,7 +370,8 @@ fn section(title: &'static str, cx: &App) -> gpui_kit::Div {
         .child(div().flex_1().child(title.to_uppercase()))
 }
 
-/// A row of the sidebar: icon, name, an optional count.
+/// A row of the sidebar: icon, name, and muted after it a count or an
+/// owner.
 fn row(
     id: SharedString,
     icon: Icons,
@@ -424,6 +404,9 @@ fn row(
         .when_some(count, |this, count| {
             this.child(
                 div()
+                    .flex_shrink_0()
+                    .max_w(px(96.))
+                    .truncate()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(count),

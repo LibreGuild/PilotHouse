@@ -64,7 +64,12 @@ impl RepoId {
     /// The repository whose clone is `clone` (a GitHub space's folder).
     pub fn from_clone_dir(clone: &Path) -> Option<Self> {
         let root = ph_store::paths::canonical(&root()).ok()?;
-        let clone = ph_store::paths::canonical(clone).unwrap_or_else(|_| clone.to_path_buf());
+        let clone = ph_store::paths::canonical(clone).ok()?;
+        Self::from_clone_in(&root, &clone)
+    }
+
+    /// [`Self::from_clone_dir`] under clones folder `root` (both resolved).
+    fn from_clone_in(root: &Path, clone: &Path) -> Option<Self> {
         let rest = clone.strip_prefix(root).ok()?;
         let parts: Vec<String> = rest
             .components()
@@ -120,9 +125,20 @@ fn auth_env(host: &str, token: &str) -> Vec<(String, String)> {
     ]
 }
 
+/// One clone or fetch at a time: two chats getting the same repository
+/// ready would otherwise clone it into one folder together.
+static GIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The clone of `hosting`'s repository, made the first time and brought up
 /// to date (every branch) after (blocking; network).
 pub fn ensure(hosting: &Hosting) -> Result<PathBuf> {
+    let _one = GIT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ensure_locked(hosting)
+}
+
+fn ensure_locked(hosting: &Hosting) -> Result<PathBuf> {
     let id = RepoId::of(hosting);
     let env = auth_env(&id.host, &hosting.account.token()?);
     let clone = id.clone_dir();
@@ -147,7 +163,10 @@ pub fn ensure(hosting: &Hosting) -> Result<PathBuf> {
 /// own folder beside the clone, which is made or updated first. Returns
 /// the folder and the commit (blocking; network).
 pub fn check_out_pull(hosting: &Hosting, number: u64) -> Result<(PathBuf, String)> {
-    let clone = ensure(hosting)?;
+    let _one = GIT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let clone = ensure_locked(hosting)?;
     let id = RepoId::of(hosting);
     let env = auth_env(&id.host, &hosting.account.token()?);
     let local = format!("refs/pilothouse/pr/{number}");
@@ -172,7 +191,12 @@ pub fn check_out_pull(hosting: &Hosting, number: u64) -> Result<(PathBuf, String
     }
     let folder = id.pull_dir(number);
     if folder.join(".git").exists() {
-        ph_git::git(&folder, &["checkout", "--quiet", "--detach", &sha])?;
+        // The copy is PilotHouse's: anything changed in it gives way.
+        ph_git::git(
+            &folder,
+            &["checkout", "--quiet", "--force", "--detach", &sha],
+        )?;
+        ph_git::git(&folder, &["clean", "--quiet", "-d", "--force"])?;
     } else {
         if folder.exists() {
             std::fs::remove_dir_all(&folder)?;
@@ -182,9 +206,27 @@ pub fn check_out_pull(hosting: &Hosting, number: u64) -> Result<(PathBuf, String
     Ok((folder, sha))
 }
 
-/// Whether `path` is one of the clones' folders (or inside one).
+/// The repository's own review rules ([`ph_review::templates::TEAM_RULES`])
+/// on branch `base` of the clone, as fetched last; `None` when it has none.
+/// Read from the base, never the pull request's head, which its author
+/// controls.
+pub fn team_rules(clone: &Path, base: &str) -> Option<String> {
+    ph_git::check_ref(base).ok()?;
+    let spec = format!("origin/{base}:{}", ph_review::templates::TEAM_RULES);
+    let text = ph_git::git(clone, &["show", "--no-textconv", &spec]).ok()?;
+    (!text.trim().is_empty()).then(|| text.chars().take(20_000).collect())
+}
+
+/// Whether `path` is an existing file or folder inside the clones (links
+/// and `..` resolved, so nothing outside passes).
 pub fn is_managed(path: &Path) -> bool {
-    ph_store::paths::canonical(&root()).is_ok_and(|root| path.starts_with(root))
+    match (
+        ph_store::paths::canonical(&root()),
+        ph_store::paths::canonical(path),
+    ) {
+        (Ok(root), Ok(path)) => path.starts_with(root),
+        _ => false,
+    }
 }
 
 /// Standard base64, for the header.
@@ -243,5 +285,36 @@ mod tests {
         assert_eq!(RepoId::parse(&id.key()), Some(id.clone()));
         assert_eq!(RepoId::parse("github.com/../etc"), None);
         assert_eq!(RepoId::parse("github.com/acme"), None);
+    }
+
+    #[test]
+    fn a_clone_folder_names_its_repository() {
+        let root = Path::new("/data/github");
+        assert_eq!(
+            RepoId::from_clone_in(
+                root,
+                Path::new("/data/github/ghe.example.net_8443/team/svc/repo")
+            ),
+            Some(RepoId {
+                host: "ghe.example.net:8443".into(),
+                owner: "team".into(),
+                name: "svc".into(),
+            })
+        );
+        assert_eq!(
+            RepoId::from_clone_in(root, Path::new("/data/github/github.com/team/svc/pr-3")),
+            None
+        );
+        assert_eq!(
+            RepoId::from_clone_in(root, Path::new("/elsewhere/a/b/c/repo")),
+            None
+        );
+    }
+
+    #[test]
+    fn only_real_paths_inside_count_as_managed() {
+        // Nothing exists here: never managed, whatever the spelling.
+        let fake = root().join("github.com/../../../../etc/passwd");
+        assert!(!is_managed(&fake));
     }
 }

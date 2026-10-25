@@ -24,6 +24,7 @@ pub struct ReportedFinding {
     pub end_line: Option<u64>,
     pub title: String,
     pub details: String,
+    pub evidence: String,
     pub suggestion: String,
 }
 

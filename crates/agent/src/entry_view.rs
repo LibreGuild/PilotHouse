@@ -10,7 +10,6 @@ use gpui_kit::component::{
     clipboard::Clipboard,
     h_flex,
     spinner::Spinner,
-    text::TextView,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -67,12 +66,7 @@ pub fn render_entry(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> 
             .group("agent-message")
             .gap_1()
             .map(|this| match view {
-                Some(view) => this.child(
-                    TextView::new(view)
-                        .selectable(true)
-                        .w_full()
-                        .on_link_click(|url, _, _, cx| open_link(url, cx)),
-                ),
+                Some(view) => this.child(view.clone()),
                 // Not prepared yet (the list prepares a row before drawing it).
                 None => this.child(text.clone()),
             })
@@ -120,7 +114,7 @@ pub fn render_entry(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> 
 /// Opens a link from agent output. Only web and mail links: agent text can
 /// echo pages it read, and a `file://` or custom-scheme link could launch a
 /// local program with one click.
-fn open_link(url: &str, cx: &mut App) {
+pub(crate) fn open_link(url: &str, cx: &mut App) {
     let scheme = url
         .split_once(':')
         .map(|(scheme, _)| scheme.to_ascii_lowercase());
@@ -513,6 +507,8 @@ fn render_permission(request: &Entity<PermissionRequest>, cx: &App) -> AnyElemen
     let request = request.read(cx);
     let pending = request.is_pending();
     v_flex()
+        .w_full()
+        .min_w_0()
         .gap_2()
         .px_3()
         .py_2p5()
@@ -541,7 +537,15 @@ fn render_permission(request: &Entity<PermissionRequest>, cx: &App) -> AnyElemen
                         cx.theme().muted_foreground
                     }),
                 )
-                .child(div().flex_1().child(request.title.clone())),
+                // A long command (a path with no spaces) wraps inside the
+                // card instead of running out of it.
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(request.title.clone()),
+                ),
         )
         .map(|this| match request.outcome() {
             Some(outcome) => this.child(

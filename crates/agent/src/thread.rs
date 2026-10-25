@@ -56,6 +56,9 @@ pub struct ThreadProject {
     pub extra_dirs: Vec<PathBuf>,
     /// The workspace has no folders: `path` is its scratch folder.
     pub empty: bool,
+    /// A GitHub repository's chat (the GitHub view): it reads and explains
+    /// pull requests in PilotHouse's own copy, and never changes files.
+    pub read_only: bool,
 }
 
 impl ThreadProject {
@@ -66,6 +69,7 @@ impl ThreadProject {
             path: project.path.clone(),
             extra_dirs: project.extra_folders.clone(),
             empty: project.empty,
+            read_only: project.kind == ph_store::projects::ProjectKind::GitHub,
         }
     }
 
@@ -81,6 +85,14 @@ impl ThreadProject {
     /// Told to the agent with a chat's first message: the workspace's other
     /// folders, or that it has none.
     pub fn workspace_note(&self) -> Option<String> {
+        if self.read_only {
+            return Some(format!(
+                "(Note from PilotHouse: this chat is about a GitHub repository, in PilotHouse's own copy of it at {}. It is \
+                 read-only: read, search and run read-only commands such as git diff, log and show, but never edit files, \
+                 commit, push or install anything. Changes are made from a workspace.)",
+                self.path.display()
+            ));
+        }
         if self.empty && self.extra_dirs.is_empty() {
             return Some(format!(
                 "(Workspace note from PilotHouse: this workspace has no project folder. You are working in its own scratch \
@@ -515,6 +527,11 @@ impl ChatThread {
                             .set_session_place(session.id, "parallel", Some(&cwd));
                         session.kind = "parallel".into();
                         session.cwd = Some(cwd);
+                    } else if self.project.read_only {
+                        // A GitHub chat is about the pull request its folder holds.
+                        let cwd = self.project.path.to_string_lossy().to_string();
+                        let _ = self.store.set_session_place(session.id, "chat", Some(&cwd));
+                        session.cwd = Some(cwd);
                     }
                     cx.emit(ThreadEvent::SessionCreated(session.clone()));
                     self.session = Some(session);
@@ -557,8 +574,8 @@ impl ChatThread {
         );
         self.persist(cx);
         // The files as they are before the agent touches them, taken while
-        // the agent session starts. Reviews only read.
-        let checkpoint = self.review_id.is_none().then(|| {
+        // the agent session starts. Reviews and GitHub chats only read.
+        let checkpoint = (self.review_id.is_none() && !self.project.read_only).then(|| {
             let root = self.project.path.clone();
             cx.background_spawn(async move { ph_git::checkpoint::create(&root, &label) })
         });
@@ -824,9 +841,9 @@ impl ChatThread {
                     })
             })
             .unwrap_or_else(|| "Use a tool".to_string());
-        // A review (or a quick question) only reads: let it, without waking
-        // anyone up.
-        if self.review_id.is_some() || self.reads_this_turn {
+        // A review, a quick question or a GitHub chat only reads: let it,
+        // without waking anyone up.
+        if self.review_id.is_some() || self.reads_this_turn || self.project.read_only {
             let known =
                 self.tool_index(&request.tool_call.tool_call_id.0)
                     .and_then(|ix| match &self.entries[ix] {
@@ -844,6 +861,9 @@ impl ChatThread {
                         ToolKindLabel::Search => ToolKind::Search,
                         ToolKindLabel::Think => ToolKind::Think,
                         ToolKindLabel::Execute => ToolKind::Execute,
+                        ToolKindLabel::Edit => ToolKind::Edit,
+                        ToolKindLabel::Delete => ToolKind::Delete,
+                        ToolKindLabel::Move => ToolKind::Move,
                         _ => ToolKind::Other,
                     }));
             let raw_input = request.tool_call.fields.raw_input.clone();
@@ -853,12 +873,42 @@ impl ChatThread {
                     agent_client_protocol_schema::v1::PermissionOptionKind::AllowOnce
                 )
             });
+            // Antigravity can only go on with every permission for the rest
+            // of the turn: that is the user's to give, never automatic.
+            let escalates = title.contains("with every permission");
             if let Some(allow) = allow
+                && !escalates
                 && (crate::review_policy::allows(kind, raw_input.as_ref(), &title)
                     || (self.app_tools_this_turn
                         && crate::review_policy::is_app_tool(kind, &title, raw_input.as_ref())))
             {
                 respond(Some(allow.option_id.0.to_string()), cx);
+                return;
+            }
+            // A GitHub chat never changes files: refused without asking.
+            let reject = request.options.iter().find(|option| {
+                matches!(
+                    option.kind,
+                    agent_client_protocol_schema::v1::PermissionOptionKind::RejectOnce
+                )
+            });
+            if self.project.read_only
+                && matches!(
+                    kind,
+                    Some(ToolKind::Edit | ToolKind::Delete | ToolKind::Move)
+                )
+                && let Some(reject) = reject
+            {
+                respond(Some(reject.option_id.0.to_string()), cx);
+                self.push(
+                    Entry::Notice {
+                        text: format!(
+                            "Refused “{title}”: chats in the GitHub view only read. Make changes from a workspace."
+                        ),
+                        is_error: false,
+                    },
+                    cx,
+                );
                 return;
             }
         }

@@ -18,6 +18,7 @@ use ph_github::{Client, Repo, accounts, pulls};
 use ph_pulls::Hosting;
 use ph_review::post::{self, PostMode};
 use ph_review::prompt::{PullInfo, review_prompt};
+use ph_review::templates::Template;
 use ph_store::Store;
 use ph_store::projects::ProjectId;
 use ph_store::reviews::{PrReview, PullRef};
@@ -126,18 +127,23 @@ pub struct Prepared {
 
 /// Checks the PR out beside the repository's managed clone (see
 /// [`ph_pulls::clones`]), records the run for the repository's space
-/// `project_id`, and writes the prompt (blocking: network; run off the UI
-/// thread).
+/// `project_id`, and writes the prompt from review `template` and the
+/// repository's own rules (blocking: network; run off the UI thread).
 pub fn prepare(
     store: &Store,
     project_id: ProjectId,
     hosting: &Hosting,
     pull: &PullRequest,
+    template: &Template,
 ) -> Result<Prepared> {
     // The latest head: the PR may have moved since the list was read.
     let pull =
         pulls::get(&hosting.client, &hosting.repo, pull.number).unwrap_or_else(|_| pull.clone());
     let (worktree, sha) = ph_pulls::clones::check_out_pull(hosting, pull.number)?;
+    let rules = ph_pulls::clones::team_rules(
+        &ph_pulls::clones::RepoId::of(hosting).clone_dir(),
+        &pull.base.name,
+    );
 
     let pull_ref = PullRef {
         host: hosting.account.host.clone(),
@@ -163,18 +169,31 @@ pub fn prepare(
         head_sha: &sha,
     };
     let again = if previous.is_empty() { "" } else { " again" };
+    let kind = if template.id == ph_review::templates::REVIEW {
+        "Review".to_string()
+    } else {
+        template.name.clone()
+    };
+    let rules_note = if rules.is_some() {
+        format!(
+            " With this repository's rules from {}.",
+            ph_review::templates::TEAM_RULES
+        )
+    } else {
+        String::new()
+    };
     Ok(Prepared {
         review_id: review.id,
         worktree,
-        title: format!("Review #{}: {}", pull.number, pull.title),
+        title: format!("{kind} #{}: {}", pull.number, pull.title),
         display: format!(
-            "Review pull request #{} “{}”{again} ({} → {}, at {}).",
+            "{kind}{again} of #{} “{}” ({} → {}, at {}).{rules_note}",
             pull.number,
             pull.title,
             pull.head.name,
             pull.base.name,
             &sha[..sha.len().min(8)]
         ),
-        prompt: review_prompt(&info, &previous),
+        prompt: review_prompt(&info, &previous, &template.instructions, rules.as_deref()),
     })
 }

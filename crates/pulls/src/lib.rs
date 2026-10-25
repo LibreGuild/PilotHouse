@@ -8,6 +8,8 @@
 //! - [`PullView`]: one PR in full: description, conversation, files with
 //!   line comments, commits, checks; comment, approve, request changes,
 //!   merge, check out, review with an agent.
+//! - [`TemplatesView`]: Settings → Templates, what agents are asked to do
+//!   with a pull request.
 //! - [`clones`]: the GitHub view's own clones of repositories, where agent
 //!   reviews run.
 //!
@@ -18,8 +20,10 @@ pub mod clones;
 pub mod hosting;
 mod pull_view;
 mod pulls_panel;
+mod templates_view;
 
 pub use accounts_view::AccountsView;
 pub use hosting::Hosting;
 pub use pull_view::{PullView, PullViewEvent, short_date};
 pub use pulls_panel::{PullsPanel, PullsPanelEvent};
+pub use templates_view::TemplatesView;

@@ -30,20 +30,32 @@ impl ChatPanel {
                     .font_weight(gpui_kit::FontWeight::MEDIUM)
                     .child(thread.title()),
             )
-            .child(
-                h_flex()
+            // The agent's mark with a dot for its state; the words are in the
+            // tooltip, to keep the header small.
+            .child({
+                let tip = format!("{} · {label}", thread.agent().name);
+                div()
+                    .id("chat-agent-state")
                     .flex_none()
-                    .gap_1p5()
-                    .px_2()
-                    .py_0p5()
-                    .rounded_full()
-                    .bg(cx.theme().muted)
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(div().size_1p5().rounded_full().bg(dot))
-                    .child(thread.agent().mark(px(12.)))
-                    .child(format!("{} · {label}", thread.agent().name)),
-            )
+                    .relative()
+                    .p_0p5()
+                    .aria_label(SharedString::from(tip.clone()))
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    })
+                    .child(thread.agent().mark(px(16.)))
+                    .child(
+                        div()
+                            .absolute()
+                            .right(px(-1.))
+                            .bottom(px(-1.))
+                            .size(px(7.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(cx.theme().background)
+                            .bg(dot),
+                    )
+            })
             .children(crate::usage_meter::render(thread.usage(), cx))
             .when(
                 thread.has_started() && *thread.status() == ThreadStatus::Idle,
@@ -84,6 +96,11 @@ impl ChatPanel {
     /// new-chat button beside it.
     pub(super) fn render_history(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (store, project_id) = (self.store.clone(), self.project.id);
+        // A chat about something lists the chats about it.
+        let only = self
+            .context
+            .as_ref()
+            .map(|context| context.cwd.to_string_lossy().into_owned());
         let active = self.active.read(cx).session().map(|session| session.id);
         let panel = cx.weak_entity();
         h_flex()
@@ -97,7 +114,14 @@ impl ChatPanel {
                     .tooltip("Past chats")
                     .accessibility_label("Past chats")
                     .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-                        let sessions = store.sessions(project_id).unwrap_or_default();
+                        let sessions: Vec<_> = store
+                            .sessions(project_id)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|session| {
+                                only.is_none() || session.cwd.as_ref() == only.as_ref()
+                            })
+                            .collect();
                         if sessions.is_empty() {
                             return menu.label("No chats yet");
                         }
@@ -172,7 +196,16 @@ impl ChatPanel {
     pub(super) fn render_empty(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let agent = self.active.read(cx).agent();
         let checks = self.setup_checks(agent);
-        let subtitle: SharedString = format!("{} in {}", agent.name, self.project.name).into();
+        let (title, subtitle): (SharedString, SharedString) = match &self.context {
+            Some(context) => (
+                context.title.clone().into(),
+                context.subtitle.clone().into(),
+            ),
+            None => (
+                "What are we building?".into(),
+                format!("{} in {}", agent.name, self.project.name).into(),
+            ),
+        };
         let panel = cx.weak_entity();
         if !setup::ready(&checks) {
             let recheck = {
@@ -229,12 +262,14 @@ impl ChatPanel {
                     .child(
                         div()
                             .text_xl()
+                            .text_center()
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child("What are we building?"),
+                            .child(title),
                     )
                     .child(
                         div()
                             .text_sm()
+                            .text_center()
                             .text_color(cx.theme().muted_foreground)
                             .child(subtitle),
                     )
@@ -256,50 +291,97 @@ impl ChatPanel {
                     .grid()
                     .grid_cols(2)
                     .gap_2()
-                    .children(
-                        if self.project.empty && self.project.extra_dirs.is_empty() {
-                            FOLDERLESS_SUGGESTIONS
-                        } else {
-                            SUGGESTIONS
-                        }
-                        .iter()
-                        .enumerate()
-                        .map(|(ix, (title, hint, prompt))| {
-                            let panel = panel.clone();
-                            v_flex()
-                                .id(("suggestion", ix))
-                                .gap_0p5()
-                                .px_3()
-                                .py_2p5()
-                                .rounded(cx.theme().radius_lg)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .cursor_pointer()
-                                .hover(|style| {
-                                    style.bg(cx.theme().muted).border_color(cx.theme().input)
-                                })
-                                .on_click(move |_, window, cx| {
-                                    let (prompt, title) = (prompt.to_string(), title.to_string());
-                                    _ = panel.update(cx, |panel, cx| {
-                                        panel.send_text(prompt, Some(title), window, cx)
-                                    });
-                                })
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(gpui_kit::FontWeight::MEDIUM)
-                                        .child(*title),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(*hint),
-                                )
-                        }),
-                    ),
+                    .children(self.render_starters(cx))
+                    .when(self.context.is_none(), |this| {
+                        this.children(
+                            if self.project.empty && self.project.extra_dirs.is_empty() {
+                                FOLDERLESS_SUGGESTIONS
+                            } else {
+                                SUGGESTIONS
+                            }
+                            .iter()
+                            .enumerate()
+                            .map(|(ix, (title, hint, prompt))| {
+                                let panel = panel.clone();
+                                v_flex()
+                                    .id(("suggestion", ix))
+                                    .gap_0p5()
+                                    .px_3()
+                                    .py_2p5()
+                                    .rounded(cx.theme().radius_lg)
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .cursor_pointer()
+                                    .hover(|style| {
+                                        style.bg(cx.theme().muted).border_color(cx.theme().input)
+                                    })
+                                    .on_click(move |_, window, cx| {
+                                        let (prompt, title) =
+                                            (prompt.to_string(), title.to_string());
+                                        _ = panel.update(cx, |panel, cx| {
+                                            panel.send_text(prompt, Some(title), window, cx)
+                                        });
+                                    })
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                            .child(*title),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(*hint),
+                                    )
+                            }),
+                        )
+                    }),
             )
             .into_any_element()
+    }
+
+    /// The context's starters (a pull request's templates), as cards.
+    fn render_starters(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(context) = &self.context else {
+            return Vec::new();
+        };
+        (context.starters)()
+            .into_iter()
+            .enumerate()
+            .map(|(ix, starter)| {
+                let id = starter.id.clone();
+                v_flex()
+                    .id(("starter", ix))
+                    .gap_0p5()
+                    .px_3()
+                    .py_2p5()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(cx.theme().muted).border_color(cx.theme().input))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.busy.is_none() {
+                            cx.emit(ChatPanelEvent::Starter(id.clone()))
+                        }
+                    }))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .child(starter.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(starter.hint.clone()),
+                    )
+                    .test_support()
+                    .into_any_element()
+            })
+            .collect()
     }
 
     pub(super) fn render_attachments(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -358,10 +440,12 @@ impl ChatPanel {
         let panel = cx.weak_entity();
 
         let status_line: Option<SharedString> = match status {
+            _ if self.busy.is_some() => self.busy.clone(),
             ThreadStatus::Connecting => Some(format!("Starting {}…", agent.name).into()),
             ThreadStatus::Working => Some(format!("{} is working…", agent.name).into()),
             ThreadStatus::Idle => None,
         };
+        let failed = self.failed.clone();
 
         let mode = options
             .iter()
@@ -434,6 +518,18 @@ impl ChatPanel {
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(ShimmerText::new(text).id("agent-status")),
+                        )
+                    })
+                    .when_some(failed, |this, reason| {
+                        this.child(
+                            h_flex()
+                                .id("chat-prepare-failed")
+                                .px_2()
+                                .gap_1p5()
+                                .text_xs()
+                                .text_color(cx.theme().danger)
+                                .child(Icon::new(Icons::TriangleAlert).xsmall())
+                                .child(div().flex_1().min_w_0().child(reason)),
                         )
                     })
                     .child(

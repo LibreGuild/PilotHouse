@@ -572,7 +572,10 @@ impl Workspace {
                     let (hosting, pull) = ((**hosting).clone(), (**pull).clone());
                     this.set_view(View::GitHub, window, cx);
                     let github = this.github(cx);
-                    github.update(cx, |github, cx| github.review(hosting, pull, window, cx));
+                    let template = ph_review::templates::default_review(AppState::store(cx));
+                    github.update(cx, |github, cx| {
+                        github.review(hosting, pull, template, window, cx)
+                    });
                 }
                 WorkspaceScreenEvent::ReviewAgain(review_id) => {
                     this.set_view(View::GitHub, window, cx);

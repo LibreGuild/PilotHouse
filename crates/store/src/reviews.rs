@@ -47,7 +47,11 @@ pub struct Finding {
     pub line: Option<u64>,
     pub end_line: Option<u64>,
     pub title: String,
+    /// What is wrong and why it matters.
     pub body: String,
+    /// What shows it: the code, a call path, a failing case.
+    pub evidence: String,
+    /// How to fix it.
     pub suggestion: String,
     /// `new`, `open` (seen before, still there), `fixed` or `dismissed`.
     pub status: String,
@@ -97,6 +101,7 @@ impl Finding {
             end_line: number("end_line")?,
             title: row.get("title")?,
             body: row.get("body")?,
+            evidence: row.get("evidence")?,
             suggestion: row.get("suggestion")?,
             status: row.get("status")?,
             comment_id: number("comment_id")?,
@@ -196,8 +201,8 @@ impl Store {
         for finding in findings {
             tx.execute(
                 "INSERT INTO pr_findings (review_id, key, severity, path, line, end_line, title, body,
-                    suggestion, status, comment_id, comment_kind, fixed_notified)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    suggestion, status, comment_id, comment_kind, fixed_notified, evidence)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     id,
                     finding.key,
@@ -212,6 +217,7 @@ impl Store {
                     finding.comment_id.map(|v| v as i64),
                     finding.comment_kind,
                     finding.fixed_notified as i64,
+                    finding.evidence,
                 ],
             )?;
         }
@@ -273,6 +279,7 @@ mod tests {
             end_line: None,
             title: format!("Problem {key}"),
             body: "Details".into(),
+            evidence: String::new(),
             suggestion: String::new(),
             status: status.into(),
             comment_id: None,
