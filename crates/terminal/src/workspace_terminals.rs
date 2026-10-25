@@ -89,6 +89,11 @@ impl WorkspaceTerminals {
     }
 
     /// The workspace's folders changed (the primary first).
+    /// Where a new shell starts (the workspace's primary folder).
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
     pub fn set_folders(&mut self, cwd: PathBuf, folders: Vec<(String, PathBuf)>) {
         self.cwd = cwd;
         self.folders = folders;
@@ -113,7 +118,17 @@ impl WorkspaceTerminals {
         cwd: PathBuf,
         cx: &mut Context<Self>,
     ) -> Option<Entity<Terminal>> {
-        let shell = match Terminal::start(cwd) {
+        self.new_terminal_with(cwd, None, cx)
+    }
+
+    /// A new `shell` (the default for `None`) in folder `cwd`, shown.
+    pub fn new_terminal_with(
+        &mut self,
+        cwd: PathBuf,
+        shell: Option<&ph_env::Shell>,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Terminal>> {
+        let shell = match Terminal::start_with(cwd, shell) {
             Ok(shell) => shell,
             Err(err) => {
                 self.error = Some(format!("Could not start a shell: {err:#}").into());

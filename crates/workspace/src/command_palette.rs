@@ -28,7 +28,6 @@ enum Run {
     Action(Box<dyn Action>),
     OpenProject(ProjectId),
     /// Start an agent CLI without a chat in a terminal.
-    StartCli(&'static ph_terminal::cli_agents::CliAgent),
     /// Open the Utilities dialog at one utility.
     Utility(&'static str),
 }
@@ -261,21 +260,6 @@ fn groups(workspace: &Workspace) -> Vec<(&'static str, Vec<Entry>)> {
         .collect(),
     ));
 
-    if workspace.active_space().is_some() {
-        let clis: Vec<Entry> = ph_terminal::cli_agents::installed()
-            .into_iter()
-            .map(|agent| Entry {
-                label: format!("Start {} in a terminal", agent.name).into(),
-                icon: IconName::Bot.into(),
-                keywords: &["agent", "cli", "terminal"],
-                run: Run::StartCli(agent),
-            })
-            .collect();
-        if !clis.is_empty() {
-            groups.push(("Agent CLIs", clis));
-        }
-    }
-
     groups.push((
         "Appearance",
         vec![
@@ -308,7 +292,7 @@ fn row(entry: &Entry) -> CommandItem {
     let icon = entry.icon.clone();
     let action = match &entry.run {
         Run::Action(action) => Some(action.boxed_clone()),
-        Run::OpenProject(_) | Run::StartCli(_) | Run::Utility(_) => None,
+        Run::OpenProject(_) | Run::Utility(_) => None,
     };
     CommandItem::new()
         .label(entry.label.clone())
@@ -369,12 +353,6 @@ pub(crate) fn open(
                             .update(cx, |workspace, cx| workspace.open_project(id, window, cx));
                     }
                     Run::Utility(id) => crate::utilities::open(Some(id), window, cx),
-                    Run::StartCli(agent) => {
-                        let space = workspace.read(cx).active_space().cloned();
-                        if let Some(space) = space {
-                            space.update(cx, |space, cx| space.start_cli(agent, window, cx));
-                        }
-                    }
                 }
             });
         for (title, entries) in groups.iter() {

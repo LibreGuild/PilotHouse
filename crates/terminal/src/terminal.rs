@@ -40,6 +40,8 @@ pub struct StartedShell {
     pty: EventLoopSender,
     events: smol::channel::Receiver<Event>,
     title: SharedString,
+    /// The shell's name, as the user picked it (`zsh`, `PowerShell 7`).
+    shell: SharedString,
     columns: usize,
     rows: usize,
 }
@@ -54,6 +56,8 @@ pub struct Terminal {
     term: Arc<FairMutex<Term<Listener>>>,
     pty: EventLoopSender,
     title: SharedString,
+    /// The shell started (see [`Terminal::shell`]).
+    shell: SharedString,
     /// A fixed name (a run configuration's), shown instead of the shell's title.
     label: Option<SharedString>,
     exited: bool,
@@ -72,14 +76,34 @@ impl Terminal {
     /// on a mapped network drive gets a shell on the server, in the same
     /// folder there (through `ssh`, which may ask for a password).
     pub fn start(cwd: std::path::PathBuf) -> anyhow::Result<StartedShell> {
+        Self::start_with(cwd, None)
+    }
+
+    /// [`Self::start`] with `shell` (one of [`ph_env::shells`]) instead of
+    /// the default. A folder on a network drive always gets the server's.
+    pub fn start_with(
+        cwd: std::path::PathBuf,
+        shell: Option<&ph_env::Shell>,
+    ) -> anyhow::Result<StartedShell> {
         if let Some(remote) = ph_remote::remote_of(&cwd) {
             let (program, args) = ph_remote::ssh::shell(&remote.mapping, &remote.path);
             let mut shell = Self::start_program(&program, args, home_or(cwd))?;
             shell.title = remote.mapping.host.clone().into();
+            shell.shell = remote.mapping.host.clone().into();
             return Ok(shell);
         }
-        let (shell, args) = ph_env::default_shell();
-        Self::start_program(&shell.to_string_lossy(), args, cwd)
+        match shell {
+            Some(shell) => {
+                let mut started =
+                    Self::start_program(&shell.program.to_string_lossy(), shell.args.clone(), cwd)?;
+                started.shell = shell.name.clone().into();
+                Ok(started)
+            }
+            None => {
+                let (shell, args) = ph_env::default_shell();
+                Self::start_program(&shell.to_string_lossy(), args, cwd)
+            }
+        }
     }
 
     /// Starts `program` with `args` in `cwd` on a PTY (a shell, `ssh`,
@@ -131,11 +155,13 @@ impl Terminal {
             .file_stem()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "shell".into());
+        let title: SharedString = title.into();
         Ok(StartedShell {
             term,
             pty,
             events,
-            title: title.into(),
+            shell: title.clone(),
+            title,
             columns,
             rows,
         })
@@ -162,6 +188,7 @@ impl Terminal {
             term: shell.term,
             pty: shell.pty,
             title: shell.title,
+            shell: shell.shell,
             label: None,
             exited: false,
             exit_code: None,
@@ -169,6 +196,11 @@ impl Terminal {
             rows: shell.rows,
             _events: events,
         }
+    }
+
+    /// The shell this terminal started (its name, not what it runs now).
+    pub fn shell(&self) -> &SharedString {
+        &self.shell
     }
 
     pub fn title(&self) -> &SharedString {

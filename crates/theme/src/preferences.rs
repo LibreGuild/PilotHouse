@@ -33,7 +33,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            accent: Accent::Clay,
+            accent: Accent::Green,
             ui_font: String::new(),
             ui_font_size: 14.0,
             code_font: String::new(),
@@ -295,6 +295,15 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
     let alpha = preferences.opacity.clamp(0.55, 1.0);
     Theme::update(cx, |theme| {
         let dark = theme.mode.is_dark();
+        // From the theme's own colors every time: the edits below scale
+        // alphas, and on top of an earlier pass they would compound (more
+        // transparent with each change, never solid again).
+        let config = if dark {
+            theme.dark_theme.clone()
+        } else {
+            theme.light_theme.clone()
+        };
+        theme.apply_config(&config);
         let accent = preferences.accent.color(dark);
         theme.font_family = ui_font.into();
         theme.font_size = px(preferences.ui_font_size.clamp(11.0, 20.0));

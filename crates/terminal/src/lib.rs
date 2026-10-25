@@ -9,11 +9,7 @@
 //!
 //! Drag to select (double-click a word, triple-click a line) and ⌘C (Ctrl+Shift+C
 //! off macOS) copies. Not yet supported: mouse reporting to programs.
-//!
-//! Agent CLIs PilotHouse has no chat for ([`cli_agents`]) start from the
-//! tab's menu, each in its own terminal.
 
-pub mod cli_agents;
 mod keys;
 mod palette;
 mod terminal;

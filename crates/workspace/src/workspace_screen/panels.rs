@@ -352,17 +352,6 @@ impl WorkspaceScreen {
         self.terminal = Some(terminal.clone());
         terminal
     }
-
-    /// Starts an agent CLI that has no chat in its own terminal.
-    pub fn start_cli(
-        &mut self,
-        agent: &ph_terminal::cli_agents::CliAgent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let terminal = self.terminal_for_run(window, cx);
-        terminal.update(cx, |terminal, cx| terminal.start_cli(agent, window, cx));
-    }
 }
 
 /// Open pull requests as `@pr:` mentions attach them.

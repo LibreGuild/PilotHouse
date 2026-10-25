@@ -97,13 +97,67 @@ pub fn checks(spec: &AgentSpec) -> Vec<Check> {
             }
         });
     }
-    checks.push(Check {
-        title: "Signed in".into(),
-        state: CheckState::Note,
-        detail: spec.login_hint.into(),
-        action: None,
-    });
+    // Shown only when the agent's own sign-in record is found: without one
+    // it may still be signed in some other way (a keychain), and the chat
+    // offers its sign-in methods if it asks.
+    if let Some(how) = dirs::home_dir().and_then(|home| signed_in(spec.id, &home, &env_var)) {
+        checks.push(Check {
+            title: "Signed in".into(),
+            state: CheckState::Ok,
+            detail: how.into(),
+            action: None,
+        });
+    }
     checks
+}
+
+fn env_var(name: &str) -> Option<String> {
+    ph_env::var(name)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+}
+
+/// How agent `id` is signed in on this machine, if its own record says so
+/// (`home` is the user's home folder, `var` reads the login environment).
+/// Nothing secret is read: only whether the record is there.
+fn signed_in(id: &str, home: &Path, var: &dyn Fn(&str) -> Option<String>) -> Option<&'static str> {
+    let json = |path: PathBuf| -> Option<serde_json::Value> {
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    };
+    match id {
+        "claude" => {
+            let account = json(home.join(".claude.json"))
+                .is_some_and(|config| config.get("oauthAccount").is_some_and(|a| !a.is_null()));
+            if account || home.join(".claude/.credentials.json").is_file() {
+                Some("With your Claude account.")
+            } else {
+                var("ANTHROPIC_API_KEY").map(|_| "With ANTHROPIC_API_KEY.")
+            }
+        }
+        "codex" => {
+            let auth = json(home.join(".codex/auth.json")).is_some_and(|auth| {
+                ["tokens", "OPENAI_API_KEY"]
+                    .iter()
+                    .any(|key| auth.get(key).is_some_and(|value| !value.is_null()))
+            });
+            if auth {
+                Some("With `codex login`.")
+            } else {
+                var("OPENAI_API_KEY").map(|_| "With OPENAI_API_KEY.")
+            }
+        }
+        "gemini" => {
+            let google = json(home.join(".gemini/google_accounts.json"))
+                .is_some_and(|accounts| accounts.get("active").is_some_and(|a| !a.is_null()))
+                || home.join(".gemini/oauth_creds.json").is_file();
+            if google {
+                Some("With your Google account.")
+            } else {
+                var("GEMINI_API_KEY").map(|_| "With GEMINI_API_KEY.")
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Whether nothing blocks starting the agent.
@@ -162,6 +216,26 @@ fn npm_cache() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sign_in_records_are_recognised() {
+        let home = std::env::temp_dir().join(format!("ph-signin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::create_dir_all(home.join(".gemini")).unwrap();
+        let none = |_: &str| None;
+        assert_eq!(signed_in("claude", &home, &none), None);
+        std::fs::write(home.join(".claude.json"), r#"{"oauthAccount":{"x":1}}"#).unwrap();
+        assert!(signed_in("claude", &home, &none).is_some());
+        std::fs::write(home.join(".codex/auth.json"), r#"{"tokens":null}"#).unwrap();
+        assert_eq!(signed_in("codex", &home, &none), None);
+        let key = |name: &str| (name == "OPENAI_API_KEY").then(|| "k".to_string());
+        assert!(signed_in("codex", &home, &key).is_some());
+        std::fs::write(home.join(".gemini/google_accounts.json"), r#"{"active":"a"}"#).unwrap();
+        assert!(signed_in("gemini", &home, &none).is_some());
+        assert_eq!(signed_in("antigravity", &home, &none), None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn splits_scoped_packages() {
