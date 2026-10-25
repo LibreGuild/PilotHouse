@@ -1,6 +1,7 @@
-//! The Pull requests tab: the project's open PRs (all, mine, waiting for my
-//! review) with CI state, a form to open one for the current branch, and
-//! the PR view.
+//! A repository's open PRs (all, mine, waiting for my review) with CI
+//! state, and the PR view. In a workspace's PRs tool it reads the
+//! repository from the folder's remote and offers a form to open a PR for
+//! the current branch; in the GitHub view it shows a repository by name.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,6 +28,7 @@ use ph_github::pulls;
 use ph_store::Store;
 use ph_ui::{EmptyState, Icons};
 
+use crate::clones::RepoId;
 use crate::hosting::{self, Hosting, Missing};
 use crate::pull_view::{self, PullView, PullViewEvent};
 
@@ -56,10 +58,20 @@ enum State {
     Ready(Hosting),
 }
 
+/// Where the panel's repository comes from.
+enum Source {
+    /// A workspace folder's checkout and its remote.
+    Local {
+        repo: Entity<LocalRepo>,
+        root: PathBuf,
+    },
+    /// A repository by name (the GitHub view).
+    Named(RepoId),
+}
+
 pub struct PullsPanel {
     store: Store,
-    local: Entity<LocalRepo>,
-    root: PathBuf,
+    source: Source,
     state: State,
     me: Option<String>,
     pulls: Vec<PullRequest>,
@@ -68,6 +80,8 @@ pub struct PullsPanel {
     loading: bool,
     error: Option<SharedString>,
     open: Option<(Entity<PullView>, Subscription)>,
+    /// A pull request to show once the repository is read.
+    pending_open: Option<u64>,
     create: Option<CreateForm>,
     writer: Option<Writer>,
     _load: Option<Task<()>>,
@@ -88,10 +102,18 @@ impl EventEmitter<PullsPanelEvent> for PullsPanel {}
 impl PullsPanel {
     pub fn new(store: Store, local: Entity<LocalRepo>, cx: &mut Context<Self>) -> Self {
         let root = local.read(cx).root().to_path_buf();
+        Self::with_source(store, Source::Local { repo: local, root }, cx)
+    }
+
+    /// The pull requests of repository `id`, with no checkout of the user's.
+    pub fn for_repo(store: Store, id: RepoId, cx: &mut Context<Self>) -> Self {
+        Self::with_source(store, Source::Named(id), cx)
+    }
+
+    fn with_source(store: Store, source: Source, cx: &mut Context<Self>) -> Self {
         let mut panel = Self {
             store,
-            local,
-            root,
+            source,
             state: State::Loading,
             me: None,
             pulls: Vec::new(),
@@ -100,6 +122,7 @@ impl PullsPanel {
             loading: false,
             error: None,
             open: None,
+            pending_open: None,
             create: None,
             writer: None,
             _load: None,
@@ -114,11 +137,18 @@ impl PullsPanel {
 
     /// Re-reads the remote and account, then the pull requests.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
-        let (root, store) = (self.root.clone(), self.store.clone());
+        let store = self.store.clone();
+        let place = match &self.source {
+            Source::Local { root, .. } => Ok(root.clone()),
+            Source::Named(id) => Err(id.clone()),
+        };
         self.loading = true;
         cx.notify();
         let load = cx.background_spawn(async move {
-            let hosting = hosting::resolve(&root, &store)?;
+            let hosting = match place {
+                Ok(root) => hosting::resolve(&root, &store)?,
+                Err(id) => hosting::for_repo(&store, &id)?,
+            };
             let me = pulls::me(&hosting.client).ok().map(|user| user.login);
             let list = pulls::list(&hosting.client, &hosting.repo);
             let checks: HashMap<u64, Vec<Check>> = list
@@ -165,6 +195,19 @@ impl PullsPanel {
         &self.pulls
     }
 
+    /// The workspace checkout, when the panel has one.
+    fn local(&self) -> Option<(&Entity<LocalRepo>, &PathBuf)> {
+        match &self.source {
+            Source::Local { repo, root } => Some((repo, root)),
+            Source::Named(_) => None,
+        }
+    }
+
+    /// The pull request in view, if one is.
+    pub fn showing(&self, cx: &gpui_kit::App) -> Option<u64> {
+        self.open.as_ref().map(|(view, _)| view.read(cx).number())
+    }
+
     fn hosting(&self) -> Option<&Hosting> {
         match &self.state {
             State::Ready(hosting) => Some(hosting),
@@ -172,12 +215,18 @@ impl PullsPanel {
         }
     }
 
-    /// Shows pull request `number`.
+    /// Shows pull request `number` (once the repository is read, if it is
+    /// not yet).
     pub fn open_pull(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(hosting) = self.hosting().cloned() else {
+            self.pending_open = Some(number);
             return;
         };
-        let (local, store) = (self.local.clone(), self.store.clone());
+        self.pending_open = None;
+        let (local, store) = (
+            self.local().map(|(repo, _)| repo.clone()),
+            self.store.clone(),
+        );
         let view = cx.new(|cx| PullView::new(store, hosting.clone(), local, number, window, cx));
         let subscription = cx.subscribe(
             &view,
@@ -200,7 +249,13 @@ impl PullsPanel {
     }
 
     fn show_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let branch = self.local.read(cx).branch().unwrap_or_default().to_string();
+        let Some((local, root)) = self.local() else {
+            return;
+        };
+        let (branch, base_branch) = (
+            local.read(cx).branch().unwrap_or_default().to_string(),
+            default_base(root),
+        );
         let title = cx.new(|cx| {
             let mut input = InputState::new(window, cx).placeholder("Title");
             input.set_value(branch.replace(['-', '_', '/'], " "), window, cx);
@@ -213,7 +268,7 @@ impl PullsPanel {
         });
         let base = cx.new(|cx| {
             let mut input = InputState::new(window, cx).placeholder("Base branch");
-            input.set_value(default_base(&self.root), window, cx);
+            input.set_value(base_branch, window, cx);
             input
         });
         self.create = Some(CreateForm {
@@ -229,13 +284,15 @@ impl PullsPanel {
 
     /// The agent writes the description from the branch's commits and diff.
     fn write_description(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.local().map(|(_, root)| root.clone()) else {
+            return;
+        };
         let (Some(writer), Some(form)) = (self.writer.clone(), self.create.as_mut()) else {
             return;
         };
         let base = form.base.read(cx).value().trim().to_string();
         form.busy = Some("Writing…");
         cx.notify();
-        let root = self.root.clone();
         let collect = cx.background_spawn({
             let root = root.clone();
             let base = base.clone();
@@ -313,6 +370,12 @@ impl PullsPanel {
 
     /// Pushes the branch if it has no upstream, then opens the PR.
     fn create_pull(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((local, root)) = self
+            .local()
+            .map(|(repo, root)| (repo.clone(), root.clone()))
+        else {
+            return;
+        };
         let (Some(hosting), Some(form)) = (self.hosting().cloned(), self.create.as_mut()) else {
             return;
         };
@@ -320,14 +383,13 @@ impl PullsPanel {
         let body = form.body.read(cx).value().to_string();
         let base = form.base.read(cx).value().trim().to_string();
         let draft = form.draft;
-        let status = self.local.read(cx).status().cloned().unwrap_or_default();
+        let status = local.read(cx).status().cloned().unwrap_or_default();
         let Some(head) = status.branch.clone() else {
             window.push_notification(Notification::warning("Switch to a branch first."), cx);
             return;
         };
         form.busy = Some("Opening…");
         cx.notify();
-        let root = self.root.clone();
         let work = cx.background_spawn(async move {
             if status.upstream.is_none() || status.ahead > 0 {
                 ph_git::branches::push(&root, status.upstream.is_some())?;
@@ -428,7 +490,9 @@ impl PullsPanel {
                         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .child(format!(
                             "New pull request from {}",
-                            self.local.read(cx).branch().unwrap_or("this branch")
+                            self.local()
+                                .and_then(|(repo, _)| repo.read(cx).branch())
+                                .unwrap_or("this branch")
                         )),
                 )
                 .child(Input::new(&form.title).small())
@@ -503,7 +567,9 @@ impl PullsPanel {
                 Filter::ToReview => pull.requested_reviewers.iter().any(|user| user.login == me),
             })
             .collect();
-        let branch = self.local.read(cx).branch().map(str::to_string);
+        let branch = self
+            .local()
+            .and_then(|(repo, _)| repo.read(cx).branch().map(str::to_string));
         let has_pr = branch
             .as_ref()
             .is_some_and(|branch| self.pulls.iter().any(|pull| &pull.head.name == branch));
@@ -732,7 +798,13 @@ fn default_base(root: &std::path::Path) -> String {
 }
 
 impl Render for PullsPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A pull request asked for before the repository was read.
+        if self.hosting().is_some()
+            && let Some(number) = self.pending_open.take()
+        {
+            self.open_pull(number, window, cx);
+        }
         if let Some((view, _)) = &self.open {
             return view.clone().into_any_element();
         }

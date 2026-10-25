@@ -2,7 +2,7 @@
 
 Crate: `ph-files`.
 
-- **Where**: the tree is the sidebar's Files section (`FileTree`); open files show in the editor column beside the chat (`FilesPanel`). One model serves both.
+- **Where**: the tree is the Files tool on the right (⌘1, `FileTree`); open files show in the editor column beside the chat (`FilesPanel`). One model serves both.
 - **Tree** (`dir_tree.rs`, `files_panel.rs`): directories are listed on first expand, with ignored paths (`.gitignore`) and `.git` hidden. An unlisted folder carries a placeholder child so it stays expandable. Rows have chevrons and indent guides, an icon per file and folder type (`ph_ui::file_icon_element`: Material Icon Theme SVGs, MIT, bundled in `crates/ui/assets/file-icons`), and Git marks from each folder's status (**M**, **U**, **A**, **D**, **R**, **!**; a dot on folders holding changes).
 - **Editor** (`file_view.rs`): the gpui-component code editor with syntect highlighting (about 200 languages), chosen by file extension. ⌘S saves, ⌘F finds and replaces in the file. Unsaved files show `●` in their tab. Binary files open as a notice.
 - **Large files** (`large/`): text files over 4 MB open in a read-only viewer that handles many gigabytes. It reads with positioned reads (no memory map, so a file truncated underneath cannot crash the app) and keeps only where every 1024th line starts, built in the background (a 1 GB, 10-million-line log indexes in a few seconds; scrolling works while it counts). Only the lines on screen are read. Find (smart case, both ways, across chunk seams), go to line, click/⇧-click to select lines and ⌘C to copy them (up to 32 MB), sideways scroll for long lines (cut at 4 KB), and *Follow* to stay at the end of a growing log.

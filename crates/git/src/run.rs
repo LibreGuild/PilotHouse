@@ -27,6 +27,22 @@ pub fn git(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Like [`git`], with environment variables `env` set (credentials for one
+/// call, which never reach the command line or a config file).
+pub fn git_env(root: &Path, args: &[&str], env: &[(String, String)]) -> Result<String> {
+    let mut command = command(root);
+    command.args(args);
+    command.envs(env.iter().map(|(key, value)| (key, value)));
+    let output = ready(command)
+        .stdin(Stdio::null())
+        .output()
+        .context("running git (is it installed?)")?;
+    if !output.status.success() {
+        bail!("{}", failure(root, args.first().unwrap_or(&""), &output));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// Like [`git`], with `input` on stdin.
 pub fn git_with_input(root: &Path, args: &[&str], input: &str) -> Result<String> {
     let mut command = command(root);

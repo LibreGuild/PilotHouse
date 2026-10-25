@@ -1,39 +1,63 @@
-//! The left sidebar for the workspace in front: its files on top (each
-//! folder a root of the tree), its chats below, grouped by day. Either
-//! section folds; with both open, the line between them drags. Chats that
-//! PilotHouse started itself (schedules, test recording and repair, pull
-//! request reviews) fold into *Runs*, so the user's own stay in view.
+//! The left sidebar of the Workspaces view: everything at once, so nothing
+//! needs switching to be seen.
 //!
-//! Workspaces are switched from the title bar, not here.
+//! - **New chat** (⌘N) and chat search on top.
+//! - **Chats**: the Chats space, for chats outside any workspace (no folder
+//!   needed), grouped by day.
+//! - **Workspaces**: each with its colour and what it is doing; unfolded,
+//!   its newest chats (all of them on request). Picking a chat opens its
+//!   workspace at it. Each row's menu adds folders, renames, moves it to a
+//!   window of its own, recolours or removes it.
+//!
+//! Chats that PilotHouse started itself (schedules, test recording and
+//! repair, pull request reviews) fold into *Runs*, so the user's own stay in
+//! view. A workspace's files are its Files tool, on the right.
 
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    resizable::{resizable_panel, v_resizable},
+    menu::PopupMenuItem,
     spinner::Spinner,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
+    AnyElement, App, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, div, px,
 };
 use jiff::{ToSpan as _, Zoned};
-use ph_store::sessions::Session;
+use ph_store::projects::{Project, ProjectId};
+use ph_store::sessions::{Session, SessionId};
 use ph_theme::layout;
-use ph_ui::Icons;
+use ph_ui::{Icons, MenuButton as _};
 
-use crate::actions::{AddFolderToWorkspace, AddProject, NewSession, NewWorkspace, SearchChats};
-use crate::workspace::Workspace;
-use crate::workspace_screen::WorkspaceScreen;
+use crate::actions::{
+    AddFolderToWorkspace, AddProject, NewSession, NewWorkspace, OpenInNewWindow, RemoveWorkspace,
+    RenameWorkspace, SearchChats,
+};
+use crate::workspace::{View, Workspace};
+
+/// The chats an unfolded workspace lists before *Show all*.
+const NEWEST: usize = 5;
 
 pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let body = match workspace.active_space().cloned() {
-        Some(space) => sections(&space, cx),
-        None => no_workspace(cx),
-    };
+    let mut rows: Vec<AnyElement> = Vec::new();
+    if let Some(chats) = workspace.chats_space() {
+        rows.push(chats_header(chats.id, cx));
+        rows.extend(chat_rows(workspace, chats.id, None, cx));
+    }
+    rows.push(workspaces_header(cx));
+    if workspace.projects().is_empty() {
+        rows.push(no_workspaces(cx));
+    }
+    for (ix, project) in workspace.projects().iter().enumerate() {
+        rows.push(workspace_row(workspace, project, ix, cx));
+        if workspace.expanded.contains(&project.id) {
+            rows.extend(chat_rows(workspace, project.id, Some(NEWEST), cx));
+        }
+    }
     v_flex()
         .id("workspace-sidebar")
         .flex_none()
@@ -41,266 +65,393 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
         .h_full()
         .pl_2()
         .pb_2()
-        .child(body)
-}
-
-/// Files over chats, as folded and sized.
-fn sections(space: &Entity<WorkspaceScreen>, cx: &mut Context<Workspace>) -> AnyElement {
-    let (tree, files_folded, chats_folded, project_id, files_height) = {
-        let space = space.read(cx);
-        (
-            space.file_tree().cloned(),
-            space.files_folded(),
-            space.chats_folded(),
-            space.project().id,
-            space.files_height(),
-        )
-    };
-    let chats = chats_section(space, chats_folded, cx);
-    let Some(tree) = tree else {
-        // No folders yet: say how to add one, and the chats take the rest.
-        return v_flex()
-            .size_full()
-            .child(no_folders(cx))
-            .child(div().flex_1().min_h_0().child(chats))
-            .into_any_element();
-    };
-    let files = files_section(space, &tree, files_folded, cx);
-    match (files_folded, chats_folded) {
-        (false, false) => v_resizable(("sidebar-split", project_id as u64))
-            // Where the divider was left is kept for the workspace.
-            .on_resize({
-                let space = space.downgrade();
-                move |state, _, cx| {
-                    let Some(height) = state.read(cx).sizes().first().copied() else {
-                        return;
-                    };
-                    _ = space.update(cx, |space, cx| {
-                        space.set_files_height(f32::from(height), cx)
-                    });
-                }
-            })
-            .child(
-                resizable_panel()
-                    .size(px(files_height.unwrap_or(380.)))
-                    .size_range(px(120.)..gpui_kit::Pixels::MAX)
-                    .child(files),
-            )
-            .child(
-                resizable_panel()
-                    .size_range(px(120.)..gpui_kit::Pixels::MAX)
-                    .child(chats),
-            )
-            .into_any_element(),
-        // A folded section keeps its header; the open one takes the rest.
-        (true, false) => v_flex()
-            .size_full()
-            .child(div().flex_none().child(files))
-            .child(div().flex_1().min_h_0().child(chats))
-            .into_any_element(),
-        (false, true) => v_flex()
-            .size_full()
-            .child(div().flex_1().min_h_0().child(files))
-            .child(div().flex_none().child(chats))
-            .into_any_element(),
-        (true, true) => v_flex()
-            .size_full()
-            .child(files)
-            .child(chats)
-            .into_any_element(),
-    }
-}
-
-fn files_section(
-    space: &Entity<WorkspaceScreen>,
-    tree: &Entity<ph_files::FileTree>,
-    folded: bool,
-    cx: &mut Context<Workspace>,
-) -> AnyElement {
-    let files = tree.read(cx).files().clone();
-    let searching = files.read(cx).is_searching();
-    let (fold, search) = (space.clone(), files.clone());
-    let header = section_header(
-        "sidebar-files",
-        if searching { "Search" } else { "Files" },
-        folded,
-        move |cx| {
-            fold.update(cx, |space, cx| {
-                let (chats, runs) = (space.chats_folded(), space.runs_open());
-                space.set_sidebar_folds(!folded, chats, runs, cx)
-            })
-        },
-        cx,
-    )
-    .child(
-        Button::new("files-search")
-            .ghost()
-            .xsmall()
-            .icon(if searching {
-                Icons::Files
-            } else {
-                IconName::Search.into()
-            })
-            .tooltip(if searching {
-                "Back to the files"
-            } else {
-                "Search in workspace (⌘⇧F)"
-            })
-            .accessibility_label("Search in workspace")
-            .on_click(move |_, window, cx| {
-                search.update(cx, |files, cx| {
-                    if files.is_searching() {
-                        files.show_tree(cx)
-                    } else {
-                        files.find_in_project(window, cx)
-                    }
-                })
-            }),
-    )
-    .child(
-        Button::new("files-add-folder")
-            .ghost()
-            .xsmall()
-            .icon(Icons::FolderPlus)
-            .tooltip("Add a folder to this workspace")
-            .accessibility_label("Add folder")
-            .on_click(|_, window, cx| window.dispatch_action(Box::new(AddFolderToWorkspace), cx)),
-    );
-    v_flex()
-        .size_full()
-        .child(header)
-        .when(!folded, |this| {
-            this.child(div().flex_1().min_h_0().child(tree.clone()))
-        })
-        .into_any_element()
-}
-
-fn chats_section(
-    space: &Entity<WorkspaceScreen>,
-    folded: bool,
-    cx: &mut Context<Workspace>,
-) -> AnyElement {
-    let fold = space.clone();
-    let header = section_header(
-        "sidebar-chats",
-        "Chats",
-        folded,
-        move |cx| {
-            fold.update(cx, |space, cx| {
-                let (files, runs) = (space.files_folded(), space.runs_open());
-                space.set_sidebar_folds(files, !folded, runs, cx)
-            })
-        },
-        cx,
-    )
-    .child(
-        Button::new("sidebar-search-chats")
-            .ghost()
-            .xsmall()
-            .icon(IconName::Search)
-            .tooltip("Search chats (⌘⇧K)")
-            .accessibility_label("Search chats")
-            .on_click(|_, window, cx| window.dispatch_action(Box::new(SearchChats), cx)),
-    )
-    .child(
-        Button::new("sidebar-new-chat")
-            .ghost()
-            .xsmall()
-            .icon(Icons::SquarePen)
-            .tooltip("New chat (⌘N)")
-            .accessibility_label("New chat")
-            .on_click(|_, window, cx| window.dispatch_action(Box::new(NewSession), cx)),
-    );
-    if folded {
-        return header.into_any_element();
-    }
-    v_flex()
-        .size_full()
-        .child(header)
+        .child(top(cx))
         .child(
             v_flex()
-                .id("sidebar-chat-list")
+                .id("sidebar-list")
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
                 .pr_1()
                 .pb_2()
-                .children(chat_list(space, cx)),
+                .children(rows),
         )
-        .into_any_element()
 }
 
-/// The chats in groups by day, the user's own first and PilotHouse's in
-/// *Runs* at the end.
-fn chat_list(space: &Entity<WorkspaceScreen>, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
-    let (sessions, active, runs_open, project_id) = {
-        let space = space.read(cx);
-        (
-            space.sessions().to_vec(),
-            space.active_session(),
-            space.runs_open(),
-            space.project().id,
+/// New chat and search.
+fn top(cx: &App) -> impl IntoElement {
+    h_flex()
+        .flex_none()
+        .pr_1()
+        .pb_1()
+        .gap_1()
+        .child(
+            Button::new("sidebar-new-chat")
+                .outline()
+                .small()
+                .flex_1()
+                .icon(Icons::SquarePen)
+                .label("New chat")
+                .tooltip("New chat here (⌘N)")
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(NewSession), cx)),
         )
+        .child(
+            Button::new("sidebar-search-chats")
+                .ghost()
+                .small()
+                .icon(IconName::Search)
+                .tooltip("Search chats (⌘⇧K)")
+                .accessibility_label("Search chats")
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(SearchChats), cx)),
+        )
+        .child(div().h_px().bg(cx.theme().border))
+}
+
+fn chats_header(chats: ProjectId, cx: &mut Context<Workspace>) -> AnyElement {
+    let workspace = cx.entity().downgrade();
+    section(
+        "sidebar-chats",
+        "Chats",
+        Button::new("sidebar-new-loose-chat")
+            .ghost()
+            .xsmall()
+            .icon(IconName::Plus)
+            .tooltip("New chat outside any workspace")
+            .accessibility_label("New chat outside any workspace")
+            .on_click(move |_, window, cx| {
+                _ = workspace.update(cx, |workspace, cx| workspace.new_chat_in(chats, window, cx));
+            }),
+        cx,
+    )
+}
+
+fn workspaces_header(cx: &mut Context<Workspace>) -> AnyElement {
+    section(
+        "sidebar-workspaces",
+        "Workspaces",
+        Button::new("sidebar-add-workspace")
+            .ghost()
+            .xsmall()
+            .icon(IconName::Plus)
+            .tooltip("New workspace or open a folder")
+            .accessibility_label("Add a workspace")
+            .menu(gpui_kit::Anchor::TopRight, |menu, _, _| {
+                menu.item(
+                    PopupMenuItem::new("Open folder as a workspace…")
+                        .icon(Icon::new(Icons::FolderOpen))
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(AddProject), cx)),
+                )
+                .item(
+                    PopupMenuItem::new("New workspace without folders")
+                        .icon(Icon::new(Icons::SquarePen))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(NewWorkspace), cx)
+                        }),
+                )
+            }),
+        cx,
+    )
+}
+
+/// A workspace: fold chevron, colour, name, what it is doing, and on hover
+/// a new-chat button and its menu.
+fn workspace_row(
+    workspace: &Workspace,
+    project: &Project,
+    ix: usize,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let id = project.id;
+    let expanded = workspace.expanded.contains(&id);
+    let active = workspace.view() == View::Workspaces && workspace.active_project_id() == Some(id);
+    let dark = cx.theme().is_dark();
+    let color = ph_ui::workspace_color(project.shade(ph_ui::WORKSPACE_COLORS.len()), dark);
+    let status = workspace.status(id);
+    let marker: Option<AnyElement> = if status.waiting > 0 {
+        Some(dot(cx.theme().warning).into_any_element())
+    } else if status.failed {
+        Some(dot(cx.theme().danger).into_any_element())
+    } else if status.working > 0 {
+        Some(Spinner::new().xsmall().into_any_element())
+    } else if status.unseen > 0 {
+        Some(dot(cx.theme().success).into_any_element())
+    } else {
+        None
     };
-    let chats = ph_agent::ChatHub::existing(project_id, cx);
-    let (runs, own): (Vec<Session>, Vec<Session>) = sessions.into_iter().partition(is_automated);
-    let today = Zoned::now();
-    let mut rows = Vec::new();
-    let mut group = None;
-    if own.is_empty() {
-        rows.push(
+    let summary = status.summary(cx).map(|(text, _)| text);
+    let tooltip = match (summary, ix < 9) {
+        (Some(text), true) => format!("{} · {text} ({})", project.name, switch_hint(ix)),
+        (Some(text), false) => format!("{} · {text}", project.name),
+        (None, true) => format!("{} ({})", project.name, switch_hint(ix)),
+        (None, false) => project.name.clone(),
+    };
+    let entity = cx.entity().downgrade();
+    let (fold, open, new_chat) = (entity.clone(), entity.clone(), entity.clone());
+    let group = SharedString::from(format!("workspace-row-{id}"));
+    h_flex()
+        .id(("sidebar-workspace", id as u64))
+        .group(group.clone())
+        .mt_0p5()
+        .h_7()
+        .pl_0p5()
+        .pr_0p5()
+        .gap_1()
+        .rounded(cx.theme().radius)
+        .cursor_pointer()
+        .text_sm()
+        .when(active, |this| {
+            this.font_weight(gpui_kit::FontWeight::MEDIUM)
+                .bg(cx.theme().sidebar_accent.opacity(0.35))
+        })
+        .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.6)))
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+        })
+        .on_click(move |_, window, cx| {
+            _ = open.update(cx, |workspace, cx| workspace.open_project(id, window, cx));
+        })
+        .child(
             div()
-                .px_2()
-                .py_1()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("No chats yet.")
-                .into_any_element(),
-        );
-    }
-    for session in &own {
-        let day = day_group(session.updated_at, &today);
-        if group != Some(day) {
-            group = Some(day);
-            rows.push(group_label(day, cx));
-        }
-        rows.push(chat_row(space, session, active, chats.as_ref(), cx));
-    }
-    if !runs.is_empty() {
-        let toggle = space.clone();
-        rows.push(
-            h_flex()
-                .id("sidebar-runs")
-                .mt_2()
-                .px_2()
-                .h_6()
-                .gap_1()
+                .id(("sidebar-fold", id as u64))
+                .flex_none()
+                .p_0p5()
                 .rounded(cx.theme().radius)
-                .cursor_pointer()
-                .text_xs()
-                .font_weight(gpui_kit::FontWeight::MEDIUM)
                 .text_color(cx.theme().muted_foreground)
-                .hover(|style| style.bg(cx.theme().sidebar_accent))
+                .hover(|style| style.text_color(cx.theme().foreground))
                 .on_click(move |_, _, cx| {
-                    toggle.update(cx, |space, cx| {
-                        let (files, chats) = (space.files_folded(), space.chats_folded());
-                        space.set_sidebar_folds(files, chats, !runs_open, cx)
-                    })
+                    cx.stop_propagation();
+                    _ = fold.update(cx, |workspace, cx| workspace.toggle_expanded(id, cx));
                 })
                 .child(
-                    Icon::new(if runs_open {
+                    Icon::new(if expanded {
                         IconName::ChevronDown
                     } else {
                         IconName::ChevronRight
                     })
                     .xsmall(),
+                ),
+        )
+        .child(dot(color))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(project.name.clone()),
+        )
+        .children(marker)
+        .child(
+            h_flex()
+                .flex_none()
+                .gap_0p5()
+                .invisible()
+                .group_hover(group, |style| style.visible())
+                .child(
+                    Button::new(("sidebar-workspace-chat", id as u64))
+                        .ghost()
+                        .xsmall()
+                        .icon(Icons::SquarePen)
+                        .tooltip("New chat in this workspace")
+                        .accessibility_label("New chat in this workspace")
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            _ = new_chat
+                                .update(cx, |workspace, cx| workspace.new_chat_in(id, window, cx));
+                        }),
                 )
-                .child(format!("Runs · {}", runs.len()))
+                .child(workspace_menu(entity, project, cx)),
+        )
+        .test_support()
+        .into_any_element()
+}
+
+/// What can be done to a workspace. Each item opens it first, then runs
+/// the action on the workspace in front.
+fn workspace_menu(
+    workspace: WeakEntity<Workspace>,
+    project: &Project,
+    _: &App,
+) -> impl IntoElement {
+    let id = project.id;
+    Button::new(("sidebar-workspace-menu", id as u64))
+        .ghost()
+        .xsmall()
+        .icon(IconName::Ellipsis)
+        .accessibility_label("Workspace menu")
+        .menu(gpui_kit::Anchor::TopRight, move |menu, window, cx| {
+            let item =
+                |label: &'static str, icon: Icons, action: fn() -> Box<dyn gpui_kit::Action>| {
+                    let workspace = workspace.clone();
+                    PopupMenuItem::new(label).icon(Icon::new(icon)).on_click(
+                        move |_, window, cx| {
+                            _ = workspace
+                                .update(cx, |workspace, cx| workspace.open_project(id, window, cx));
+                            window.dispatch_action(action(), cx);
+                        },
+                    )
+                };
+            let colours = {
+                let workspace = workspace.clone();
+                gpui_kit::component::menu::PopupMenu::build(window, cx, move |menu, _, _| {
+                    ph_ui::WORKSPACE_COLORS.iter().enumerate().fold(
+                        menu,
+                        |menu, (ix, (name, _))| {
+                            let workspace = workspace.clone();
+                            menu.item(PopupMenuItem::new(*name).on_click(move |_, _, cx| {
+                                _ = workspace.update(cx, |workspace, cx| {
+                                    workspace.set_color(id, Some(ix as u8), cx)
+                                });
+                            }))
+                        },
+                    )
+                })
+            };
+            menu.item(item("Add a folder…", Icons::FolderPlus, || {
+                Box::new(AddFolderToWorkspace)
+            }))
+            .item(item("Rename…", Icons::Pencil, || {
+                Box::new(RenameWorkspace)
+            }))
+            .item(item("Open in new window", Icons::ExternalLink, || {
+                Box::new(OpenInNewWindow)
+            }))
+            .item(PopupMenuItem::submenu("Colour", colours))
+            .separator()
+            .item(item("Remove from PilotHouse", Icons::Trash, || {
+                Box::new(RemoveWorkspace)
+            }))
+        })
+}
+
+/// The chats of `project` (the Chats space, or a workspace), the user's own
+/// by day and PilotHouse's in *Runs*; with `limit`, only the newest unless
+/// all were asked for.
+fn chat_rows(
+    workspace: &Workspace,
+    project: ProjectId,
+    limit: Option<usize>,
+    cx: &mut Context<Workspace>,
+) -> Vec<AnyElement> {
+    let sessions = workspace.sessions_of(project, cx);
+    let active = (workspace.view() == View::Workspaces
+        && workspace.active_project_id() == Some(project))
+    .then(|| {
+        workspace
+            .active_space()
+            .and_then(|space| space.read(cx).active_session())
+    })
+    .flatten();
+    let nested = limit.is_some();
+    let chats = ph_agent::ChatHub::existing(project, cx);
+    let (runs, own): (Vec<Session>, Vec<Session>) = sessions.into_iter().partition(is_automated);
+    let show_all = workspace.show_all.contains(&project);
+    let shown = match limit {
+        Some(limit) if !show_all => own.len().min(limit),
+        _ => own.len(),
+    };
+    let entity = cx.entity().downgrade();
+    let today = Zoned::now();
+    let mut rows = Vec::new();
+    if own.is_empty() && runs.is_empty() {
+        rows.push(
+            div()
+                .when(nested, |this| this.pl_6())
+                .when(!nested, |this| this.px_2())
+                .py_1()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(if nested {
+                    "No chats yet."
+                } else {
+                    "Chats here need no folder."
+                })
                 .into_any_element(),
         );
-        if runs_open {
+    }
+    let mut group = None;
+    for session in own.iter().take(shown) {
+        // Day groups only in the Chats list; a workspace lists its newest.
+        if !nested {
+            let day = day_group(session.updated_at, &today);
+            if group != Some(day) {
+                group = Some(day);
+                rows.push(group_label(day, cx));
+            }
+        }
+        rows.push(chat_row(
+            &entity,
+            project,
+            session,
+            active,
+            nested,
+            chats.as_ref(),
+            cx,
+        ));
+    }
+    if own.len() > shown || (show_all && limit.is_some_and(|limit| own.len() > limit)) {
+        let more = own.len() > shown;
+        let toggle = entity.clone();
+        rows.push(
+            link(
+                SharedString::from(format!("sidebar-more-{project}")),
+                if more {
+                    format!("Show all ({})", own.len())
+                } else {
+                    "Show fewer".into()
+                },
+                nested,
+                cx,
+            )
+            .on_click(move |_, _, cx| {
+                _ = toggle.update(cx, |workspace, cx| {
+                    if !workspace.show_all.remove(&project) {
+                        workspace.show_all.insert(project);
+                    }
+                    cx.notify();
+                });
+            })
+            .into_any_element(),
+        );
+    }
+    if !runs.is_empty() {
+        let open = workspace.runs_open.contains(&project);
+        let toggle = entity.clone();
+        rows.push(
+            link(
+                SharedString::from(format!("sidebar-runs-{project}")),
+                format!("Runs · {}", runs.len()),
+                nested,
+                cx,
+            )
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .xsmall(),
+            )
+            .on_click(move |_, _, cx| {
+                _ = toggle.update(cx, |workspace, cx| {
+                    if !workspace.runs_open.remove(&project) {
+                        workspace.runs_open.insert(project);
+                    }
+                    cx.notify();
+                });
+            })
+            .into_any_element(),
+        );
+        if open {
             for session in &runs {
-                rows.push(chat_row(space, session, active, chats.as_ref(), cx));
+                rows.push(chat_row(
+                    &entity,
+                    project,
+                    session,
+                    active,
+                    nested,
+                    chats.as_ref(),
+                    cx,
+                ));
             }
         }
     }
@@ -308,10 +459,12 @@ fn chat_list(space: &Entity<WorkspaceScreen>, cx: &mut Context<Workspace>) -> Ve
 }
 
 fn chat_row(
-    space: &Entity<WorkspaceScreen>,
+    workspace: &WeakEntity<Workspace>,
+    project: ProjectId,
     session: &Session,
-    active: Option<i64>,
-    chats: Option<&Entity<ph_agent::WorkspaceChats>>,
+    active: Option<SessionId>,
+    nested: bool,
+    chats: Option<&gpui_kit::Entity<ph_agent::WorkspaceChats>>,
     cx: &App,
 ) -> AnyElement {
     let id = session.id;
@@ -322,7 +475,7 @@ fn chat_row(
             (chats.is_working(id, cx), chats.is_waiting(id, cx))
         })
         .unwrap_or_default();
-    let space = space.clone();
+    let workspace = workspace.clone();
     let marker: AnyElement = if waiting {
         div()
             .flex_none()
@@ -342,7 +495,9 @@ fn chat_row(
     h_flex()
         .id(SharedString::from(format!("chat-{id}")))
         .h_7()
-        .px_2()
+        .when(nested, |this| this.pl_6())
+        .when(!nested, |this| this.pl_2())
+        .pr_2()
         .gap_2()
         .rounded(cx.theme().radius)
         .cursor_pointer()
@@ -354,7 +509,11 @@ fn chat_row(
         .when(!selected, |this| {
             this.hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.6)))
         })
-        .on_click(move |_, _, cx| space.update(cx, |space, cx| space.select_session(id, cx)))
+        .on_click(move |_, window, cx| {
+            _ = workspace.update(cx, |workspace, cx| {
+                workspace.open_chat(project, id, window, cx)
+            });
+        })
         .child(marker)
         .child(
             div()
@@ -363,43 +522,55 @@ fn chat_row(
                 .truncate()
                 .child(session.title.clone()),
         )
+        .test_support()
         .into_any_element()
 }
 
-/// A section's title row: a chevron and name that fold it, then `actions`.
-fn section_header(
+/// A section's title row, then `action`.
+fn section(
     id: &'static str,
     title: &'static str,
-    folded: bool,
-    toggle: impl Fn(&mut App) + 'static,
+    action: impl IntoElement,
     cx: &App,
-) -> gpui_kit::Div {
-    h_flex().flex_none().h_8().pr_1().gap_0p5().child(
-        h_flex()
-            .id(id)
-            .flex_1()
-            .h_full()
-            .px_1()
-            .gap_1()
-            .rounded(cx.theme().radius)
-            .cursor_pointer()
-            .text_xs()
-            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-            .text_color(cx.theme().muted_foreground)
-            .hover(|style| style.text_color(cx.theme().foreground))
-            .on_click(move |_, _, cx| toggle(cx))
-            // Findable in UI tests and automation.
-            .test_support()
-            .child(
-                Icon::new(if folded {
-                    IconName::ChevronRight
-                } else {
-                    IconName::ChevronDown
-                })
-                .xsmall(),
-            )
-            .child(title.to_uppercase()),
-    )
+) -> AnyElement {
+    h_flex()
+        .id(id)
+        .flex_none()
+        .h_8()
+        .mt_1()
+        .px_1()
+        .gap_0p5()
+        .text_xs()
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+        .text_color(cx.theme().muted_foreground)
+        .child(div().flex_1().child(title.to_uppercase()))
+        .child(action)
+        // Findable in UI tests and automation.
+        .test_support()
+        .into_any_element()
+}
+
+/// A small muted row (Show all, Runs).
+fn link(
+    id: SharedString,
+    text: String,
+    nested: bool,
+    cx: &App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    h_flex()
+        .id(id)
+        .h_6()
+        .when(nested, |this| this.pl_6())
+        .when(!nested, |this| this.pl_2())
+        .pr_2()
+        .gap_1()
+        .rounded(cx.theme().radius)
+        .cursor_pointer()
+        .text_xs()
+        .font_weight(gpui_kit::FontWeight::MEDIUM)
+        .text_color(cx.theme().muted_foreground)
+        .hover(|style| style.bg(cx.theme().sidebar_accent))
+        .child(text)
 }
 
 fn group_label(day: Day, cx: &App) -> AnyElement {
@@ -413,64 +584,23 @@ fn group_label(day: Day, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// The Files section of a workspace without folders.
-fn no_folders(cx: &App) -> AnyElement {
+/// Shown while there is no workspace.
+fn no_workspaces(cx: &App) -> AnyElement {
     v_flex()
-        .flex_none()
-        .pr_1()
-        .pb_2()
+        .gap_0p5()
+        .items_start()
         .child(
-            h_flex()
-                .h_8()
-                .px_1()
+            div()
+                .px_2()
+                .pb_1()
                 .text_xs()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(cx.theme().muted_foreground)
-                .child("FILES"),
-        )
-        .child(
-            div()
-                .px_2()
-                .pb_1()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("No folders in this workspace."),
-        )
-        .child(
-            Button::new("sidebar-add-first-folder")
-                .ghost()
-                .small()
-                .w_full()
-                .justify_start()
-                .icon(Icons::FolderPlus)
-                .label("Add a folder…")
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(AddFolderToWorkspace), cx)
-                }),
-        )
-        .into_any_element()
-}
-
-/// Shown when no workspace is open.
-fn no_workspace(cx: &App) -> AnyElement {
-    v_flex()
-        .gap_1()
-        .pt_2()
-        .pr_2()
-        .child(
-            div()
-                .px_2()
-                .pb_1()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("No workspace open."),
+                .child("Open a folder to work on its code: files, Git, runs and tests."),
         )
         .child(
             Button::new("sidebar-open-folder")
                 .ghost()
                 .small()
-                .w_full()
-                .justify_start()
                 .icon(Icons::FolderOpen)
                 .label("Open a folder…")
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(AddProject), cx)),
@@ -479,13 +609,24 @@ fn no_workspace(cx: &App) -> AnyElement {
             Button::new("sidebar-new-workspace")
                 .ghost()
                 .small()
-                .w_full()
-                .justify_start()
                 .icon(Icons::SquarePen)
                 .label("New workspace")
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(NewWorkspace), cx)),
         )
         .into_any_element()
+}
+
+fn dot(color: Hsla) -> impl IntoElement {
+    div().flex_none().size(px(8.)).rounded_full().bg(color)
+}
+
+/// ⌃1…⌃9 on macOS, Alt+1…9 elsewhere (⌘/Ctrl+digits show tools).
+fn switch_hint(ix: usize) -> String {
+    if cfg!(target_os = "macos") {
+        format!("⌃{}", ix + 1)
+    } else {
+        format!("Alt+{}", ix + 1)
+    }
 }
 
 /// A chat PilotHouse started rather than the user: a schedule's, a UI

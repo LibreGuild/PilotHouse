@@ -1,6 +1,9 @@
 //! Everything shown for one open workspace: the editor column (while a file
-//! is open), the chat, the tool panel and the icon bar that picks the tool,
-//! plus what the window's sidebar shows for it (the file tree, the chats).
+//! is open), the chat, the tool panel (Files, Git, the board…) and the icon
+//! bar that picks the tool. The window's sidebar lists its chats.
+//!
+//! The Chats space (chats outside any workspace) has a screen too: the chat
+//! and the tools that need no folder.
 //!
 //! A `WorkspaceScreen` is the screen of a workspace. Its running work (chats,
 //! shells, test runs) belongs to the workspace and outlives the screen (see
@@ -54,16 +57,26 @@ mod panels;
 mod render;
 mod to_chat;
 
-/// Emitted when something the sidebar or title bar shows has changed.
-#[derive(Debug, Clone)]
+pub(crate) use panels::briefs;
+
+/// Emitted when something the sidebar or title bar shows has changed, or
+/// for what the window does (folders, reviews in the GitHub view).
+#[derive(Clone)]
 pub enum WorkspaceScreenEvent {
     SessionsChanged,
-    /// Show the sidebar's file tree (it may be hidden).
-    RevealFiles,
     /// Make this folder the workspace's primary one.
     MakePrimary(std::path::PathBuf),
     /// Take this folder out of the workspace.
     RemoveFolder(std::path::PathBuf),
+    /// Review this pull request with an agent (in the GitHub view).
+    Review {
+        hosting: Box<ph_pulls::Hosting>,
+        pull: Box<ph_github::models::PullRequest>,
+    },
+    /// Run agent review `review_id` again on its PR's latest head.
+    ReviewAgain(i64),
+    /// Show chat `id`, wherever it is (a review in the GitHub view).
+    ShowSession(SessionId),
 }
 
 /// What a narrow window shows when a file and a tool are both open: the
@@ -120,7 +133,7 @@ pub struct WorkspaceScreen {
     /// Watches each folder; created with the first panel that needs them.
     watchers: Vec<Entity<ProjectWatcher>>,
     files: Option<Entity<FilesPanel>>,
-    /// The sidebar's view of `files`.
+    /// The Files tool's tree over `files`.
     file_tree: Option<Entity<FileTree>>,
     changes: HashMap<usize, Entity<ChangesPanel>>,
     board: Option<Entity<BoardPanel>>,
@@ -132,7 +145,7 @@ pub struct WorkspaceScreen {
     tests: Option<Entity<ph_uitest::TestsPanel>>,
     /// This is the project on screen (live panes stream only then).
     visible: bool,
-    /// The window shows its sidebar (with the chat list); the chat offers
+    /// The window shows its sidebar (with the chat lists); the chat offers
     /// its own history menu only when not.
     sidebar_shown: bool,
     _subscriptions: Vec<Subscription>,
@@ -189,7 +202,7 @@ impl WorkspaceScreen {
                     this.open_file(path, line, window, cx);
                 }
                 ChatPanelEvent::ReviewAgain { review_id } => {
-                    this.review_again(*review_id, window, cx)
+                    cx.emit(WorkspaceScreenEvent::ReviewAgain(*review_id))
                 }
             },
         );
@@ -268,7 +281,8 @@ impl WorkspaceScreen {
         if space.context_open {
             space.ensure_panel(space.context_tab, window, cx);
         }
-        // The tree is in the sidebar from the start.
+        // Files (the editor and the tree) from the start: open files come
+        // back with the screen.
         if !space.project.empty {
             space.files(window, cx);
         }
@@ -318,6 +332,10 @@ impl WorkspaceScreen {
     /// tests or an app to test. Until the folders are looked at, every tool
     /// shows; the tool in view always does.
     fn is_relevant(&self, tab: ContextTab) -> bool {
+        // In the Chats space there is no folder to show or add.
+        if tab == ContextTab::Files {
+            return self.project.is_workspace();
+        }
         let Some(traits) = &self.traits else {
             return true;
         };
@@ -328,6 +346,7 @@ impl WorkspaceScreen {
         let has = |stack| traits.stacks.contains(&stack);
         let web = has(Stack::Web) || has(Stack::Node);
         match tab {
+            ContextTab::Files => true,
             ContextTab::Changes => traits.git,
             ContextTab::Pulls => traits.remote,
             ContextTab::Board | ContextTab::Terminal => true,
@@ -621,53 +640,13 @@ impl WorkspaceScreen {
         files
     }
 
-    /// The sidebar's file tree (none for a workspace without folders).
+    /// The Files tool's tree (none for a workspace without folders).
     pub fn file_tree(&self) -> Option<&Entity<FileTree>> {
         self.file_tree.as_ref()
     }
 
     pub fn files_panel(&self) -> Option<&Entity<FilesPanel>> {
         self.files.as_ref()
-    }
-
-    pub fn files_folded(&self) -> bool {
-        self.saved.files_folded
-    }
-
-    pub fn chats_folded(&self) -> bool {
-        self.saved.chats_folded
-    }
-
-    pub fn runs_open(&self) -> bool {
-        self.saved.runs_open
-    }
-
-    /// Folds or unfolds the sidebar's Files or Chats section, or lists the
-    /// chats PilotHouse started.
-    pub fn files_height(&self) -> Option<f32> {
-        self.saved.files_height
-    }
-
-    /// The Files/Chats divider was dragged: Files is now `height` tall.
-    pub fn set_files_height(&mut self, height: f32, cx: &mut Context<Self>) {
-        if self.saved.files_height != Some(height) {
-            self.saved.files_height = Some(height);
-            self.save_layout(cx);
-        }
-    }
-
-    pub fn set_sidebar_folds(
-        &mut self,
-        files_folded: bool,
-        chats_folded: bool,
-        runs_open: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.saved.files_folded = files_folded;
-        self.saved.chats_folded = chats_folded;
-        self.saved.runs_open = runs_open;
-        self.save_layout(cx);
-        cx.notify();
     }
 
     /// One watcher per folder, in the order of the workspace's roots. Their
@@ -780,20 +759,14 @@ impl WorkspaceScreen {
         files.update(cx, |files, cx| files.quick_open(window, cx));
     }
 
-    /// ⌘⇧F from anywhere: the sidebar's tree turns into workspace search.
+    /// ⌘⇧F from anywhere: the Files tool's tree turns into workspace search.
     pub fn find_in_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.reveal_files(cx);
+        if !self.project.is_workspace() {
+            return;
+        }
+        self.show_tab(ContextTab::Files, window, cx);
         let files = self.files(window, cx);
         files.update(cx, |files, cx| files.find_in_project(window, cx));
-    }
-
-    /// Shows the sidebar's file tree, unfolded.
-    pub fn reveal_files(&mut self, cx: &mut Context<Self>) {
-        if self.saved.files_folded {
-            let (chats, runs) = (self.saved.chats_folded, self.saved.runs_open);
-            self.set_sidebar_folds(false, chats, runs, cx);
-        }
-        cx.emit(WorkspaceScreenEvent::RevealFiles);
     }
 
     /// Opens `relative` in the editor beside the chat, optionally at a
@@ -881,7 +854,6 @@ impl WorkspaceScreen {
             session_id: self.active_session,
             open_files,
             active_file,
-            ..self.saved.clone()
         };
         if let Err(err) = AppState::store(cx).save_project_ui_state(self.project.id, &self.saved) {
             tracing::warn!(

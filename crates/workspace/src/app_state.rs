@@ -9,6 +9,8 @@ pub(crate) mod keys {
     pub const APPEARANCE: &str = "appearance";
     pub const LAST_PROJECT: &str = "workspace.last_project";
     pub const SIDEBAR_COLLAPSED: &str = "workspace.sidebar_collapsed";
+    /// The workspaces unfolded in the sidebar (their chats listed).
+    pub const SIDEBAR_EXPANDED: &str = "workspace.sidebar_expanded";
     pub const DISABLED_FEATURES: &str = "features.disabled";
     pub const PREFERENCES: &str = "appearance.preferences";
 }

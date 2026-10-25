@@ -1,17 +1,20 @@
-//! The tools beside the chat, picked from the icon bar on the right. (Files
-//! are not a tool: the tree is in the sidebar, open files beside the chat.)
+//! The tools beside the chat, picked from the icon bar on the right. Files
+//! is one of them: its tree shows here, and the files it opens beside the
+//! chat. (The sidebar lists workspaces and their chats.)
 
 use gpui_kit::Action;
 use ph_ui::Icons;
 
 use crate::actions::{
-    ShowBoard, ShowBrowser, ShowChanges, ShowDevices, ShowPulls, ShowRuns, ShowTerminal, ShowTests,
+    ShowBoard, ShowBrowser, ShowChanges, ShowDevices, ShowFiles, ShowPulls, ShowRuns, ShowTerminal,
+    ShowTests,
 };
 
 /// Which tool the context panel shows. Persisted per project by [`Self::key`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ContextTab {
     #[default]
+    Files,
     Changes,
     Pulls,
     Board,
@@ -23,7 +26,8 @@ pub enum ContextTab {
 }
 
 impl ContextTab {
-    pub const ALL: [ContextTab; 8] = [
+    pub const ALL: [ContextTab; 9] = [
+        ContextTab::Files,
         ContextTab::Changes,
         ContextTab::Pulls,
         ContextTab::Board,
@@ -36,6 +40,7 @@ impl ContextTab {
 
     pub fn label(self) -> &'static str {
         match self {
+            ContextTab::Files => "Files",
             ContextTab::Changes => "Git",
             ContextTab::Pulls => "PRs",
             ContextTab::Board => "Board",
@@ -49,6 +54,7 @@ impl ContextTab {
 
     pub fn icon(self) -> Icons {
         match self {
+            ContextTab::Files => Icons::Files,
             ContextTab::Changes => Icons::GitBranch,
             ContextTab::Pulls => Icons::GitPullRequest,
             ContextTab::Board => Icons::SquareKanban,
@@ -63,6 +69,7 @@ impl ContextTab {
     /// Stable identifier used in saved layouts and element ids.
     pub fn key(self) -> &'static str {
         match self {
+            ContextTab::Files => "files",
             ContextTab::Changes => "changes",
             ContextTab::Pulls => "pulls",
             ContextTab::Board => "board",
@@ -81,6 +88,7 @@ impl ContextTab {
     /// The action that switches to this tab, so buttons and shortcuts agree.
     pub fn action(self) -> Box<dyn Action> {
         match self {
+            ContextTab::Files => Box::new(ShowFiles),
             ContextTab::Changes => Box::new(ShowChanges),
             ContextTab::Pulls => Box::new(ShowPulls),
             ContextTab::Board => Box::new(ShowBoard),

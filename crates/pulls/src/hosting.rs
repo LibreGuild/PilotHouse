@@ -39,6 +39,20 @@ pub enum Missing {
     Failed(String),
 }
 
+impl Missing {
+    /// Why, in a sentence for the user.
+    pub fn explain(&self) -> String {
+        match self {
+            Missing::NotRepository => "Not a Git repository.".into(),
+            Missing::NoRemote => "No GitHub remote.".into(),
+            Missing::NoAccount { host } => {
+                format!("No GitHub account for {host} (Settings → GitHub).")
+            }
+            Missing::Failed(reason) => reason.clone(),
+        }
+    }
+}
+
 /// Reads the remote and finds its account (blocking; run off the UI thread).
 pub fn resolve(root: &Path, store: &Store) -> Result<Hosting, Missing> {
     if !ph_git::is_repository(root) {
@@ -57,6 +71,25 @@ pub fn resolve(root: &Path, store: &Store) -> Result<Hosting, Missing> {
         account,
         repo,
         remote: hosted.remote,
+        client: Arc::new(client),
+    })
+}
+
+/// The repository `id` on its host, for the GitHub view: no checkout of
+/// the user's is involved (the remote named is the managed clone's, see
+/// [`crate::clones`]).
+pub fn for_repo(store: &Store, id: &crate::clones::RepoId) -> Result<Hosting, Missing> {
+    let account = accounts::for_host(store, &id.host).ok_or_else(|| Missing::NoAccount {
+        host: id.host.clone(),
+    })?;
+    let repo = Repo::new(&id.owner, &id.name).map_err(|err| Missing::Failed(err.to_string()))?;
+    let client = account
+        .client()
+        .map_err(|err| Missing::Failed(format!("{err:#}")))?;
+    Ok(Hosting {
+        account,
+        repo,
+        remote: "origin".into(),
         client: Arc::new(client),
     })
 }

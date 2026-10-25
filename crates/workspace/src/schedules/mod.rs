@@ -233,13 +233,10 @@ fn open_from_notification(tag: &str, cx: &mut App) {
     };
     let _ = handle.update(cx, |_, window, cx| {
         window.activate_window();
-        workspace.update(cx, |workspace, cx| {
-            if let Some(project) = project {
-                workspace.open_project(project, window, cx);
-            }
-            if let (Some(session), Some(space)) = (session, workspace.active_space().cloned()) {
-                space.update(cx, |space, cx| space.select_session(session, cx));
-            }
+        workspace.update(cx, |workspace, cx| match (project, session) {
+            (Some(project), Some(session)) => workspace.open_chat(project, session, window, cx),
+            (Some(project), None) => workspace.open_project(project, window, cx),
+            _ => {}
         });
     });
 }

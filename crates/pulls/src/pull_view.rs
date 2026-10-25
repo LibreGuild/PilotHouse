@@ -63,7 +63,9 @@ pub struct PullView {
     /// The newest finished agent review: (session, open, fixed) counts.
     last_review: Option<(Option<i64>, usize, usize, String)>,
     hosting: Hosting,
-    local: Entity<LocalRepo>,
+    /// The workspace checkout to check the PR out in (none in the GitHub
+    /// view, which reviews in its own clones).
+    local: Option<Entity<LocalRepo>>,
     number: u64,
     data: Option<Loaded>,
     error: Option<SharedString>,
@@ -88,7 +90,7 @@ impl PullView {
     pub fn new(
         store: ph_store::Store,
         hosting: Hosting,
-        local: Entity<LocalRepo>,
+        local: Option<Entity<LocalRepo>>,
         number: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -325,7 +327,10 @@ impl PullView {
     /// Fetches the head and switches to a local `pr/<number>` branch.
     fn check_out(&mut self, cx: &mut Context<Self>) {
         let (hosting, number) = (self.hosting.clone(), self.number);
-        self.local.update(cx, |repo, cx| {
+        let Some(local) = self.local.clone() else {
+            return;
+        };
+        local.update(cx, |repo, cx| {
             repo.run(
                 format!("Checking out #{number}"),
                 move |root| {
@@ -416,21 +421,25 @@ impl PullView {
                             .primary()
                             .icon(Icons::Sparkles)
                             .label("Review with agent")
-                            .tooltip("Opens a review chat in its own worktree")
+                            .tooltip(
+                                "Opens a review chat in the GitHub view, on its own copy of the PR",
+                            )
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(PullViewEvent::ReviewWithAgent(Box::new(
                                     review_pull.clone(),
                                 )))
                             })),
                     )
-                    .child(
-                        Button::new("pull-check-out")
-                            .small()
-                            .outline()
-                            .icon(Icons::GitBranch)
-                            .label("Check out")
-                            .on_click(cx.listener(|this, _, _, cx| this.check_out(cx))),
-                    )
+                    .when(self.local.is_some(), |this| {
+                        this.child(
+                            Button::new("pull-check-out")
+                                .small()
+                                .outline()
+                                .icon(Icons::GitBranch)
+                                .label("Check out")
+                                .on_click(cx.listener(|this, _, _, cx| this.check_out(cx))),
+                        )
+                    })
                     .child(
                         Button::new("pull-refresh")
                             .small()

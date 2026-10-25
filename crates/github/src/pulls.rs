@@ -77,6 +77,12 @@ pub fn me(client: &Client) -> Result<User> {
     client.get("user")
 }
 
+/// The repository itself: whether it exists for this token, its default
+/// branch and where to clone it from.
+pub fn repository(client: &Client, repo: &Repo) -> Result<Repository> {
+    client.get(&format!("repos/{}/{}", repo.owner, repo.name))
+}
+
 /// Open pull requests, most recently updated first.
 pub fn list(client: &Client, repo: &Repo) -> Result<Vec<PullRequest>> {
     client.get_all(&repo.path("pulls?state=open&sort=updated&direction=desc"))

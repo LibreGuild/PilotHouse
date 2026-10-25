@@ -37,6 +37,12 @@ Opening a project should not run its code:
 - Nothing is executed during detection; files are only read.
 - Restoring a checkpoint removes files created since only when the checkpoint holds every untracked file; one that left some out (over 20,000 files, or a file over 20 MB) keeps files it does not know and says so.
 
+## The GitHub view's clones
+
+- Reviews run in PilotHouse's own clone of the repository (`<data dir>/github/…`, a private folder), never in the user's checkouts, and the pull request's head is a detached worktree beside it. Opening that clone as a workspace is refused.
+- Git reaches the host over HTTPS with the account's token, passed per call in the environment as a header scoped to that host's URL (`http.https://HOST/.extraHeader` through `GIT_CONFIG_*`): never on a command line other processes can list, in the remote URL, or in a config file. Error messages name only the Git command, not its settings.
+- Files a chat names open from the GitHub view only when they are inside those clones.
+
 ## Housekeeping
 
 Copies PilotHouse made for agents (review checkouts, parallel-run lanes) are removed when unused, at startup, only inside its own copies folders (`<data dir>/worktrees`, and this install's folder on a network drive), and only when the database in use is that data folder's own (so tests on a temporary database never touch it). Open lanes stay until you decide. When the workspaces cannot be read, nothing is removed. A removed workspace's copies stay unused for three days too, in case their work is wanted.

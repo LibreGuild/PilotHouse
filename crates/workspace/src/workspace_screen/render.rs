@@ -155,6 +155,7 @@ impl WorkspaceScreen {
                             .child(tab.label()),
                     )
                     .child(div().flex_1())
+                    .children(self.render_tab_actions(cx))
                     .child(
                         Button::new("zoom-context-panel")
                             .ghost()
@@ -197,6 +198,54 @@ impl WorkspaceScreen {
                 ),
             )
             .into_any_element()
+    }
+
+    /// Buttons of the tool in view, in its header: Files searches the
+    /// workspace and adds folders.
+    pub(super) fn render_tab_actions(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if self.context_tab != ContextTab::Files || self.project.empty {
+            return Vec::new();
+        }
+        let Some(files) = self.files.clone() else {
+            return Vec::new();
+        };
+        let searching = files.read(cx).is_searching();
+        vec![
+            Button::new("files-search")
+                .ghost()
+                .small()
+                .icon(if searching {
+                    Icons::Files
+                } else {
+                    IconName::Search.into()
+                })
+                .tooltip(if searching {
+                    "Back to the files"
+                } else {
+                    "Search in workspace (⌘⇧F)"
+                })
+                .accessibility_label("Search in workspace")
+                .on_click(move |_, window, cx| {
+                    files.update(cx, |files, cx| {
+                        if files.is_searching() {
+                            files.show_tree(cx)
+                        } else {
+                            files.find_in_project(window, cx)
+                        }
+                    })
+                })
+                .into_any_element(),
+            Button::new("files-add-folder")
+                .ghost()
+                .small()
+                .icon(Icons::FolderPlus)
+                .tooltip("Add a folder to this workspace")
+                .accessibility_label("Add folder")
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(crate::actions::AddFolderToWorkspace), cx)
+                })
+                .into_any_element(),
+        ]
     }
 
     /// The tools down the window's right edge: icons, with names in their
@@ -321,14 +370,17 @@ impl WorkspaceScreen {
     }
 
     pub(super) fn render_tab_content(&self, cx: &mut Context<Self>) -> AnyElement {
-        // Git and PRs need a folder; say so instead of an empty tool.
+        // Files, Git and PRs need a folder; say so instead of an empty tool.
         if self.project.folders().is_empty()
-            && matches!(self.context_tab, ContextTab::Changes | ContextTab::Pulls)
+            && matches!(
+                self.context_tab,
+                ContextTab::Files | ContextTab::Changes | ContextTab::Pulls
+            )
         {
             return ph_ui::EmptyState::new("No folders in this workspace")
                 .icon(Icons::FolderPlus)
                 .description(
-                    "Add a folder to see its Git changes, branches and pull requests. Chat, the board, the browser and devices work without one.",
+                    "Add a folder to see its files, Git changes, branches and pull requests. Chat, the board, the browser and devices work without one.",
                 )
                 .action(
                     Button::new("empty-add-folder")
@@ -342,6 +394,7 @@ impl WorkspaceScreen {
                 .into_any_element();
         }
         let panel = match self.context_tab {
+            ContextTab::Files => self.file_tree.clone().map(IntoElement::into_any_element),
             ContextTab::Changes => self
                 .changes
                 .get(&self.git_folder)
@@ -522,6 +575,7 @@ pub(super) fn tool_rail_width(labels: bool) -> gpui_kit::Pixels {
 /// The shortcut that shows `tab` (see `actions::bind_keys`).
 pub(super) fn tab_shortcut(tab: ContextTab) -> String {
     let key = match tab {
+        ContextTab::Files => 1,
         ContextTab::Changes => 2,
         ContextTab::Board => 3,
         ContextTab::Terminal => 4,
