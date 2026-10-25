@@ -246,7 +246,10 @@ pub fn shells() -> Vec<Shell> {
     let (default_program, default_args) = default_shell();
     let mut list: Vec<Shell> = Vec::new();
     let mut add = |name: String, program: PathBuf, args: Vec<String>| {
-        if list.iter().any(|known| known.name == name || known.program == program) {
+        if list
+            .iter()
+            .any(|known| known.name == name || known.program == program)
+        {
             return;
         }
         let default = program == default_program;
@@ -267,16 +270,24 @@ pub fn shells() -> Vec<Shell> {
         }
         let cmd = PathBuf::from(var("COMSPEC").unwrap_or("cmd.exe"));
         add("Command Prompt".into(), cmd, Vec::new());
-        let git_bash = [var("ProgramFiles"), var("ProgramW6432"), var("LOCALAPPDATA")]
-            .into_iter()
-            .flatten()
-            .flat_map(|root| {
-                [
-                    PathBuf::from(root).join("Git").join("bin").join("bash.exe"),
-                    PathBuf::from(root).join("Programs").join("Git").join("bin").join("bash.exe"),
-                ]
-            })
-            .find(|path| path.is_file());
+        let git_bash = [
+            var("ProgramFiles"),
+            var("ProgramW6432"),
+            var("LOCALAPPDATA"),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|root| {
+            [
+                PathBuf::from(root).join("Git").join("bin").join("bash.exe"),
+                PathBuf::from(root)
+                    .join("Programs")
+                    .join("Git")
+                    .join("bin")
+                    .join("bash.exe"),
+            ]
+        })
+        .find(|path| path.is_file());
         if let Some(path) = git_bash {
             add("Git Bash".into(), path, vec!["--login".into(), "-i".into()]);
         }
@@ -290,7 +301,11 @@ pub fn shells() -> Vec<Shell> {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default()
         };
-        add(name_of(&default_program), default_program.clone(), default_args.clone());
+        add(
+            name_of(&default_program),
+            default_program.clone(),
+            default_args.clone(),
+        );
         let listed = std::fs::read_to_string("/etc/shells").unwrap_or_default();
         for line in listed.lines().map(str::trim) {
             if line.is_empty() || line.starts_with('#') {
@@ -304,7 +319,11 @@ pub fn shells() -> Vec<Shell> {
         // Common shells a package manager installs without listing them.
         for name in ["fish", "nu", "pwsh"] {
             if let Some(path) = which(name) {
-                let args = if name == "fish" { vec!["-l".into()] } else { Vec::new() };
+                let args = if name == "fish" {
+                    vec!["-l".into()]
+                } else {
+                    Vec::new()
+                };
                 add(name.to_string(), path, args);
             }
         }

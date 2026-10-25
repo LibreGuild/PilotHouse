@@ -231,7 +231,11 @@ mod tests {
         assert_eq!(signed_in("codex", &home, &none), None);
         let key = |name: &str| (name == "OPENAI_API_KEY").then(|| "k".to_string());
         assert!(signed_in("codex", &home, &key).is_some());
-        std::fs::write(home.join(".gemini/google_accounts.json"), r#"{"active":"a"}"#).unwrap();
+        std::fs::write(
+            home.join(".gemini/google_accounts.json"),
+            r#"{"active":"a"}"#,
+        )
+        .unwrap();
         assert!(signed_in("gemini", &home, &none).is_some());
         assert_eq!(signed_in("antigravity", &home, &none), None);
         let _ = std::fs::remove_dir_all(&home);

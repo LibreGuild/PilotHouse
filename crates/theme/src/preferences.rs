@@ -6,7 +6,7 @@
 //! They are a GPUI global; panels read the editor and terminal parts.
 
 use gpui_kit::component::Theme;
-use gpui_kit::{App, Global, Hsla, Window, WindowBackgroundAppearance, px, rgb};
+use gpui_kit::{App, Global, Hsla, Window, WindowBackgroundAppearance, hsla, px, rgb};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,11 +116,23 @@ impl Accent {
             Accent::Blue => (0x6b8cff, 0x3d6df2),
             Accent::Violet => (0xa78bfa, 0x7c3aed),
             Accent::Teal => (0x2dd4bf, 0x0d9488),
-            Accent::Green => (0x4ade80, 0x16a34a),
+            // Softer than a pure green, so it marks without shouting.
+            Accent::Green => (0x5bbf85, 0x1f8a4c),
             Accent::Amber => (0xfbbf24, 0xd97706),
             Accent::Rose => (0xfb7185, 0xe11d48),
         };
         rgb(if dark { dark_hex } else { light_hex }).into()
+    }
+
+    /// The accent as a fill behind white text (primary and send buttons):
+    /// a deeper, calmer shade of [`Self::color`].
+    pub fn fill(self, dark: bool) -> Hsla {
+        let accent = self.color(dark);
+        Hsla {
+            s: accent.s * 0.75,
+            l: accent.l.min(if dark { 0.34 } else { 0.38 }),
+            ..accent
+        }
     }
 }
 
@@ -293,18 +305,23 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
     let (radius, radius_lg) = preferences.corners.radius();
     let translucent = preferences.window != WindowStyle::Solid;
     let alpha = preferences.opacity.clamp(0.55, 1.0);
+    // From the theme's own colors every time: the edits below scale
+    // alphas, and on top of an earlier pass they would compound (more
+    // transparent with each change, never solid again). A pass of its own,
+    // so the edits below register as changes and reach the theme's tokens.
     Theme::update(cx, |theme| {
-        let dark = theme.mode.is_dark();
-        // From the theme's own colors every time: the edits below scale
-        // alphas, and on top of an earlier pass they would compound (more
-        // transparent with each change, never solid again).
-        let config = if dark {
+        let config = if theme.mode.is_dark() {
             theme.dark_theme.clone()
         } else {
             theme.light_theme.clone()
         };
         theme.apply_config(&config);
+    });
+    Theme::update(cx, |theme| {
+        let dark = theme.mode.is_dark();
         let accent = preferences.accent.color(dark);
+        let fill = preferences.accent.fill(dark);
+        let white = hsla(0., 0., 1., 1.);
         theme.font_family = ui_font.into();
         theme.font_size = px(preferences.ui_font_size.clamp(11.0, 20.0));
         theme.mono_font_family = code_font.into();
@@ -326,6 +343,31 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
         colors.caret = accent;
         colors.slider_bar = accent;
         colors.progress_bar = accent;
+        // Filled buttons wear a deeper shade of it, with white text.
+        colors.primary = fill;
+        colors.primary_hover = fill.opacity(0.88);
+        colors.primary_active = fill.opacity(0.76);
+        colors.primary_foreground = white;
+        // Buttons read their own colors (the send button is an info one).
+        for (button, hover, active, text) in [
+            (
+                &mut colors.button_primary,
+                &mut colors.button_primary_hover,
+                &mut colors.button_primary_active,
+                &mut colors.button_primary_foreground,
+            ),
+            (
+                &mut colors.button_info,
+                &mut colors.button_info_hover,
+                &mut colors.button_info_active,
+                &mut colors.button_info_foreground,
+            ),
+        ] {
+            *button = fill;
+            *hover = fill.opacity(0.88);
+            *active = fill.opacity(0.76);
+            *text = white;
+        }
 
         if translucent {
             // The desktop shows through the app chrome; panels stay readable.

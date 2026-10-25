@@ -7,6 +7,7 @@ use gpui_kit::{App, AppContext as _, ParentElement as _, Window, px};
 /// Asks for a name, starting from `current`; `done` gets it on OK (or
 /// Enter, which presses OK).
 pub fn open(
+    title: &'static str,
     current: String,
     window: &mut Window,
     cx: &mut App,
@@ -22,7 +23,7 @@ pub fn open(
     window.open_dialog(cx, move |dialog, _, _| {
         let (input, done) = (input.clone(), done.clone());
         dialog
-            .title("Rename workspace")
+            .title(title)
             .w(px(420.))
             .child(Input::new(&input))
             .footer(ph_ui::dialog_buttons("Rename", true))

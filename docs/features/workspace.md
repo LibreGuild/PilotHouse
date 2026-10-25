@@ -5,7 +5,7 @@ Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 ```
 ┌ title bar: ◆ · sidebar · [Workspaces | GitHub] · ⌘K search · inbox · theme · tools · settings ┐
 │ sidebar          │ editor (while a file  │ chat              │ tool panel       │ icon │
-│  + New chat  🔍  │  is open)             │                   │ (Files, Git, …)  │ bar  │
+│  New chat   ⌘N   │  is open)             │                   │ (Files, Git, …)  │ bar  │
 │  CHATS           │                       │                   │                  │      │
 │  WORKSPACES      │                       │                   │                  │      │
 │   ▾ ● app  ⟳     │                       │                   │                  │      │
@@ -29,10 +29,13 @@ Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 
 Everything at once, so nothing needs switching to be seen (`sidebar.rs`):
 
-- **New chat** (⌘N) for the workspace in front, and **Search chats** (⌘⇧K).
+- **New chat** (⌘N) for the workspace in front, and a **Search chats** field (⌘⇧K), each a full-width row with its shortcut.
+- **Pinned**: chats pinned from any workspace (each chat's ⋯ menu: *Pin to top*), with the workspace each belongs to. Kept in `workspace.sidebar_pinned`.
 - **Chats**: the Chats space, for chats that need no folder (thinking something through, the browser, the board). A first start opens straight into a chat there. Its chats are grouped *Today*, *Yesterday*, *This week*, *Older*; **+** starts one.
 - **Workspaces**, newest first (an order that stays put as they are used): each with its colour dot and what it is doing (a spinner while working, amber for a question, red for failing tests, green for something finished and not seen; the tooltip says it in words, with the ⌃1–⌃9 shortcut). The chevron unfolds a workspace to list its five newest chats (*Show all* for the rest); opening a workspace unfolds it. Picking a chat opens its workspace at that chat. On hover, a row offers a new chat there and its menu: *Add a folder…*, *Rename…*, *Open in new window*, *Colour*, *Remove from PilotHouse*. The section's **+** opens a folder as a workspace or makes one without folders.
 - In every list a working chat has a spinner and one waiting for an answer an amber dot. Chats PilotHouse started (schedules, test recording and repair) fold into *Runs*.
+- Each chat's ⋯ menu (on hover) pins or unpins it, renames it, or deletes it with its transcript after asking (not while its agent works or waits for an answer).
+- Every section (*Pinned*, *Chats*, *Workspaces*) folds from its header; a folded one shows how many it hides. Folded sections are kept (`workspace.sidebar_folded`).
 - Which workspaces are unfolded is kept (`workspace.sidebar_expanded`). The chats of a workspace whose screen is closed are read from the store each second, so a schedule's new chat shows up.
 - ⌘B hides the sidebar, and the chat header then offers the chat list.
 

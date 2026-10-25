@@ -174,35 +174,52 @@ impl TerminalPanel {
             .menu(gpui_kit::Anchor::TopRight, move |menu, window, cx| {
                 // Looked up as it opens: a shell installed meanwhile shows.
                 let shells = ph_env::shells();
-                shells.into_iter().fold(menu.label("New terminal"), |menu, shell| {
-                    let label = if shell.default {
-                        format!("{} (default)", shell.name)
-                    } else {
-                        shell.name.clone()
-                    };
-                    if folders.len() < 2 {
-                        let (panel, cwd) = (panel.clone(), cwd.clone());
-                        return menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                            _ = panel.update(cx, |panel, cx| {
-                                panel.new_shell(cwd.clone(), Some(shell.clone()), window, cx)
-                            });
-                        }));
-                    }
-                    let (panel, folders) = (panel.clone(), folders.clone());
-                    let submenu = PopupMenu::build(window, cx, move |menu, _, _| {
-                        folders.iter().fold(menu.label("In folder"), |menu, (name, path)| {
-                            let (panel, path, shell) = (panel.clone(), path.clone(), shell.clone());
-                            menu.item(PopupMenuItem::new(name.clone()).on_click(
+                shells
+                    .into_iter()
+                    .fold(menu.label("New terminal"), |menu, shell| {
+                        let label = if shell.default {
+                            format!("{} (default)", shell.name)
+                        } else {
+                            shell.name.clone()
+                        };
+                        if folders.len() < 2 {
+                            let (panel, cwd) = (panel.clone(), cwd.clone());
+                            return menu.item(PopupMenuItem::new(label).on_click(
                                 move |_, window, cx| {
                                     _ = panel.update(cx, |panel, cx| {
-                                        panel.new_shell(path.clone(), Some(shell.clone()), window, cx)
+                                        panel.new_shell(
+                                            cwd.clone(),
+                                            Some(shell.clone()),
+                                            window,
+                                            cx,
+                                        )
                                     });
                                 },
-                            ))
-                        })
-                    });
-                    menu.item(PopupMenuItem::submenu(label, submenu))
-                })
+                            ));
+                        }
+                        let (panel, folders) = (panel.clone(), folders.clone());
+                        let submenu = PopupMenu::build(window, cx, move |menu, _, _| {
+                            folders
+                                .iter()
+                                .fold(menu.label("In folder"), |menu, (name, path)| {
+                                    let (panel, path, shell) =
+                                        (panel.clone(), path.clone(), shell.clone());
+                                    menu.item(PopupMenuItem::new(name.clone()).on_click(
+                                        move |_, window, cx| {
+                                            _ = panel.update(cx, |panel, cx| {
+                                                panel.new_shell(
+                                                    path.clone(),
+                                                    Some(shell.clone()),
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        },
+                                    ))
+                                })
+                        });
+                        menu.item(PopupMenuItem::submenu(label, submenu))
+                    })
             })
             .into_any_element()
     }
@@ -342,14 +359,23 @@ mod tests {
     #[test]
     fn tab_names_are_short() {
         let name = |title: &str| short_title(title, "zsh", None).to_string();
-        assert_eq!(name("ada@host:/Users/ada/code/LibreGuild/PilotHouse"), "zsh · PilotHouse");
+        assert_eq!(
+            name("ada@host:/Users/ada/code/LibreGuild/PilotHouse"),
+            "zsh · PilotHouse"
+        );
         assert_eq!(name("ada@host:~"), "zsh · ~");
         assert_eq!(name("ada@host: ~/code/app/"), "zsh · app");
         assert_eq!(name("/usr/local/src"), "zsh · src");
         assert_eq!(name("C:\\Users\\ada\\app"), "zsh · app");
         assert_eq!(name("vim notes.md"), "vim notes.md");
         assert_eq!(name(""), "zsh");
-        assert_eq!(name("cargo watch -x test --all-features"), "cargo watch -x test --a…");
-        assert_eq!(short_title("x", "zsh", Some("server: dev")).as_ref(), "server: dev");
+        assert_eq!(
+            name("cargo watch -x test --all-features"),
+            "cargo watch -x test --a…"
+        );
+        assert_eq!(
+            short_title("x", "zsh", Some("server: dev")).as_ref(),
+            "server: dev"
+        );
     }
 }
