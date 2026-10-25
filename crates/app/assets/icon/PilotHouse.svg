@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- PilotHouse: a house (the workspace) with a prompt in it (the agents at
+       work). The macOS tile; Windows and the in-app mark use the same
+       drawing on a tile inset 24 with corner radius 220. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1f6e4a"/>
+      <stop offset="1" stop-color="#0b2e21"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="512" cy="300" r="380" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#78e6aa" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#78e6aa" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#glow)"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke="#7ce6a9" stroke-width="66">
+      <polyline points="262,488 512,282 762,488"/>
+      <polyline points="322,438.6 322,748 702,748 702,438.6"/>
+    </g>
+    <g stroke="#f4fbf6" stroke-width="58">
+      <polyline points="418,548 500,614 418,680"/>
+      <line x1="548" y1="680" x2="614" y2="680"/>
+    </g>
+  </g>
+</svg>
