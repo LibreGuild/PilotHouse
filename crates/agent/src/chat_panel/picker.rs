@@ -41,7 +41,6 @@ impl ChatPanel {
             active,
             started: thread.has_started(),
             agents,
-            viewing: self.picker_view.unwrap_or(active),
             query: self.picker_search.read(cx).value().to_string(),
             highlight: self.picker_highlight,
         }
@@ -64,17 +63,8 @@ impl ChatPanel {
                 // Applied when that agent's session starts.
                 options::remember(&self.store, agent.id, &option, &value);
                 self.switch_agent(agent, window, cx);
-                self.picker_view = None;
             }
-            Pick::Agent(agent) => {
-                self.switch_agent(agent, window, cx);
-                self.picker_view = None;
-            }
-            Pick::View(agent) => {
-                self.picker_view = Some(agent);
-                self.picker_highlight = 0;
-                cx.notify();
-            }
+            Pick::Agent(agent) => self.switch_agent(agent, window, cx),
         }
         // The picker stays open: the keyboard stays in it, so the arrows,
         // typing and Escape still work after a click.
@@ -84,7 +74,6 @@ impl ChatPanel {
 
     /// The picker opened: this chat's agent, no filter, typing goes there.
     pub(super) fn picker_opened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.picker_view = None;
         self.picker_highlight = 0;
         let search = self.picker_search.clone();
         window.defer(cx, move |window, cx| {
@@ -95,8 +84,8 @@ impl ChatPanel {
         });
     }
 
-    /// The picker's keys: ↑/↓ move the highlight, Enter picks it, Tab shows
-    /// the next agent.
+    /// The picker's keys: ↑/↓ move the highlight, Enter picks it, Tab jumps
+    /// to the next agent's models.
     pub(crate) fn picker_key(
         &mut self,
         key: PickerKey,
@@ -119,13 +108,13 @@ impl ChatPanel {
                 }
             }
             PickerKey::NextAgent => {
-                let ix = data
-                    .agents
+                let starts = model_picker::section_starts(&data);
+                self.picker_highlight = starts
                     .iter()
-                    .position(|(agent, _)| agent.id == data.viewing.id)
+                    .copied()
+                    .find(|start| *start > self.picker_highlight)
+                    .or(starts.first().copied())
                     .unwrap_or_default();
-                let next = data.agents[(ix + 1) % data.agents.len()].0;
-                self.pick(Pick::View(next), window, cx);
             }
         }
         cx.notify();

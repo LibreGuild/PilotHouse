@@ -22,7 +22,8 @@ A day with coding agents usually means several agent CLIs in terminals, an edito
 
 ## What it does
 
-- **Workspaces** with any number of folders (each Git repository has its own tools) or none. Switch from the title bar; each workspace has a colour and shows what it is doing: working, needs your answer, tests failing, finished. A workspace can move to a window of its own.
+- **Workspaces** with any number of folders (each Git repository has its own tools) or none, all in the sidebar with their chats: each has a colour and shows what it is doing (working, needs your answer, tests failing, finished). A workspace can move to a window of its own. Chats that need no folder have their own place, so PilotHouse is ready to chat on first start.
+- **A GitHub view** beside the workspaces: pull requests waiting for your review across repositories, yours, those assigned to you, and agent reviews that run in PilotHouse's own clone of the repository, with the review chat beside the PR.
 - **Agent chat** over the [Agent Client Protocol](https://agentclientprotocol.com) with Claude Code, Codex, Gemini CLI and Antigravity: tool calls with diffs, plans, permissions, a model picker with effort and mode, `@` mentions of files, definitions, screenshots, logs, pull requests and test runs, checkpoints with restore, hand-off between agents, search across chats, usage, and parallel runs of one prompt in separate worktrees.
 - **Code**: a file tree with icons per file type and Git marks, an editor with language servers (diagnostics, hover, definition, references, rename, outline), workspace search, a viewer for multi-gigabyte logs, and *ask about this code*.
 - **Git and GitHub**: commit, branches, history graph, stashes, conflicts, blame, review of agent edits per hunk; pull requests in the app, and agent reviews whose findings you post as comments.

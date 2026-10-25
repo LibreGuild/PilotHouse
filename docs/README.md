@@ -13,7 +13,7 @@ Short, practical notes on how PilotHouse is built. Start with **architecture**, 
 | [control-socket.md](control-socket.md) | The local socket and every method on it |
 | [security.md](security.md) | Local surfaces, agent boundaries, untrusted repositories, and their protections |
 | **Features** | |
-| [features/workspace.md](features/workspace.md) | Window shell: workspaces and their folders, the sidebar, switching and windows, command palette, settings, opening from outside |
+| [features/workspace.md](features/workspace.md) | Window shell: the two views, workspaces and their folders, the sidebar and the Chats space, windows, command palette, settings, opening from outside |
 | [features/chat.md](features/chat.md) | Agent chat over ACP, permissions, the approval inbox, mentions |
 | [features/board.md](features/board.md) | Kanban board and the MCP tools agents use |
 | [features/files.md](features/files.md) | File tree, editor, ⌘P finder, project search |

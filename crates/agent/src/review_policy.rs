@@ -80,11 +80,35 @@ const GIT_DENIED: &[&str] = &[
     "--exec",
 ];
 
-/// A single read-only command: no shell operators, no redirection, no
-/// substitution, a system program from the list, and none of its options
-/// that write or run something else.
+/// A read-only command line: read-only commands joined by `&&` or `;`, or
+/// piped into one another with `|` (agents often write `cd <dir> && git
+/// log | head`), each step one of the allowed programs or `cd`. No other
+/// shell operator, no redirection and no substitution anywhere.
 pub fn read_only_command(command: &str) -> bool {
-    if command.contains([';', '|', '&', '>', '<', '`', '\n', '\r', '$']) {
+    if command.contains(['>', '<', '`', '\n', '\r', '$']) {
+        return false;
+    }
+    command
+        .split("&&")
+        .flat_map(|step| step.split(';'))
+        .all(|step| {
+            step.split('|').all(|part| {
+                let part = part.trim();
+                single_command(part) || change_dir(part)
+            })
+        })
+}
+
+/// `cd` into a folder (it only moves where the next steps run).
+fn change_dir(part: &str) -> bool {
+    let mut words = part.split_whitespace();
+    words.next() == Some("cd") && words.count() <= 1
+}
+
+/// One read-only command: a system program from the list, and none of its
+/// options that write or run something else.
+fn single_command(command: &str) -> bool {
+    if command.contains(['&', '|']) {
         return false;
     }
     let mut words = command.split_whitespace();
@@ -197,9 +221,28 @@ mod tests {
         assert!(!read_only_command("rm -rf src"));
         assert!(!read_only_command("cat a.txt > b.txt"));
         assert!(!read_only_command("git log; rm -rf ."));
+        assert!(read_only_command(
+            "git diff origin/main...HEAD; git ls-files"
+        ));
         assert!(!read_only_command("ls $(rm -rf /)"));
         assert!(!read_only_command("find . -delete"));
         assert!(!read_only_command(""));
+    }
+
+    #[test]
+    fn read_only_steps_may_be_chained() {
+        assert!(read_only_command(
+            "cd /tmp/pr-12 && git diff --stat origin/main...HEAD | tail -n 80"
+        ));
+        assert!(read_only_command("git log --oneline | head -20"));
+        assert!(read_only_command("cd src && rg -n TODO | wc -l"));
+        assert!(!read_only_command("cd src && rm -rf ."));
+        assert!(!read_only_command("git log | sh"));
+        assert!(!read_only_command("git log || rm -rf ."));
+        assert!(!read_only_command("git log & rm -rf ."));
+        assert!(!read_only_command("cd a b && ls"));
+        assert!(!read_only_command("git log | xargs rm"));
+        assert!(!read_only_command("cd && "));
     }
 
     #[test]

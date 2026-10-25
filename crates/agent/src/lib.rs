@@ -30,6 +30,7 @@ mod model_picker;
 pub mod oneshot;
 pub mod options;
 mod permission;
+mod reply;
 pub mod review_card;
 mod review_policy;
 pub mod rpc;
@@ -42,7 +43,7 @@ mod transcript;
 pub mod usage_meter;
 
 pub use attachments::{Attachment, LiveSources, PullBrief};
-pub use chat_panel::{ChatPanel, ChatPanelEvent};
+pub use chat_panel::{ChatContext, ChatPanel, ChatPanelEvent, Prepare, Starter};
 pub use chats::{ChatHub, ChatsActivity, WorkspaceChats, WorkspaceChatsEvent};
 pub use connection::AgentConnection;
 pub use permission::{ApprovalInbox, PermissionRequest};

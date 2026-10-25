@@ -176,23 +176,18 @@ impl WorkspaceScreen {
         self._subscriptions.push(cx.subscribe_in(
             &pulls,
             window,
-            |this, _, event: &PullsPanelEvent, window, cx| match event {
+            |_, _, event: &PullsPanelEvent, window, cx| match event {
                 PullsPanelEvent::OpenSettings => {
                     window.dispatch_action(Box::new(crate::actions::OpenSettings), cx)
                 }
+                // Reviews run in the GitHub view, on its own clone.
                 PullsPanelEvent::ReviewWithAgent { hosting, pull } => {
-                    this.review_with_agent((**hosting).clone(), (**pull).clone(), window, cx)
+                    cx.emit(WorkspaceScreenEvent::Review {
+                        hosting: hosting.clone(),
+                        pull: pull.clone(),
+                    })
                 }
-                PullsPanelEvent::OpenSession(id) => {
-                    let session = AppState::store(cx).session(*id).ok().flatten();
-                    if session.is_some() {
-                        if this.zoomed {
-                            this.toggle_zoom(window, cx);
-                        }
-                        this.chat
-                            .update(cx, |chat, cx| chat.set_session(session, cx));
-                    }
-                }
+                PullsPanelEvent::OpenSession(id) => cx.emit(WorkspaceScreenEvent::ShowSession(*id)),
             },
         ));
         self.pulls.insert(self.git_folder, pulls.clone());
@@ -243,78 +238,6 @@ impl WorkspaceScreen {
         ));
     }
 
-    /// Starts an agent review of a pull request: checks it out in its own
-    /// worktree, then opens a review chat there that starts by itself.
-    pub(super) fn review_with_agent(
-        &mut self,
-        hosting: ph_pulls::Hosting,
-        pull: ph_github::models::PullRequest,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        window.push_notification(
-            Notification::info(format!("Checking out #{} for the review…", pull.number)),
-            cx,
-        );
-        let store = AppState::store(cx).clone();
-        let (project_id, root) = (self.project.id, self.project.path.clone());
-        let work = cx.background_spawn(async move {
-            crate::review::prepare(&store, project_id, &root, &hosting, &pull)
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = work.await;
-            _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(prepared) => {
-                    this.reveal_chat(cx);
-                    this.chat.update(cx, |chat, cx| {
-                        chat.start_review(
-                            prepared.review_id,
-                            prepared.worktree,
-                            prepared.title,
-                            prepared.display,
-                            prepared.prompt,
-                            window,
-                            cx,
-                        )
-                    });
-                }
-                Err(err) => window.push_notification(
-                    Notification::error(format!("{err:#}")).title("Could not start the review"),
-                    cx,
-                ),
-            });
-        })
-        .detach();
-    }
-
-    /// A new run of review `review_id`'s pull request, on its latest head.
-    pub(super) fn review_again(
-        &mut self,
-        review_id: i64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let store = AppState::store(cx).clone();
-        let root = self.project.path.clone();
-        let find = cx.background_spawn(async move {
-            let review = store
-                .pr_review(review_id)?
-                .ok_or_else(|| anyhow::anyhow!("review not found"))?;
-            let hosting = ph_pulls::hosting::resolve(&root, &store)
-                .map_err(|missing| anyhow::anyhow!("{missing:?}"))?;
-            let pull = ph_github::pulls::get(&hosting.client, &hosting.repo, review.pull.number)?;
-            anyhow::Ok((hosting, pull))
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = find.await;
-            _ = this.update_in(cx, |this, window, cx| match result {
-                Ok((hosting, pull)) => this.review_with_agent(hosting, pull, window, cx),
-                Err(err) => window.push_notification(Notification::error(format!("{err:#}")), cx),
-            });
-        })
-        .detach();
-    }
-
     pub fn runs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<RunsPanel> {
         if let Some(runs) = &self.runs {
             return runs.clone();
@@ -353,6 +276,11 @@ impl WorkspaceScreen {
         cx: &mut Context<Self>,
     ) {
         match tab {
+            ContextTab::Files => {
+                if !self.project.empty {
+                    self.files(window, cx);
+                }
+            }
             ContextTab::Board => {
                 self.board(window, cx);
             }
@@ -438,7 +366,7 @@ impl WorkspaceScreen {
 }
 
 /// Open pull requests as `@pr:` mentions attach them.
-pub(super) fn briefs(pulls: &[ph_github::models::PullRequest]) -> Vec<ph_agent::PullBrief> {
+pub(crate) fn briefs(pulls: &[ph_github::models::PullRequest]) -> Vec<ph_agent::PullBrief> {
     pulls
         .iter()
         .filter(|pull| pull.state == "open")

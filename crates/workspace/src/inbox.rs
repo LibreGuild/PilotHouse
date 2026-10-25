@@ -209,10 +209,7 @@ impl InboxView {
         };
         let project_id = schedule.project_id;
         _ = self.workspace.update(cx, |workspace, cx| {
-            workspace.open_project(project_id, window, cx);
-            if let Some(space) = workspace.active_space() {
-                space.update(cx, |space, cx| space.select_session(session, cx));
-            }
+            workspace.open_chat(project_id, session, window, cx)
         });
     }
 

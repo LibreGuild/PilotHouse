@@ -10,6 +10,7 @@
 
 use std::rc::Rc;
 
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -53,7 +54,9 @@ mod mentions;
 mod picker;
 mod render;
 
-/// Setting key for the agent new chats start with.
+/// The composer's hint in a workspace's chat.
+const PLACEHOLDER: &str = "Ask anything. @file, #12 for a card, @screenshot, @log";
+
 /// Session titles are cut to this many characters.
 const TITLE_CHARS: usize = 48;
 
@@ -74,6 +77,44 @@ pub enum ChatPanelEvent {
     /// `@pr:` is being typed and no pull requests are known: load them and
     /// pass them in with [`ChatPanel::set_pulls`].
     WantPulls,
+    /// A starter of the panel's [`ChatContext`] was picked (its id).
+    Starter(String),
+}
+
+/// What a chat panel is for when it is not a workspace's plain chat: the
+/// GitHub view's chat about one pull request.
+#[derive(Clone)]
+pub struct ChatContext {
+    /// Shown in an empty chat.
+    pub title: String,
+    pub subtitle: String,
+    /// Picked from the empty chat ([`ChatPanelEvent::Starter`]); read each
+    /// time it is drawn, so edits elsewhere (Settings) show at once.
+    pub starters: Rc<dyn Fn() -> Vec<Starter>>,
+    pub placeholder: String,
+    /// Where new chats work. The history lists the chats that worked here.
+    pub cwd: std::path::PathBuf,
+    /// Makes `cwd` ready (clones, checks out) before a new chat's first
+    /// message; `label` is shown meanwhile.
+    pub prepare: Option<Prepare>,
+}
+
+/// Starts readying a chat's folder; the task ends when it is ready.
+pub type PrepareFn = Rc<dyn Fn(&mut App) -> Task<anyhow::Result<()>>>;
+
+/// A step that readies a chat's folder, shown as `label` while it runs.
+#[derive(Clone)]
+pub struct Prepare {
+    pub label: String,
+    pub run: PrepareFn,
+}
+
+/// One of an empty chat's suggestions.
+#[derive(Clone)]
+pub struct Starter {
+    pub id: String,
+    pub title: String,
+    pub hint: String,
 }
 
 /// Starter prompts shown in an empty chat: title, hint, prompt.
@@ -132,9 +173,6 @@ pub struct ChatPanel {
     /// The chat on screen: a stored one, or a draft.
     active: Entity<ChatThread>,
     composer: Entity<TextareaState>,
-    /// The model picker's search field.
-    /// The agent whose models the open picker shows (`None`: this chat's).
-    picker_view: Option<&'static AgentSpec>,
     /// The picker's filter, and which of the models it lists is highlighted
     /// for the keyboard.
     picker_search: Entity<InputState>,
@@ -160,6 +198,12 @@ pub struct ChatPanel {
     live: Option<LiveSources>,
     /// The header lists past chats (when the window's sidebar is hidden).
     history_menu: bool,
+    /// What the panel is for, when not a workspace's plain chat.
+    context: Option<ChatContext>,
+    /// Something readying the chat (a clone), or why it failed.
+    busy: Option<SharedString>,
+    failed: Option<SharedString>,
+    _prepare: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     _active_subscriptions: Vec<Subscription>,
 }
@@ -175,7 +219,7 @@ impl ChatPanel {
     ) -> Self {
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Ask anything. @file, #12 for a card, @screenshot, @log")
+                .placeholder(PLACEHOLDER)
                 .rows(2)
                 .submit_on_enter(true)
         });
@@ -217,7 +261,6 @@ impl ChatPanel {
             chats,
             active: draft,
             composer,
-            picker_view: None,
             picker_search,
             picker_highlight: 0,
             mention: None,
@@ -231,6 +274,10 @@ impl ChatPanel {
             next_title: None,
             live: None,
             history_menu: false,
+            context: None,
+            busy: None,
+            failed: None,
+            _prepare: None,
             _subscriptions: vec![subscription, picker_subscription],
             _active_subscriptions: Vec::new(),
         };
@@ -246,11 +293,65 @@ impl ChatPanel {
                 .update(cx, |chats, cx| chats.thread_for(session, cx)),
             None => {
                 let agent = default_agent(&self.store);
-                let (store, project) = (self.store.clone(), self.project.clone());
+                let (store, project) = (self.store.clone(), self.draft_project());
                 cx.new(|cx| ChatThread::draft(store, project, agent, cx))
             }
         };
+        self.failed = None;
         self.watch_active(cx);
+        cx.notify();
+    }
+
+    /// Where a new chat works: the context's folder, else the project's.
+    fn draft_project(&self) -> ThreadProject {
+        match &self.context {
+            Some(context) => ThreadProject {
+                path: context.cwd.clone(),
+                extra_dirs: Vec::new(),
+                empty: false,
+                ..self.project.clone()
+            },
+            None => self.project.clone(),
+        }
+    }
+
+    /// Makes this panel the chat about something (`None`: a plain chat).
+    /// A draft in view moves to the context's folder.
+    pub fn set_context(
+        &mut self,
+        context: Option<ChatContext>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = context
+            .as_ref()
+            .map(|context| context.placeholder.clone())
+            .unwrap_or_else(|| PLACEHOLDER.to_string());
+        self.composer.update(cx, |composer, cx| {
+            composer.set_placeholder(placeholder, window, cx)
+        });
+        self.context = context;
+        self.busy = None;
+        self.failed = None;
+        self._prepare = None;
+        if !self.active.read(cx).has_started() {
+            self.set_session(None, cx);
+        }
+        cx.notify();
+    }
+
+    /// Shows `label` over the composer while the owner readies something
+    /// for this chat (`None` when done).
+    pub fn set_busy(&mut self, label: Option<String>, cx: &mut Context<Self>) {
+        self.busy = label.map(Into::into);
+        self.failed = None;
+        cx.notify();
+    }
+
+    /// Says why readying the chat failed.
+    pub fn set_failed(&mut self, reason: String, cx: &mut Context<Self>) {
+        self.busy = None;
+        self.failed = Some(reason.into());
         cx.notify();
     }
 
@@ -295,6 +396,39 @@ impl ChatPanel {
         self.active.read(cx).session().map(|session| session.id)
     }
 
+    /// Opens a new chat working in the context's folder and starts it with
+    /// `prompt` (a template's request); the chat shows `display` for it.
+    /// The chat may read without asking.
+    pub fn start_prompt(
+        &mut self,
+        title: String,
+        display: String,
+        prompt: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.busy = None;
+        self.failed = None;
+        self.set_session(None, cx);
+        let agent = self.active.read(cx).agent();
+        self.active
+            .update(cx, |thread, _| thread.allow_reads_for_turn());
+        let connection = self.connection(agent, cx);
+        let blocks = vec![agent_client_protocol_schema::v1::ContentBlock::Text(
+            agent_client_protocol_schema::v1::TextContent::new(prompt),
+        )];
+        self.active.update(cx, |thread, cx| {
+            thread.send(display, Vec::new(), title, blocks, connection, cx)
+        });
+        if let Some(id) = self.active_session_id(cx) {
+            let thread = self.active.clone();
+            self.chats
+                .update(cx, |chats, cx| chats.keep(id, thread, cx));
+        }
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
     /// Opens a new review chat working in `cwd` (the PR's worktree) and
     /// starts it: `display` is what the chat shows for the long `prompt`.
     #[allow(clippy::too_many_arguments)]
@@ -308,6 +442,8 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.busy = None;
+        self.failed = None;
         let agent = default_agent(&self.store);
         let store = self.store.clone();
         // A review works in its worktree alone.
@@ -535,6 +671,14 @@ impl ChatPanel {
     }
 
     fn warm_up(&mut self, cx: &mut Context<Self>) {
+        // A folder still to be made (a clone) has nothing to start in yet.
+        if self
+            .context
+            .as_ref()
+            .is_some_and(|context| !context.cwd.is_dir())
+        {
+            return;
+        }
         let spec = self.active.read(cx).agent();
         if !matches!(spec.availability(), Availability::Ready { .. }) {
             return;
@@ -545,6 +689,48 @@ impl ChatPanel {
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value().trim().to_string();
+        if text.is_empty() && self.attachments.is_empty() {
+            return;
+        }
+        if *self.active.read(cx).status() != ThreadStatus::Idle || self.busy.is_some() {
+            return;
+        }
+        // A new chat about something readies its folder first (clones the
+        // repository, checks the pull request out), then sends.
+        if !self.active.read(cx).has_started()
+            && let Some(prepare) = self
+                .context
+                .as_ref()
+                .and_then(|context| context.prepare.clone())
+        {
+            self.busy = Some(prepare.label.clone().into());
+            self.failed = None;
+            let task = (prepare.run)(cx);
+            self._prepare = Some(cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                _ = this.update_in(cx, |this, window, cx| {
+                    this.busy = None;
+                    match result {
+                        Ok(()) => {
+                            // A fresh draft: one warmed up before the folder
+                            // existed would start in the wrong place.
+                            this.set_session(None, cx);
+                            this.send_prepared(window, cx);
+                        }
+                        Err(err) => this.failed = Some(format!("{err:#}").into()),
+                    }
+                    cx.notify();
+                });
+            }));
+            cx.notify();
+            return;
+        }
+        self.send_prepared(window, cx);
+    }
+
+    /// [`Self::send`] once the chat's folder is ready.
+    fn send_prepared(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().trim().to_string();
         if text.is_empty() && self.attachments.is_empty() {
             return;

@@ -67,13 +67,17 @@ actions!(
         RemoveWorkspace,
         /// Back to the workspace shown before this one (Ctrl+Tab).
         PreviousWorkspace,
+        /// The Workspaces view: workspaces and their chats (⌘⇧E).
+        ShowWorkspacesView,
+        /// The GitHub view: pull requests across repositories, reviews (⌘⇧G).
+        ShowGitHubView,
         /// Move the workspace in front to a window of its own.
         OpenInNewWindow,
         Quit,
     ]
 );
 
-/// Show the workspace at `index` in the switcher (⌃1…⌃9 on macOS, Alt+1…9
+/// Show the workspace at `index` in the sidebar (⌃1…⌃9 on macOS, Alt+1…9
 /// elsewhere).
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = workspace, no_json)]
@@ -107,6 +111,8 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-/", ShowShortcuts, context),
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("ctrl-tab", PreviousWorkspace, context),
+        KeyBinding::new("secondary-shift-e", ShowWorkspacesView, context),
+        KeyBinding::new("secondary-shift-g", ShowGitHubView, context),
     ]);
     // ⌘/Ctrl+digits show tools, so workspaces take the other modifier.
     let modifier = if cfg!(target_os = "macos") {

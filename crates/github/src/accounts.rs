@@ -32,13 +32,18 @@ impl Account {
     }
 
     pub fn client(&self) -> Result<Client> {
-        let token = secrets::get(&self.secret_name())?.with_context(|| {
+        Ok(Client::new(&self.api_base(), &self.token()?))
+    }
+
+    /// The account's token, for Git over HTTPS to this host (the GitHub
+    /// view's clones). Never log or store it.
+    pub fn token(&self) -> Result<String> {
+        secrets::get(&self.secret_name())?.with_context(|| {
             format!(
                 "No token saved for {}. Add it again in Settings → GitHub.",
                 self.host
             )
-        })?;
-        Ok(Client::new(&self.api_base(), &token))
+        })
     }
 
     fn secret_name(&self) -> String {

@@ -103,6 +103,11 @@ fn app_state(cx: &mut App) -> Result<Value> {
             "path": project.path,
         })).collect::<Vec<_>>(),
         "active_project": workspace.active_project_id(),
+        "chats_space": workspace.chats_space().map(|chats| chats.id),
+        "view": match workspace.view() {
+            ph_workspace::View::Workspaces => "workspaces",
+            ph_workspace::View::GitHub => "github",
+        },
         "sidebar_collapsed": workspace.is_sidebar_collapsed(),
         "context_panel_open": space.map(|space| space.is_context_open()),
         "context_tab": space.map(|space| space.context_tab().key()),

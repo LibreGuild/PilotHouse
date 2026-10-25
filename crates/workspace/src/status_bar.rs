@@ -20,7 +20,14 @@ use ph_ui::Icons;
 use crate::workspace::Workspace;
 
 pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let space_entity = workspace.active_space().cloned();
+    // The GitHub view and the Chats space have no folder to tell of.
+    let space_entity = workspace
+        .active_space()
+        .filter(|space| {
+            workspace.view() == crate::workspace::View::Workspaces
+                && space.read(cx).project().is_workspace()
+        })
+        .cloned();
     let space = space_entity.as_ref().map(|space| space.read(cx));
     // Where the workspace is: its folder's name and how many more it has
     // (the full paths in the tooltip), or none.
@@ -75,12 +82,10 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                                     .build(window, cx)
                             })
                         })
-                        .child(Icon::new(Icons::Folder).xsmall())
-                        .child(
-                            div()
-                                .truncate()
-                                .child(path.unwrap_or_else(|| "No workspace open".into())),
-                        ),
+                        .when_some(path, |this, path| {
+                            this.child(Icon::new(Icons::Folder).xsmall())
+                                .child(div().truncate().child(path))
+                        }),
                 )
                 .children(drive),
         )

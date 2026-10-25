@@ -11,6 +11,8 @@ agent-client-protocol-schema.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 gpui-kit.workspace = true
+# Mermaid diagrams in replies, drawn as SVG without a browser.
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 ph-env.workspace = true
 ph-files.workspace = true
 ph-store.workspace = true

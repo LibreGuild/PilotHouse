@@ -96,6 +96,7 @@ pub fn open_paths(paths: &[PathBuf], cx: &mut App) -> Result<()> {
         let projects: Vec<(ProjectId, Vec<PathBuf>)> = AppState::store(cx)
             .projects()?
             .into_iter()
+            .filter(|project| project.is_workspace())
             .map(|project| (project.id, project.folders()))
             .collect();
         let Ok(path) = paths::canonical(path) else {

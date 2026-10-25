@@ -35,12 +35,18 @@ mod testing;
 pub mod worktree;
 
 pub use diff::{FileChange, Hunk, parse_diff};
-pub use run::git;
+pub use run::{git, git_env};
 pub(crate) use run::{local_path, null_device};
 pub use status::{
     ApplyMode, Change, RepoStatus, WorkingChanges, apply, current_branch, is_repository,
     stage_path, staged_diff, status, unstage_path, working_changes,
 };
+
+/// Refuses a branch or ref name git would read as an option, for callers
+/// outside this crate.
+pub fn check_ref(name: &str) -> anyhow::Result<()> {
+    check_name("name", name)
+}
 
 /// Refuses names that git would read as options (`-x`) or that hold
 /// control characters, before they reach the command line.

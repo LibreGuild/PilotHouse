@@ -6,6 +6,8 @@
 //!   company CAs installed on the machine).
 //! - [`pulls`]: pull requests, files, diffs, conversation, line comments,
 //!   reviews, checks; commenting, reviewing, merging, creating.
+//! - [`search`]: pull requests across repositories (review requested, the
+//!   user's own, assigned).
 //!
 //! Every call blocks on the network: use a background thread. Requests go
 //! only to the hosts the user added.
@@ -14,6 +16,7 @@ pub mod accounts;
 pub mod client;
 pub mod models;
 pub mod pulls;
+pub mod search;
 pub mod secrets;
 #[cfg(test)]
 mod testing;

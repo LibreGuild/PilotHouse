@@ -29,6 +29,7 @@ pub(crate) fn open(project: Option<std::path::PathBuf>, window: &mut Window, cx:
     let fonts = font_options(cx);
     let store = AppState::store(cx).clone();
     let accounts = cx.new(|cx| ph_pulls::AccountsView::new(store.clone(), window, cx));
+    let templates = cx.new(|_| ph_pulls::TemplatesView::new(store.clone()));
     let drives =
         cx.new(|cx| crate::network_drives::NetworkDrivesView::new(store.clone(), window, cx));
     let open_file: ph_agent::tools_view::OpenFile = std::rc::Rc::new(|path, window, cx| {
@@ -59,6 +60,7 @@ pub(crate) fn open(project: Option<std::path::PathBuf>, window: &mut Window, cx:
                     agents_page(),
                     tools_page(tools.clone()),
                     github_page(accounts.clone()),
+                    templates_page(templates.clone()),
                     drives_page(drives.clone()),
                     features_page(),
                     shortcuts_page(),
@@ -402,6 +404,16 @@ fn github_page(accounts: gpui_kit::Entity<ph_pulls::AccountsView>) -> SettingPag
 }
 
 /// Settings → Network drives (see [`crate::network_drives`]).
+fn templates_page(view: gpui_kit::Entity<ph_pulls::TemplatesView>) -> SettingPage {
+    SettingPage::new("Templates")
+        .icon(Icon::new(Icons::ScrollText))
+        .group(
+            SettingGroup::new().item(SettingItem::render(move |_, _, _| {
+                div().w_full().py_1().child(view.clone())
+            })),
+        )
+}
+
 fn drives_page(view: gpui_kit::Entity<crate::network_drives::NetworkDrivesView>) -> SettingPage {
     SettingPage::new("Network drives")
         .icon(Icon::new(Icons::HardDrive))

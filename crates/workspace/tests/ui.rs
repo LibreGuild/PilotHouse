@@ -52,28 +52,45 @@ fn temp_project(name: &str) -> std::path::PathBuf {
     dir
 }
 
+/// A first start opens straight into a chat (the Chats space, no folder
+/// needed); a folder added becomes a workspace in the sidebar, with Files
+/// as its first tool.
 #[gpui_kit::test]
-fn shows_welcome_until_a_project_is_added(cx: &mut TestAppContext) {
+fn a_first_start_opens_into_a_chat(cx: &mut TestAppContext) {
     let (window, workspace) = open_workspace(cx);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        assert!(window.try_find("welcome-add-project").is_some());
+        let workspace = workspace.read(cx);
+        let chats = workspace.chats_space().expect("the Chats space").id;
+        assert_eq!(workspace.active_project_id(), Some(chats));
+        assert!(workspace.projects().is_empty(), "it is not a workspace");
+        assert!(window.try_find("sidebar-chats").is_some());
+        assert!(window.try_find("sidebar-workspaces").is_some());
+        assert!(window.try_find("sidebar-open-folder").is_some());
+        // Nothing to show of files there.
+        assert!(window.try_find("context-tab-files").is_none());
     })
     .unwrap();
 
-    let folder = temp_project("welcome");
+    let folder = temp_project("first");
     cx.update_window(window, |_, window, cx| {
         workspace.update(cx, |workspace, cx| {
             workspace.add_project_path(&folder, window, cx)
         });
         window.render_frame(cx);
-        assert!(window.try_find("welcome-add-project").is_none());
-        // The sidebar shows the files; the tools open on Git by default.
-        assert!(window.try_find("sidebar-files").is_some());
+        assert!(window.try_find("sidebar-open-folder").is_none());
+        // The tools open on Files by default, Git beside it.
+        assert!(window.try_find("context-tab-files").is_some());
         assert!(window.try_find("context-tab-changes").is_some());
+        assert!(window.try_find("files-add-folder").is_some());
     })
     .unwrap();
-    cx.update(|cx| assert_eq!(workspace.read(cx).projects().len(), 1));
+    cx.update(|cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.projects().len(), 1);
+        let space = workspace.active_space().unwrap().read(cx);
+        assert_eq!(space.context_tab(), ContextTab::Files);
+    });
 }
 
 #[gpui_kit::test]
@@ -145,8 +162,8 @@ fn command_palette_runs_a_command(cx: &mut TestAppContext) {
 }
 
 /// A file opens beside the chat (the editor column shows only then), the
-/// sidebar lists files over chats, and hiding the sidebar moves the chat
-/// list into the chat's history menu.
+/// sidebar lists the chats, and hiding the sidebar moves the chat list
+/// into the chat's history menu.
 #[gpui_kit::test]
 fn files_open_beside_the_chat(cx: &mut TestAppContext) {
     let (window, workspace) = open_workspace(cx);
@@ -159,7 +176,6 @@ fn files_open_beside_the_chat(cx: &mut TestAppContext) {
             workspace.add_project_path(&folder, window, cx)
         });
         window.render_frame(cx);
-        assert!(window.try_find("sidebar-files").is_some());
         assert!(window.try_find("sidebar-chats").is_some());
         assert!(
             window.try_find_by_label("Close file").is_none(),
@@ -187,7 +203,7 @@ fn files_open_beside_the_chat(cx: &mut TestAppContext) {
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         assert!(
-            window.try_find("sidebar-files").is_none(),
+            window.try_find("sidebar-chats").is_none(),
             "⌘B hid the sidebar"
         );
         assert!(
@@ -350,25 +366,107 @@ fn click(window: AnyWindowHandle, id: &'static str, cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
+fn click_id(window: AnyWindowHandle, id: impl Into<gpui_kit::ElementId>, cx: &mut TestAppContext) {
+    let id = id.into();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let at = window.find(id).bounds().center();
+        gpui_kit::test::TestEventExt::pointer_down(window, at, gpui_kit::MouseButton::Left, cx);
+        gpui_kit::test::TestEventExt::pointer_up(window, at, gpui_kit::MouseButton::Left, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+}
+
 fn press(window: AnyWindowHandle, key: &str, cx: &mut TestAppContext) {
     cx.update_window(window, |_, window, cx| window.press(key, cx))
         .unwrap();
     cx.run_until_parked();
 }
 
-/// The switcher in the title bar: type part of a name, Enter opens it.
+/// Every workspace is in the sidebar, newest first: a click opens one,
+/// an unfolded one lists its chats, and a chat's row opens it at that chat
+/// (whichever workspace is in front).
 #[gpui_kit::test]
-fn the_switcher_opens_a_workspace_from_the_keyboard(cx: &mut TestAppContext) {
+fn the_sidebar_opens_workspaces_and_their_chats(cx: &mut TestAppContext) {
     let (window, workspace) = open_workspace(cx);
-    let (alpha, beta) = two_workspaces("switcher", window, &workspace, cx);
+    let (alpha, beta) = two_workspaces("sidebar", window, &workspace, cx);
+    cx.update(|cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.active_project_id(), Some(beta));
+        let order: Vec<_> = workspace.projects().iter().map(|p| p.id).collect();
+        assert_eq!(order, vec![beta, alpha], "newest first, and it stays so");
+    });
+
+    // ⌃1 (Alt+1 off macOS) is the first row: beta.
+    press(
+        window,
+        if cfg!(target_os = "macos") {
+            "ctrl-1"
+        } else {
+            "alt-1"
+        },
+        cx,
+    );
     cx.update(|cx| assert_eq!(workspace.read(cx).active_project_id(), Some(beta)));
 
-    click(window, "project-switcher", cx);
-    cx.update_window(window, |_, window, cx| window.input("alph", cx))
-        .unwrap();
-    cx.run_until_parked();
-    press(window, "enter", cx);
-    cx.update(|cx| assert_eq!(workspace.read(cx).active_project_id(), Some(alpha)));
+    click_id(window, ("sidebar-workspace", alpha as u64), cx);
+    cx.update(|cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.active_project_id(), Some(alpha));
+        assert_eq!(
+            workspace.projects()[1].id,
+            alpha,
+            "opening does not reorder"
+        );
+    });
+
+    // A chat of beta's, listed while alpha is in front.
+    let session = cx.update(|cx| {
+        AppState::store(cx)
+            .create_session(beta, "Plan the release", "claude")
+            .unwrap()
+            .id
+    });
+    // Beta's screen closes (hidden, idle): the sidebar reads its chats.
+    workspace.update(cx, |workspace, cx| {
+        workspace.unload_idle(std::time::Duration::ZERO, cx)
+    });
+    cx.update(|cx| assert!(!workspace.read(cx).has_space(beta)));
+    click_id(
+        window,
+        gpui_kit::SharedString::from(format!("chat-{session}")),
+        cx,
+    );
+    cx.update(|cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.active_project_id(), Some(beta));
+        let space = workspace.active_space().unwrap().read(cx);
+        assert_eq!(space.active_session(), Some(session));
+    });
+}
+
+/// The GitHub view is one click away; without an account it asks for one,
+/// and the workspace's sidebar gives way to its own.
+#[gpui_kit::test]
+fn the_github_view_asks_for_an_account(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    click(window, "view-github", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(workspace.read(cx).view(), ph_workspace::View::GitHub);
+        assert!(window.try_find("github-open-settings").is_some());
+        assert!(window.try_find("github-sidebar").is_some());
+        assert!(window.try_find("sidebar-chats").is_none());
+    })
+    .unwrap();
+    press(window, "secondary-shift-e", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(workspace.read(cx).view(), ph_workspace::View::Workspaces);
+        assert!(window.try_find("sidebar-chats").is_some());
+    })
+    .unwrap();
 }
 
 /// A workspace moved to a window of its own leaves this one, which shows

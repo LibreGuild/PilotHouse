@@ -1,6 +1,6 @@
 //! The findings of an agent's PR review, shown in its chat: grouped by
-//! severity, each with its place in the code, details and suggestion, and
-//! whether it is new, still open, fixed or dismissed. The reviewer picks
+//! severity, each with its place in the code, the issue, its evidence and
+//! the fix, and whether it is new, still open, fixed or dismissed. The reviewer picks
 //! findings and posts them to GitHub as line comments or one comment.
 //!
 //! Posting is done by the app ([`ReviewService`], set by the workspace),
@@ -142,16 +142,22 @@ impl ReviewCard {
             _ = this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 match result {
-                    Ok(message) => {
-                        window.push_notification(Notification::success(message), cx);
-                        this.selected.clear();
-                    }
+                    Ok(message) => window.push_notification(Notification::success(message), cx),
                     Err(err) => window.push_notification(
                         Notification::error(format!("{err:#}")).title("GitHub"),
                         cx,
                     ),
                 }
                 this.reload(false, cx);
+                // What was posted leaves the selection; the rest stays picked
+                // (marking fixed ones on GitHub posts none of them).
+                let posted: HashSet<i64> = this
+                    .findings
+                    .iter()
+                    .filter(|f| f.comment_id.is_some())
+                    .map(|f| f.id)
+                    .collect();
+                this.selected.retain(|id| !posted.contains(id));
             });
         }));
     }
@@ -263,19 +269,38 @@ impl ReviewCard {
                         .gap_1()
                         .pl_6()
                         .text_sm()
-                        .when(!finding.body.is_empty(), |this| {
-                            this.child(finding.body.clone())
-                        })
-                        .when(!finding.suggestion.is_empty(), |this| {
-                            this.child(
-                                div()
-                                    .p_2()
-                                    .rounded(cx.theme().radius)
-                                    .bg(cx.theme().secondary)
-                                    .text_xs()
-                                    .child(format!("Suggestion: {}", finding.suggestion)),
-                            )
-                        })
+                        // Each finding says what is wrong, what shows it and
+                        // how to fix it.
+                        .children(
+                            [
+                                ("Issue", finding.body.clone(), false),
+                                ("Evidence", finding.evidence.clone(), true),
+                                ("Fix", finding.suggestion.clone(), true),
+                            ]
+                            .into_iter()
+                            .filter(|(_, text, _)| !text.trim().is_empty())
+                            .map(|(label, text, boxed)| {
+                                v_flex()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(label),
+                                    )
+                                    .child(
+                                        div()
+                                            .when(boxed, |this| {
+                                                this.p_2()
+                                                    .rounded(cx.theme().radius)
+                                                    .bg(cx.theme().secondary)
+                                                    .text_xs()
+                                            })
+                                            .child(text),
+                                    )
+                            }),
+                        )
                         .child(h_flex().gap_1().child(if dismissed {
                             Button::new(("finding-restore", id as u64))
                                 .xsmall()

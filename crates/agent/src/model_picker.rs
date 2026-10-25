@@ -1,9 +1,9 @@
-//! The model picker: the agents down the left (each with its mark, and what
-//! it is to this chat), the models of the one in view on the right, each
-//! with a line about it. It stays open while you choose, so you can look
-//! around and pick; click outside or press Esc to close it. Typing filters
-//! the models, ↑/↓ and Enter pick one, Tab shows the next agent. Effort and
-//! mode are their own buttons beside it in the composer.
+//! The model picker: one compact list, an agent's name over its models,
+//! the agents one after another (this chat's first), with a search on top.
+//! It stays open while you choose; click outside or press Esc to close it.
+//! Typing filters by model or agent, ↑/↓ and Enter pick one, Tab jumps to
+//! the next agent. Effort and mode are their own buttons beside it in the
+//! composer.
 //!
 //! Models come from each agent's own ACP config options. The current chat's
 //! agent is live; other agents show what was cached the last time they ran
@@ -13,9 +13,7 @@
 
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _,
-    button::Button,
-    h_flex,
+    ActiveTheme as _, Icon, Sizable as _, h_flex,
     input::{Enter, IndentInline, Input, InputState, MoveDown, MoveUp},
     v_flex,
 };
@@ -34,11 +32,10 @@ use crate::options::{AgentOption, OptionCategory, OptionChoice, OptionKind};
 pub struct PickerData {
     pub active: &'static AgentSpec,
     pub started: bool,
-    /// Per agent: its options (live for the active one, cached otherwise).
+    /// Per agent: its options (live for the active one, cached otherwise),
+    /// this chat's agent first.
     pub agents: Vec<(&'static AgentSpec, Vec<AgentOption>)>,
-    /// The agent whose models are in view (its tab is selected).
-    pub viewing: &'static AgentSpec,
-    /// What the filter says, and the highlighted model (keyboard).
+    /// What the filter says, and the highlighted row (keyboard).
     pub query: String,
     pub highlight: usize,
 }
@@ -53,8 +50,6 @@ pub enum Pick {
     },
     /// Switch to an agent whose models are not known yet.
     Agent(&'static AgentSpec),
-    /// Show another agent's models (nothing changes yet).
-    View(&'static AgentSpec),
 }
 
 /// A key the picker acts on.
@@ -66,48 +61,80 @@ pub enum PickerKey {
     NextAgent,
 }
 
-/// The model option of the agent in view, and its choices that match the
-/// filter.
-fn matching(data: &PickerData) -> (Option<&AgentOption>, Vec<&OptionChoice>) {
-    let model = data
-        .agents
-        .iter()
-        .find(|(agent, _)| agent.id == data.viewing.id)
-        .and_then(|(_, options)| {
-            options
-                .iter()
-                .find(|option| option.category == OptionCategory::Model)
-        });
-    let query = data.query.trim().to_lowercase();
-    let matches = |choice: &&OptionChoice| {
-        query.is_empty()
-            || choice.name.to_lowercase().contains(&query)
-            || choice
-                .description
-                .as_deref()
-                .is_some_and(|description| description.to_lowercase().contains(&query))
-    };
-    let choices = match model.map(|option| &option.kind) {
-        Some(OptionKind::Select(choices)) => choices.iter().filter(matches).collect(),
-        _ => Vec::new(),
-    };
-    (model, choices)
+/// One agent as listed: its model option (when known) and the models that
+/// match the filter. An agent with nothing matching is left out.
+struct Section<'a> {
+    agent: &'static AgentSpec,
+    model: Option<&'a AgentOption>,
+    choices: Vec<&'a OptionChoice>,
 }
 
-/// What Enter does for each row listed now, in order.
-pub fn listed_models(data: &PickerData) -> Vec<Pick> {
-    let (model, choices) = matching(data);
-    let Some(model) = model else {
-        return vec![Pick::Agent(data.viewing)];
-    };
-    choices
-        .into_iter()
-        .map(|choice| Pick::Model {
-            agent: data.viewing,
-            option: model.id.clone(),
-            value: choice.value.clone(),
+fn sections(data: &PickerData) -> Vec<Section<'_>> {
+    let query = data.query.trim().to_lowercase();
+    data.agents
+        .iter()
+        .filter_map(|(agent, options)| {
+            let model = options
+                .iter()
+                .find(|option| option.category == OptionCategory::Model);
+            // An agent's name matching shows all its models.
+            let named = query.is_empty()
+                || agent.name.to_lowercase().contains(&query)
+                || agent.provider.to_lowercase().contains(&query);
+            let matches = |choice: &&OptionChoice| {
+                named
+                    || choice.name.to_lowercase().contains(&query)
+                    || choice
+                        .description
+                        .as_deref()
+                        .is_some_and(|text| text.to_lowercase().contains(&query))
+            };
+            let choices: Vec<&OptionChoice> = match model.map(|option| &option.kind) {
+                Some(OptionKind::Select(choices)) => choices.iter().filter(matches).collect(),
+                _ => Vec::new(),
+            };
+            let shown = !choices.is_empty() || (model.is_none() && named);
+            shown.then_some(Section {
+                agent,
+                model,
+                choices,
+            })
         })
         .collect()
+}
+
+/// The rows Enter can pick, in order: each model, or an agent's *Load
+/// models* when its models are not known.
+pub fn listed_models(data: &PickerData) -> Vec<Pick> {
+    sections(data)
+        .into_iter()
+        .flat_map(|section| match section.model {
+            None => vec![Pick::Agent(section.agent)],
+            Some(model) => section
+                .choices
+                .into_iter()
+                .map(|choice| Pick::Model {
+                    agent: section.agent,
+                    option: model.id.clone(),
+                    value: choice.value.clone(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Where each agent's first row is in [`listed_models`], for Tab.
+pub fn section_starts(data: &PickerData) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut at = 0;
+    for section in sections(data) {
+        starts.push(at);
+        at += section
+            .choices
+            .len()
+            .max(usize::from(section.model.is_none()));
+    }
+    starts
 }
 
 pub fn render(
@@ -116,7 +143,6 @@ pub fn render(
     panel: WeakEntity<ChatPanel>,
     cx: &App,
 ) -> AnyElement {
-    let viewing = data.viewing;
     let keys = panel.clone();
     let key = move |key: PickerKey| {
         let panel = keys.clone();
@@ -133,234 +159,108 @@ pub fn render(
         }
     };
 
-    let agents = v_flex()
-        .flex_none()
-        .w(px(158.))
-        .p_1()
-        .gap_0p5()
-        .border_r_1()
-        .border_color(cx.theme().border)
-        .children(data.agents.iter().map(|(agent, _)| {
-            let selected = agent.id == viewing.id;
-            let ready = matches!(agent.availability(), Availability::Ready { .. });
-            let (note, note_color) = if agent.id == data.active.id {
-                ("This chat", agent.tint())
-            } else if !ready {
-                ("Not set up", cx.theme().muted_foreground)
-            } else {
-                (agent.provider, cx.theme().muted_foreground)
-            };
-            h_flex()
-                .id(SharedString::from(format!("picker-agent-{}", agent.id)))
-                .role(gpui_kit::accesskit::Role::Tab)
-                .aria_label(agent.name)
-                .relative()
-                .h_10()
-                .px_2()
-                .gap_2()
-                .rounded(cx.theme().radius)
-                .cursor_pointer()
-                .when(selected, |this| this.bg(cx.theme().secondary))
-                .when(!selected, |this| {
-                    this.hover(|style| style.bg(cx.theme().list_hover))
-                })
-                .when(!ready, |this| this.opacity(0.7))
-                .on_click(pick(Pick::View(agent)))
-                // The agent in view has a bar in its colour.
-                .when(selected, |this| {
-                    this.child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top(px(10.))
-                            .bottom(px(10.))
-                            .w(px(3.))
-                            .rounded_full()
-                            .bg(agent.tint()),
-                    )
-                })
-                .child(agent.mark(px(20.)))
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .truncate()
-                                .text_sm()
-                                .font_weight(gpui_kit::FontWeight::MEDIUM)
-                                .child(agent.short_name()),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(note_color)
-                                .child(note),
-                        ),
-                )
-                .test_support()
-        }));
-
-    let (model, choices) = matching(data);
-    let models: AnyElement = if model.is_none() {
-        let ready = matches!(viewing.availability(), Availability::Ready { .. });
-        let reason = match viewing.availability() {
-            Availability::Ready { .. } => {
-                format!("{} lists its models once it starts.", viewing.name)
-            }
-            // The real reason (CLI missing, no Node.js); the button opens
-            // the setup card.
-            Availability::Missing(reason) => reason,
+    let sections = sections(data);
+    let total: usize = sections
+        .iter()
+        .map(|section| {
+            section
+                .choices
+                .len()
+                .max(usize::from(section.model.is_none()))
+        })
+        .sum();
+    let highlight = data.highlight.min(total.saturating_sub(1));
+    let mut row = 0usize;
+    let mut rows: Vec<AnyElement> = Vec::new();
+    for section in &sections {
+        let agent = section.agent;
+        let ready = matches!(agent.availability(), Availability::Ready { .. });
+        let note = if agent.id == data.active.id {
+            Some(("This chat", agent.tint()))
+        } else if !ready {
+            Some(("Not set up", cx.theme().muted_foreground))
+        } else if data.started {
+            Some(("New chat", cx.theme().muted_foreground))
+        } else {
+            None
         };
-        v_flex()
-            .flex_1()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .p_4()
-            .child(viewing.mark(px(32.)))
-            .child(
-                div()
-                    .text_xs()
-                    .text_center()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(reason),
-            )
-            .child(
-                Button::new(SharedString::from(format!("picker-load-{}", viewing.id)))
-                    .outline()
-                    .small()
-                    .label(if ready { "Load models" } else { "Set up" })
-                    .on_click(pick(Pick::Agent(viewing))),
-            )
-            .into_any_element()
-    } else if choices.is_empty() {
-        div()
-            .p_3()
-            .text_sm()
-            .text_color(cx.theme().muted_foreground)
-            .child("No models match.")
-            .into_any_element()
-    } else {
-        let option_id = model.map(|option| option.id.clone()).unwrap_or_default();
-        let current = model
-            .map(|option| option.current.clone())
-            .unwrap_or_default();
-        let highlight = data.highlight.min(choices.len() - 1);
-        v_flex()
-            .id("picker-list")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .p_1()
-            .gap_0p5()
-            .children(choices.iter().enumerate().map(|(ix, choice)| {
-                let selected = choice.value == current;
-                let highlighted = ix == highlight;
-                h_flex()
-                    .id((SharedString::from(format!("picker-{}", viewing.id)), ix))
-                    .role(gpui_kit::accesskit::Role::MenuItem)
-                    .aria_label(SharedString::from(choice.name.clone()))
-                    .px_2()
-                    .py_1()
-                    .gap_2()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .cursor_pointer()
-                    .when(selected, |this| {
-                        this.bg(viewing.tint().opacity(0.12))
-                            .border_color(viewing.tint().opacity(0.4))
-                    })
-                    .when(!selected, |this| {
-                        this.border_color(gpui_kit::transparent_black())
-                            .hover(|style| style.bg(cx.theme().list_hover))
-                    })
-                    // The keyboard's row.
-                    .when(highlighted && !selected, |this| {
-                        this.bg(cx.theme().list_hover)
-                            .border_color(cx.theme().ring.opacity(0.5))
-                    })
-                    .on_click(pick(Pick::Model {
-                        agent: viewing,
-                        option: option_id.clone(),
-                        value: choice.value.clone(),
-                    }))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_sm()
-                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
-                                    .child(choice.name.clone()),
-                            )
-                            .children(choice.description.clone().map(|description| {
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(description)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_center()
-                            .size(px(18.))
-                            .rounded_full()
-                            .when(selected, |this| {
-                                this.bg(viewing.tint()).child(
-                                    Icon::new(Icons::Check)
-                                        .xsmall()
-                                        .text_color(gpui_kit::white()),
-                                )
-                            })
-                            .when(!selected, |this| {
-                                this.border_1().border_color(cx.theme().border)
-                            }),
-                    )
-                    .test_support()
-            }))
-            .into_any_element()
-    };
-
-    let header = h_flex()
-        .flex_none()
-        .h_9()
-        .px_3()
-        .gap_1p5()
-        .border_b_1()
-        .border_color(cx.theme().border)
-        .child(
-            div()
-                .text_sm()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .child(viewing.name),
-        )
-        .child(
-            div()
+        // The agent's name, over its models.
+        rows.push(
+            h_flex()
+                .flex_none()
+                .h_7()
+                .px_2()
+                .mt_1()
+                .gap_1p5()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(format!("· {}", viewing.provider)),
-        )
-        .child(div().flex_1())
-        .when(data.started && viewing.id != data.active.id, |this| {
-            this.child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("opens a new chat"),
-            )
-        });
-    let filter = div().flex_none().px_2().pt_1p5().child(
-        Input::new(search)
-            .small()
-            .prefix(Icon::new(Icons::Search).xsmall()),
-    );
+                .child(agent.mark(px(14.)))
+                .child(
+                    div()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().foreground)
+                        .child(agent.short_name()),
+                )
+                .child(agent.provider)
+                .child(div().flex_1())
+                .children(note.map(|(text, color)| div().text_color(color).child(text)))
+                .into_any_element(),
+        );
+        let Some(model) = section.model else {
+            let reason = match agent.availability() {
+                Availability::Ready { .. } => "Load its models".to_string(),
+                Availability::Missing(reason) => format!("Set up: {reason}"),
+            };
+            rows.push(
+                model_row(
+                    SharedString::from(format!("picker-load-{}", agent.id)),
+                    agent,
+                    reason,
+                    None,
+                    false,
+                    row == highlight,
+                    cx,
+                )
+                .on_click(pick(Pick::Agent(agent)))
+                .test_support()
+                .into_any_element(),
+            );
+            row += 1;
+            continue;
+        };
+        for choice in &section.choices {
+            let selected = agent.id == data.active.id && choice.value == model.current;
+            rows.push(
+                model_row(
+                    SharedString::from(format!("picker-{}-{}", agent.id, choice.value)),
+                    agent,
+                    choice.name.clone(),
+                    choice.description.clone(),
+                    selected,
+                    row == highlight,
+                    cx,
+                )
+                .on_click(pick(Pick::Model {
+                    agent,
+                    option: model.id.clone(),
+                    value: choice.value.clone(),
+                }))
+                .test_support()
+                .into_any_element(),
+            );
+            row += 1;
+        }
+    }
+    if rows.is_empty() {
+        rows.push(
+            div()
+                .p_3()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child("No models match.")
+                .into_any_element(),
+        );
+    }
 
     let (up, down, enter, next) = (
         key(PickerKey::Up),
@@ -368,24 +268,81 @@ pub fn render(
         key(PickerKey::Pick),
         key(PickerKey::NextAgent),
     );
-    h_flex()
+    v_flex()
         .id("model-picker-card")
-        .w(px(500.))
-        .h(px(340.))
-        .items_stretch()
+        .w(px(320.))
+        .max_h(px(300.))
         // The filter has the keyboard; these keys steer the list instead.
         .capture_action(move |_: &MoveUp, window, cx| up(window, cx))
         .capture_action(move |_: &MoveDown, window, cx| down(window, cx))
         .capture_action(move |_: &Enter, window, cx| enter(window, cx))
         .capture_action(move |_: &IndentInline, window, cx| next(window, cx))
-        .child(agents)
+        .child(
+            div().flex_none().p_1p5().child(
+                Input::new(search)
+                    .small()
+                    .prefix(Icon::new(Icons::Search).xsmall()),
+            ),
+        )
         .child(
             v_flex()
+                .id("picker-list")
                 .flex_1()
-                .min_w_0()
-                .child(header)
-                .child(filter)
-                .child(models),
+                .min_h_0()
+                .overflow_y_scroll()
+                .px_1()
+                .pb_1()
+                .gap_0p5()
+                .children(rows),
         )
         .into_any_element()
+}
+
+/// A model (or *Load models*) row: the agent's mark, the name with its
+/// note muted beside it, and a check on the one in use.
+fn model_row(
+    id: SharedString,
+    agent: &'static AgentSpec,
+    name: String,
+    description: Option<String>,
+    selected: bool,
+    highlighted: bool,
+    cx: &App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    h_flex()
+        .id(id)
+        .role(gpui_kit::accesskit::Role::MenuItem)
+        .aria_label(SharedString::from(name.clone()))
+        .h_7()
+        .px_2()
+        .gap_2()
+        .rounded(cx.theme().radius)
+        .cursor_pointer()
+        .text_sm()
+        .when(selected, |this| this.bg(agent.tint().opacity(0.12)))
+        .when(highlighted && !selected, |this| {
+            this.bg(cx.theme().list_hover)
+        })
+        .when(!selected, |this| {
+            this.hover(|style| style.bg(cx.theme().list_hover))
+        })
+        .child(agent.mark(px(14.)))
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1p5()
+                .child(div().flex_none().child(name))
+                .children(description.map(|text| {
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(text)
+                })),
+        )
+        .when(selected, |this| {
+            this.child(Icon::new(Icons::Check).xsmall().text_color(agent.tint()))
+        })
 }

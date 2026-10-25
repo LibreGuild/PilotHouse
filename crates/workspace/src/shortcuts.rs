@@ -57,6 +57,8 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
         (
             "Workspaces and layout",
             vec![
+                ("Workspaces view", action(Box::new(ShowWorkspacesView))),
+                ("GitHub view", action(Box::new(ShowGitHubView))),
                 ("Workspace 1 to 9", Keys::Text(workspace_keys.into())),
                 ("Previous workspace", action(Box::new(PreviousWorkspace))),
                 ("Show or hide the sidebar", action(Box::new(ToggleSidebar))),

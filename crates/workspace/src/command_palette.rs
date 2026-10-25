@@ -211,6 +211,24 @@ fn groups(workspace: &Workspace) -> Vec<(&'static str, Vec<Entry>)> {
         ));
     }
 
+    groups.push((
+        "Views",
+        vec![
+            Entry::action(
+                "Show the Workspaces view",
+                ph_ui::Icons::LayoutGrid,
+                ShowWorkspacesView,
+                &["view", "sidebar", "chats"],
+            ),
+            Entry::action(
+                "Show the GitHub view",
+                ph_ui::Icons::Github,
+                ShowGitHubView,
+                &["view", "pull", "review", "pr"],
+            ),
+        ],
+    ));
+
     let projects: Vec<Entry> = workspace
         .projects()
         .iter()

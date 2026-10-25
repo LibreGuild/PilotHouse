@@ -13,6 +13,18 @@ pub struct User {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct Repository {
+    /// `owner/name`, as GitHub spells it.
+    pub full_name: String,
+    pub default_branch: String,
+    pub private: bool,
+    pub html_url: String,
+    /// The HTTPS clone URL.
+    pub clone_url: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Label {
     pub name: String,
     /// Hex without `#`.

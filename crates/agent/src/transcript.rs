@@ -8,7 +8,6 @@ use agent_client_protocol_schema::v1::{
     ContentBlock, PlanEntryStatus, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
     ToolKind,
 };
-use gpui_kit::component::text::TextViewState;
 use gpui_kit::{App, AppContext as _, Entity};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,9 +30,10 @@ pub enum Entry {
     },
     Agent {
         text: String,
-        /// The rendered markdown, made when the reply is first shown: a
-        /// long stored chat opens without parsing replies no one scrolls to.
-        view: Option<Entity<TextViewState>>,
+        /// The rendered reply (Markdown and diagrams), made when it is
+        /// first shown: a long stored chat opens without parsing replies no
+        /// one scrolls to.
+        view: Option<Entity<crate::reply::Reply>>,
     },
     /// Files were put back to a checkpoint; `undo` reverses it.
     Restored {
@@ -365,7 +365,7 @@ impl Entry {
     }
 
     pub fn agent(text: String, cx: &mut App) -> Self {
-        let view = cx.new(|cx| TextViewState::markdown(&text, cx));
+        let view = cx.new(|cx| crate::reply::Reply::new(&text, cx));
         Entry::Agent {
             text,
             view: Some(view),

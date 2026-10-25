@@ -1,9 +1,10 @@
 //! The PilotHouse window shell.
 //!
-//! [`Workspace`] is the root view of the main window. It owns the list of
-//! projects and one [`WorkspaceScreen`] per opened project, and lays out the
-//! title bar, the project/session sidebar, the chat column, the context panel
-//! and the status bar. Feature crates (files, board, terminal, agents...) plug
+//! [`Workspace`] is the root view of a window. It owns the list of
+//! workspaces and one [`WorkspaceScreen`] per opened one, and lays out the
+//! title bar (with the Workspaces and GitHub views), the sidebar of
+//! workspaces and chats, the screen in front and the status bar. The
+//! [`GithubView`] shows pull requests across repositories and their reviews. Feature crates (files, board, terminal, agents...) plug
 //! their views into a `WorkspaceScreen`; the shell itself holds no feature logic.
 //!
 //! See `docs/architecture.md` for how the pieces fit together.
@@ -17,6 +18,7 @@ mod context_panel;
 mod copies;
 mod detect;
 mod file_window;
+mod github_view;
 mod housekeeping;
 mod inbox;
 mod instructions_view;
@@ -35,7 +37,6 @@ mod status_bar;
 mod title_bar;
 mod usage_view;
 mod utilities;
-mod welcome;
 mod windows;
 mod workspace;
 mod workspace_screen;
@@ -44,9 +45,10 @@ pub use actions::*;
 pub use app_state::AppState;
 pub use context_panel::ContextTab;
 pub use detect::Stack;
+pub use github_view::GithubView;
 pub use open::{main_workspace, open_paths, set_main_window};
 pub use windows::{open_window, window_options};
-pub use workspace::Workspace;
+pub use workspace::{View, Workspace};
 pub use workspace_screen::WorkspaceScreen;
 
 use gpui_kit::App;

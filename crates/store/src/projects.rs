@@ -6,6 +6,12 @@
 //! (shown in Files, given to agents as extra directories, each with its own
 //! Git tab). A workspace without folders works in a private scratch folder
 //! in PilotHouse's data folder, so chat, the browser and devices still work.
+//!
+//! The same table holds two kinds of space that are not workspaces (see
+//! [`ProjectKind`]): the *Chats* space, for chats that belong to no
+//! workspace, and one space per GitHub repository the GitHub view works in
+//! (its managed clone). They give those chats everything a workspace's chats
+//! have (agents, checkpoints, usage) without showing up as workspaces.
 
 use std::path::{Path, PathBuf};
 
@@ -16,6 +22,30 @@ use serde::{Deserialize, Serialize};
 use crate::{Store, now_millis};
 
 pub type ProjectId = i64;
+
+/// What a row of `projects` is (its `kind` column).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectKind {
+    /// A workspace with a primary folder.
+    Folder,
+    /// A workspace without folders, working in a scratch folder.
+    Empty,
+    /// The one space for chats outside any workspace (a scratch folder).
+    Chats,
+    /// A GitHub repository's managed clone, used by the GitHub view.
+    GitHub,
+}
+
+impl ProjectKind {
+    fn from_column(kind: &str) -> Self {
+        match kind {
+            "empty" => Self::Empty,
+            "chats" => Self::Chats,
+            "github" => Self::GitHub,
+            _ => Self::Folder,
+        }
+    }
+}
 
 /// A workspace.
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +60,7 @@ pub struct Project {
     pub extra_folders: Vec<PathBuf>,
     /// No folders: `path` is a scratch folder.
     pub empty: bool,
+    pub kind: ProjectKind,
     /// The colour the user chose (an index into the UI's palette); `None`
     /// means one picked from the id, see [`Project::shade`].
     pub color: Option<u8>,
@@ -52,28 +83,27 @@ pub struct ProjectUiState {
     pub open_files: Vec<String>,
     /// The file that was focused in the viewer.
     pub active_file: Option<String>,
-    /// The sidebar's Files section is folded.
-    pub files_folded: bool,
-    /// The sidebar's Chats section is folded.
-    pub chats_folded: bool,
-    /// The chats PilotHouse started (schedules, tests, reviews) are listed.
-    pub runs_open: bool,
-    /// Height of the sidebar's Files section (pixels) when Chats is open
-    /// below it, as last dragged.
-    pub files_height: Option<f32>,
 }
 
 impl Project {
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        let kind = ProjectKind::from_column(&row.get::<_, String>("kind")?);
         Ok(Self {
             id: row.get("id")?,
             name: row.get("name")?,
             path: PathBuf::from(row.get::<_, String>("path")?),
             last_opened_at: row.get("last_opened_at")?,
             extra_folders: Vec::new(),
-            empty: row.get::<_, String>("kind")? == "empty",
+            empty: matches!(kind, ProjectKind::Empty | ProjectKind::Chats),
+            kind,
             color: row.get("color")?,
         })
+    }
+
+    /// A workspace the user made (not the Chats space or a GitHub
+    /// repository's).
+    pub fn is_workspace(&self) -> bool {
+        matches!(self.kind, ProjectKind::Folder | ProjectKind::Empty)
     }
 
     /// The workspace's colour as an index below `palette_len`: the chosen
@@ -164,6 +194,9 @@ impl Store {
             bail!("{} is not a folder", path.display());
         }
         let project = self.project(id)?.context("no such workspace")?;
+        if !project.is_workspace() {
+            bail!("folders are added to workspaces only");
+        }
         if project.roots().contains(&path) {
             return Ok(project);
         }
@@ -295,6 +328,7 @@ impl Store {
         let mut found: Vec<(usize, Project)> = self
             .projects()?
             .into_iter()
+            .filter(Project::is_workspace)
             .filter_map(|project| {
                 let depth = project
                     .folders()
@@ -340,10 +374,113 @@ impl Store {
             Project::from_row,
         )?;
         drop(conn);
+        if !project.is_workspace() {
+            bail!(
+                "{} is PilotHouse's own folder for the GitHub view",
+                path.display()
+            );
+        }
         self.with_folders(project)
     }
 
-    /// All projects, most recently opened first.
+    /// The space for chats outside any workspace, made (with a scratch
+    /// folder under `scratch_root`) the first time.
+    pub fn chats_space(&self, scratch_root: &Path) -> Result<Project> {
+        let find = |conn: &rusqlite::Connection| {
+            conn.query_row(
+                "SELECT * FROM projects WHERE kind = 'chats' ORDER BY id LIMIT 1",
+                [],
+                Project::from_row,
+            )
+            .optional()
+        };
+        // Bound first: the connection's lock is let go before the next use.
+        let existing = find(&self.conn())?;
+        if let Some(project) = existing {
+            return self.with_folders(project);
+        }
+        let scratch = new_scratch(scratch_root)?;
+        // Looked for again and made in one transaction: two windows starting
+        // together make one.
+        let project = {
+            let mut conn = self.conn();
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let project = match find(&tx)? {
+                Some(project) => project,
+                None => {
+                    let id = next_project_id(&tx)?;
+                    tx.execute(
+                        "INSERT INTO projects (id, name, path, created_at, last_opened_at, kind)
+                         VALUES (?3, 'Chats', ?1, ?2, ?2, 'chats')",
+                        params![scratch.to_string_lossy(), now_millis(), id],
+                    )?;
+                    find(&tx)?.context("just created")?
+                }
+            };
+            tx.commit()?;
+            project
+        };
+        if project.path != scratch {
+            let _ = std::fs::remove_dir(&scratch);
+        }
+        self.with_folders(project)
+    }
+
+    /// The space of the GitHub repository whose managed clone is `clone`
+    /// (an existing folder), named `name` (`owner/repo`); made the first
+    /// time.
+    pub fn github_space(&self, name: &str, clone: &Path) -> Result<Project> {
+        let clone = crate::paths::canonical(clone)
+            .with_context(|| format!("resolving {}", clone.display()))?;
+        let text = clone.to_string_lossy().to_string();
+        let conn = self.conn();
+        let existing = conn
+            .query_row(
+                "SELECT * FROM projects WHERE path = ?1",
+                params![text],
+                Project::from_row,
+            )
+            .optional()?;
+        let project = match existing {
+            Some(project) if project.kind == ProjectKind::GitHub => project,
+            Some(_) => bail!("{} is a workspace's folder", clone.display()),
+            None => {
+                let id = next_project_id(&conn)?;
+                let now = now_millis();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, last_opened_at, kind)
+                     VALUES (?1, ?2, ?3, ?4, ?4, 'github')",
+                    params![id, name, text, now],
+                )?;
+                conn.query_row(
+                    "SELECT * FROM projects WHERE id = ?1",
+                    params![id],
+                    Project::from_row,
+                )?
+            }
+        };
+        drop(conn);
+        self.with_folders(project)
+    }
+
+    /// The GitHub repository space whose managed clone is `clone`, if made.
+    pub fn github_space_at(&self, clone: &Path) -> Result<Option<Project>> {
+        let Ok(clone) = crate::paths::canonical(clone) else {
+            return Ok(None);
+        };
+        let project = self
+            .conn()
+            .query_row(
+                "SELECT * FROM projects WHERE path = ?1 AND kind = 'github'",
+                params![clone.to_string_lossy()],
+                Project::from_row,
+            )
+            .optional()?;
+        Ok(project)
+    }
+
+    /// Every row: workspaces, the Chats space and GitHub repositories'
+    /// spaces (see [`Project::is_workspace`]), most recently opened first.
     pub fn projects(&self) -> Result<Vec<Project>> {
         let conn = self.conn();
         let mut statement =
@@ -630,6 +767,44 @@ mod tests {
             store.project_ui_state(project.id).unwrap(),
             ProjectUiState::default()
         );
+    }
+
+    #[test]
+    fn the_chats_space_and_github_spaces_are_not_workspaces() {
+        let store = Store::open_in_memory().unwrap();
+        let scratch = temp_folder("kinds-scratch");
+        let chats = store.chats_space(&scratch).unwrap();
+        assert_eq!(chats.kind, ProjectKind::Chats);
+        assert!(chats.empty && !chats.is_workspace());
+        // Asked again, the same one.
+        assert_eq!(store.chats_space(&scratch).unwrap().id, chats.id);
+        assert!(
+            store
+                .add_workspace_folder(chats.id, &temp_folder("kinds-x"))
+                .is_err()
+        );
+
+        let clone = temp_folder("kinds-clone");
+        let repo = store.github_space("acme/app", &clone).unwrap();
+        assert_eq!(repo.kind, ProjectKind::GitHub);
+        assert_eq!(repo.name, "acme/app");
+        assert_eq!(store.github_space("acme/app", &clone).unwrap().id, repo.id);
+        assert_eq!(
+            store.github_space_at(&clone).unwrap().map(|p| p.id),
+            Some(repo.id)
+        );
+        // Its folder is not offered as a workspace, nor found as one.
+        assert!(store.add_project(&clone).is_err());
+        assert!(
+            store
+                .workspaces_containing(&clone.join("src"))
+                .unwrap()
+                .is_empty()
+        );
+
+        let folder = store.add_project(&temp_folder("kinds-folder")).unwrap();
+        assert!(folder.is_workspace() && folder.kind == ProjectKind::Folder);
+        assert!(store.github_space("x/y", &folder.path).is_err());
     }
 
     #[test]

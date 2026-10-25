@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -17,8 +18,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Task, Window, div,
+    IntoElement, ListAlignment, ListState, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Task, Window, div, list,
 };
 use ph_changes::Repo as LocalRepo;
 use ph_github::models::{
@@ -46,11 +47,17 @@ enum Tab {
     Checks,
 }
 
+/// A file's diff is folded when longer than this (like GitHub's large
+/// diffs); one click shows it.
+const FOLD_LINES: usize = 400;
+
 /// Everything about the pull request, loaded together.
 #[derive(Default, Clone)]
 struct Loaded {
     pull: PullRequest,
     files: Vec<PullFile>,
+    /// Each file's patch, parsed once (in the background).
+    changes: Vec<Option<ph_git::FileChange>>,
     commits: Vec<Commit>,
     conversation: Vec<IssueComment>,
     line_comments: Vec<ReviewComment>,
@@ -63,9 +70,15 @@ pub struct PullView {
     /// The newest finished agent review: (session, open, fixed) counts.
     last_review: Option<(Option<i64>, usize, usize, String)>,
     hosting: Hosting,
-    local: Entity<LocalRepo>,
+    /// The workspace checkout to check the PR out in (none in the GitHub
+    /// view, which reviews in its own clones).
+    local: Option<Entity<LocalRepo>>,
     number: u64,
-    data: Option<Loaded>,
+    data: Option<std::rc::Rc<Loaded>>,
+    /// The Files tab draws only the files in sight.
+    files_list: ListState,
+    /// Large files whose diff was asked for.
+    unfolded: std::collections::HashSet<usize>,
     error: Option<SharedString>,
     tab: Tab,
     /// Rendered markdown: the description, then each comment by id.
@@ -88,7 +101,7 @@ impl PullView {
     pub fn new(
         store: ph_store::Store,
         hosting: Hosting,
-        local: Entity<LocalRepo>,
+        local: Option<Entity<LocalRepo>>,
         number: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -108,6 +121,8 @@ impl PullView {
             reply_box,
             number,
             data: None,
+            files_list: ListState::new(0, ListAlignment::Top, gpui_kit::px(800.)),
+            unfolded: std::collections::HashSet::new(),
             error: None,
             tab: Tab::Overview,
             description: None,
@@ -121,6 +136,13 @@ impl PullView {
         };
         view.reload(cx);
         view
+    }
+
+    /// An agent review of this pull request ended: its line in the header
+    /// says what it found.
+    pub fn review_changed(&mut self, cx: &mut Context<Self>) {
+        self.read_last_review();
+        cx.notify();
     }
 
     pub fn number(&self) -> u64 {
@@ -168,8 +190,10 @@ impl PullView {
             let reviews = pulls::reviews(&client, &repo, number)?;
             // Checks are nice to have; a token without that scope still works.
             let checks = pulls::checks(&client, &repo, &pull.head.sha).unwrap_or_default();
+            let changes = files.iter().map(file_change).collect();
             anyhow::Ok(Loaded {
                 pull,
+                changes,
                 files,
                 commits,
                 conversation,
@@ -200,7 +224,13 @@ impl PullView {
                             bodies.insert(id, cx.new(|cx| TextViewState::markdown(&body, cx)));
                         }
                         this.bodies = bodies;
-                        this.data = Some(data);
+                        // The same files keep their place (a reply was posted).
+                        if this.files_list.item_count() == data.files.len() {
+                            this.files_list.remeasure();
+                        } else {
+                            this.files_list.reset(data.files.len());
+                        }
+                        this.data = Some(std::rc::Rc::new(data));
                         this.error = None;
                     }
                     Err(err) => this.error = Some(format!("{err:#}").into()),
@@ -325,7 +355,10 @@ impl PullView {
     /// Fetches the head and switches to a local `pr/<number>` branch.
     fn check_out(&mut self, cx: &mut Context<Self>) {
         let (hosting, number) = (self.hosting.clone(), self.number);
-        self.local.update(cx, |repo, cx| {
+        let Some(local) = self.local.clone() else {
+            return;
+        };
+        local.update(cx, |repo, cx| {
             repo.run(
                 format!("Checking out #{number}"),
                 move |root| {
@@ -402,8 +435,17 @@ impl PullView {
                     .text_color(cx.theme().muted_foreground)
                     .child(pill(state, color))
                     .child(format!(
-                        "{} wants to merge {} into {}",
-                        pull.user.login, pull.head.name, pull.base.name
+                        "{} {} {} into {}",
+                        pull.user.login,
+                        if pull.merged {
+                            "merged"
+                        } else if pull.state == "closed" {
+                            "proposed (closed)"
+                        } else {
+                            "wants to merge"
+                        },
+                        pull.head.name,
+                        pull.base.name
                     ))
                     .child(format!("+{} −{}", pull.additions, pull.deletions)),
             )
@@ -416,21 +458,25 @@ impl PullView {
                             .primary()
                             .icon(Icons::Sparkles)
                             .label("Review with agent")
-                            .tooltip("Opens a review chat in its own worktree")
+                            .tooltip(
+                                "Opens a review chat in the GitHub view, on its own copy of the PR",
+                            )
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(PullViewEvent::ReviewWithAgent(Box::new(
                                     review_pull.clone(),
                                 )))
                             })),
                     )
-                    .child(
-                        Button::new("pull-check-out")
-                            .small()
-                            .outline()
-                            .icon(Icons::GitBranch)
-                            .label("Check out")
-                            .on_click(cx.listener(|this, _, _, cx| this.check_out(cx))),
-                    )
+                    .when(self.local.is_some(), |this| {
+                        this.child(
+                            Button::new("pull-check-out")
+                                .small()
+                                .outline()
+                                .icon(Icons::GitBranch)
+                                .label("Check out")
+                                .on_click(cx.listener(|this, _, _, cx| this.check_out(cx))),
+                        )
+                    })
                     .child(
                         Button::new("pull-refresh")
                             .small()
@@ -500,8 +546,19 @@ impl PullView {
             .pt_1()
             .children(tabs.into_iter().map(|(tab, label)| {
                 let selected = self.tab == tab;
+                let name = match tab {
+                    Tab::Overview => "Overview",
+                    Tab::Files => "Files",
+                    Tab::Commits => "Commits",
+                    Tab::Checks => "Checks",
+                };
                 div()
-                    .id(SharedString::from(format!("pull-tab-{label}")))
+                    .id(SharedString::from(format!(
+                        "pull-tab-{}",
+                        name.to_lowercase()
+                    )))
+                    .role(gpui_kit::accesskit::Role::Tab)
+                    .aria_label(name)
                     .px_2p5()
                     .py_1()
                     .rounded(cx.theme().radius)
@@ -521,6 +578,7 @@ impl PullView {
                         cx.notify();
                     }))
                     .child(label)
+                    .test_support()
             }))
     }
 
@@ -537,7 +595,13 @@ impl PullView {
             .chain(
                 data.reviews
                     .iter()
-                    .filter(|r| r.state != "PENDING")
+                    // A reply on a line thread is a review with no text of its
+                    // own: it shows in its thread under Files, not here.
+                    .filter(|r| {
+                        r.state != "PENDING"
+                            && !(r.state == "COMMENTED"
+                                && r.body.as_deref().unwrap_or_default().trim().is_empty())
+                    })
                     .map(|r| (r.submitted_at.clone().unwrap_or_default(), Item::Review(r))),
             )
             .collect();
@@ -707,143 +771,173 @@ impl PullView {
             .into_any_element()
     }
 
-    fn render_files(&self, data: &Loaded, cx: &mut Context<Self>) -> AnyElement {
-        // Line comment threads by file, each root with its replies.
-        let mut threads: HashMap<&str, Vec<(&ReviewComment, Vec<&ReviewComment>)>> = HashMap::new();
-        for root in data
+    /// The Files tab: each file's diff and its line comment threads, drawn
+    /// only while in sight (a pull request can change thousands of lines).
+    fn render_files(&self, cx: &mut Context<Self>) -> AnyElement {
+        list(
+            self.files_list.clone(),
+            cx.processor(|this, ix: usize, _, cx| this.render_file(ix, cx)),
+        )
+        .size_full()
+        .into_any_element()
+    }
+
+    fn render_file(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(data) = self.data.clone() else {
+            return div().into_any_element();
+        };
+        let (Some(file), Some(change)) = (data.files.get(ix), data.changes.get(ix)) else {
+            return div().into_any_element();
+        };
+        // Line comment threads of this file, each root with its replies.
+        let threads: Vec<(&ReviewComment, Vec<&ReviewComment>)> = data
             .line_comments
             .iter()
-            .filter(|c| c.in_reply_to_id.is_none())
-        {
-            let replies = data
-                .line_comments
-                .iter()
-                .filter(|c| c.in_reply_to_id == Some(root.id))
-                .collect();
-            threads
-                .entry(root.path.as_str())
-                .or_default()
-                .push((root, replies));
-        }
+            .filter(|c| c.in_reply_to_id.is_none() && c.path == file.filename)
+            .map(|root| {
+                let replies = data
+                    .line_comments
+                    .iter()
+                    .filter(|c| c.in_reply_to_id == Some(root.id))
+                    .collect();
+                (root, replies)
+            })
+            .collect();
+        let lines: usize = change.as_ref().map_or(0, |change| {
+            change.hunks.iter().map(|hunk| hunk.lines.len()).sum()
+        });
+        let folded = lines > FOLD_LINES && !self.unfolded.contains(&ix);
+        let diff = match change {
+            Some(change) if !folded => ph_changes::file_diff(change, cx),
+            _ => h_flex()
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_2()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(cx.theme().border)
+                .text_sm()
+                .child(div().flex_1().min_w_0().truncate().child(format!(
+                    "{} · +{} −{}",
+                    file.filename, file.additions, file.deletions
+                )))
+                .map(|this| {
+                    if change.is_some() {
+                        this.child(
+                            Button::new(("show-diff", ix))
+                                .xsmall()
+                                .ghost()
+                                .label(format!("Show diff ({lines} lines)"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.unfolded.insert(ix);
+                                    this.files_list.remeasure_items(ix..ix + 1);
+                                    cx.notify();
+                                })),
+                        )
+                    } else {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!("{} (no diff shown)", file.status)),
+                        )
+                    }
+                })
+                .into_any_element(),
+        };
+        // A list item sizes to its content: fill the column.
         v_flex()
-            .gap_2()
-            .p_3()
-            .children(data.files.iter().map(|file| {
-                let change = file_change(file);
+            .w_full()
+            .px_3()
+            .pt_2()
+            .when(ix + 1 == data.files.len(), |this| this.pb_3())
+            .gap_1()
+            .child(div().w_full().child(diff))
+            .children(threads.into_iter().map(|(root, replies)| {
                 v_flex()
-                    .flex_none()
+                    .ml_3()
                     .gap_1()
-                    .child(match &change {
-                        Some(change) => ph_changes::file_diff(change, cx),
-                        None => div()
-                            .px_2()
-                            .py_1()
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .text_sm()
+                    .p_2()
+                    .rounded(cx.theme().radius)
+                    .border_l_2()
+                    .border_color(cx.theme().info.opacity(0.5))
+                    .bg(cx.theme().secondary)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
                             .child(format!(
-                                "{} · {} (no diff shown)",
-                                file.filename, file.status
-                            ))
-                            .into_any_element(),
-                    })
-                    .children(
-                        threads
-                            .get(file.filename.as_str())
-                            .into_iter()
-                            .flatten()
-                            .map(|(root, replies)| {
+                                "Line {} · {}",
+                                root.line
+                                    .or(root.original_line)
+                                    .map(|l| l.to_string())
+                                    .unwrap_or("outdated".into()),
+                                root.user.login
+                            )),
+                    )
+                    .children(self.bodies.get(&root.id).map(TextView::new))
+                    .children(replies.iter().map(|reply| {
+                        v_flex()
+                            .pt_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(reply.user.login.clone()),
+                            )
+                            .children(self.bodies.get(&reply.id).map(TextView::new))
+                    }))
+                    .map(|this| {
+                        let thread = root.id;
+                        if self.replying == Some(thread) {
+                            this.child(
                                 v_flex()
-                                    .ml_3()
                                     .gap_1()
-                                    .p_2()
-                                    .rounded(cx.theme().radius)
-                                    .border_l_2()
-                                    .border_color(cx.theme().info.opacity(0.5))
-                                    .bg(cx.theme().secondary)
+                                    .pt_1()
+                                    .child(Textarea::new(&self.reply_box).small())
                                     .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(format!(
-                                                "Line {} · {}",
-                                                root.line
-                                                    .or(root.original_line)
-                                                    .map(|l| l.to_string())
-                                                    .unwrap_or("outdated".into()),
-                                                root.user.login
-                                            )),
-                                    )
-                                    .children(self.bodies.get(&root.id).map(TextView::new))
-                                    .children(replies.iter().map(|reply| {
-                                        v_flex()
-                                            .pt_1()
+                                        h_flex()
+                                            .gap_1()
+                                            .justify_end()
                                             .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(reply.user.login.clone()),
-                                            )
-                                            .children(self.bodies.get(&reply.id).map(TextView::new))
-                                    }))
-                                    .map(|this| {
-                                        let thread = root.id;
-                                        if self.replying == Some(thread) {
-                                            this.child(
-                                                v_flex()
-                                                    .gap_1()
-                                                    .pt_1()
-                                                    .child(Textarea::new(&self.reply_box).small())
-                                                    .child(
-                                                        h_flex()
-                                                            .gap_1()
-                                                            .justify_end()
-                                                            .child(
-                                                                Button::new((
-                                                                    "cancel-reply",
-                                                                    thread,
-                                                                ))
-                                                                .xsmall()
-                                                                .ghost()
-                                                                .label("Cancel")
-                                                                .on_click(cx.listener(
-                                                                    |this, _, _, cx| {
-                                                                        this.replying = None;
-                                                                        cx.notify();
-                                                                    },
-                                                                )),
-                                                            )
-                                                            .child(
-                                                                Button::new(("send-reply", thread))
-                                                                    .xsmall()
-                                                                    .primary()
-                                                                    .label("Reply")
-                                                                    .on_click(cx.listener(
-                                                                        |this, _, window, cx| {
-                                                                            this.reply(window, cx)
-                                                                        },
-                                                                    )),
-                                                            ),
-                                                    ),
-                                            )
-                                        } else {
-                                            this.child(
-                                                Button::new(("start-reply", thread))
+                                                Button::new(("cancel-reply", thread))
                                                     .xsmall()
                                                     .ghost()
+                                                    .label("Cancel")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.replying = None;
+                                                        this.files_list.remeasure();
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new(("send-reply", thread))
+                                                    .xsmall()
+                                                    .primary()
                                                     .label("Reply")
                                                     .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            this.replying = Some(thread);
-                                                            cx.notify();
+                                                        |this, _, window, cx| {
+                                                            this.reply(window, cx)
                                                         },
                                                     )),
-                                            )
-                                        }
-                                    })
-                            }),
-                    )
+                                            ),
+                                    ),
+                            )
+                        } else {
+                            this.child(
+                                Button::new(("start-reply", thread))
+                                    .xsmall()
+                                    .ghost()
+                                    .label("Reply")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.replying = Some(thread);
+                                        this.files_list.remeasure();
+                                        cx.notify();
+                                    })),
+                            )
+                        }
+                    })
             }))
             .into_any_element()
     }
@@ -951,22 +1045,31 @@ impl Render for PullView {
                 .into_any_element();
         };
         let body = match self.tab {
-            Tab::Overview => self.render_overview(&data, cx),
-            Tab::Files => self.render_files(&data, cx),
-            Tab::Commits => self.render_commits(&data, cx),
-            Tab::Checks => self.render_checks(&data, cx),
+            // A list that scrolls itself, absolutely filled so it gets an
+            // exact height (a percentage inside a flex item resolves to the
+            // content's, and then nothing scrolls).
+            Tab::Files => div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(div().absolute().inset_0().child(self.render_files(cx)))
+                .into_any_element(),
+            tab => div()
+                .id("pull-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(match tab {
+                    Tab::Overview => self.render_overview(&data, cx),
+                    Tab::Commits => self.render_commits(&data, cx),
+                    _ => self.render_checks(&data, cx),
+                })
+                .into_any_element(),
         };
         v_flex()
             .size_full()
             .child(self.render_header(&data, cx))
-            .child(
-                div()
-                    .id("pull-body")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(body),
-            )
+            .child(body)
             .into_any_element()
     }
 }

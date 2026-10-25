@@ -240,6 +240,11 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE projects ADD COLUMN color INTEGER;
     "#,
+    // 12: a review finding's evidence (what shows the problem), beside its
+    // details and fix.
+    r#"
+    ALTER TABLE pr_findings ADD COLUMN evidence TEXT NOT NULL DEFAULT '';
+    "#,
 ];
 
 /// Backups kept of a database file, newest first; older ones are deleted.
