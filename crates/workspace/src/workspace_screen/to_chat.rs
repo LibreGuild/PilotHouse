@@ -75,7 +75,7 @@ impl WorkspaceScreen {
     /// ⌘⇧S: send the visible browser or device (with its marks) to chat.
     pub fn capture_to_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let tools = match self.context_tab {
-            _ if !self.context_open => None,
+            tab if !self.shown.contains(&Pane::Tool(tab)) => None,
             ContextTab::Browser => self
                 .browser
                 .as_ref()

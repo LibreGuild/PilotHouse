@@ -1,13 +1,16 @@
 //! The left sidebar of the Workspaces view: everything at once, so nothing
 //! needs switching to be seen.
 //!
-//! - **New chat** (⌘N) and chat search on top.
+//! - **New chat** (⌘N) and a search field (⌘⇧K) on top.
+//! - **Pinned**: chats pinned from any workspace, kept on top.
 //! - **Chats**: the Chats space, for chats outside any workspace (no folder
 //!   needed), grouped by day.
 //! - **Workspaces**: each with its colour and what it is doing; unfolded,
 //!   its newest chats (all of them on request). Picking a chat opens its
 //!   workspace at it. Each row's menu adds folders, renames, moves it to a
 //!   window of its own, recolours or removes it.
+//! - Each chat's menu pins, renames or deletes it. Every section folds away
+//!   from its header.
 //!
 //! Chats that PilotHouse started itself (schedules, test recording and
 //! repair, pull request reviews) fold into *Runs*, so the user's own stay in
@@ -42,20 +45,34 @@ use crate::workspace::{View, Workspace};
 /// The chats an unfolded workspace lists before *Show all*.
 const NEWEST: usize = 5;
 
+/// Section names, as [`Workspace::folded`] keeps them.
+const CHATS: &str = "chats";
+const WORKSPACES: &str = "workspaces";
+const PINNED: &str = "pinned";
+
 pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let mut rows: Vec<AnyElement> = Vec::new();
+    if !workspace.pinned.is_empty() {
+        rows.extend(pinned_rows(workspace, cx));
+    }
     if let Some(chats) = workspace.chats_space() {
-        rows.push(chats_header(chats.id, cx));
-        rows.extend(chat_rows(workspace, chats.id, None, cx));
+        let folded = workspace.folded.contains(CHATS);
+        rows.push(chats_header(chats.id, folded, cx));
+        if !folded {
+            rows.extend(chat_rows(workspace, chats.id, None, cx));
+        }
     }
-    rows.push(workspaces_header(cx));
-    if workspace.projects().is_empty() {
-        rows.push(no_workspaces(cx));
-    }
-    for (ix, project) in workspace.projects().iter().enumerate() {
-        rows.push(workspace_row(workspace, project, ix, cx));
-        if workspace.expanded.contains(&project.id) {
-            rows.extend(chat_rows(workspace, project.id, Some(NEWEST), cx));
+    let folded = workspace.folded.contains(WORKSPACES);
+    rows.push(workspaces_header(workspace.projects().len(), folded, cx));
+    if !folded {
+        if workspace.projects().is_empty() {
+            rows.push(no_workspaces(cx));
+        }
+        for (ix, project) in workspace.projects().iter().enumerate() {
+            rows.push(workspace_row(workspace, project, ix, cx));
+            if workspace.expanded.contains(&project.id) {
+                rows.extend(chat_rows(workspace, project.id, Some(NEWEST), cx));
+            }
         }
     }
     v_flex()
@@ -78,40 +95,134 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
         )
 }
 
-/// New chat and search.
+/// New chat, prominent in the accent, and a search field. Both are rows
+/// of the list's width, with their shortcut on the right.
 fn top(cx: &App) -> impl IntoElement {
-    h_flex()
+    let theme = cx.theme();
+    let shortcut =
+        |keys: &'static str, color: Hsla| div().flex_none().text_xs().text_color(color).child(keys);
+    v_flex()
         .flex_none()
         .pr_1()
-        .pb_1()
-        .gap_1()
+        .pt_1()
+        .pb_2()
+        .gap_1p5()
         .child(
-            Button::new("sidebar-new-chat")
-                .outline()
-                .small()
-                .flex_1()
-                .icon(Icons::SquarePen)
-                .label("New chat")
-                .tooltip("New chat here (⌘N)")
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(NewSession), cx)),
+            h_flex()
+                .id("sidebar-new-chat")
+                .h_8()
+                .px_2p5()
+                .gap_2()
+                .rounded(theme.radius_lg)
+                .cursor_pointer()
+                // A calm surface with the accent only in its icon: it leads
+                // the sidebar without pulling the eye from the chat.
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.sidebar_accent.opacity(0.55))
+                .text_color(theme.foreground)
+                .text_sm()
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                .hover(|style| style.bg(theme.sidebar_accent))
+                .active(|style| style.bg(theme.sidebar_accent.opacity(0.8)))
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new("New chat in the workspace in front")
+                        .build(window, cx)
+                })
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(NewSession), cx))
+                .child(Icon::new(Icons::SquarePen).small().text_color(theme.link))
+                .child(div().flex_1().child("New chat"))
+                .child(shortcut(
+                    if cfg!(target_os = "macos") {
+                        "⌘N"
+                    } else {
+                        "Ctrl+N"
+                    },
+                    theme.muted_foreground.opacity(0.8),
+                ))
+                .aria_label("New chat")
+                .test_support(),
         )
         .child(
-            Button::new("sidebar-search-chats")
-                .ghost()
-                .small()
-                .icon(IconName::Search)
-                .tooltip("Search chats (⌘⇧K)")
-                .accessibility_label("Search chats")
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(SearchChats), cx)),
+            h_flex()
+                .id("sidebar-search-chats")
+                .h_8()
+                .px_2p5()
+                .gap_2()
+                .rounded(theme.radius_lg)
+                .cursor_pointer()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background.opacity(0.5))
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .hover(|style| style.border_color(theme.ring.opacity(0.6)))
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(SearchChats), cx))
+                .child(Icon::new(IconName::Search).small())
+                .child(div().flex_1().child("Search chats"))
+                .child(shortcut(
+                    if cfg!(target_os = "macos") {
+                        "⌘⇧K"
+                    } else {
+                        "Ctrl+Shift+K"
+                    },
+                    theme.muted_foreground.opacity(0.8),
+                ))
+                .aria_label("Search chats")
+                .test_support(),
         )
-        .child(div().h_px().bg(cx.theme().border))
 }
 
-fn chats_header(chats: ProjectId, cx: &mut Context<Workspace>) -> AnyElement {
+/// Pinned chats, from any workspace, each showing where it lives.
+fn pinned_rows(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
+    let entity = cx.entity().downgrade();
+    let active = workspace
+        .active_space()
+        .filter(|_| workspace.view() == View::Workspaces)
+        .and_then(|space| space.read(cx).active_session());
+    let folded = workspace.folded.contains(PINNED);
+    let mut rows = vec![section(
+        "sidebar-pinned",
+        "Pinned",
+        (PINNED, folded),
+        folded.then_some(workspace.pinned.len()),
+        div(),
+        cx,
+    )];
+    if folded {
+        return rows;
+    }
+    for session in &workspace.pinned {
+        let place = workspace
+            .projects()
+            .iter()
+            .find(|project| project.id == session.project_id)
+            .map(|project| project.name.clone());
+        let chats = ph_agent::ChatHub::existing(session.project_id, cx);
+        rows.push(chat_row(
+            &entity,
+            session.project_id,
+            session,
+            active,
+            ChatRow {
+                nested: false,
+                pinned: true,
+                place,
+            },
+            chats.as_ref(),
+            cx,
+        ));
+    }
+    rows
+}
+
+fn chats_header(chats: ProjectId, folded: bool, cx: &mut Context<Workspace>) -> AnyElement {
     let workspace = cx.entity().downgrade();
     section(
         "sidebar-chats",
         "Chats",
+        (CHATS, folded),
+        None,
         Button::new("sidebar-new-loose-chat")
             .ghost()
             .xsmall()
@@ -125,10 +236,12 @@ fn chats_header(chats: ProjectId, cx: &mut Context<Workspace>) -> AnyElement {
     )
 }
 
-fn workspaces_header(cx: &mut Context<Workspace>) -> AnyElement {
+fn workspaces_header(count: usize, folded: bool, cx: &mut Context<Workspace>) -> AnyElement {
     section(
         "sidebar-workspaces",
         "Workspaces",
+        (WORKSPACES, folded),
+        (folded && count > 0).then_some(count),
         Button::new("sidebar-add-workspace")
             .ghost()
             .xsmall()
@@ -383,7 +496,11 @@ fn chat_rows(
             project,
             session,
             active,
-            nested,
+            ChatRow {
+                nested,
+                pinned: workspace.is_pinned(session.id),
+                place: None,
+            },
             chats.as_ref(),
             cx,
         ));
@@ -448,7 +565,11 @@ fn chat_rows(
                     project,
                     session,
                     active,
-                    nested,
+                    ChatRow {
+                        nested,
+                        pinned: workspace.is_pinned(session.id),
+                        place: None,
+                    },
                     chats.as_ref(),
                     cx,
                 ));
@@ -458,12 +579,21 @@ fn chat_rows(
     rows
 }
 
+/// How a chat row shows.
+struct ChatRow {
+    /// Under its workspace (indented).
+    nested: bool,
+    pinned: bool,
+    /// The workspace it belongs to, shown in the Pinned list.
+    place: Option<String>,
+}
+
 fn chat_row(
     workspace: &WeakEntity<Workspace>,
     project: ProjectId,
     session: &Session,
     active: Option<SessionId>,
-    nested: bool,
+    row: ChatRow,
     chats: Option<&gpui_kit::Entity<ph_agent::WorkspaceChats>>,
     cx: &App,
 ) -> AnyElement {
@@ -475,7 +605,7 @@ fn chat_row(
             (chats.is_working(id, cx), chats.is_waiting(id, cx))
         })
         .unwrap_or_default();
-    let workspace = workspace.clone();
+    let open = workspace.clone();
     let marker: AnyElement = if waiting {
         div()
             .flex_none()
@@ -487,17 +617,23 @@ fn chat_row(
     } else if working {
         Spinner::new().xsmall().into_any_element()
     } else {
-        Icon::new(Icons::MessageSquare)
-            .xsmall()
-            .text_color(cx.theme().muted_foreground)
-            .into_any_element()
+        Icon::new(if row.pinned {
+            Icons::Pin
+        } else {
+            Icons::MessageSquare
+        })
+        .xsmall()
+        .text_color(cx.theme().muted_foreground)
+        .into_any_element()
     };
+    let group = SharedString::from(format!("chat-row-{id}"));
     h_flex()
         .id(SharedString::from(format!("chat-{id}")))
+        .group(group.clone())
         .h_7()
-        .when(nested, |this| this.pl_6())
-        .when(!nested, |this| this.pl_2())
-        .pr_2()
+        .when(row.nested, |this| this.pl_6())
+        .when(!row.nested, |this| this.pl_2())
+        .pr_0p5()
         .gap_2()
         .rounded(cx.theme().radius)
         .cursor_pointer()
@@ -510,7 +646,7 @@ fn chat_row(
             this.hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.6)))
         })
         .on_click(move |_, window, cx| {
-            _ = workspace.update(cx, |workspace, cx| {
+            _ = open.update(cx, |workspace, cx| {
                 workspace.open_chat(project, id, window, cx)
             });
         })
@@ -522,29 +658,152 @@ fn chat_row(
                 .truncate()
                 .child(session.title.clone()),
         )
+        .when_some(row.place, |this, place| {
+            this.child(
+                div()
+                    .flex_none()
+                    .max_w(px(80.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .group_hover(group.clone(), |style| style.invisible())
+                    .child(place),
+            )
+        })
+        .child(
+            div()
+                .id(SharedString::from(format!("chat-actions-{id}")))
+                .flex_none()
+                .invisible()
+                .group_hover(group, |style| style.visible())
+                // The menu opens without opening the chat.
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(chat_menu(
+                    workspace.clone(),
+                    project,
+                    session.clone(),
+                    row.pinned,
+                    working || waiting,
+                )),
+        )
         .test_support()
         .into_any_element()
 }
 
-/// A section's title row, then `action`.
+/// What can be done to a chat: pin, rename, delete (not while it works).
+fn chat_menu(
+    workspace: WeakEntity<Workspace>,
+    project: ProjectId,
+    session: Session,
+    pinned: bool,
+    busy: bool,
+) -> impl IntoElement {
+    let id = session.id;
+    Button::new(SharedString::from(format!("chat-menu-{id}")))
+        .ghost()
+        .xsmall()
+        .icon(IconName::Ellipsis)
+        .accessibility_label("Chat menu")
+        .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+            let (pin, rename, delete) = (workspace.clone(), workspace.clone(), workspace.clone());
+            let (rename_session, delete_session) = (session.clone(), session.clone());
+            menu.item(
+                PopupMenuItem::new(if pinned { "Unpin" } else { "Pin to top" })
+                    .icon(Icon::new(if pinned { Icons::PinOff } else { Icons::Pin }))
+                    .on_click(move |_, _, cx| {
+                        _ = pin.update(cx, |workspace, cx| workspace.toggle_pin(id, cx));
+                    }),
+            )
+            .item(
+                PopupMenuItem::new("Rename…")
+                    .icon(Icon::new(Icons::Pencil))
+                    .on_click(move |_, window, cx| {
+                        _ = rename.update(cx, |workspace, cx| {
+                            workspace.rename_chat(project, &rename_session, window, cx)
+                        });
+                    }),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new(if busy {
+                    "Delete (still working)"
+                } else {
+                    "Delete…"
+                })
+                .icon(Icon::new(Icons::Trash))
+                .disabled(busy)
+                .on_click(move |_, window, cx| {
+                    _ = delete.update(cx, |workspace, cx| {
+                        workspace.delete_chat(project, &delete_session, window, cx)
+                    });
+                }),
+            )
+        })
+}
+
+/// A section's title row, then `action`. The title folds the section
+/// (`fold`: its name and whether it is folded); `count` shows how much a
+/// folded one hides.
 fn section(
     id: &'static str,
     title: &'static str,
+    (name, folded): (&'static str, bool),
+    count: Option<usize>,
     action: impl IntoElement,
-    cx: &App,
+    cx: &mut Context<Workspace>,
 ) -> AnyElement {
+    let workspace = cx.entity().downgrade();
+    let group = SharedString::from(format!("{id}-header"));
     h_flex()
         .id(id)
+        .group(group.clone())
         .flex_none()
         .h_8()
         .mt_1()
         .px_1()
-        .gap_0p5()
+        .gap_1()
         .text_xs()
         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
         .text_color(cx.theme().muted_foreground)
-        .child(div().flex_1().child(title.to_uppercase()))
-        .child(action)
+        .cursor_pointer()
+        .hover(|style| style.text_color(cx.theme().foreground))
+        .on_click(move |_, _, cx| {
+            _ = workspace.update(cx, |workspace, cx| workspace.toggle_section(name, cx));
+        })
+        .child(
+            // Folded sections always show it; open ones on hover.
+            div()
+                .when(!folded, |this| {
+                    this.invisible()
+                        .group_hover(group.clone(), |style| style.visible())
+                })
+                .child(
+                    Icon::new(if folded {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .xsmall(),
+                ),
+        )
+        .child(title.to_uppercase())
+        .when_some(count, |this, count| {
+            this.child(
+                div()
+                    .px_1p5()
+                    .rounded_full()
+                    .bg(cx.theme().muted)
+                    .child(count.to_string()),
+            )
+        })
+        .child(div().flex_1())
+        // Its button acts without folding the section.
+        .child(
+            div()
+                .id(SharedString::from(format!("{id}-action")))
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(action),
+        )
         // Findable in UI tests and automation.
         .test_support()
         .into_any_element()

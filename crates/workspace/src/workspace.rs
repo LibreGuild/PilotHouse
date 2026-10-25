@@ -58,6 +58,10 @@ pub struct Workspace {
     pub(crate) expanded: HashSet<ProjectId>,
     pub(crate) show_all: HashSet<ProjectId>,
     pub(crate) runs_open: HashSet<ProjectId>,
+    /// Pinned chats, as last read (another window may pin one too).
+    pub(crate) pinned: Vec<ph_store::sessions::Session>,
+    /// Sidebar sections folded away (`chats`, `workspaces`).
+    pub(crate) folded: HashSet<String>,
     /// The chats of unfolded workspaces whose screen is closed, read again
     /// each second (a schedule may add one).
     sessions: HashMap<ProjectId, Vec<ph_store::sessions::Session>>,
@@ -98,6 +102,7 @@ impl Workspace {
         let last_project: Option<ProjectId> = store.setting(keys::LAST_PROJECT);
         let sidebar_collapsed: bool = store.setting(keys::SIDEBAR_COLLAPSED);
         let expanded: Vec<ProjectId> = store.setting(keys::SIDEBAR_EXPANDED);
+        let folded: Vec<String> = store.setting(keys::SIDEBAR_FOLDED);
 
         // Follow OS light/dark changes while the preference is "System".
         let appearance_subscription = cx.observe_window_appearance(window, |_, window, cx| {
@@ -133,6 +138,8 @@ impl Workspace {
             expanded: expanded.into_iter().collect(),
             show_all: HashSet::new(),
             runs_open: HashSet::new(),
+            pinned: Vec::new(),
+            folded: folded.into_iter().collect(),
             sessions: HashMap::new(),
             spaces: HashMap::new(),
             active_project: None,
@@ -331,7 +338,7 @@ impl Workspace {
     /// Reads the chats of unfolded workspaces without a screen.
     fn read_sessions(&mut self, cx: &mut Context<Self>) -> bool {
         let store = AppState::store(cx).clone();
-        let mut changed = false;
+        let mut changed = self.read_pinned(cx);
         let wanted: Vec<ProjectId> = self
             .expanded
             .iter()
@@ -347,6 +354,161 @@ impl Workspace {
             }
         }
         changed
+    }
+
+    /// Re-reads the pinned chats (dropping ids whose chat is gone).
+    fn read_pinned(&mut self, cx: &mut Context<Self>) -> bool {
+        let store = AppState::store(cx);
+        let ids: Vec<ph_store::sessions::SessionId> = store.setting(keys::SIDEBAR_PINNED);
+        let pinned: Vec<_> = ids
+            .iter()
+            .filter_map(|id| store.session(*id).ok().flatten())
+            .collect();
+        let changed = pinned != self.pinned;
+        self.pinned = pinned;
+        changed
+    }
+
+    pub(crate) fn is_pinned(&self, id: ph_store::sessions::SessionId) -> bool {
+        self.pinned.iter().any(|session| session.id == id)
+    }
+
+    /// Pins chat `id` to the top of the sidebar, or unpins it.
+    pub(crate) fn toggle_pin(&mut self, id: ph_store::sessions::SessionId, cx: &mut Context<Self>) {
+        let store = AppState::store(cx);
+        let mut ids: Vec<ph_store::sessions::SessionId> = store.setting(keys::SIDEBAR_PINNED);
+        if let Some(at) = ids.iter().position(|pinned| *pinned == id) {
+            ids.remove(at);
+        } else {
+            ids.push(id);
+        }
+        if let Err(err) = store.set_setting(keys::SIDEBAR_PINNED, &ids) {
+            tracing::warn!("saving the pinned chats failed: {err:#}");
+        }
+        self.read_pinned(cx);
+        cx.notify();
+    }
+
+    /// Folds sidebar section `name` away, or shows it again.
+    pub(crate) fn toggle_section(&mut self, name: &str, cx: &mut Context<Self>) {
+        if !self.folded.remove(name) {
+            self.folded.insert(name.to_string());
+        }
+        let mut names: Vec<&String> = self.folded.iter().collect();
+        names.sort();
+        let _ = AppState::store(cx).set_setting(keys::SIDEBAR_FOLDED, &names);
+        cx.notify();
+    }
+
+    /// The chats of `project`, loading them when its screen is not open.
+    fn chats_of(
+        &self,
+        project: ProjectId,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<Entity<ph_agent::WorkspaceChats>> {
+        let project = self
+            .projects
+            .iter()
+            .chain(self.chats_space.as_ref())
+            .find(|candidate| candidate.id == project)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("the workspace is gone"))?;
+        let store = AppState::store(cx).clone();
+        Ok(ph_agent::ChatHub::chats(&store, &project, cx))
+    }
+
+    /// Asks for a new name for chat `session` of `project`.
+    pub(crate) fn rename_chat(
+        &mut self,
+        project: ProjectId,
+        session: &ph_store::sessions::Session,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (id, workspace) = (session.id, cx.entity().downgrade());
+        crate::rename_dialog::open(
+            "Rename chat",
+            session.title.clone(),
+            window,
+            cx,
+            move |title, window, cx| {
+                let title = title.trim().to_string();
+                if title.is_empty() {
+                    return;
+                }
+                _ = workspace.update(cx, |workspace, cx| {
+                    let renamed = workspace.chats_of(project, cx).and_then(|chats| {
+                        chats.update(cx, |chats, cx| chats.rename(id, &title, cx))
+                    });
+                    if let Err(err) = renamed {
+                        window.push_notification(
+                            Notification::error(format!("Could not rename the chat: {err:#}")),
+                            cx,
+                        );
+                    }
+                    workspace.read_sessions(cx);
+                    cx.notify();
+                });
+            },
+        );
+    }
+
+    /// Asks before deleting chat `session` of `project` with its transcript.
+    pub(crate) fn delete_chat(
+        &mut self,
+        project: ProjectId,
+        session: &ph_store::sessions::Session,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (id, workspace) = (session.id, cx.entity().downgrade());
+        let title = session.title.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let workspace = workspace.clone();
+            dialog
+                .title("Delete chat?")
+                .w(gpui_kit::px(420.))
+                .child(format!(
+                    "“{title}” and its transcript will be deleted. This cannot be undone."
+                ))
+                .footer(ph_ui::dialog_buttons("Delete", true))
+                .on_ok(move |_, window, cx| {
+                    _ = workspace.update(cx, |workspace, cx| {
+                        workspace.delete_chat_now(project, id, window, cx)
+                    });
+                    true
+                })
+        });
+    }
+
+    fn delete_chat_now(
+        &mut self,
+        project: ProjectId,
+        id: ph_store::sessions::SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The chat on screen gives way to a new one first.
+        if let Some(space) = self.spaces.get(&project).cloned()
+            && space.read(cx).active_session() == Some(id)
+        {
+            space.update(cx, |space, cx| space.new_session(window, cx));
+        }
+        let deleted = self
+            .chats_of(project, cx)
+            .and_then(|chats| chats.update(cx, |chats, cx| chats.delete(id, cx)));
+        if let Err(err) = deleted {
+            window.push_notification(
+                Notification::error(format!("Could not delete the chat: {err:#}")),
+                cx,
+            );
+            return;
+        }
+        if self.is_pinned(id) {
+            self.toggle_pin(id, cx);
+        }
+        self.read_sessions(cx);
+        cx.notify();
     }
 
     pub fn active_project_id(&self) -> Option<ProjectId> {
@@ -844,23 +1006,29 @@ impl Workspace {
             return;
         };
         let workspace = cx.entity().downgrade();
-        crate::rename_dialog::open(project.name.clone(), window, cx, move |name, window, cx| {
-            let name = name.trim().to_string();
-            if name.is_empty() {
-                return;
-            }
-            if let Err(err) = AppState::store(cx).rename_project(project.id, &name) {
-                tracing::warn!("renaming the workspace failed: {err:#}");
-                return;
-            }
-            let renamed = Project {
-                name,
-                ..project.clone()
-            };
-            _ = workspace.update(cx, |workspace, cx| {
-                workspace.workspace_changed(renamed, window, cx)
-            });
-        });
+        crate::rename_dialog::open(
+            "Rename workspace",
+            project.name.clone(),
+            window,
+            cx,
+            move |name, window, cx| {
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                if let Err(err) = AppState::store(cx).rename_project(project.id, &name) {
+                    tracing::warn!("renaming the workspace failed: {err:#}");
+                    return;
+                }
+                let renamed = Project {
+                    name,
+                    ..project.clone()
+                };
+                _ = workspace.update(cx, |workspace, cx| {
+                    workspace.workspace_changed(renamed, window, cx)
+                });
+            },
+        );
     }
 
     /// Removes a project from PilotHouse (the folder on disk is untouched).

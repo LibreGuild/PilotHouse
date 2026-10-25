@@ -12,10 +12,11 @@ A short tour of PilotHouse for people using it. For how it is built, see the [do
 ## The screen
 
 - **Title bar:** the two views (*Workspaces* and *GitHub*), search and commands (⌘K), the inbox, light or dark, the tool panel, settings.
-- **Left sidebar:** *New chat*, then *Chats* (chats outside any workspace) and every workspace with what it is doing; unfold one to see its chats and pick one to open it there. A workspace's menu (⋯ on hover) adds folders, renames it, recolours it, opens it in a new window or removes it. Chats PilotHouse started are under *Runs*. ⌘B hides the sidebar.
+- **Left sidebar:** *New chat* and *Search chats*, then *Pinned* chats, *Chats* (chats outside any workspace) and every workspace with what it is doing; unfold one to see its chats and pick one to open it there. A workspace's menu (⋯ on hover) adds folders, renames it, recolours it, opens it in a new window or removes it. A chat's ⋯ menu pins, renames or deletes it. Each section folds from its header. Chats PilotHouse started are under *Runs*. ⌘B hides the sidebar.
 - **Editor:** opens beside the chat when you pick a file.
 - **Chat** in the middle.
 - **Tools** on the right, chosen from the icon bar: Files, Git, pull requests, the board, terminals, the browser, devices, run configurations, UI tests. Only the tools a workspace uses show; the rest are under ⋯.
+- **Arrange it your way:** drag any tab (the chat, the editor, a tool) into another group, beside or below one, or to the left, right or bottom edge; or use the pane's ⋯ menu (*Move below the chat*…). Each workspace keeps its layout.
 
 A workspace keeps its chats, shells and test runs going while you look at another one. The sidebar shows what each is doing, and coming back shows what finished while you were away.
 

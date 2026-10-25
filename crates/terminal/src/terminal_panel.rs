@@ -1,5 +1,5 @@
-//! The Terminal tab: one or more shells in the workspace's folders, and agent
-//! CLIs without a chat (see [`crate::cli_agents`]). The shells belong to the
+//! The Terminal tab: one or more shells in the workspace's folders, each the
+//! shell the user picks (zsh, bash, PowerShell…). The shells belong to the
 //! workspace ([`WorkspaceTerminals`]); this panel only shows them, with one
 //! [`TerminalView`] per shell made when first shown.
 
@@ -10,7 +10,7 @@ use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    menu::PopupMenuItem,
+    menu::{PopupMenu, PopupMenuItem},
     tab::{Tab, TabBar},
     v_flex,
 };
@@ -135,17 +135,25 @@ impl TerminalPanel {
         }
     }
 
-    /// Starts an agent CLI in its own terminal, named after it.
-    pub fn start_cli(
+    /// A new `shell` in folder `cwd`.
+    fn new_shell(
         &mut self,
-        agent: &crate::cli_agents::CliAgent,
+        cwd: PathBuf,
+        shell: Option<ph_env::Shell>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.run_in(agent.name, agent.command, None, window, cx);
+        if let Some(terminal) = self.terminals.update(cx, |terminals, cx| {
+            terminals.new_terminal_with(cwd, shell.as_ref(), cx)
+        }) {
+            self.focus(&terminal, window, cx);
+        }
     }
 
-    /// "+": a new shell; with several folders, a menu of them.
+    /// "+": the shells installed here (the default first), each in the
+    /// primary folder or, with several folders, in the one picked from its
+    /// submenu. A folder on a network drive gets the server's shell, so
+    /// there it simply opens one.
     fn render_new_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let button = Button::new("new-terminal")
             .ghost()
@@ -154,62 +162,66 @@ impl TerminalPanel {
             .icon(Icons::Plus)
             .tooltip("New terminal")
             .accessibility_label("New terminal");
-        let folders = self.terminals.read(cx).folders().to_vec();
-        if folders.len() < 2 {
+        let terminals = self.terminals.read(cx);
+        let (cwd, folders) = (terminals.cwd().to_path_buf(), terminals.folders().to_vec());
+        if ph_remote::remote_of(&cwd).is_some() {
             return button
                 .on_click(cx.listener(|this, _, window, cx| this.new_terminal(window, cx)))
                 .into_any_element();
         }
         let panel = cx.weak_entity();
         button
-            .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-                folders
-                    .iter()
-                    .fold(menu.label("New terminal in"), |menu, (name, path)| {
-                        let (panel, path) = (panel.clone(), path.clone());
-                        menu.item(PopupMenuItem::new(name.clone()).on_click(
-                            move |_, window, cx| {
-                                _ = panel.update(cx, |panel, cx| {
-                                    panel.new_terminal_in(path.clone(), window, cx)
-                                });
-                            },
-                        ))
+            .menu(gpui_kit::Anchor::TopRight, move |menu, window, cx| {
+                // Looked up as it opens: a shell installed meanwhile shows.
+                let shells = ph_env::shells();
+                shells
+                    .into_iter()
+                    .fold(menu.label("New terminal"), |menu, shell| {
+                        let label = if shell.default {
+                            format!("{} (default)", shell.name)
+                        } else {
+                            shell.name.clone()
+                        };
+                        if folders.len() < 2 {
+                            let (panel, cwd) = (panel.clone(), cwd.clone());
+                            return menu.item(PopupMenuItem::new(label).on_click(
+                                move |_, window, cx| {
+                                    _ = panel.update(cx, |panel, cx| {
+                                        panel.new_shell(
+                                            cwd.clone(),
+                                            Some(shell.clone()),
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                },
+                            ));
+                        }
+                        let (panel, folders) = (panel.clone(), folders.clone());
+                        let submenu = PopupMenu::build(window, cx, move |menu, _, _| {
+                            folders
+                                .iter()
+                                .fold(menu.label("In folder"), |menu, (name, path)| {
+                                    let (panel, path, shell) =
+                                        (panel.clone(), path.clone(), shell.clone());
+                                    menu.item(PopupMenuItem::new(name.clone()).on_click(
+                                        move |_, window, cx| {
+                                            _ = panel.update(cx, |panel, cx| {
+                                                panel.new_shell(
+                                                    path.clone(),
+                                                    Some(shell.clone()),
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        },
+                                    ))
+                                })
+                        });
+                        menu.item(PopupMenuItem::submenu(label, submenu))
                     })
             })
             .into_any_element()
-    }
-
-    /// Agent CLIs found on this machine; looked up each time it opens, so
-    /// one installed meanwhile shows up.
-    fn render_cli_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let panel = cx.weak_entity();
-        Button::new("terminal-cli-agents")
-            .ghost()
-            .xsmall()
-            .icon(Icons::Bot)
-            .tooltip("Start an agent CLI")
-            .accessibility_label("Start an agent CLI")
-            .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-                let installed = crate::cli_agents::installed();
-                if installed.is_empty() {
-                    let names: Vec<_> = crate::cli_agents::CLI_AGENTS
-                        .iter()
-                        .map(|agent| agent.program)
-                        .collect();
-                    return menu
-                        .label("No other agent CLIs found")
-                        .label(format!("Looked for: {}", names.join(", ")));
-                }
-                let menu = menu.label("Start in a terminal");
-                installed.into_iter().fold(menu, |menu, agent| {
-                    let panel = panel.clone();
-                    menu.item(
-                        PopupMenuItem::new(agent.name).on_click(move |_, window, cx| {
-                            _ = panel.update(cx, |panel, cx| panel.start_cli(agent, window, cx));
-                        }),
-                    )
-                })
-            })
     }
 
     fn render_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -244,7 +256,14 @@ impl Render for TerminalPanel {
         let titles: Vec<SharedString> = terminals
             .terminals()
             .iter()
-            .map(|terminal| short_title(terminal.read(cx).title()))
+            .map(|terminal| {
+                let terminal = terminal.read(cx);
+                short_title(
+                    terminal.title(),
+                    terminal.shell(),
+                    terminal.label().map(|label| label.as_ref()),
+                )
+            })
             .collect();
         let tabs = titles.into_iter().enumerate().map(|(ix, title)| {
             Tab::new().label(title).suffix(
@@ -264,6 +283,7 @@ impl Render for TerminalPanel {
             .child(
                 h_flex()
                     .flex_none()
+                    .pl_1()
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .min_w_0()
@@ -287,32 +307,76 @@ impl Render for TerminalPanel {
                                 .children(tabs),
                         ),
                     )
-                    .child(self.render_cli_menu(cx))
                     .child(self.render_new_button(cx)),
             )
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
     }
 }
 
-/// Most of a long title is its start (`user@host:`); keep the end, where the
-/// folder or program is.
-fn short_title(title: &str) -> SharedString {
-    const MAX: usize = 28;
-    let count = title.chars().count();
-    if count <= MAX {
-        return title.to_string().into();
+/// A tab's name: a run's own name, else what the shell says it is doing,
+/// made short. A prompt title (`ada@host:~/code/app`) becomes the shell and
+/// the folder (`zsh · app`); a program's title (`vim notes.md`) stays, cut.
+fn short_title(title: &str, shell: &str, label: Option<&str>) -> SharedString {
+    const MAX: usize = 24;
+    if let Some(label) = label {
+        return cut(label, MAX);
     }
-    let tail: String = title.chars().skip(count - (MAX - 1)).collect();
-    format!("…{tail}").into()
+    let title = title.trim();
+    let path = match title.split_once(':') {
+        // `user@host:path`
+        Some((who, path)) if who.contains('@') && !who.contains(' ') => Some(path.trim()),
+        _ if title.starts_with(['/', '~']) || title.contains(":\\") => Some(title),
+        _ => None,
+    };
+    if let Some(path) = path {
+        let folder = path
+            .trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("/");
+        return cut(&format!("{shell} · {folder}"), MAX);
+    }
+    if title.is_empty() {
+        return cut(shell, MAX);
+    }
+    cut(title, MAX)
+}
+
+/// `text` cut to `max` characters, with an ellipsis.
+fn cut(text: &str, max: usize) -> SharedString {
+    if text.chars().count() <= max {
+        return text.to_string().into();
+    }
+    let mut cut: String = text.chars().take(max - 1).collect();
+    cut.push('…');
+    cut.into()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::short_title;
+
     #[test]
-    fn long_titles_keep_their_end() {
-        assert_eq!(super::short_title("zsh").as_ref(), "zsh");
-        let short = super::short_title("ada@host:/Users/ada/code/LibreGuild/PilotHouse");
-        assert_eq!(short.chars().count(), 28);
-        assert!(short.ends_with("PilotHouse") && short.starts_with('…'));
+    fn tab_names_are_short() {
+        let name = |title: &str| short_title(title, "zsh", None).to_string();
+        assert_eq!(
+            name("ada@host:/Users/ada/code/LibreGuild/PilotHouse"),
+            "zsh · PilotHouse"
+        );
+        assert_eq!(name("ada@host:~"), "zsh · ~");
+        assert_eq!(name("ada@host: ~/code/app/"), "zsh · app");
+        assert_eq!(name("/usr/local/src"), "zsh · src");
+        assert_eq!(name("C:\\Users\\ada\\app"), "zsh · app");
+        assert_eq!(name("vim notes.md"), "vim notes.md");
+        assert_eq!(name(""), "zsh");
+        assert_eq!(
+            name("cargo watch -x test --all-features"),
+            "cargo watch -x test --a…"
+        );
+        assert_eq!(
+            short_title("x", "zsh", Some("server: dev")).as_ref(),
+            "server: dev"
+        );
     }
 }

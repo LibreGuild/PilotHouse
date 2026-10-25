@@ -1,5 +1,6 @@
-//! How a workspace's screen is drawn: the editor column, the chat (with
-//! what finished while away), the tool panel and its icon bar.
+//! How a workspace's screen is drawn: what each pane shows (the chat, with
+//! what finished while away; the editor; each tool), the dock they are
+//! arranged in, and the icon bar.
 
 use super::*;
 
@@ -88,122 +89,44 @@ impl WorkspaceScreen {
         cx.notify();
     }
 
-    /// The open files, beside the chat.
-    pub(super) fn render_editor(&self) -> Option<AnyElement> {
-        Some(Surface::new().child(self.files.clone()?).into_any_element())
-    }
-
-    /// The editor folded to a strip (a narrow window showing a tool): one
-    /// click brings the files back.
-    pub(super) fn render_editor_strip(&self, cx: &mut Context<Self>) -> AnyElement {
-        let count = self
-            .files
-            .as_ref()
-            .map(|files| files.read(cx).open_file_paths(cx).len())
-            .unwrap_or_default();
-        v_flex()
-            .id("editor-strip")
-            .flex_none()
-            .w(px(36.))
-            .h_full()
-            .mr_2()
-            .py_2()
-            .gap_1()
-            .items_center()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
-            .cursor_pointer()
-            .hover(|style| style.bg(cx.theme().secondary_hover))
-            .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(format!("Show open files ({count})"))
-                    .build(window, cx)
-            })
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.front = Front::Editor;
-                cx.notify();
-            }))
-            .child(Icon::new(Icons::FileCode).small())
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(count.to_string()),
-            )
-            .into_any_element()
-    }
-
-    pub(super) fn render_context_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let tab = self.context_tab;
-        v_flex()
+    /// What pane `pane` shows. A tool's panel is made here the first time
+    /// its pane is drawn (a saved layout may show tools nobody opened yet).
+    pub(super) fn render_pane(
+        &mut self,
+        pane: Pane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let content = match pane {
+            Pane::Chat => self.render_chat(cx),
+            Pane::Editor => match self.files.clone() {
+                Some(files) => files.into_any_element(),
+                None => div().into_any_element(),
+            },
+            Pane::Tool(tab) => {
+                self.ensure_panel(tab, window, cx);
+                self.render_tab_content(tab, cx)
+            }
+        };
+        // Absolutely filled, so each panel gets an exact height (a
+        // percentage height inside a flex item resolves too tall).
+        div()
+            .relative()
             .size_full()
-            .child(
-                h_flex()
-                    .flex_none()
-                    .h_10()
-                    .pl_3()
-                    .pr_1p5()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(Icon::new(tab.icon()).small().text_color(cx.theme().info))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(tab.label()),
-                    )
-                    .child(div().flex_1())
-                    .children(self.render_tab_actions(cx))
-                    .child(
-                        Button::new("zoom-context-panel")
-                            .ghost()
-                            .small()
-                            .icon(if self.zoomed {
-                                IconName::Minimize
-                            } else {
-                                IconName::Maximize
-                            })
-                            .tooltip(if self.zoomed {
-                                "Restore chat (⌘⇧J)"
-                            } else {
-                                "Maximize (⌘⇧J)"
-                            })
-                            .accessibility_label("Maximize panel")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.toggle_zoom(window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("close-context-panel")
-                            .ghost()
-                            .small()
-                            .icon(Icons::PanelRightClose)
-                            .tooltip("Hide (⌘J)")
-                            .accessibility_label("Hide panel")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_context_panel(window, cx)
-                            })),
-                    ),
-            )
-            // Absolutely filled, so each panel gets an exact height (a
-            // percentage height inside a flex item resolves too tall).
-            .child(
-                div().relative().flex_1().min_h_0().child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .child(self.render_tab_content(cx)),
-                ),
-            )
+            .overflow_hidden()
+            .child(div().absolute().inset_0().child(content))
             .into_any_element()
     }
 
-    /// Buttons of the tool in view, in its header: Files searches the
-    /// workspace and adds folders.
-    pub(super) fn render_tab_actions(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        if self.context_tab != ContextTab::Files || self.project.empty {
+    /// Buttons in a pane's title bar: Files searches the workspace and
+    /// adds folders.
+    pub(super) fn pane_buttons(
+        &mut self,
+        pane: Pane,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Button> {
+        if pane != Pane::Tool(ContextTab::Files) || self.project.empty {
             return Vec::new();
         }
         let Some(files) = self.files.clone() else {
@@ -233,8 +156,7 @@ impl WorkspaceScreen {
                             files.find_in_project(window, cx)
                         }
                     })
-                })
-                .into_any_element(),
+                }),
             Button::new("files-add-folder")
                 .ghost()
                 .small()
@@ -243,14 +165,13 @@ impl WorkspaceScreen {
                 .accessibility_label("Add folder")
                 .on_click(|_, window, cx| {
                     window.dispatch_action(Box::new(crate::actions::AddFolderToWorkspace), cx)
-                })
-                .into_any_element(),
+                }),
         ]
     }
 
     /// The tools down the window's right edge: icons, with names in their
     /// tooltips (or under them, in Settings).
-    pub(super) fn render_tool_rail(&self, shown: bool, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_tool_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let space = cx.entity();
         let labels = ph_theme::preferences::preferences(cx).tool_labels;
         let changes = self
@@ -291,7 +212,7 @@ impl WorkspaceScreen {
             .gap_0p5()
             .items_center()
             .children(shown_tabs.into_iter().map(|tab| {
-                let selected = shown && tab == self.context_tab;
+                let selected = self.shown.contains(&Pane::Tool(tab));
                 let space = space.clone();
                 let badge = (tab == ContextTab::Changes && changes > 0).then(|| {
                     div()
@@ -369,11 +290,11 @@ impl WorkspaceScreen {
             .into_any_element()
     }
 
-    pub(super) fn render_tab_content(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_tab_content(&self, tab: ContextTab, cx: &mut Context<Self>) -> AnyElement {
         // Files, Git and PRs need a folder; say so instead of an empty tool.
         if self.project.folders().is_empty()
             && matches!(
-                self.context_tab,
+                tab,
                 ContextTab::Files | ContextTab::Changes | ContextTab::Pulls
             )
         {
@@ -393,7 +314,7 @@ impl WorkspaceScreen {
                 )
                 .into_any_element();
         }
-        let panel = match self.context_tab {
+        let panel = match tab {
             ContextTab::Files => self.file_tree.clone().map(IntoElement::into_any_element),
             ContextTab::Changes => self
                 .changes
@@ -486,84 +407,22 @@ impl WorkspaceScreen {
 
 impl Render for WorkspaceScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let labels = ph_theme::preferences::preferences(cx).tool_labels;
-        let sidebar = if self.sidebar_shown {
-            layout::SIDEBAR_WIDTH
-        } else {
-            px(0.)
-        };
-        // Room for the columns: the window less the sidebar, the tool icons
-        // and the margins.
-        let available = window.viewport_size().width - sidebar - tool_rail_width(labels) - px(16.);
-        let editor_open = self
-            .files
-            .as_ref()
-            .is_some_and(|files| files.read(cx).has_open_files());
-        let tools_open = self.context_open;
-        let narrow = available < layout::EDITOR_MIN + layout::CHAT_MIN + layout::CONTEXT_PANEL_MIN;
-        // A narrow window shows the file or the tool opened last; the
-        // other folds to the side.
-        let (show_editor, show_tools, editor_strip) = match (editor_open, tools_open) {
-            (true, true) if narrow => match self.front {
-                Front::Editor => (true, false, false),
-                Front::Tools => (false, true, true),
-            },
-            (editor, tools) => (editor, tools, false),
-        };
-        let rail = self.render_tool_rail(show_tools, cx);
-        let shell = h_flex().size_full().pr_1().pb_2().items_stretch();
-
-        if self.zoomed && tools_open {
-            let tools = Surface::new().child(self.render_context_panel(cx));
-            return shell
-                .child(div().flex_1().min_w_0().h_full().pr_1().child(tools))
-                .child(rail)
-                .into_any_element();
+        if std::mem::take(&mut self.reveal_pending) {
+            self.panes.show(Pane::Chat, window, cx);
         }
-
-        let chat = Surface::new().child(self.render_chat(cx));
-        let split_id = SharedString::from(format!(
-            "space-{}-{}{}",
-            self.project.id,
-            u8::from(show_editor),
-            u8::from(show_tools)
-        ));
-        let editor_width =
-            (available * if show_tools { 0.38 } else { 0.5 }).max(layout::EDITOR_MIN);
-        let tools_width =
-            (available - layout::CHAT_MIN - if show_editor { editor_width } else { px(0.) })
-                .min(layout::CONTEXT_PANEL_DEFAULT)
-                .max(layout::CONTEXT_PANEL_MIN);
-        let mut split = h_resizable(split_id);
-        if show_editor && let Some(editor) = self.render_editor() {
-            split = split.child(
-                resizable_panel()
-                    .size(editor_width)
-                    .size_range(layout::EDITOR_MIN..gpui_kit::Pixels::MAX)
-                    .child(div().size_full().pr_1().child(editor)),
-            );
-        }
-        split = split.child(
-            resizable_panel()
-                .size_range(layout::CHAT_MIN..gpui_kit::Pixels::MAX)
-                .child(div().size_full().px_1().child(chat)),
-        );
-        if show_tools {
-            let tools = Surface::new().child(self.render_context_panel(cx));
-            split = split.child(
-                resizable_panel()
-                    .size(tools_width)
-                    .size_range(layout::CONTEXT_PANEL_MIN..layout::CONTEXT_PANEL_MAX)
-                    .child(div().size_full().pl_1().child(tools)),
-            );
-        }
-        shell
-            .when(editor_strip, |this| {
-                this.child(self.render_editor_strip(cx))
-            })
-            .child(div().flex_1().min_w_0().h_full().child(split))
-            .child(rail)
-            .into_any_element()
+        h_flex()
+            .size_full()
+            .pr_1()
+            .pb_2()
+            .items_stretch()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(self.panes.area.clone()),
+            )
+            .child(self.render_tool_rail(cx))
     }
 }
 

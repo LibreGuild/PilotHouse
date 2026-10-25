@@ -11,6 +11,8 @@ icon_assets!(
         MousePointer2,
         Square,
         MapPin,
+        Pin,
+        PinOff,
         Undo2,
         GitCompareArrows,
         RotateCw,

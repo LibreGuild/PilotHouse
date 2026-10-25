@@ -354,6 +354,14 @@ impl ChatThread {
         self.session.as_ref()
     }
 
+    /// After the chat was renamed (stored already).
+    pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
+        if let Some(session) = &mut self.session {
+            session.title = title.to_string();
+            cx.notify();
+        }
+    }
+
     pub fn title(&self) -> SharedString {
         self.session
             .as_ref()

@@ -331,4 +331,34 @@ impl WorkspaceChats {
             )
         })
     }
+
+    /// Renames chat `session` (stored, and in its loaded thread).
+    pub fn rename(
+        &mut self,
+        session: SessionId,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        self.store.rename_session(session, title)?;
+        if let Some(kept) = self.threads.get(&session) {
+            kept.thread
+                .update(cx, |thread, cx| thread.set_title(title, cx));
+        }
+        cx.emit(WorkspaceChatsEvent::SessionsChanged);
+        Ok(())
+    }
+
+    /// Deletes chat `session` and its transcript. Refused while its agent
+    /// works or waits for an answer, so nothing is cut off mid-turn.
+    pub fn delete(&mut self, session: SessionId, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.is_working(session, cx) && !self.is_waiting(session, cx),
+            "the chat is still working"
+        );
+        self.store.delete_session(session)?;
+        self.threads.remove(&session);
+        self.unseen.retain(|id| *id != session);
+        cx.emit(WorkspaceChatsEvent::SessionsChanged);
+        Ok(())
+    }
 }

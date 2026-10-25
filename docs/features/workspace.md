@@ -4,8 +4,8 @@ Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 
 ```
 ┌ title bar: ◆ · sidebar · [Workspaces | GitHub] · ⌘K search · inbox · theme · tools · settings ┐
-│ sidebar          │ editor (while a file  │ chat              │ tool panel       │ icon │
-│  + New chat  🔍  │  is open)             │                   │ (Files, Git, …)  │ bar  │
+│ sidebar          │ editor (while a file  │ chat              │ right dock       │ icon │
+│  New chat   ⌘N   │  is open)             │                   │ (Files, Git, …)  │ bar  │
 │  CHATS           │                       │                   │                  │      │
 │  WORKSPACES      │                       │                   │                  │      │
 │   ▾ ● app  ⟳     │                       │                   │                  │      │
@@ -15,7 +15,7 @@ Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 
 - **`Workspace`** (`workspace.rs`) is a window's root: the title bar, the sidebar, the workspace in front and the status bar. It keeps one `WorkspaceScreen` per workspace opened in the window, and the window's [GitHub view](pulls.md#the-github-view) once shown.
 - **Two views**, picked in the title bar: **Workspaces** (⌘⇧E) and **GitHub** (⌘⇧G). The GitHub view shows pull requests across repositories and their agent reviews, apart from any workspace; it has its own sidebar.
-- **`WorkspaceScreen`** (`workspace_screen.rs`) is a workspace's screen: the editor column (only while a file is open), the chat, the tool panel and the icon bar on the right that picks the tool. Panels are made the first time they are shown. Its layout is saved per workspace: tool, panel open, chat, open files, sidebar folds.
+- **`WorkspaceScreen`** (`workspace_screen.rs`) is a workspace's screen: the chat, the editor (only while a file is open) and the tools, each a pane of a dockable layout (`workspace_screen/dock.rs`, on gpui-component's `DockArea`), and the icon bar on the right that shows a tool. The drawing above is the layout a workspace starts with. Panels are made the first time they are shown. Its state is saved per workspace: the dock layout (`workspace.dock.<id>`), the tool shown last, chat, open files, sidebar folds.
 - **Running work outlives the screen.** Chats (`ph_agent::chats`), shells (`ph_terminal::TerminalHub`), test runs (`ph_uitest::runner`) and schedules (`schedules::Automation`) belong to the workspace or the app, not to a window. A screen can be closed and rebuilt (another window, folders changed, idle) without stopping anything.
 - **Actions** (`actions.rs`) are the single source for every command. Shortcuts, the palette, menus and buttons all dispatch them.
 
@@ -29,10 +29,13 @@ Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 
 Everything at once, so nothing needs switching to be seen (`sidebar.rs`):
 
-- **New chat** (⌘N) for the workspace in front, and **Search chats** (⌘⇧K).
+- **New chat** (⌘N) for the workspace in front, and a **Search chats** field (⌘⇧K), each a full-width row with its shortcut.
+- **Pinned**: chats pinned from any workspace (each chat's ⋯ menu: *Pin to top*), with the workspace each belongs to. Kept in `workspace.sidebar_pinned`.
 - **Chats**: the Chats space, for chats that need no folder (thinking something through, the browser, the board). A first start opens straight into a chat there. Its chats are grouped *Today*, *Yesterday*, *This week*, *Older*; **+** starts one.
 - **Workspaces**, newest first (an order that stays put as they are used): each with its colour dot and what it is doing (a spinner while working, amber for a question, red for failing tests, green for something finished and not seen; the tooltip says it in words, with the ⌃1–⌃9 shortcut). The chevron unfolds a workspace to list its five newest chats (*Show all* for the rest); opening a workspace unfolds it. Picking a chat opens its workspace at that chat. On hover, a row offers a new chat there and its menu: *Add a folder…*, *Rename…*, *Open in new window*, *Colour*, *Remove from PilotHouse*. The section's **+** opens a folder as a workspace or makes one without folders.
 - In every list a working chat has a spinner and one waiting for an answer an amber dot. Chats PilotHouse started (schedules, test recording and repair) fold into *Runs*.
+- Each chat's ⋯ menu (on hover) pins or unpins it, renames it, or deletes it with its transcript after asking (not while its agent works or waits for an answer).
+- Every section (*Pinned*, *Chats*, *Workspaces*) folds from its header; a folded one shows how many it hides. Folded sections are kept (`workspace.sidebar_folded`).
 - Which workspaces are unfolded is kept (`workspace.sidebar_expanded`). The chats of a workspace whose screen is closed are read from the store each second, so a schedule's new chat shows up.
 - ⌘B hides the sidebar, and the chat header then offers the chat list.
 
@@ -43,10 +46,11 @@ A row of kind `chats` in `projects` (`ph_store::projects::ProjectKind`): no fold
 ## Editor, chat and tools
 
 - **Files** is the first tool (⌘1): the folder tree, each folder a root when there are several (the primary one says so), with an icon per file type, chevrons, indent guides and Git marks (**M** changed, **U** new, **D** deleted; a dot on a folder holding changes). Its header's search button (⌘⇧F) turns the tree into workspace search, and **+** adds a folder. Right-click a folder root to make it primary or take it out.
-- Picking a file opens it in the **editor column** beside the chat; closing the last file closes the column.
+- Picking a file opens it in the **editor** pane beside the chat; with no file open the pane gives its room back.
 - The **icon bar** on the right shows the tools this workspace uses (Files in a workspace, Git with a repository, PRs with a hosted remote, Browser for web code, Devices for Android, Run with something to run, Tests with tests or an app); the rest are under **⋯**. Names show in tooltips, or under the icons with *Settings → Appearance → Names under tool icons*.
-- On a narrow window, a file and a tool do not fit beside the chat at once: the one opened last shows, and the other folds to the side (the editor to a strip, the tool to its icon).
-- ⌘J hides or shows the tool panel, ⌘⇧J lets it fill the window.
+- **Docking.** Every pane has a tab. Drag a tab into another group to share it, onto a group's edge to split beside or below it, or to the window's left, right or bottom edge to dock it there. A pane's ⋯ menu does the same (*Move beside the chat*, *Move below the chat*, *Move to the left side*, *to the right side*, *to the bottom*), and also works where a drag cannot: the last pane of a dock does not drag out of it. A dock left empty goes away. Tools close with their tab's ×; the chat and the editor stay. The layout is kept per workspace and comes back with it (version `dock::LAYOUT_VERSION`; a layout this build cannot read falls back to the default).
+- A tool shown from the icon bar is selected where it is docked (its dock opens if closed), or docked on the right when it is not. The icon bar highlights every tool on screen.
+- ⌘J opens or closes the dock holding the tool shown last; ⌘⇧J lets that tool fill the window (each pane's ⛶ button does the same for it).
 
 ## Several workspaces
 

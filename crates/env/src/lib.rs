@@ -228,9 +228,125 @@ pub fn default_shell() -> (PathBuf, Vec<String>) {
     (PathBuf::from(shell), vec!["-l".into()])
 }
 
+/// A shell a terminal can start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shell {
+    /// What the user sees: `zsh`, `PowerShell`, `Git Bash`…
+    pub name: String,
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    /// The one [`default_shell`] starts.
+    pub default: bool,
+}
+
+/// The shells installed here, the default first: on Unix those listed in
+/// `/etc/shells` that exist (each once, by name); on Windows PowerShell 7,
+/// Windows PowerShell, Command Prompt, Git Bash and WSL, as found.
+pub fn shells() -> Vec<Shell> {
+    let (default_program, default_args) = default_shell();
+    let mut list: Vec<Shell> = Vec::new();
+    let mut add = |name: String, program: PathBuf, args: Vec<String>| {
+        if list
+            .iter()
+            .any(|known| known.name == name || known.program == program)
+        {
+            return;
+        }
+        let default = program == default_program;
+        list.push(Shell {
+            name,
+            program,
+            args,
+            default,
+        });
+    };
+    if cfg!(windows) {
+        let found = |name: &str| which(name);
+        if let Some(path) = found("pwsh") {
+            add("PowerShell 7".into(), path, vec!["-NoLogo".into()]);
+        }
+        if let Some(path) = found("powershell") {
+            add("Windows PowerShell".into(), path, vec!["-NoLogo".into()]);
+        }
+        let cmd = PathBuf::from(var("COMSPEC").unwrap_or("cmd.exe"));
+        add("Command Prompt".into(), cmd, Vec::new());
+        let git_bash = [
+            var("ProgramFiles"),
+            var("ProgramW6432"),
+            var("LOCALAPPDATA"),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|root| {
+            [
+                PathBuf::from(root).join("Git").join("bin").join("bash.exe"),
+                PathBuf::from(root)
+                    .join("Programs")
+                    .join("Git")
+                    .join("bin")
+                    .join("bash.exe"),
+            ]
+        })
+        .find(|path| path.is_file());
+        if let Some(path) = git_bash {
+            add("Git Bash".into(), path, vec!["--login".into(), "-i".into()]);
+        }
+        if let Some(path) = found("wsl") {
+            add("WSL".into(), path, Vec::new());
+        }
+    } else {
+        // The default first, then the rest as /etc/shells lists them.
+        let name_of = |path: &std::path::Path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        add(
+            name_of(&default_program),
+            default_program.clone(),
+            default_args.clone(),
+        );
+        let listed = std::fs::read_to_string("/etc/shells").unwrap_or_default();
+        for line in listed.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let path = PathBuf::from(line);
+            if path.is_file() {
+                add(name_of(&path), path, vec!["-l".into()]);
+            }
+        }
+        // Common shells a package manager installs without listing them.
+        for name in ["fish", "nu", "pwsh"] {
+            if let Some(path) = which(name) {
+                let args = if name == "fish" {
+                    vec!["-l".into()]
+                } else {
+                    Vec::new()
+                };
+                add(name.to_string(), path, args);
+            }
+        }
+    }
+    // The default leads.
+    list.sort_by_key(|shell| !shell.default);
+    list
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_shell_is_listed_first() {
+        let shells = shells();
+        assert!(!shells.is_empty());
+        assert!(shells[0].default);
+        assert_eq!(shells.iter().filter(|shell| shell.default).count(), 1);
+        let mut names: Vec<_> = shells.iter().map(|shell| &shell.name).collect();
+        names.dedup();
+        assert_eq!(names.len(), shells.len(), "each shell once");
+    }
 
     #[test]
     fn finds_programs_on_path() {

@@ -11,6 +11,10 @@ pub(crate) mod keys {
     pub const SIDEBAR_COLLAPSED: &str = "workspace.sidebar_collapsed";
     /// The workspaces unfolded in the sidebar (their chats listed).
     pub const SIDEBAR_EXPANDED: &str = "workspace.sidebar_expanded";
+    /// Chats pinned to the top of the sidebar, in pin order.
+    pub const SIDEBAR_PINNED: &str = "workspace.sidebar_pinned";
+    /// Sidebar sections folded away (`chats`, `workspaces`).
+    pub const SIDEBAR_FOLDED: &str = "workspace.sidebar_folded";
     pub const DISABLED_FEATURES: &str = "features.disabled";
     pub const PREFERENCES: &str = "appearance.preferences";
 }
