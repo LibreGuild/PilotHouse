@@ -14,6 +14,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
 </p>
 
+<p align="center">
+  <img src="docs/images/pilothouse.png" alt="PilotHouse: a workspace with its chats in the sidebar, a Claude Code chat in the middle and the Git changes beside it" width="900">
+</p>
+
 ## Why
 
 A day with coding agents usually means several agent CLIs in terminals, an editor, a Git client, a browser to check the result, an emulator, and a notepad. PilotHouse puts them in one window, keeps every workspace's agents, shells and test runs going while you look at another, and tells you when one needs you.

@@ -33,7 +33,7 @@ pub use workspace_colors::{WORKSPACE_COLORS, workspace_color, workspace_tint};
 /// name from that list or it will render blank.
 pub use gpui_kit::assets::IconName as Icons;
 
-/// The version as people read it: `0.1.0 beta` for `0.1.0-beta`.
+/// The version as people read it: `1.0.0 beta` for `1.0.0-beta`.
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").replacen('-', " ", 1)
 }

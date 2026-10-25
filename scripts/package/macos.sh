@@ -31,7 +31,7 @@ fi
 rm -rf "$APP" && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/pilothouse"
 cp crates/app/assets/icon/PilotHouse.icns "$APP/Contents/Resources/PilotHouse.icns"
-# macOS takes only numbers there: 0.1.0 for 0.1.0-beta.
+# macOS takes only numbers there: 1.0.0 for 1.0.0-beta.
 sed "s/@VERSION@/${VERSION%%-*}/g" scripts/package/Info.plist > "$APP/Contents/Info.plist"
 cp LICENSE NOTICE "$APP/Contents/Resources/"
 codesign --force --deep --sign - "$APP"
