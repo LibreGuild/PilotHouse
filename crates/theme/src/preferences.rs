@@ -370,20 +370,24 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
         }
 
         if translucent {
-            // The desktop shows through the app chrome; panels stay readable.
+            // The desktop shows through. The window paints `background`
+            // once under everything, and the panels (surfaces) paint it again
+            // on top, so each layer gets the alpha that makes a panel come
+            // out at `alpha` overall: the chrome around them (sidebar, title
+            // and status bars) is the base layer alone, the clearest part.
+            // The chrome's own fills turn transparent, so nothing stacks
+            // further and the slider's whole range shows.
+            let layer = 1. - (1. - alpha).sqrt();
+            colors.background = colors.background.opacity(layer);
             for color in [
-                &mut colors.background,
                 &mut colors.sidebar,
                 &mut colors.title_bar,
                 &mut colors.status_bar,
                 &mut colors.tab_bar,
                 &mut colors.list,
             ] {
-                *color = color.opacity(alpha);
+                *color = color.opacity(0.);
             }
-            colors.sidebar = colors.sidebar.opacity(alpha * 0.7);
-            colors.title_bar = colors.title_bar.opacity(alpha * 0.7);
-            colors.status_bar = colors.status_bar.opacity(alpha * 0.7);
         }
     });
     if let Some(window) = window {
@@ -398,6 +402,15 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_layers_make_the_chosen_opacity() {
+        for alpha in [0.55_f32, 0.7, 0.85, 1.0] {
+            let layer = 1. - (1. - alpha).sqrt();
+            let panel = 1. - (1. - layer) * (1. - layer);
+            assert!((panel - alpha).abs() < 1e-5, "{alpha}: {panel}");
+        }
+    }
 
     #[test]
     fn old_or_partial_settings_still_load() {
