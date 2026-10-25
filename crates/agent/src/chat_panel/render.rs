@@ -603,7 +603,15 @@ impl Render for ChatPanel {
         v_flex()
             .size_full()
             .child(self.render_header(cx))
-            .child(div().flex_1().min_h_0().child(self.render_transcript(cx)))
+            // Clipped: in a short pane the empty chat's welcome is taller
+            // than the room and would draw over the header.
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(self.render_transcript(cx)),
+            )
             .child(self.render_composer(cx))
     }
 }

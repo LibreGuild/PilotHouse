@@ -283,6 +283,7 @@ impl Render for TerminalPanel {
             .child(
                 h_flex()
                     .flex_none()
+                    .pl_1()
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .min_w_0()
