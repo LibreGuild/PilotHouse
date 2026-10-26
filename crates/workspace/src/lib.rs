@@ -10,8 +10,11 @@
 //! See `docs/architecture.md` for how the pieces fit together.
 
 mod actions;
+mod agent_sessions;
+mod agents_board;
 mod app_state;
 mod arch_map;
+mod attention;
 mod chat_search;
 mod command_palette;
 mod context_panel;
@@ -32,9 +35,13 @@ mod settings_dialog;
 mod shell_integration;
 mod shortcuts;
 mod sidebar;
+mod signals;
 mod status;
 mod status_bar;
+mod tasks;
+mod terminal_agents;
 mod title_bar;
+mod updates;
 mod usage_view;
 mod utilities;
 mod windows;
@@ -57,8 +64,13 @@ use gpui_kit::App;
 /// after `gpui_kit::init` and before opening the window.
 pub fn init(cx: &mut App) {
     review::install(AppState::store(cx).clone(), cx);
+    attention::install(cx);
+    terminal_agents::install(cx);
+    ph_agent::rate_limits::RateLimits::watch_codex(cx);
+    updates::install(cx);
     actions::bind_keys(cx);
     network_drives::install(cx);
     ph_files::init(cx, WORKSPACE_CONTEXT);
     ph_terminal::init(cx);
+    ph_terminal::TerminalHub::keep_between_runs(ph_store::paths::data_dir().join("terminals"), cx);
 }

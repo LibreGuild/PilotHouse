@@ -140,3 +140,76 @@ index 1111111..2222222 100644
         assert!(!patch.contains("todo!"));
     }
 }
+
+/// What the branch checked out at `root` changed against its base: the
+/// default branch (`origin/HEAD`, else `main` or `master`), from where they
+/// part. `None` when there is no base to compare with, or HEAD is it.
+pub fn branch_changes(root: &std::path::Path) -> anyhow::Result<Option<BranchChanges>> {
+    let git = |args: &[&str]| crate::git(root, args).map(|out| out.trim().to_string());
+    let Some(base) = default_base(root) else {
+        return Ok(None);
+    };
+    // On the base branch itself there is nothing to compare. (A local
+    // `main` against `origin/main` shows what is not pushed yet.)
+    let head = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if head == base {
+        return Ok(None);
+    }
+    let fork = git(&["merge-base", &base, "HEAD"])?;
+    let diff = crate::git(
+        root,
+        // As the Changes view reads diffs: no converters, three lines of
+        // context whatever the user's config says.
+        &[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--unified=3",
+            &fork,
+            "HEAD",
+        ],
+    )?;
+    Ok(Some(BranchChanges {
+        base,
+        fork: fork.chars().take(7).collect(),
+        files: parse_diff(&diff),
+    }))
+}
+
+/// The repository's default branch, as a ref to compare with:
+/// `origin/HEAD`'s branch (`origin/main`), else a local `main` or `master`.
+pub fn default_base(root: &std::path::Path) -> Option<String> {
+    let git = |args: &[&str]| crate::git(root, args).map(|out| out.trim().to_string());
+    git(&[
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "refs/remotes/origin/HEAD",
+    ])
+    .ok()
+    .filter(|base| !base.is_empty())
+    .or_else(|| {
+        ["main", "master"]
+            .into_iter()
+            .find(|name| {
+                git(&[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{name}"),
+                ])
+                .is_ok()
+            })
+            .map(str::to_string)
+    })
+}
+
+/// See [`branch_changes`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct BranchChanges {
+    pub base: String,
+    /// Where the branch left the base (short commit id).
+    pub fork: String,
+    pub files: Vec<FileChange>,
+}

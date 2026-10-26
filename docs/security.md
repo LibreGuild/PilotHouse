@@ -14,6 +14,9 @@ PilotHouse runs on your machine with your permissions and has no server. The thi
 | SSH to network drives' servers | Commands run as you on a server | The system `ssh` with your keys; never a stored password. Commands use `BatchMode` and `StrictHostKeyChecking=yes`, so they never prompt or accept an unknown or changed server. A new server is trusted only after its fingerprints are shown. Hosts that `ssh` could read as an option are refused, and every word sent to the server's shell is quoted. Only a validated public key line is ever installed on a server |
 | Shared SSH connections (macOS, Linux) | A socket that runs commands on the server as you | In a private (`0700`) folder; closed at quit or after 10 idle minutes |
 | Tunnels to a server's ports | A port on this computer | Bound to `127.0.0.1`; each ends when PilotHouse does |
+| Terminal text kept between runs | Up to 2,000 lines of each terminal, which can include whatever a program printed | Plain text in the data folder (`terminals/`, so `0700`), read when that workspace's terminals are next wanted and then deleted (also when the workspace is removed); colours and escapes are dropped, so nothing replays as input |
+| Agents in a terminal | Hooks call PilotHouse; their session files are read | The hook settings file is per launch in the data folder and removed at the next start; paths typed into the shell are single-quoted. Session files of Claude Code, Codex and Gemini CLI are only read |
+| Updates | A new program replaces this one | Only `latest.json` and files under `https://github.com/LibreGuild/PilotHouse/releases/download/` (HTTPS, no `..` or escapes in the path) are fetched; nothing is sent. The version must be a plain one, since it names the download folder. Each file must match its SHA-256 before it is unpacked, and it is put in place only after PilotHouse quits. Turn checks off in *Settings → About* ([packaging.md](packaging.md#updates)) |
 
 ## Agent boundaries
 

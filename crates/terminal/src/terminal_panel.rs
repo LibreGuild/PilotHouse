@@ -5,18 +5,23 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 
+use gpui_kit::component::Selectable as _;
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{PopupMenu, PopupMenuItem},
+    resizable::{h_resizable, resizable_panel},
     tab::{Tab, TabBar},
     v_flex,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, EntityId, Focusable as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
+    AnyElement, AnyView, App, AppContext as _, Context, Entity, EntityId, Focusable as _,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
+    px,
 };
 use ph_ui::MenuButton as _;
 use ph_ui::{EmptyState, Icons};
@@ -29,7 +34,23 @@ use crate::workspace_terminals::WorkspaceTerminals;
 pub enum TerminalPanelEvent {
     /// Ask the agent about `text` from the terminal named `terminal`.
     Ask { terminal: String, text: String },
+    /// Start a coding agent's CLI (by agent id) in a new terminal in `cwd`,
+    /// with PilotHouse following what it does.
+    StartAgent { agent: &'static str, cwd: PathBuf },
+    /// Pick one of the agent's past sessions in `cwd` to resume.
+    ResumeAgent { agent: &'static str, cwd: PathBuf },
+    /// Open a link ⌘-clicked in a terminal's output; `cwd` is where its
+    /// shell started (a relative path is looked for there first).
+    Open {
+        link: crate::links::Link,
+        cwd: PathBuf,
+    },
+    /// Show or hide the session of the agent in `terminal` beside it.
+    ToggleTranscript(Entity<Terminal>),
 }
+
+/// Whether a terminal has an agent session to show beside it.
+pub type HasTranscript = Rc<dyn Fn(&Entity<Terminal>, &App) -> bool>;
 
 impl gpui_kit::EventEmitter<TerminalPanelEvent> for TerminalPanel {}
 
@@ -37,6 +58,9 @@ pub struct TerminalPanel {
     terminals: Entity<WorkspaceTerminals>,
     /// A view per shell shown so far.
     views: HashMap<EntityId, (Entity<TerminalView>, Subscription)>,
+    /// Agent sessions shown beside their terminal, by terminal.
+    transcripts: HashMap<EntityId, AnyView>,
+    has_transcript: Option<HasTranscript>,
     _observe: Subscription,
 }
 
@@ -53,11 +77,68 @@ impl TerminalPanel {
                     .map(Entity::entity_id)
                     .collect();
                 this.views.retain(|id, _| open.contains(id));
+                this.transcripts.retain(|id, _| open.contains(id));
                 cx.notify();
             }),
             terminals,
             views: HashMap::new(),
+            transcripts: HashMap::new(),
+            has_transcript: None,
         }
+    }
+
+    /// Offers *Transcript* on the terminals `check` passes.
+    pub fn set_has_transcript(&mut self, check: HasTranscript) {
+        self.has_transcript = Some(check);
+    }
+
+    /// Shows `view` beside `terminal` (`None`: hides it).
+    pub fn set_transcript(
+        &mut self,
+        terminal: EntityId,
+        view: Option<AnyView>,
+        cx: &mut Context<Self>,
+    ) {
+        match view {
+            Some(view) => self.transcripts.insert(terminal, view),
+            None => self.transcripts.remove(&terminal),
+        };
+        cx.notify();
+    }
+
+    pub fn shows_transcript(&self, terminal: EntityId) -> bool {
+        self.transcripts.contains_key(&terminal)
+    }
+
+    /// The *Transcript* toggle, for an agent's terminal.
+    fn render_transcript_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let terminal = self.terminals.read(cx).active().cloned()?;
+        let shown = self.shows_transcript(terminal.entity_id());
+        if !shown
+            && !self
+                .has_transcript
+                .as_ref()
+                .is_some_and(|check| check(&terminal, cx))
+        {
+            return None;
+        }
+        Some(
+            Button::new("terminal-transcript")
+                .ghost()
+                .xsmall()
+                .icon(Icons::MessageSquare)
+                .selected(shown)
+                .tooltip(if shown {
+                    "Hide the agent's transcript"
+                } else {
+                    "Show the agent's transcript beside it"
+                })
+                .accessibility_label("Transcript")
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(TerminalPanelEvent::ToggleTranscript(terminal.clone()))
+                }))
+                .into_any_element(),
+        )
     }
 
     pub fn terminals(&self) -> &Entity<WorkspaceTerminals> {
@@ -75,7 +156,16 @@ impl TerminalPanel {
         }
         let view = cx.new(|cx| TerminalView::new(terminal.clone(), cx));
         let subscription = cx.subscribe(&view, |_, view, event: &TerminalViewEvent, cx| {
-            let TerminalViewEvent::Ask(text) = event;
+            let text = match event {
+                TerminalViewEvent::Ask(text) => text,
+                TerminalViewEvent::Open(link) => {
+                    let cwd = view.read(cx).terminal().read(cx).cwd().to_path_buf();
+                    return cx.emit(TerminalPanelEvent::Open {
+                        link: link.clone(),
+                        cwd,
+                    });
+                }
+            };
             // A run's name says what it is; a shell's title is noise.
             let name = view
                 .read(cx)
@@ -94,7 +184,14 @@ impl TerminalPanel {
     }
 
     /// Puts the keyboard in `terminal`.
-    fn focus(&mut self, terminal: &Entity<Terminal>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn focus(
+        &mut self,
+        terminal: &Entity<Terminal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Looking at it is seeing its news.
+        terminal.update(cx, |terminal, cx| terminal.acknowledge(cx));
         let view = self.view(terminal, cx);
         view.read(cx).focus_handle(cx).focus(window, cx);
     }
@@ -174,7 +271,9 @@ impl TerminalPanel {
             .menu(gpui_kit::Anchor::TopRight, move |menu, window, cx| {
                 // Looked up as it opens: a shell installed meanwhile shows.
                 let shells = ph_env::shells();
-                shells
+                let agent_panel = panel.clone();
+                let agent_cwd = cwd.clone();
+                let menu = shells
                     .into_iter()
                     .fold(menu.label("New terminal"), |menu, shell| {
                         let label = if shell.default {
@@ -219,14 +318,77 @@ impl TerminalPanel {
                                 })
                         });
                         menu.item(PopupMenuItem::submenu(label, submenu))
+                    });
+                // Agents whose CLI PilotHouse follows in a terminal.
+                const AGENTS: [(&str, &str); 4] = [
+                    ("claude", "Claude Code"),
+                    ("codex", "Codex"),
+                    ("gemini", "Gemini CLI"),
+                    ("antigravity", "Antigravity"),
+                ];
+                let menu = AGENTS.iter().fold(
+                    menu.separator().label("Agent in a terminal"),
+                    |menu, (agent, name)| {
+                        let (panel, cwd) = (agent_panel.clone(), agent_cwd.clone());
+                        menu.item(PopupMenuItem::new(*name).on_click(move |_, _, cx| {
+                            _ = panel.update(cx, |_, cx| {
+                                cx.emit(TerminalPanelEvent::StartAgent {
+                                    agent,
+                                    cwd: cwd.clone(),
+                                })
+                            });
+                        }))
+                    },
+                );
+                let resume = {
+                    let (panel, cwd) = (agent_panel.clone(), agent_cwd.clone());
+                    PopupMenu::build(window, cx, move |menu, _, _| {
+                        AGENTS.iter().fold(menu, |menu, (agent, name)| {
+                            let (panel, cwd) = (panel.clone(), cwd.clone());
+                            menu.item(PopupMenuItem::new(*name).on_click(move |_, _, cx| {
+                                _ = panel.update(cx, |_, cx| {
+                                    cx.emit(TerminalPanelEvent::ResumeAgent {
+                                        agent,
+                                        cwd: cwd.clone(),
+                                    })
+                                });
+                            }))
+                        })
                     })
+                };
+                menu.item(PopupMenuItem::submenu("Resume a session…", resume))
             })
             .into_any_element()
     }
 
     fn render_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
         if let Some(terminal) = self.terminals.read(cx).active().cloned() {
-            return self.view(&terminal, cx).into_any_element();
+            let view = self.view(&terminal, cx);
+            let Some(transcript) = self.transcripts.get(&terminal.entity_id()).cloned() else {
+                return view.into_any_element();
+            };
+            // Side by side; the divider drags.
+            return h_resizable(SharedString::from(format!(
+                "terminal-transcript-split-{}",
+                terminal.entity_id()
+            )))
+            .child(
+                resizable_panel()
+                    .size_range(px(160.)..gpui_kit::Pixels::MAX)
+                    .child(div().size_full().child(view)),
+            )
+            .child(
+                resizable_panel()
+                    .size(px(260.))
+                    .size_range(px(200.)..gpui_kit::Pixels::MAX)
+                    .child(
+                        div()
+                            .size_full()
+                            .bg(cx.theme().background)
+                            .child(transcript),
+                    ),
+            )
+            .into_any_element();
         }
         let description = self
             .terminals
@@ -253,30 +415,34 @@ impl Render for TerminalPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let terminals = self.terminals.read(cx);
         let active = terminals.active_index();
-        let titles: Vec<SharedString> = terminals
+        let titles: Vec<(SharedString, Option<crate::AgentBadge>)> = terminals
             .terminals()
             .iter()
             .map(|terminal| {
                 let terminal = terminal.read(cx);
-                short_title(
+                let title = short_title(
                     terminal.title(),
                     terminal.shell(),
                     terminal.label().map(|label| label.as_ref()),
-                )
+                );
+                (title, terminal.badge())
             })
             .collect();
-        let tabs = titles.into_iter().enumerate().map(|(ix, title)| {
-            Tab::new().label(title).suffix(
-                Button::new(("close-terminal", ix))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Close)
-                    .accessibility_label("Close terminal")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.terminals
-                            .update(cx, |terminals, cx| terminals.close_index(ix, cx))
-                    })),
-            )
+        let tabs = titles.into_iter().enumerate().map(|(ix, (title, badge))| {
+            Tab::new()
+                .label(title)
+                .when_some(badge, |tab, badge| tab.prefix(badge_glyph(badge, cx)))
+                .suffix(
+                    Button::new(("close-terminal", ix))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .accessibility_label("Close terminal")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.terminals
+                                .update(cx, |terminals, cx| terminals.close_index(ix, cx))
+                        })),
+                )
         });
         v_flex()
             .size_full()
@@ -307,9 +473,35 @@ impl Render for TerminalPanel {
                                 .children(tabs),
                         ),
                     )
+                    .children(self.render_transcript_button(cx))
                     .child(self.render_new_button(cx)),
             )
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
+    }
+}
+
+/// An agent's state on its tab: a spinner while it works, amber when it
+/// waits for the user, green when it finished a turn not looked at.
+fn badge_glyph(badge: crate::AgentBadge, cx: &App) -> AnyElement {
+    let dot = |color| {
+        div()
+            .ml_1()
+            .size(px(7.))
+            .rounded_full()
+            .bg(color)
+            .into_any_element()
+    };
+    match badge {
+        crate::AgentBadge::Working => div()
+            .ml_1()
+            .child(
+                gpui_kit::component::spinner::Spinner::new()
+                    .xsmall()
+                    .color(cx.theme().info),
+            )
+            .into_any_element(),
+        crate::AgentBadge::NeedsYou => dot(cx.theme().warning),
+        crate::AgentBadge::Done => dot(cx.theme().success),
     }
 }
 

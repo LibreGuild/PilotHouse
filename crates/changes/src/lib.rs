@@ -11,6 +11,7 @@ mod commit_box;
 mod conflict_view;
 mod diff_view;
 mod history_view;
+pub mod notes;
 mod repo;
 mod stash_view;
 pub mod text_dialog;

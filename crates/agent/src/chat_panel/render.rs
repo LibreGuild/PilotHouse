@@ -14,6 +14,7 @@ impl ChatPanel {
             }
             ThreadStatus::Idle => (cx.theme().muted_foreground.opacity(0.5), "Idle"),
         };
+        let side_of = self.side_of().cloned();
         h_flex()
             .flex_none()
             .h_11()
@@ -21,6 +22,20 @@ impl ChatPanel {
             .gap_3()
             .border_b_1()
             .border_color(cx.theme().border)
+            .when_some(side_of, |this, parent| {
+                this.child(
+                    Button::new("side-chat-back")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ArrowLeft)
+                        .tooltip(format!("Back to “{}”", parent.title))
+                        .accessibility_label("Back to the chat")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.side = None;
+                            cx.emit(ChatPanelEvent::SelectSession(Some(parent.id)));
+                        })),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -57,12 +72,39 @@ impl ChatPanel {
                     )
             })
             .children(crate::usage_meter::render(thread.usage(), cx))
+            .child(self.render_view_mode(cx))
             .when(
                 thread.has_started() && *thread.status() == ThreadStatus::Idle,
                 |this| this.child(self.render_hand_off(cx)),
             )
             .when(self.history_menu, |this| {
                 this.child(self.render_history(cx))
+            })
+    }
+
+    /// How much of the agents' work every chat shows.
+    pub(super) fn render_view_mode(&self, cx: &App) -> impl IntoElement {
+        use crate::view_mode::ViewMode;
+        let current = ViewMode::current(cx);
+        let store = self.store.clone();
+        Button::new("chat-view-mode")
+            .ghost()
+            .xsmall()
+            .icon(Icons::Layers)
+            .tooltip("How much of the agent's work to show")
+            .accessibility_label("View mode")
+            .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                ViewMode::ALL.into_iter().fold(menu, |menu, mode| {
+                    let store = store.clone();
+                    menu.item(
+                        PopupMenuItem::new(mode.label())
+                            .checked(mode == current)
+                            .on_click(move |_, window, cx| {
+                                mode.choose(&store, cx);
+                                window.refresh();
+                            }),
+                    )
+                })
             })
     }
 
@@ -170,11 +212,19 @@ impl ChatPanel {
             return self.render_empty(cx);
         }
         let thread = self.active.clone();
+        // A chat shown since the view mode changed measures its rows again.
+        let mode = crate::view_mode::ViewMode::current(cx);
+        thread.update(cx, |thread, cx| thread.set_view_mode(mode, cx));
         let scroller = thread.read(cx).scroller().clone();
+        // Rows space themselves by what they follow (see `entry_view`), so
+        // the list adds no gap of its own.
+        let mut row_style = gpui_kit::StyleRefinement::default();
+        row_style.padding.bottom = Some(px(0.).into());
         MessageScroller::new("chat-transcript", scroller, move |ix, _, cx| {
             thread.update(cx, |thread, cx| thread.prepare_entry(ix, cx));
             render_entry(&thread, ix, cx)
         })
+        .with_row_style(row_style)
         .size_full()
         .into_any_element()
     }
@@ -247,23 +297,13 @@ impl ChatPanel {
                 v_flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size_12()
-                            .mb_1()
-                            .rounded(cx.theme().radius_lg)
-                            .bg(cx.theme().info.opacity(0.14))
-                            .text_color(cx.theme().info)
-                            .child(Icon::new(Icons::Sparkles).size_6()),
-                    )
+                    // Whose chat this is: the agent's mark, not a decoration.
+                    .child(div().mb_1().child(agent.mark(gpui_kit::px(32.))))
                     .child(
                         div()
                             .text_xl()
                             .text_center()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
                             .child(title),
                     )
                     .child(
@@ -431,6 +471,208 @@ impl ChatPanel {
         )
     }
 
+    /// Messages waiting for the agent to finish, each removable or editable;
+    /// the first can interrupt the agent.
+    /// While the turn has subagents: how many run, and on click each one's
+    /// state, latest step and time; a row shows it in the transcript.
+    fn render_subagents(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let thread = self.active.read(cx);
+        let working = *thread.status() == ThreadStatus::Working;
+        let subagents = thread.subagents();
+        let busy = |tool: &crate::transcript::ToolEntry| working && tool.is_busy();
+        let running = subagents.iter().filter(|(_, tool)| busy(tool)).count();
+        if running == 0 && !(self.subagents_open && !subagents.is_empty()) {
+            return None;
+        }
+        let label = match (running, subagents.len()) {
+            (0, all) => format!("{all} subagent{} finished", if all == 1 { "" } else { "s" }),
+            (running, all) if running == all => {
+                format!(
+                    "{running} subagent{} running",
+                    if running == 1 { "" } else { "s" }
+                )
+            }
+            (running, all) => format!("{running} of {all} subagents running"),
+        };
+        let open = self.subagents_open;
+        let theme = cx.theme();
+        let rows: Vec<AnyElement> = if open {
+            subagents
+                .iter()
+                .map(|(ix, tool)| {
+                    let ix = *ix;
+                    let glyph: AnyElement = match tool.status {
+                        _ if busy(tool) => gpui_kit::component::spinner::Spinner::new()
+                            .xsmall()
+                            .color(theme.info)
+                            .into_any_element(),
+                        crate::transcript::ToolStatus::Failed => Icon::new(IconName::Close)
+                            .xsmall()
+                            .text_color(theme.danger)
+                            .into_any_element(),
+                        _ => Icon::new(IconName::Check)
+                            .xsmall()
+                            .text_color(theme.success)
+                            .into_any_element(),
+                    };
+                    let elapsed = tool
+                        .started
+                        .filter(|_| busy(tool))
+                        .map(|started| crate::entry_view::short_duration(started.elapsed()));
+                    let steps = tool.children.len();
+                    let thread = self.active.clone();
+                    h_flex()
+                        .id(("subagent-row", ix))
+                        .gap_2()
+                        .px_2()
+                        .h_7()
+                        .rounded(theme.radius)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.list_hover))
+                        .text_xs()
+                        .child(glyph)
+                        .child(
+                            div()
+                                .flex_none()
+                                .max_w(px(220.))
+                                .truncate()
+                                .text_color(theme.foreground)
+                                .child(tool.display_title()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.muted_foreground)
+                                .children(tool.last_step()),
+                        )
+                        .child(div().flex_none().text_color(theme.muted_foreground).child(
+                            match elapsed {
+                                Some(elapsed) => format!("{steps} steps · {elapsed}"),
+                                None => format!("{steps} steps"),
+                            },
+                        ))
+                        .on_click(move |_, _, cx| {
+                            thread.update(cx, |thread, cx| thread.reveal(ix, cx))
+                        })
+                        .into_any_element()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Some(
+            v_flex()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .id("subagents-chip")
+                        .gap_1p5()
+                        .px_2()
+                        .h_6()
+                        .rounded(theme.radius)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.list_hover))
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .when(running > 0, |this| {
+                            this.child(
+                                gpui_kit::component::spinner::Spinner::new()
+                                    .xsmall()
+                                    .color(theme.info),
+                            )
+                        })
+                        .child(label)
+                        .child(
+                            Icon::new(if open {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronUp
+                            })
+                            .xsmall(),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.subagents_open = !this.subagents_open;
+                            cx.notify();
+                        })),
+                )
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    fn render_queued(
+        &self,
+        queued: Vec<(usize, String)>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let steer = self.active.read(cx).can_steer(cx);
+        v_flex()
+            .gap_1()
+            .children(queued.into_iter().map(|(ix, text)| {
+                let line = text.lines().next().unwrap_or_default().to_string();
+                h_flex()
+                    .id(("queued", ix))
+                    .group("queued")
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary.opacity(0.6))
+                    .text_xs()
+                    .child(
+                        Icon::new(Icons::Clock)
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(line))
+                    .when(ix == 0, |this| {
+                        this.child(
+                            Button::new(("send-queued-now", ix))
+                                .ghost()
+                                .xsmall()
+                                .label("Send now")
+                                .tooltip(if steer {
+                                    "Add this to what the agent is doing now"
+                                } else {
+                                    "Stop the agent and send this now"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.active
+                                        .update(cx, |thread, cx| thread.send_queued_now(cx))
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new(("edit-queued", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icons::Pencil)
+                            .tooltip("Edit")
+                            .accessibility_label("Edit the queued message")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.edit_queued(ix, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(("remove-queued", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip("Remove")
+                            .accessibility_label("Remove the queued message")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.active.update(cx, |thread, cx| {
+                                    thread.unqueue(ix, cx);
+                                })
+                            })),
+                    )
+            }))
+    }
+
     pub(super) fn render_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let thread = self.active.read(cx);
         let status = thread.status().clone();
@@ -442,8 +684,8 @@ impl ChatPanel {
         let status_line: Option<SharedString> = match status {
             _ if self.busy.is_some() => self.busy.clone(),
             ThreadStatus::Connecting => Some(format!("Starting {}…", agent.name).into()),
-            ThreadStatus::Working => Some(format!("{} is working…", agent.name).into()),
-            ThreadStatus::Idle => None,
+            // The transcript's working row says it.
+            ThreadStatus::Working | ThreadStatus::Idle => None,
         };
         let failed = self.failed.clone();
 
@@ -474,7 +716,8 @@ impl ChatPanel {
                 this.child(more_options_button(&options, panel.clone()))
             });
 
-        let action = if busy {
+        let has_text = !self.composer.read(cx).value().trim().is_empty();
+        let stop = busy.then(|| {
             Button::new("stop-agent")
                 .small()
                 .outline()
@@ -483,16 +726,35 @@ impl ChatPanel {
                 .tooltip("Stop")
                 .accessibility_label("Stop")
                 .on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))
-        } else {
+        });
+        // While the agent works, a message is queued: it goes when the turn ends.
+        let send = (!busy || has_text).then(|| {
             Button::new("send-message")
                 .small()
-                .info()
+                .primary()
                 .rounded_full()
-                .icon(IconName::ArrowUp)
-                .tooltip("Send (Enter)")
-                .accessibility_label("Send")
+                .icon(if busy {
+                    Icons::ListPlus
+                } else {
+                    IconName::ArrowUp.into()
+                })
+                .tooltip(if busy {
+                    "Queue (Enter): sent when the agent finishes"
+                } else if cfg!(target_os = "macos") {
+                    "Send (Enter). ⌘Enter sends and starts a new chat"
+                } else {
+                    "Send (Enter). Ctrl+Enter sends and starts a new chat"
+                })
+                .accessibility_label(if busy { "Queue" } else { "Send" })
                 .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
-        };
+        });
+        let action = h_flex().gap_1().children(stop).children(send);
+        let queued: Vec<(usize, String)> = thread
+            .queued()
+            .iter()
+            .enumerate()
+            .map(|(ix, prompt)| (ix, prompt.display.clone()))
+            .collect();
 
         div()
             .flex_none()
@@ -519,6 +781,10 @@ impl ChatPanel {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(ShimmerText::new(text).id("agent-status")),
                         )
+                    })
+                    .children(self.render_subagents(cx))
+                    .when(!queued.is_empty(), |this| {
+                        this.child(self.render_queued(queued, cx))
                     })
                     .when_some(failed, |this, reason| {
                         this.child(
@@ -567,6 +833,12 @@ impl ChatPanel {
                                     this.mention.as_ref().map(|menu| menu.selected)
                                 {
                                     this.accept_mention(selected, window, cx);
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            // ⇧Tab switches the agent's mode, as in Claude Code.
+                            .capture_action(cx.listener(|this, _: &OutdentInline, _, cx| {
+                                if this.cycle_mode(cx) {
                                     cx.stop_propagation();
                                 }
                             }))
@@ -764,7 +1036,11 @@ pub(super) fn option_pill(option: &AgentOption, panel: WeakEntity<ChatPanel>) ->
         option_icon(option.category),
         option.current_name(),
     )
-    .tooltip(option.name.clone())
+    .tooltip(if option.category == OptionCategory::Mode {
+        format!("{} (⇧Tab switches)", option.name)
+    } else {
+        option.name.clone()
+    })
     .menu(gpui_kit::Anchor::BottomLeft, move |menu, _, _| {
         option_menu(menu, &option, panel.clone())
     })

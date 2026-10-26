@@ -9,21 +9,28 @@
 //!   AVDs, and starting emulators headless.
 //! - [`DeviceScreen`]: one device's live screen and input while it is shown.
 //! - [`DevicesPanel`]: the pane.
+//! - [`android_project`] + [`AndroidRun`]: build, install and start an app
+//!   module's variant on the chosen device (the Run tab's Android card).
 //! - `control`: `device.*` control methods behind the MCP tools.
 
 pub mod adb;
+pub mod android_project;
+mod android_run;
 pub mod avd;
 mod avd_dialog;
+mod connect_dialog;
 mod control;
 mod devices_panel;
 pub mod emulator;
 mod grpc;
 pub mod logcat;
+mod logcat_view;
 mod manager;
 mod screen;
 pub mod sdk;
 pub mod ui_tree;
 
+pub use android_run::{AndroidRun, AndroidRunEvent};
 pub use devices_panel::DevicesPanel;
 pub use manager::{DeviceManager, DevicesChanged};
 pub use screen::{DeviceScreen, ScreenEvent, SystemKey};

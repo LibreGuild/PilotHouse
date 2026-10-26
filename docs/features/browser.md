@@ -6,7 +6,7 @@ Which browser: the one chosen in the pane (setting `browser.chrome_path`), else 
 
 ## How it works
 
-1. **Start on demand.** Chrome starts the first time the Browser tab is shown or an agent calls a browser tool. It runs headless with a per-project profile in `<data dir>/browser/<project id>` (private to you), so logins persist per project and never mix with your own Chrome.
+1. **Start on demand.** Chrome starts the first time the Browser tab is shown or an agent calls a browser tool. It runs headless with a per-project profile in `<data dir>/browser/<project id>` (private to you), so logins persist per project and never mix with your own Chrome. Sites see the Chrome it is: the user agent and client hints say Chrome (headless Chrome otherwise names itself `HeadlessChrome`), and `navigator.webdriver` is off (`--disable-blink-features=AutomationControlled`), so ordinary sites do not answer with a CAPTCHA.
 2. **DevTools over a pipe.** PilotHouse talks to Chrome through `--remote-debugging-pipe` (file descriptors 3 and 4), attaches to the page with a flat session, and enables Page, Runtime, Log and Network. There is no localhost port that other processes could use, and Chrome exits on its own when PilotHouse does, even after a crash.
 3. **Frames.** While the pane is visible, `Page.startScreencast` sends JPEG frames sized to the pane (at the screen's scale). Each frame is decoded off the UI thread and acked after decoding, so only one frame is ever in flight. Hidden panes and other projects stream nothing.
 4. **Input.** Clicks, drags, the wheel and keys go through `Input.dispatch*Event`. ⌘V pastes, and ⌘C/⌘X copy the page selection through the system clipboard.

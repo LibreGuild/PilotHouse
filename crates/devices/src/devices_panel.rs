@@ -7,16 +7,15 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputState},
     menu::{PopupMenu, PopupMenuItem},
     spinner::Spinner,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    AnyElement, App, AppContext as _, Context, DragMoveEvent, Entity, EventEmitter,
+    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Pixels, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use ph_media::annotate::Shape;
 use ph_media::{Frame, LiveTools, SurfaceEvent, SurfaceView, ToChat};
@@ -24,15 +23,31 @@ use ph_ui::MenuButton as _;
 use ph_ui::{EmptyState, Icons};
 
 use crate::adb::{Adb, RemoteFile};
-use crate::logcat::{Logcat, Priority};
+use crate::logcat::Logcat;
+use crate::logcat_view::LogcatView;
 use crate::manager::{DeviceManager, DevicesChanged};
 use crate::screen::{DeviceScreen, ScreenEvent, SystemKey};
 use crate::ui_tree::{self, UiNode};
 
-/// Rows shown in the drawer.
-const DRAWER_ROWS: usize = 300;
-/// Logcat lines sent to chat.
-const SEND_LINES: usize = 80;
+/// Rows shown in the UI and Files drawers.
+const DRAWER_ROWS: usize = 500;
+/// The drawer's height until the user drags it, and its limits.
+const DRAWER_HEIGHT: f32 = 280.0;
+const DRAWER_MIN: f32 = 120.0;
+/// Room always left for the screen above the drawer.
+const SCREEN_MIN: f32 = 160.0;
+
+/// What is dragged when the drawer is resized.
+struct ResizeDrawer;
+
+/// Nothing follows the pointer: the drawer edge itself moves.
+struct NoGhost;
+
+impl Render for NoGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Drawer {
@@ -48,8 +63,8 @@ pub struct DevicesPanel {
     surface: Entity<SurfaceView>,
     tools: Entity<LiveTools>,
     drawer: Option<Drawer>,
-    log_filter: Entity<InputState>,
-    errors_only: bool,
+    drawer_height: Pixels,
+    logcat_view: Entity<LogcatView>,
     ui_nodes: Vec<UiNode>,
     files_dir: String,
     files: Vec<RemoteFile>,
@@ -69,8 +84,7 @@ impl DevicesPanel {
         let manager = DeviceManager::global(cx);
         let surface = cx.new(|cx| SurfaceView::new("", cx));
         let tools = cx.new(|cx| LiveTools::new(surface.clone(), "device", true, cx));
-        let log_filter =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Filter: tag, package or text"));
+        let logcat_view = cx.new(|cx| LogcatView::new(window, cx));
         let subscriptions = vec![
             cx.subscribe(&manager, |this, _, _: &DevicesChanged, cx| {
                 this.sync_session(cx)
@@ -79,8 +93,10 @@ impl DevicesPanel {
                 this.surface_event(event, cx)
             }),
             cx.subscribe(&tools, |_, _, event: &ToChat, cx| cx.emit(event.clone())),
+            cx.subscribe(&logcat_view, |_, _, event: &ToChat, cx| {
+                cx.emit(event.clone())
+            }),
             cx.observe(&manager, |_, _, cx| cx.notify()),
-            cx.observe(&log_filter, |_, _, cx| cx.notify()),
         ];
         Self {
             manager,
@@ -89,8 +105,8 @@ impl DevicesPanel {
             surface,
             tools,
             drawer: None,
-            log_filter,
-            errors_only: false,
+            drawer_height: px(DRAWER_HEIGHT),
+            logcat_view,
             ui_nodes: Vec::new(),
             files_dir: "/sdcard".into(),
             files: Vec::new(),
@@ -127,13 +143,7 @@ impl DevicesPanel {
 
     /// Recent logcat errors, for `@log`.
     pub fn recent_logs(&self, cx: &App) -> Option<String> {
-        let logcat = self.logcat.as_ref()?.read(cx);
-        let lines = logcat.matching("", true, 40);
-        if lines.is_empty() {
-            return None;
-        }
-        let text: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
-        Some(format!("Logcat errors:\n```\n{}\n```", text.join("\n")))
+        self.logcat_view.read(cx).recent_errors(cx)
     }
 
     fn adb(&self, cx: &App) -> Option<Adb> {
@@ -208,13 +218,19 @@ impl DevicesPanel {
             let (Some(adb), Some(serial)) = (self.adb(cx), self.selected_serial(cx)) else {
                 return;
             };
-            let logcat = cx.new(|cx| Logcat::new(&adb, &serial, cx));
-            self._subscriptions
-                .push(cx.observe(&logcat, |_, _, cx| cx.notify()));
-            self.logcat = Some(logcat);
+            self.logcat = Some(cx.new(|cx| Logcat::new(&adb, &serial, cx)));
         } else if !wanted {
             self.logcat = None;
         }
+        let device = self
+            .manager
+            .read(cx)
+            .selected()
+            .map(|device| device.display_name())
+            .unwrap_or_default();
+        let logcat = self.logcat.clone();
+        self.logcat_view
+            .update(cx, |view, cx| view.set_logcat(logcat, device, cx));
     }
 
     fn load_packages(&mut self, adb: Adb, serial: String, cx: &mut Context<Self>) {
@@ -224,6 +240,8 @@ impl DevicesPanel {
                 .await
                 .unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
+                this.logcat_view
+                    .update(cx, |view, cx| view.set_packages(packages.clone(), cx));
                 this.packages = packages;
                 cx.notify();
             });
@@ -494,30 +512,6 @@ impl DevicesPanel {
         .detach();
     }
 
-    fn send_logcat(&mut self, cx: &mut Context<Self>) {
-        let Some(logcat) = &self.logcat else { return };
-        let filter = self.log_filter.read(cx).value().to_string();
-        let lines: Vec<String> = logcat
-            .read(cx)
-            .matching(&filter, self.errors_only, SEND_LINES)
-            .into_iter()
-            .map(|line| line.text.clone())
-            .collect();
-        if lines.is_empty() {
-            return;
-        }
-        let device = self
-            .manager
-            .read(cx)
-            .selected()
-            .map(|device| device.display_name())
-            .unwrap_or_default();
-        cx.emit(ToChat::Text {
-            label: "logcat".into(),
-            text: format!("Logcat from {device}:\n```\n{}\n```", lines.join("\n")),
-        });
-    }
-
     fn set_drawer(&mut self, drawer: Drawer, cx: &mut Context<Self>) {
         self.drawer = if self.drawer == Some(drawer) {
             None
@@ -731,26 +725,66 @@ impl DevicesPanel {
     fn render_drawer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = |id: &'static str,
                    label: &'static str,
+                   icon: Icons,
                    drawer: Drawer,
                    this: &Self,
                    cx: &mut Context<Self>| {
             Button::new(id)
                 .ghost()
                 .xsmall()
+                .icon(icon)
                 .selected(this.drawer == Some(drawer))
                 .label(label)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_drawer(drawer, cx)))
         };
+        let open = self.drawer.is_some();
         let header = h_flex()
+            .relative()
             .flex_none()
-            .h_8()
+            .h_9()
             .px_2()
             .gap_1()
             .border_t_1()
             .border_color(cx.theme().border)
-            .child(tab("drawer-logcat", "Logcat", Drawer::Logcat, self, cx))
-            .child(tab("drawer-ui", "UI", Drawer::Ui, self, cx))
-            .child(tab("drawer-files", "Files", Drawer::Files, self, cx))
+            .bg(cx.theme().secondary.opacity(0.5))
+            .when(open, |this| {
+                // The top edge drags the drawer taller or shorter.
+                this.child(
+                    div()
+                        .id("drawer-resize")
+                        .absolute()
+                        .top(px(-3.))
+                        .left_0()
+                        .right_0()
+                        .h(px(6.))
+                        .cursor_row_resize()
+                        .on_drag(ResizeDrawer, |_, _, _, cx| cx.new(|_| NoGhost)),
+                )
+            })
+            .child(tab(
+                "drawer-logcat",
+                "Logcat",
+                Icons::ScrollText,
+                Drawer::Logcat,
+                self,
+                cx,
+            ))
+            .child(tab(
+                "drawer-ui",
+                "Layout",
+                Icons::LayoutPanelTop,
+                Drawer::Ui,
+                self,
+                cx,
+            ))
+            .child(tab(
+                "drawer-files",
+                "Files",
+                Icons::FolderOpen,
+                Drawer::Files,
+                self,
+                cx,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -760,84 +794,49 @@ impl DevicesPanel {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .children(self.status.clone()),
-            );
+            )
+            .when(open, |this| {
+                this.child(
+                    Button::new("drawer-close")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ChevronDown)
+                        .tooltip("Close the drawer")
+                        .accessibility_label("Close the drawer")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(drawer) = this.drawer {
+                                this.set_drawer(drawer, cx);
+                            }
+                        })),
+                )
+            });
         let body = match self.drawer {
             None => None,
-            Some(Drawer::Logcat) => Some(self.render_logcat(cx)),
+            Some(Drawer::Logcat) => Some(self.logcat_view.clone().into_any_element()),
             Some(Drawer::Ui) => Some(self.render_ui_tree(cx)),
             Some(Drawer::Files) => Some(self.render_files(cx)),
         };
-        v_flex().flex_none().child(header).children(body)
+        v_flex()
+            .flex_none()
+            .child(header)
+            .children(body.map(|body| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .h(self.drawer_height)
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(body)
+            }))
     }
 
-    fn render_logcat(&self, cx: &mut Context<Self>) -> AnyElement {
-        let filter = self.log_filter.read(cx).value().to_string();
-        let rows: Vec<(SharedString, Option<gpui_kit::Hsla>)> = self
-            .logcat
-            .as_ref()
-            .map(|logcat| {
-                logcat
-                    .read(cx)
-                    .matching(&filter, self.errors_only, DRAWER_ROWS)
-                    .into_iter()
-                    // Newest first, like the browser's console.
-                    .rev()
-                    .map(|line| {
-                        let color = match line.priority {
-                            Priority::Error => Some(cx.theme().danger),
-                            Priority::Warn => Some(cx.theme().warning),
-                            Priority::Verbose | Priority::Debug => {
-                                Some(cx.theme().muted_foreground)
-                            }
-                            Priority::Info => None,
-                        };
-                        (line.text.clone().into(), color)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        v_flex()
-            .child(
-                h_flex()
-                    .px_2()
-                    .py_1()
-                    .gap_1()
-                    .child(div().flex_1().child(Input::new(&self.log_filter).xsmall()))
-                    .child(
-                        Button::new("logcat-errors")
-                            .ghost()
-                            .xsmall()
-                            .label("Errors only")
-                            .selected(self.errors_only)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.errors_only = !this.errors_only;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("logcat-send")
-                            .ghost()
-                            .xsmall()
-                            .icon(Icons::SendHorizontal)
-                            .label("Send to chat")
-                            .on_click(cx.listener(|this, _, _, cx| this.send_logcat(cx))),
-                    )
-                    .child(
-                        Button::new("logcat-clear")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Delete)
-                            .tooltip("Clear")
-                            .accessibility_label("Clear logcat")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(logcat) = &this.logcat {
-                                    logcat.update(cx, |logcat, cx| logcat.clear(cx));
-                                }
-                            })),
-                    ),
-            )
-            .child(log_rows("logcat-rows", rows, cx))
-            .into_any_element()
+    fn resize_drawer(&mut self, event: &DragMoveEvent<ResizeDrawer>, cx: &mut Context<Self>) {
+        let area = event.bounds;
+        // The drawer's header stays under the pointer.
+        let height = area.bottom() - event.event.position.y - px(36.);
+        let most = (area.size.height - px(SCREEN_MIN + 80.)).max(px(DRAWER_MIN));
+        self.drawer_height = height.clamp(px(DRAWER_MIN), most);
+        cx.notify();
     }
 
     fn render_ui_tree(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -881,7 +880,8 @@ impl DevicesPanel {
             .child(
                 v_flex()
                     .id("ui-rows")
-                    .h_48()
+                    .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .px_3()
                     .font_family(cx.theme().mono_font_family.clone())
@@ -892,15 +892,66 @@ impl DevicesPanel {
                             .take(DRAWER_ROWS)
                             .enumerate()
                             .map(|(ix, node)| {
-                                let line = node.describe();
-                                div()
+                                let class = node
+                                    .class
+                                    .rsplit('.')
+                                    .next()
+                                    .unwrap_or(&node.class)
+                                    .to_string();
+                                let label = if !node.text.is_empty() {
+                                    format!("“{}”", node.text)
+                                } else if !node.description.is_empty() {
+                                    node.description.clone()
+                                } else {
+                                    String::new()
+                                };
+                                let id = node
+                                    .resource_id
+                                    .rsplit('/')
+                                    .next()
+                                    .unwrap_or_default()
+                                    .to_string();
+                                h_flex()
                                     .id(("ui-node", ix))
-                                    .py_0p5()
-                                    .px_1()
+                                    .h_6()
+                                    .px_2()
+                                    .gap_2()
                                     .rounded(cx.theme().radius)
                                     .cursor_pointer()
                                     .hover(|style| style.bg(cx.theme().list_hover))
-                                    .child(line)
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .px_1p5()
+                                            .rounded(cx.theme().radius)
+                                            .bg(cx.theme().info.opacity(0.14))
+                                            .text_color(cx.theme().info)
+                                            .child(class),
+                                    )
+                                    .child(div().min_w_0().truncate().child(label))
+                                    .when(!id.is_empty(), |this| {
+                                        this.child(
+                                            div()
+                                                .flex_none()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!("#{id}")),
+                                        )
+                                    })
+                                    .child(div().flex_1())
+                                    .when(node.clickable, |this| {
+                                        this.child(
+                                            Icon::new(Icons::Pointer)
+                                                .xsmall()
+                                                .text_color(cx.theme().muted_foreground),
+                                        )
+                                    })
+                                    .tooltip({
+                                        let line = node.describe();
+                                        move |window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(line.clone())
+                                                .build(window, cx)
+                                        }
+                                    })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.outline(&node, scale, cx)
                                     }))
@@ -958,7 +1009,8 @@ impl DevicesPanel {
             .child(
                 v_flex()
                     .id("file-rows")
-                    .h_48()
+                    .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .px_2()
                     .text_sm()
@@ -977,20 +1029,16 @@ impl DevicesPanel {
                                 h_flex()
                                     .id(("remote-file", ix))
                                     .group("remote-file")
+                                    .h_7()
                                     .gap_2()
-                                    .px_1()
-                                    .py_0p5()
+                                    .px_2()
                                     .rounded(cx.theme().radius)
                                     .hover(|style| style.bg(cx.theme().list_hover))
-                                    .child(
-                                        Icon::new(if file.is_dir {
-                                            IconName::Folder
-                                        } else {
-                                            IconName::File
-                                        })
-                                        .xsmall()
-                                        .text_color(cx.theme().muted_foreground),
-                                    )
+                                    .child(if file.is_dir {
+                                        ph_ui::folder_icon_element(&file.name, px(16.))
+                                    } else {
+                                        ph_ui::file_icon_element(&file.name, px(16.))
+                                    })
                                     .child(
                                         div()
                                             .flex_1()
@@ -1045,7 +1093,7 @@ impl DevicesPanel {
 
 /// The device picker: connected devices, emulators to start or stop, and
 /// making, wiping and deleting emulators.
-fn device_menu(
+pub(crate) fn device_menu(
     menu: PopupMenu,
     manager: &Entity<DeviceManager>,
     window: &mut Window,
@@ -1115,8 +1163,29 @@ fn device_menu(
                 }),
         );
     }
-    let maker = manager.clone();
+    let connector = manager.clone();
     menu = menu.separator().item(
+        PopupMenuItem::new("Connect over Wi-Fi…")
+            .icon(Icons::Wifi)
+            .on_click(move |_, window, cx| {
+                crate::connect_dialog::open(connector.clone(), window, cx)
+            }),
+    );
+    if let Some(serial) = selected
+        .clone()
+        .filter(|serial| crate::adb::is_wireless(serial))
+    {
+        let disconnector = manager.clone();
+        menu = menu.item(
+            PopupMenuItem::new("Disconnect this device")
+                .icon(Icons::WifiOff)
+                .on_click(move |_, _, cx| {
+                    disconnector.read(cx).disconnect(&serial, cx);
+                }),
+        );
+    }
+    let maker = manager.clone();
+    menu = menu.item(
         PopupMenuItem::new("New emulator…")
             .icon(Icons::Plus)
             .on_click(move |_, window, cx| crate::avd_dialog::open_new(maker.clone(), window, cx)),
@@ -1173,35 +1242,6 @@ fn loading(text: String, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn log_rows(
-    id: &'static str,
-    rows: Vec<(SharedString, Option<gpui_kit::Hsla>)>,
-    cx: &App,
-) -> impl IntoElement {
-    v_flex()
-        .id(id)
-        .h_48()
-        .overflow_y_scroll()
-        .px_3()
-        .py_1()
-        .font_family(cx.theme().mono_font_family.clone())
-        .text_xs()
-        .when(rows.is_empty(), |this| {
-            this.child(
-                div()
-                    .py_2()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Nothing yet."),
-            )
-        })
-        .children(rows.into_iter().map(|(text, color)| {
-            div()
-                .py_0p5()
-                .when_some(color, |this, color| this.text_color(color))
-                .child(text)
-        }))
-}
-
 /// `dir/name`, or `dir/name (2)`… so a download never overwrites a file.
 fn unused_path(dir: &std::path::Path, name: &str) -> PathBuf {
     let candidate = dir.join(name);
@@ -1233,6 +1273,11 @@ impl Render for DevicesPanel {
         let show_tools = overlay.is_none();
         v_flex()
             .size_full()
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<ResizeDrawer>, _, cx| {
+                    this.resize_drawer(event, cx)
+                }),
+            )
             .child(self.render_toolbar(cx))
             .child(
                 div()
@@ -1243,15 +1288,7 @@ impl Render for DevicesPanel {
                     .child(div().absolute().inset_0().child(self.surface.clone()))
                     .children(overlay)
                     .when(show_tools, |this| {
-                        this.child(
-                            h_flex()
-                                .absolute()
-                                .bottom_3()
-                                .left_0()
-                                .right_0()
-                                .justify_center()
-                                .child(self.tools.clone()),
-                        )
+                        this.child(div().absolute().inset_0().child(self.tools.clone()))
                     }),
             )
             .child(self.render_drawer(cx))

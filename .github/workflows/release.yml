@@ -62,11 +62,15 @@ jobs:
         run: scripts/package/macos.sh
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: dist/*.dmg
+          subject-path: |
+            dist/*.dmg
+            dist/*.zip
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos
-          path: dist/*.dmg
+          path: |
+            dist/*.dmg
+            dist/*.zip
           if-no-files-found: error
 
   windows:
@@ -170,6 +174,13 @@ jobs:
       - name: Checksums
         working-directory: dist
         run: sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: source
+          persist-credentials: false
+      # What PilotHouse's updater reads: the version and each install's file.
+      - name: Update manifest
+        run: python3 source/scripts/package/latest-json.py "$VERSION" "$GITHUB_REF_NAME" "$GH_REPO" dist > dist/latest.json && cat dist/latest.json
       - name: Release notes
         run: |
           set -euo pipefail
@@ -184,6 +195,8 @@ jobs:
           | Windows 10/11 (x64) | `PilotHouse-Windows-Setup-x64.exe` (for your user, no admin), or `PilotHouse-Windows-Portable-x64.zip` |
           | Ubuntu 22.04+ / Debian 12+ | `PilotHouse-Linux-amd64.deb`: `sudo apt install ./PilotHouse-Linux-amd64.deb` |
           | Any Linux (x86-64) | `PilotHouse-Linux-x86_64.AppImage` (`chmod +x` and run) or `PilotHouse-Linux-x86_64.tar.gz` |
+
+          PilotHouse updates itself from these releases (`latest.json`, and `PilotHouse-macOS-universal.zip` on macOS); the `.deb` is updated by installing the new one.
 
           The builds are not code-signed. **macOS:** the first open is blocked; open System Settings → Privacy & Security → **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/PilotHouse.app`. **Windows:** if SmartScreen appears, choose **More info → Run anyway**.
 

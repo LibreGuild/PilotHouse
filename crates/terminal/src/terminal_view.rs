@@ -26,7 +26,7 @@ use gpui_kit::{
 
 use crate::palette::Palette;
 use crate::terminal::{Listener, Terminal};
-use crate::{TerminalAsk, TerminalCopy, TerminalPaste, keys};
+use crate::{TerminalAsk, TerminalCopy, TerminalFind, TerminalPaste, keys};
 
 pub const TERMINAL_CONTEXT: &str = "Terminal";
 
@@ -34,6 +34,8 @@ pub const TERMINAL_CONTEXT: &str = "Terminal";
 pub enum TerminalViewEvent {
     /// Ask the agent about this text (the selection, or the last screenful).
     Ask(String),
+    /// Open a link in the output (⌘-click).
+    Open(crate::links::Link),
 }
 
 pub struct TerminalView {
@@ -51,7 +53,16 @@ pub struct TerminalView {
     /// Text typed since the last other key: an input method may replace
     /// some of it (macOS press-and-hold turns `e` into `é`).
     typed: String,
+    /// The find bar, while open.
+    find: Option<FindBar>,
     _observe: Subscription,
+}
+
+/// The find bar over the terminal.
+struct FindBar {
+    input: Entity<gpui_kit::component::input::InputState>,
+    search: crate::search::Search,
+    _subscription: Subscription,
 }
 
 impl EventEmitter<TerminalViewEvent> for TerminalView {}
@@ -67,14 +78,132 @@ impl TerminalView {
             selecting: false,
             composing: String::new(),
             typed: String::new(),
+            find: None,
         }
+    }
+
+    /// Opens the find bar (or puts the keyboard back in it).
+    fn open_find(&mut self, _: &TerminalFind, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::AppContext as _;
+        use gpui_kit::component::input::{InputEvent, InputState};
+        if let Some(find) = &self.find {
+            find.input.update(cx, |input, cx| input.focus(window, cx));
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &InputEvent, window, cx| {
+                match event {
+                    InputEvent::Change => {
+                        let query = input.read(cx).value().to_string();
+                        if let Some(find) = this.find.as_mut() {
+                            find.search = crate::search::Search::new(&query);
+                            find.search.step(
+                                &mut this.terminal.read(cx).term().lock(),
+                                alacritty_terminal::index::Direction::Left,
+                            );
+                        }
+                        cx.notify();
+                    }
+                    InputEvent::PressEnter { shift, .. } => {
+                        let direction = if *shift {
+                            alacritty_terminal::index::Direction::Right
+                        } else {
+                            alacritty_terminal::index::Direction::Left
+                        };
+                        if let Some(find) = this.find.as_mut() {
+                            find.search
+                                .step(&mut this.terminal.read(cx).term().lock(), direction);
+                        }
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+                let _ = window;
+            },
+        );
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.find = Some(FindBar {
+            input,
+            search: crate::search::Search::new(""),
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    /// Closes the find bar; the keyboard goes back to the terminal.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.take().is_some() {
+            self.terminal.read(cx).term().lock().selection = None;
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn render_find(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        use gpui_kit::component::input::Input;
+        use gpui_kit::component::{
+            IconName, Sizable as _,
+            button::{Button, ButtonVariants as _},
+        };
+        use gpui_kit::prelude::FluentBuilder as _;
+        let find = self.find.as_ref()?;
+        let theme = cx.theme();
+        Some(
+            div()
+                .absolute()
+                .top_1()
+                .right_3()
+                .flex()
+                .items_center()
+                .gap_1()
+                .p_1()
+                .rounded(theme.radius)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.popover)
+                .shadow_md()
+                .text_size(px(12.))
+                .font_family(theme.font_family.clone())
+                .capture_action(cx.listener(
+                    |this, _: &gpui_kit::component::input::Escape, window, cx| {
+                        this.close_find(window, cx);
+                        cx.stop_propagation();
+                    },
+                ))
+                .child(div().w(px(200.)).child(Input::new(&find.input).small()))
+                .when(find.search.missing(), |this| {
+                    this.child(
+                        div()
+                            .px_1()
+                            .text_color(theme.muted_foreground)
+                            .child("No matches"),
+                    )
+                })
+                .child(
+                    Button::new("terminal-find-close")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .tooltip("Close (Esc)")
+                        .accessibility_label("Close find")
+                        .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     pub fn terminal(&self) -> &Entity<Terminal> {
         &self.terminal
     }
 
-    fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Keys typed in the find bar are its own.
+        if !self.focus_handle.is_focused(window) {
+            return;
+        }
         // Plain text is left to the text input (`replace_text_in_range`).
         if is_text(&event.keystroke) || !self.composing.is_empty() {
             return;
@@ -97,10 +226,15 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn key_action(&mut self, action: &crate::TerminalKey, _: &mut Window, cx: &mut Context<Self>) {
+    fn key_action(
+        &mut self,
+        action: &crate::TerminalKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Enter while composing commits the text in the input method; it
-        // must not also run the half-typed line.
-        if !self.composing.is_empty() {
+        // must not also run the half-typed line. Keys of the find bar are its own.
+        if !self.composing.is_empty() || !self.focus_handle.is_focused(window) {
             return;
         }
         self.typed.clear();
@@ -157,6 +291,19 @@ impl TerminalView {
         let Some((point, side)) = self.cell_at(event.position, cx) else {
             return;
         };
+        // ⌘-click (Ctrl-click off macOS) opens a link instead of selecting.
+        let opens = if cfg!(target_os = "macos") {
+            event.modifiers.platform
+        } else {
+            event.modifiers.control
+        };
+        if opens {
+            let text = self.terminal.read(cx).line_text(point.line);
+            if let Some(link) = crate::links::link_at(&text, point.column.0) {
+                cx.emit(TerminalViewEvent::Open(link));
+                return;
+            }
+        }
         let kind = match event.click_count {
             2 => SelectionType::Semantic,
             3.. => SelectionType::Lines,
@@ -447,14 +594,15 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::ask))
+            .on_action(cx.listener(Self::open_find))
             .on_scroll_wheel(cx.listener(Self::scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .relative()
             .size_full()
-            .px_2()
-            .py_1()
+            .px_3()
+            .py_2()
             .bg(background)
             .overflow_hidden()
             .font_family(base.family.clone())
@@ -472,6 +620,7 @@ impl Render for TerminalView {
                             .child(StyledText::new(line.text).with_runs(line.runs))
                     })),
             )
+            .children(self.render_find(cx))
     }
 }
 

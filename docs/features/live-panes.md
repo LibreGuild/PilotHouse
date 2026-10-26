@@ -4,10 +4,12 @@ Crate: `ph-media`. The browser and device panes share one pattern: a **frame sou
 
 ## The floating toolbar
 
+It sits at the bottom centre of the pane. Drag it by its grip anywhere over the picture, so it hides less of what you look at (double-click the grip to put it back), or fold it to a single button.
+
 | Tool | What it does |
 |---|---|
 | Use the app | Pointer and keys go to the page or device |
-| Pick an element | The next click describes the element under it (web: selector, text, style, HTML; Android: class, id, text, bounds), outlines it and attaches it to the chat |
+| Pick an element | The next click describes the element under it (web: selector, text, style, the CSS that shapes it — box model, flex, borders, type — the source file and line when a dev build tells (React before 19, Vue, Svelte, `data-source`), and HTML; Android: class, id, text, bounds), outlines it and attaches it to the chat |
 | Box, arrow, pen, pin | Marks in red. Pins are numbered (1, 2, 3…) so a message can refer to them. Undo and clear appear once there are marks |
 | Capture (⌘⇧S) | The frame with the marks burned in, at full resolution, attached to the chat with a note explaining the marks |
 | Record | Frames are written to a GIF as they arrive (downscaled to 720 px, at most 8 per second, up to 10 minutes), on a worker thread, so memory stays flat. Stopping attaches 4 evenly spaced frames and the GIF's path |

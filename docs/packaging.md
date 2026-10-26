@@ -21,6 +21,28 @@ Everything lands in `dist/` (git-ignored). The version comes from `Cargo.toml` (
 
 Each build job attests its files ([build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations)), and the release carries `SHA256SUMS`. Check a download with `gh attestation verify <file> -R LibreGuild/PilotHouse`.
 
+## Updates
+
+Each release also carries `latest.json` (written by `scripts/package/latest-json.py` in the publish job) and `PilotHouse-macOS-universal.zip` (the app, for macOS updates). `latest.json` names the version and, per kind of install, the file to download with its SHA-256 and size:
+
+```json
+{ "version": "0.3.0",
+  "platforms": { "macos-universal": { "url": "https://github.com/LibreGuild/PilotHouse/releases/download/v0.3.0/PilotHouse-macOS-universal.zip", "sha256": "…", "size": 123 } } }
+```
+
+PilotHouse (`ph_workspace::updates`) reads `releases/latest/download/latest.json` at start and every six hours (*Settings → About → Updates* turns it off), downloads the file for how it was installed, refuses it unless it comes from this repository's release downloads and matches its SHA-256, unpacks it into `<data dir>/updates/<version>/`, and puts it in place when the app quits, or at once with **Restart to update** (title bar and Settings):
+
+| Installed as | Detected by | Update |
+|---|---|---|
+| macOS `PilotHouse.app` | the program is inside an `.app` | the app is moved aside, the new one moved in (the old one comes back if that fails) |
+| Windows installer | `Uninstall.exe` beside the program | the new installer runs silently (`/S`) |
+| Windows portable | `LICENSE` beside the program, folder writable | the zip is unpacked over the folder |
+| Linux AppImage | `$APPIMAGE` | the new AppImage replaces it |
+| Linux tarball | `pilothouse.desktop` beside the program, folder writable | the new binary replaces it |
+| `.deb`, a build from source | — | the title bar says a version is available and links to the release |
+
+A small script (`sh`, PowerShell on Windows) waits for PilotHouse to quit, then replaces it and, after *Restart to update*, starts it again. Updates are not signed beyond the checksum: they are as trustworthy as the release page itself (HTTPS from GitHub, this repository only). Debug builds can be pointed at a test release with `PILOTHOUSE_UPDATE_MANIFEST` (and `PILOTHOUSE_UPDATE_TEST_BUNDLE` for a stand-in app).
+
 ## Signing
 
 The builds are not code-signed: that needs a paid Apple Developer ID and a Windows code-signing certificate. Until then, macOS asks once (*Open Anyway* in Privacy & Security) and Windows SmartScreen may warn (*More info → Run anyway*); the release notes say so. The checksums and attestations are how a download is verified.

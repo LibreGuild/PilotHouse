@@ -249,13 +249,22 @@ impl BrowserPanel {
                     )
                 });
                 let tag = element["tag"].as_str().unwrap_or("element");
-                let text = format!(
-                    "Element on {url}\nSelector: {}\nText: {}\nStyle: {}\n\n```html\n{}\n```",
+                let mut text = format!(
+                    "Element on {url}\nSelector: {}\nText: {}\nStyle: {}",
                     element["selector"].as_str().unwrap_or_default(),
                     element["text"].as_str().unwrap_or_default(),
                     element["styles"].as_str().unwrap_or_default(),
-                    element["html"].as_str().unwrap_or_default(),
                 );
+                if let Some(css) = element["css"].as_str().filter(|css| !css.is_empty()) {
+                    text.push_str(&format!("\nCSS: {css}"));
+                }
+                if let Some(source) = element["source"].as_str() {
+                    text.push_str(&format!("\nSource: {source}"));
+                }
+                text.push_str(&format!(
+                    "\n\n```html\n{}\n```",
+                    element["html"].as_str().unwrap_or_default()
+                ));
                 cx.emit(ToChat::Text {
                     label: format!("<{tag}> element"),
                     text,
@@ -749,15 +758,7 @@ impl Render for BrowserPanel {
                     .children(overlay)
                     .children(self.render_dialog(cx))
                     .when(show_tools, |this| {
-                        this.child(
-                            h_flex()
-                                .absolute()
-                                .bottom_3()
-                                .left_0()
-                                .right_0()
-                                .justify_center()
-                                .child(self.tools.clone()),
-                        )
+                        this.child(div().absolute().inset_0().child(self.tools.clone()))
                     }),
             )
             .child(self.render_drawer(cx))

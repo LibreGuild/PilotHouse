@@ -49,6 +49,34 @@ pub fn pick(x: f32, y: f32) -> String {
     text: labelOf(el),
     html: el.outerHTML.slice(0, 800),
     styles: (() => {{ const s = getComputedStyle(el); return `${{s.display}}; ${{s.width}} × ${{s.height}}; font ${{s.fontSize}} ${{s.fontFamily.split(',')[0]}}; color ${{s.color}}; background ${{s.backgroundColor}}`; }})(),
+    css: (() => {{
+      const s = getComputedStyle(el);
+      // Only what is not the default (`display` is in `styles` already).
+      const keep = ['position', 'flex-direction', 'align-items', 'justify-content', 'gap',
+        'margin', 'padding', 'border', 'border-radius', 'box-shadow', 'font-weight', 'line-height',
+        'text-align', 'opacity', 'z-index', 'overflow'];
+      const quiet = ['none', 'normal', 'auto', 'static', '0px', '1', 'visible', 'start', 'stretch', '400', 'row'];
+      return keep.map(k => [k, s.getPropertyValue(k)])
+        .filter(([, v]) => v && !quiet.includes(v) && !/^0px none\b/.test(v))
+        .map(([k, v]) => `${{k}}: ${{v}}`).join('; ');
+    }})(),
+    source: (() => {{
+      // Where the element comes from, when the page is a dev build that
+      // says: React (before 19), Vue, Svelte, or a data-source attribute.
+      for (let n = el; n && n.nodeType === 1; n = n.parentElement) {{
+        const svelte = n.__svelte_meta;
+        if (svelte && svelte.loc) return `${{svelte.loc.file}}:${{svelte.loc.line}}`;
+        const fiberKey = Object.keys(n).find(k => k.startsWith('__reactFiber$'));
+        if (fiberKey) for (let f = n[fiberKey]; f; f = f.return) {{
+          const s = f._debugSource; if (s) return `${{s.fileName}}:${{s.lineNumber}}`;
+        }}
+        const vue = n.__vueParentComponent;
+        if (vue && vue.type && vue.type.__file) return vue.type.__file;
+        const attr = n.getAttribute('data-source') || n.getAttribute('data-inspector-relative-path');
+        if (attr) return attr;
+      }}
+      return null;
+    }})(),
     rect: {{ x: r.x, y: r.y, width: r.width, height: r.height }},
   }};
 }})()"#

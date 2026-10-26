@@ -12,13 +12,16 @@
 
 mod keys;
 mod palette;
+mod search;
 mod terminal;
 mod terminal_panel;
 mod terminal_view;
 mod workspace_terminals;
 
-pub use terminal::{Terminal, TerminalEvent};
-pub use terminal_panel::{TerminalPanel, TerminalPanelEvent};
+pub mod links;
+pub mod program_status;
+pub use terminal::{AgentBadge, Terminal, TerminalEvent};
+pub use terminal_panel::{HasTranscript, TerminalPanel, TerminalPanelEvent};
 pub use terminal_view::{TerminalView, TerminalViewEvent};
 pub use workspace_terminals::{TerminalHub, WorkspaceTerminals};
 
@@ -35,6 +38,8 @@ actions!(
         TerminalCopy,
         /// Send the selected text (an error, a stack trace) to the chat (⌘L).
         TerminalAsk,
+        /// Find text in the terminal's history (⌘F; Ctrl+Shift+F off macOS).
+        TerminalFind,
     ]
 );
 
@@ -57,6 +62,15 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-v", TerminalPaste, context),
         KeyBinding::new(copy, TerminalCopy, context),
         KeyBinding::new("secondary-l", TerminalAsk, context),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-f"
+            } else {
+                "ctrl-shift-f"
+            },
+            TerminalFind,
+            context,
+        ),
     ]);
     cx.bind_keys(
         ["enter", "shift-enter", "escape", "tab", "shift-tab"]

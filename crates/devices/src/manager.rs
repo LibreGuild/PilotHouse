@@ -328,6 +328,18 @@ impl DeviceManager {
         })
     }
 
+    /// Forgets a Wi-Fi device (`adb disconnect`).
+    pub fn disconnect(&self, serial: &str, cx: &App) {
+        let Some(adb) = self.adb.clone() else { return };
+        let serial = serial.to_string();
+        cx.background_spawn(async move {
+            if let Err(err) = adb.disconnect(&serial) {
+                tracing::warn!("disconnecting {serial} failed: {err:#}");
+            }
+        })
+        .detach();
+    }
+
     pub fn stop_emulator(&self, serial: &str, cx: &App) {
         let Some(adb) = self.adb.clone() else { return };
         let serial = serial.to_string();

@@ -1,8 +1,9 @@
 //! Completing mentions in the composer: `@` offers the live sources
 //! (`@screenshot`, `@log`, `@test-run`), definitions (`@path:line`), pull
-//! requests (`@pr:12`) and files; `#` offers board cards. What is inserted
-//! is the plain mention text the composer already understands (see
-//! [`crate::attachments::mentions`]).
+//! requests (`@pr:12`) and files; `#` offers board cards; `/` at the start
+//! of a message offers the agent's commands (`/review`, `/compact`…). What is
+//! inserted is the plain text the composer and the agent already understand
+//! (see [`crate::attachments::mentions`]).
 
 use std::ops::Range;
 
@@ -12,7 +13,7 @@ pub const LIMIT: usize = 8;
 /// The mention being typed at the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Typing {
-    /// `@` or `#`.
+    /// `@`, `#` or `/`.
     pub trigger: char,
     /// What follows the trigger, up to the cursor.
     pub query: String,
@@ -36,7 +37,8 @@ pub fn typing_at(text: &str, cursor: usize) -> Option<Typing> {
         .map(|(ix, _)| ix)?;
     let word = &before[start..];
     let trigger = word.chars().next()?;
-    if !matches!(trigger, '@' | '#') {
+    // A command only opens a message.
+    if !(matches!(trigger, '@' | '#') || (trigger == '/' && before[..start].trim().is_empty())) {
         return None;
     }
     let query = word[trigger.len_utf8()..].to_string();
@@ -69,6 +71,8 @@ pub struct Extra<'a> {
     pub symbols: &'a [ph_files::symbols::Symbol],
     /// Open pull requests: number and title.
     pub pulls: &'a [(u64, String)],
+    /// The agent's commands: name (without `/`) and description.
+    pub commands: &'a [(String, String)],
 }
 
 /// What to offer for `typing`, best first.
@@ -80,6 +84,34 @@ pub fn suggestions(
 ) -> Vec<Suggestion> {
     let query = typing.query.as_str();
     match typing.trigger {
+        '/' => {
+            let lower = query.to_lowercase();
+            let mut matched: Vec<(i32, &(String, String))> = extra
+                .commands
+                .iter()
+                .filter_map(|command| {
+                    let name = command.0.to_lowercase();
+                    if lower.is_empty() {
+                        Some((0, command))
+                    } else if name.starts_with(&lower) {
+                        Some((1_000 - name.len() as i32, command))
+                    } else {
+                        ph_files::fuzzy::fuzzy_match(&lower, &name)
+                            .map(|found| (found.score, command))
+                    }
+                })
+                .collect();
+            matched.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.0.cmp(&b.1.0)));
+            matched
+                .into_iter()
+                .take(LIMIT)
+                .map(|(_, (name, description))| Suggestion {
+                    label: format!("/{name}"),
+                    detail: description.clone(),
+                    insert: format!("/{name} "),
+                })
+                .collect()
+        }
         '#' => {
             let lower = query.to_lowercase();
             let mut matched: Vec<(i32, &(i64, String))> = cards
@@ -275,6 +307,23 @@ mod tests {
     }
 
     #[test]
+    fn commands_only_open_a_message() {
+        let commands = [
+            ("review".to_string(), "Review the changes".to_string()),
+            ("compact".to_string(), "Summarize the chat".to_string()),
+        ];
+        let extra = Extra {
+            commands: &commands,
+            ..Extra::default()
+        };
+        let typing = typing_at("/rev", 4).unwrap();
+        let found = suggestions(&typing, &[] as &[&str], &[], &extra);
+        assert_eq!(found[0].insert, "/review ");
+        assert!(typing_at("fix a/b", 7).is_none());
+        assert!(typing_at("see /rev", 8).is_none());
+    }
+
+    #[test]
     fn definitions_and_pull_requests_for_at() {
         let symbol = ph_files::symbols::Symbol {
             name: "parse_csv".into(),
@@ -286,6 +335,7 @@ mod tests {
         let extra = Extra {
             symbols: std::slice::from_ref(&symbol),
             pulls: &pulls,
+            ..Extra::default()
         };
         let found = suggestions(
             &typing_at("@parse", 6).unwrap(),

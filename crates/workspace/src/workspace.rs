@@ -37,6 +37,8 @@ const UNLOAD_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60
 pub enum View {
     #[default]
     Workspaces,
+    /// Every chat at work, waiting or with news, across workspaces.
+    Agents,
     GitHub,
 }
 
@@ -58,8 +60,12 @@ pub struct Workspace {
     pub(crate) expanded: HashSet<ProjectId>,
     pub(crate) show_all: HashSet<ProjectId>,
     pub(crate) runs_open: HashSet<ProjectId>,
+    /// Workspaces whose *Done* chats are listed.
+    pub(crate) done_open: HashSet<ProjectId>,
     /// Pinned chats, as last read (another window may pin one too).
     pub(crate) pinned: Vec<ph_store::sessions::Session>,
+    /// Chats marked done.
+    settled: HashSet<ph_store::sessions::SessionId>,
     /// Sidebar sections folded away (`chats`, `workspaces`).
     pub(crate) folded: HashSet<String>,
     /// The chats of unfolded workspaces whose screen is closed, read again
@@ -138,7 +144,17 @@ impl Workspace {
             expanded: expanded.into_iter().collect(),
             show_all: HashSet::new(),
             runs_open: HashSet::new(),
+            done_open: HashSet::new(),
             pinned: Vec::new(),
+            // Chats deleted since (their ids can be used again) are dropped.
+            settled: {
+                let store = AppState::store(cx);
+                store
+                    .setting::<Vec<ph_store::sessions::SessionId>>(keys::SIDEBAR_SETTLED)
+                    .into_iter()
+                    .filter(|id| store.session(*id).ok().flatten().is_some())
+                    .collect()
+            },
             folded: folded.into_iter().collect(),
             sessions: HashMap::new(),
             spaces: HashMap::new(),
@@ -213,7 +229,7 @@ impl Workspace {
         self.view
     }
 
-    /// Shows the Workspaces or the GitHub view.
+    /// Shows the Workspaces, Agents or GitHub view.
     pub fn set_view(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
         self.view = view;
         if view == View::GitHub {
@@ -299,6 +315,28 @@ impl Workspace {
         }
     }
 
+    /// Shows the terminal agent `pane` runs in (of workspace `project`),
+    /// its news seen.
+    pub(crate) fn open_terminal_agent(
+        &mut self,
+        project: ProjectId,
+        pane: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.view != View::Workspaces {
+            self.set_view(View::Workspaces, window, cx);
+        }
+        self.open_project(project, window, cx);
+        let terminal = crate::terminal_agents::TerminalAgents::find(pane, cx)
+            .and_then(|agent| agent.terminal.upgrade());
+        if let (Some(space), Some(terminal)) = (self.spaces.get(&project).cloned(), terminal) {
+            space.update(cx, |space, cx| space.show_terminal(&terminal, window, cx));
+        }
+        crate::terminal_agents::TerminalAgents::seen(pane, cx);
+        cx.notify();
+    }
+
     /// A new chat in workspace (or Chats space) `project`.
     pub fn new_chat_in(&mut self, project: ProjectId, window: &mut Window, cx: &mut Context<Self>) {
         self.open_project(project, window, cx);
@@ -371,6 +409,36 @@ impl Workspace {
 
     pub(crate) fn is_pinned(&self, id: ph_store::sessions::SessionId) -> bool {
         self.pinned.iter().any(|session| session.id == id)
+    }
+
+    /// Chat `id` was marked done.
+    pub(crate) fn is_settled(&self, id: ph_store::sessions::SessionId) -> bool {
+        self.settled.contains(&id)
+    }
+
+    /// Marks chat `id` (of `project`) done, its news seen; or not done.
+    pub(crate) fn toggle_settled(
+        &mut self,
+        project: ProjectId,
+        id: ph_store::sessions::SessionId,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.settled.remove(&id) {
+            self.settled.insert(id);
+            if let Some(chats) = ph_agent::ChatHub::existing(project, cx) {
+                chats.update(cx, |chats, cx| chats.mark_read(id, cx));
+            }
+        }
+        self.save_settled(cx);
+        cx.notify();
+    }
+
+    fn save_settled(&self, cx: &gpui_kit::App) {
+        let mut ids: Vec<_> = self.settled.iter().copied().collect();
+        ids.sort();
+        if let Err(err) = AppState::store(cx).set_setting(keys::SIDEBAR_SETTLED, &ids) {
+            tracing::warn!("saving the chats marked done failed: {err:#}");
+        }
     }
 
     /// Pins chat `id` to the top of the sidebar, or unpins it.
@@ -507,6 +575,10 @@ impl Workspace {
         if self.is_pinned(id) {
             self.toggle_pin(id, cx);
         }
+        // Its id can be a new chat's later: that one is not done.
+        if self.settled.remove(&id) {
+            self.save_settled(cx);
+        }
         self.read_sessions(cx);
         cx.notify();
     }
@@ -526,6 +598,13 @@ impl Workspace {
     /// Gives the keyboard to the chat in front (the workspace's, or the
     /// GitHub view's), else the window.
     pub(crate) fn focus_front(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The board has no input: the window keeps the keyboard, so its
+        // shortcuts and menus still reach the workspace (a chat of a
+        // workspace not shown would take them nowhere).
+        if self.view == View::Agents {
+            self.focus_handle.focus(window, cx);
+            return;
+        }
         if self.view == View::GitHub {
             let focused = self.github.clone().is_some_and(|github| {
                 github.update(cx, |github, cx| github.focus_chat(window, cx))
@@ -813,12 +892,14 @@ impl Workspace {
     }
 
     /// Adds the folder at `path` and opens it.
+    /// Opens folder `path` as a workspace (adding it the first time); its
+    /// id, unless it could not be added.
     pub fn add_project_path(
         &mut self,
         path: &std::path::Path,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<ProjectId> {
         match AppState::store(cx).add_project(path) {
             Ok(project) => {
                 if !self
@@ -830,12 +911,14 @@ impl Workspace {
                     self.projects_changed(cx);
                 }
                 self.open_project(project.id, window, cx);
+                Some(project.id)
             }
             Err(err) => {
                 window.push_notification(
                     Notification::error(format!("Could not open the folder: {err:#}")),
                     cx,
                 );
+                None
             }
         }
     }
@@ -1104,7 +1187,7 @@ impl Workspace {
         .detach();
     }
 
-    fn toggle_command_palette(
+    pub(crate) fn toggle_command_palette(
         &mut self,
         _: &ToggleCommandPalette,
         window: &mut Window,
@@ -1114,6 +1197,9 @@ impl Workspace {
     }
 
     fn new_session(&mut self, _: &NewSession, window: &mut Window, cx: &mut Context<Self>) {
+        if self.view == View::Agents {
+            self.set_view(View::Workspaces, window, cx);
+        }
         if self.view == View::GitHub {
             if let Some(github) = self.github.clone() {
                 github.update(cx, |github, cx| github.new_chat(window, cx));
@@ -1123,6 +1209,204 @@ impl Workspace {
         self.with_active_space(window, cx, |space, window, cx| {
             space.new_session(window, cx)
         });
+    }
+
+    /// Asks the new task's name, then makes its branch and worktree off the
+    /// UI thread, opens it as a workspace and runs its setup.
+    fn new_task(&mut self, _: &NewTask, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(space) = self.active_space().cloned() else {
+            return;
+        };
+        let (root, parent_name) = {
+            let space = space.read(cx);
+            let folders = space.project().folders();
+            (
+                folders.get(space.git_folder()).cloned(),
+                space.project().name.clone(),
+            )
+        };
+        let Some(root) = root.filter(|root| ph_git::is_repository(root)) else {
+            window.push_notification(
+                Notification::error("A task needs a workspace whose folder is a Git repository."),
+                cx,
+            );
+            return;
+        };
+        let workspace = cx.entity().downgrade();
+        crate::rename_dialog::ask(
+            "New task",
+            "Create",
+            String::new(),
+            window,
+            cx,
+            move |name, window, cx| {
+                let (root, workspace, parent_name) =
+                    (root.clone(), workspace.clone(), parent_name.clone());
+                let worktrees = ph_store::paths::data_dir().join("tasks");
+                let made = {
+                    let (root, name) = (root.clone(), name.clone());
+                    cx.background_spawn(
+                        async move { crate::tasks::create(&root, &name, &worktrees) },
+                    )
+                };
+                window
+                    .spawn(cx, async move |cx| {
+                        let made = made.await;
+                        _ = workspace.update_in(cx, |workspace, window, cx| match made {
+                            Ok(made) => {
+                                workspace.open_task(&root, &parent_name, &name, made, window, cx)
+                            }
+                            Err(err) => window.push_notification(
+                                Notification::error(format!("Could not make the task: {err:#}")),
+                                cx,
+                            ),
+                        });
+                    })
+                    .detach();
+            },
+        );
+    }
+
+    /// Opens a task just made: a workspace on its worktree, named after it,
+    /// with its setup running.
+    fn open_task(
+        &mut self,
+        root: &std::path::Path,
+        parent_name: &str,
+        name: &str,
+        made: crate::tasks::Created,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = AppState::store(cx).clone();
+        // Only the task's own workspace is renamed and remembered: never the
+        // one in front should the worktree not open.
+        let Some(project) = self.add_project_path(&made.path, window, cx) else {
+            return;
+        };
+        let title = format!("{parent_name} · {}", name.trim());
+        if store.rename_project(project, &title).is_ok() {
+            self.reload_projects(cx);
+        }
+        let port = crate::tasks::free_port(&store);
+        let task = crate::tasks::Task {
+            project,
+            root: root.to_path_buf(),
+            branch: made.branch,
+            base: made.base,
+            start: made.start,
+            path: made.path,
+            port,
+            extras: made.extras,
+        };
+        if let Err(err) = crate::tasks::remember(&store, task) {
+            tracing::warn!("saving the task failed: {err:#}");
+        }
+        let setup = crate::tasks::config(root)
+            .ok()
+            .and_then(|config| config.setup)
+            .unwrap_or_default();
+        let command = if setup.trim().is_empty() {
+            // The number itself: every shell echoes that the same way.
+            crate::tasks::setup_command(&format!("echo \"Port for this task: {port}\""), port)
+        } else {
+            crate::tasks::setup_command(&setup, port)
+        };
+        if let Some(space) = self.spaces.get(&project).cloned() {
+            space.update(cx, |space, cx| {
+                space.run_in_terminal("Setup", &command, window, cx)
+            });
+        }
+        cx.notify();
+    }
+
+    /// Asks, then removes the task in front: its worktree (refused with
+    /// changes not committed), its branch when merged, and its workspace.
+    fn finish_task(&mut self, _: &FinishTask, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.active_project else {
+            return;
+        };
+        let store = AppState::store(cx).clone();
+        let Some(task) = crate::tasks::of(&store, project) else {
+            return;
+        };
+        let checked = {
+            let task = task.clone();
+            cx.background_spawn(async move { crate::tasks::is_merged(&task) })
+        };
+        let workspace = cx.entity().downgrade();
+        window
+            .spawn(cx, async move |cx| {
+                let merged = checked.await;
+                _ = workspace.update_in(cx, |_, window, cx| {
+                    let description = format!(
+                        "Removes the worktree at {} and this workspace. {}",
+                        ph_ui::platform::display_path(&task.path),
+                        if merged {
+                            format!(
+                                "{} is merged into {}, so it is deleted too.",
+                                task.branch, task.base
+                            )
+                        } else {
+                            format!("The branch {} stays.", task.branch)
+                        }
+                    );
+                    let workspace = cx.entity().downgrade();
+                    window.open_alert_dialog(cx, move |dialog, _, _| {
+                        let (task, workspace, store) =
+                            (task.clone(), workspace.clone(), store.clone());
+                        dialog
+                            .confirm()
+                            .title("Finish the task?")
+                            .description(description.clone())
+                            .button_props(
+                                gpui_kit::component::dialog::DialogButtonProps::default()
+                                    .ok_text("Finish task"),
+                            )
+                            .on_ok(move |_, window, cx| {
+                                let (task, workspace, store) =
+                                    (task.clone(), workspace.clone(), store.clone());
+                                let done = {
+                                    let task = task.clone();
+                                    cx.background_spawn(async move {
+                                        crate::tasks::finish(&task, merged)
+                                    })
+                                };
+                                window
+                                    .spawn(cx, async move |cx| {
+                                        let done = done.await;
+                                        _ = workspace.update_in(cx, |workspace, window, cx| {
+                                            if let Err(err) = &done
+                                                && task.path.exists()
+                                            {
+                                                // The sentence for the user, without Git's own.
+                                                window.push_notification(
+                                                    Notification::error(err.to_string()),
+                                                    cx,
+                                                );
+                                                return;
+                                            }
+                                            if let Err(err) = done {
+                                                window.push_notification(err.to_string(), cx);
+                                            }
+                                            let _ = crate::tasks::forget(&store, task.project);
+                                            workspace.remove_project(task.project, window, cx);
+                                        });
+                                    })
+                                    .detach();
+                                true
+                            })
+                    });
+                });
+            })
+            .detach();
+    }
+
+    fn side_chat(&mut self, _: &SideChat, window: &mut Window, cx: &mut Context<Self>) {
+        if self.view != View::Workspaces {
+            return;
+        }
+        self.with_active_space(window, cx, |space, window, cx| space.side_chat(window, cx));
     }
 
     fn switch_to(
@@ -1242,6 +1526,12 @@ impl Render for Workspace {
             .then(|| self.github.clone())
             .flatten();
         let content = match (&github, self.active_space()) {
+            _ if self.view == View::Agents => div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .child(crate::agents_board::render(self, cx))
+                .into_any_element(),
             (Some(github), _) => div()
                 .flex_1()
                 .min_w_0()
@@ -1271,6 +1561,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::rename_workspace))
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::new_session))
+            .on_action(cx.listener(Self::side_chat))
+            .on_action(cx.listener(Self::new_task))
+            .on_action(cx.listener(Self::finish_task))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_context_panel))
             .on_action(cx.listener(Self::toggle_zoom))
@@ -1284,6 +1577,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &ShowGitHubView, window, cx| {
                 this.set_view(View::GitHub, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowAgentsView, window, cx| {
+                this.set_view(View::Agents, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowChanges, window, cx| {
                 this.show_tab(ContextTab::Changes, window, cx)
@@ -1379,14 +1675,7 @@ impl Render for Workspace {
             .child(
                 TitleBar::new()
                     .h(ph_theme::layout::TITLE_BAR_HEIGHT)
-                    .bg(title_bar::background(
-                        self.active_space()
-                            .map(|space| space.read(cx).project())
-                            .filter(|project| {
-                                self.view == View::Workspaces && project.is_workspace()
-                            }),
-                        cx,
-                    ))
+                    .bg(cx.theme().title_bar)
                     .child(title_bar::render(self, window, cx)),
             )
             .child(

@@ -31,6 +31,7 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, div, px,
 };
 use jiff::{ToSpan as _, Zoned};
+use ph_agent::ChatState;
 use ph_store::projects::{Project, ProjectId};
 use ph_store::sessions::{Session, SessionId};
 use ph_theme::layout;
@@ -95,81 +96,65 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
         )
 }
 
-/// New chat, prominent in the accent, and a search field. Both are rows
-/// of the list's width, with their shortcut on the right.
+/// New chat and search, as plain rows with their shortcut on the right:
+/// they lead the list without pulling the eye from the work.
 fn top(cx: &App) -> impl IntoElement {
-    let theme = cx.theme();
-    let shortcut =
-        |keys: &'static str, color: Hsla| div().flex_none().text_xs().text_color(color).child(keys);
+    let row = |id: &'static str,
+               icon: Icon,
+               label: &'static str,
+               keys: (&'static str, &'static str),
+               cx: &App| {
+        let theme = cx.theme();
+        h_flex()
+            .id(id)
+            .h_7()
+            .px_2()
+            .gap_2()
+            .rounded(theme.radius)
+            .cursor_pointer()
+            .text_sm()
+            .text_color(theme.sidebar_foreground)
+            .hover(|style| style.bg(theme.sidebar_accent))
+            .child(icon.small().text_color(theme.muted_foreground))
+            .child(div().flex_1().child(label))
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(theme.muted_foreground.opacity(0.8))
+                    .child(if cfg!(target_os = "macos") {
+                        keys.0
+                    } else {
+                        keys.1
+                    }),
+            )
+            .aria_label(label)
+            .test_support()
+    };
     v_flex()
         .flex_none()
         .pr_1()
         .pt_1()
-        .pb_2()
-        .gap_1p5()
+        .pb_1()
         .child(
-            h_flex()
-                .id("sidebar-new-chat")
-                .h_8()
-                .px_2p5()
-                .gap_2()
-                .rounded(theme.radius_lg)
-                .cursor_pointer()
-                // A calm surface with the accent only in its icon: it leads
-                // the sidebar without pulling the eye from the chat.
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.sidebar_accent.opacity(0.55))
-                .text_color(theme.foreground)
-                .text_sm()
-                .font_weight(gpui_kit::FontWeight::MEDIUM)
-                .hover(|style| style.bg(theme.sidebar_accent))
-                .active(|style| style.bg(theme.sidebar_accent.opacity(0.8)))
-                .tooltip(|window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new("New chat in the workspace in front")
-                        .build(window, cx)
-                })
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(NewSession), cx))
-                .child(Icon::new(Icons::SquarePen).small().text_color(theme.link))
-                .child(div().flex_1().child("New chat"))
-                .child(shortcut(
-                    if cfg!(target_os = "macos") {
-                        "⌘N"
-                    } else {
-                        "Ctrl+N"
-                    },
-                    theme.muted_foreground.opacity(0.8),
-                ))
-                .aria_label("New chat")
-                .test_support(),
+            row(
+                "sidebar-new-chat",
+                Icon::new(Icons::SquarePen),
+                "New chat",
+                ("⌘N", "Ctrl+N"),
+                cx,
+            )
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(NewSession), cx)),
         )
         .child(
-            h_flex()
-                .id("sidebar-search-chats")
-                .h_8()
-                .px_2p5()
-                .gap_2()
-                .rounded(theme.radius_lg)
-                .cursor_pointer()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.background.opacity(0.5))
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .hover(|style| style.border_color(theme.ring.opacity(0.6)))
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(SearchChats), cx))
-                .child(Icon::new(IconName::Search).small())
-                .child(div().flex_1().child("Search chats"))
-                .child(shortcut(
-                    if cfg!(target_os = "macos") {
-                        "⌘⇧K"
-                    } else {
-                        "Ctrl+Shift+K"
-                    },
-                    theme.muted_foreground.opacity(0.8),
-                ))
-                .aria_label("Search chats")
-                .test_support(),
+            row(
+                "sidebar-search-chats",
+                Icon::new(IconName::Search),
+                "Search chats",
+                ("⌘⇧K", "Ctrl+Shift+K"),
+                cx,
+            )
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(SearchChats), cx)),
         )
 }
 
@@ -207,6 +192,7 @@ fn pinned_rows(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyEle
             ChatRow {
                 nested: false,
                 pinned: true,
+                settled: workspace.is_settled(session.id),
                 place,
             },
             chats.as_ref(),
@@ -280,17 +266,12 @@ fn workspace_row(
     let dark = cx.theme().is_dark();
     let color = ph_ui::workspace_color(project.shade(ph_ui::WORKSPACE_COLORS.len()), dark);
     let status = workspace.status(id);
-    let marker: Option<AnyElement> = if status.waiting > 0 {
-        Some(dot(cx.theme().warning).into_any_element())
-    } else if status.failed {
-        Some(dot(cx.theme().danger).into_any_element())
-    } else if status.working > 0 {
-        Some(Spinner::new().xsmall().into_any_element())
-    } else if status.unseen > 0 {
-        Some(dot(cx.theme().success).into_any_element())
-    } else {
-        None
-    };
+    // The label says what is going on; a green dot alone says there is
+    // news nobody has looked at.
+    let marker: Option<AnyElement> =
+        (status.waiting == 0 && !status.failed && status.working == 0 && status.unseen > 0)
+            .then(|| dot(cx.theme().success).into_any_element());
+    let label = status_label(&status, cx);
     let summary = status.summary(cx).map(|(text, _)| text);
     let tooltip = match (summary, ix < 9) {
         (Some(text), true) => format!("{} · {text} ({})", project.name, switch_hint(ix)),
@@ -304,6 +285,7 @@ fn workspace_row(
     h_flex()
         .id(("sidebar-workspace", id as u64))
         .group(group.clone())
+        .relative()
         .mt_0p5()
         .h_7()
         .pl_0p5()
@@ -353,9 +335,19 @@ fn workspace_row(
                 .child(project.name.clone()),
         )
         .children(marker)
+        .children(label.map(|(text, color)| {
+            div()
+                .flex_none()
+                .pr_1()
+                .text_xs()
+                .text_color(color)
+                .group_hover(group.clone(), |style| style.invisible())
+                .child(text)
+        }))
         .child(
             h_flex()
-                .flex_none()
+                .absolute()
+                .right_0p5()
                 .gap_0p5()
                 .invisible()
                 .group_hover(group, |style| style.visible())
@@ -419,10 +411,20 @@ fn workspace_menu(
                     )
                 })
             };
-            menu.item(item("Add a folder…", Icons::FolderPlus, || {
-                Box::new(AddFolderToWorkspace)
-            }))
-            .item(item("Rename…", Icons::Pencil, || {
+            let task = crate::tasks::of(crate::AppState::store(cx), id);
+            let menu = menu
+                .item(item("Add a folder…", Icons::FolderPlus, || {
+                    Box::new(AddFolderToWorkspace)
+                }))
+                .item(item("New task…", Icons::GitBranch, || {
+                    Box::new(crate::actions::NewTask)
+                }))
+                .when(task.is_some(), |menu| {
+                    menu.item(item("Finish task…", Icons::Check, || {
+                        Box::new(crate::actions::FinishTask)
+                    }))
+                });
+            menu.item(item("Rename…", Icons::Pencil, || {
                 Box::new(RenameWorkspace)
             }))
             .item(item("Open in new window", Icons::ExternalLink, || {
@@ -457,6 +459,20 @@ fn chat_rows(
     let nested = limit.is_some();
     let chats = ph_agent::ChatHub::existing(project, cx);
     let (runs, own): (Vec<Session>, Vec<Session>) = sessions.into_iter().partition(is_automated);
+    // Chats marked done list apart, unless at work again.
+    let busy = |session: &Session| {
+        chats.as_ref().is_some_and(|chats| {
+            chats
+                .read(cx)
+                .summary(session.id, cx)
+                .is_some_and(|summary| {
+                    matches!(summary.state, ChatState::Working | ChatState::NeedsYou)
+                })
+        })
+    };
+    let (done, own): (Vec<Session>, Vec<Session>) = own
+        .into_iter()
+        .partition(|session| workspace.is_settled(session.id) && !busy(session));
     let show_all = workspace.show_all.contains(&project);
     let shown = match limit {
         Some(limit) if !show_all => own.len().min(limit),
@@ -465,7 +481,7 @@ fn chat_rows(
     let entity = cx.entity().downgrade();
     let today = Zoned::now();
     let mut rows = Vec::new();
-    if own.is_empty() && runs.is_empty() {
+    if own.is_empty() && runs.is_empty() && done.is_empty() {
         rows.push(
             div()
                 .when(nested, |this| this.pl_6())
@@ -499,6 +515,7 @@ fn chat_rows(
             ChatRow {
                 nested,
                 pinned: workspace.is_pinned(session.id),
+                settled: workspace.is_settled(session.id),
                 place: None,
             },
             chats.as_ref(),
@@ -529,6 +546,53 @@ fn chat_rows(
             })
             .into_any_element(),
         );
+    }
+    if !done.is_empty() {
+        let open = workspace.done_open.contains(&project);
+        let toggle = entity.clone();
+        rows.push(
+            link(
+                SharedString::from(format!("sidebar-done-{project}")),
+                format!("Done · {}", done.len()),
+                nested,
+                cx,
+            )
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .xsmall(),
+            )
+            .on_click(move |_, _, cx| {
+                _ = toggle.update(cx, |workspace, cx| {
+                    if !workspace.done_open.remove(&project) {
+                        workspace.done_open.insert(project);
+                    }
+                    cx.notify();
+                });
+            })
+            .into_any_element(),
+        );
+        if open {
+            for session in &done {
+                rows.push(chat_row(
+                    &entity,
+                    project,
+                    session,
+                    active,
+                    ChatRow {
+                        nested,
+                        pinned: workspace.is_pinned(session.id),
+                        settled: workspace.is_settled(session.id),
+                        place: None,
+                    },
+                    chats.as_ref(),
+                    cx,
+                ));
+            }
+        }
     }
     if !runs.is_empty() {
         let open = workspace.runs_open.contains(&project);
@@ -568,6 +632,7 @@ fn chat_rows(
                     ChatRow {
                         nested,
                         pinned: workspace.is_pinned(session.id),
+                        settled: workspace.is_settled(session.id),
                         place: None,
                     },
                     chats.as_ref(),
@@ -586,6 +651,8 @@ struct ChatRow {
     pinned: bool,
     /// The workspace it belongs to, shown in the Pinned list.
     place: Option<String>,
+    /// Marked done.
+    settled: bool,
 }
 
 fn chat_row(
@@ -599,45 +666,43 @@ fn chat_row(
 ) -> AnyElement {
     let id = session.id;
     let selected = active == Some(id);
-    let (working, waiting) = chats
-        .map(|chats| {
-            let chats = chats.read(cx);
-            (chats.is_working(id, cx), chats.is_waiting(id, cx))
-        })
-        .unwrap_or_default();
-    let open = workspace.clone();
-    let marker: AnyElement = if waiting {
-        div()
-            .flex_none()
-            .size(px(8.))
-            .mx(px(3.))
-            .rounded_full()
-            .bg(cx.theme().warning)
-            .into_any_element()
-    } else if working {
-        Spinner::new().xsmall().into_any_element()
-    } else {
-        Icon::new(if row.pinned {
-            Icons::Pin
-        } else {
-            Icons::MessageSquare
-        })
-        .xsmall()
-        .text_color(cx.theme().muted_foreground)
-        .into_any_element()
+    let summary = chats.and_then(|chats| chats.read(cx).summary(id, cx));
+    let state = summary
+        .as_ref()
+        .map_or(ChatState::Idle, |summary| summary.state);
+    let busy = matches!(state, ChatState::Working | ChatState::NeedsYou);
+    let agent = summary
+        .as_ref()
+        .map(|summary| summary.agent)
+        .or_else(|| ph_agent::agents::find(&session.agent_id));
+    let line = summary
+        .and_then(|summary| summary.line)
+        .filter(|line| !line.is_empty());
+    let line_color = match state {
+        ChatState::NeedsYou => cx.theme().warning,
+        ChatState::Failed => cx.theme().danger,
+        _ => cx.theme().muted_foreground,
     };
+    // Shown under the title when there is something to say: where a
+    // pinned chat lives, and what it is doing or said last.
+    let second = match (row.place, line) {
+        (Some(place), Some(line)) => Some(format!("{place} · {line}")),
+        (Some(place), None) => Some(place),
+        (None, line) => line,
+    };
+    let open = workspace.clone();
     let group = SharedString::from(format!("chat-row-{id}"));
-    h_flex()
+    let indent = if row.nested { px(22.) } else { px(6.) };
+    v_flex()
         .id(SharedString::from(format!("chat-{id}")))
         .group(group.clone())
-        .h_7()
-        .when(row.nested, |this| this.pl_6())
-        .when(!row.nested, |this| this.pl_2())
-        .pr_0p5()
-        .gap_2()
+        .relative()
+        .pl(indent)
+        .pr_1()
+        .py_1()
+        .gap_0p5()
         .rounded(cx.theme().radius)
         .cursor_pointer()
-        .text_sm()
         .when(selected, |this| {
             this.bg(cx.theme().sidebar_accent)
                 .text_color(cx.theme().sidebar_accent_foreground)
@@ -650,30 +715,48 @@ fn chat_row(
                 workspace.open_chat(project, id, window, cx)
             });
         })
-        .child(marker)
         .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .child(session.title.clone()),
+            h_flex()
+                .gap_2()
+                .text_sm()
+                .child(state_glyph(state, row.pinned, cx))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .when(
+                            matches!(state, ChatState::Done | ChatState::NeedsYou),
+                            |this| this.font_weight(gpui_kit::FontWeight::MEDIUM),
+                        )
+                        .child(session.title.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .group_hover(group.clone(), |style| style.invisible())
+                        .child(age(session.updated_at)),
+                ),
         )
-        .when_some(row.place, |this, place| {
+        .when_some(second, |this, second| {
             this.child(
-                div()
-                    .flex_none()
-                    .max_w(px(80.))
-                    .truncate()
+                h_flex()
+                    .pl(px(22.))
+                    .gap_1p5()
                     .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .group_hover(group.clone(), |style| style.invisible())
-                    .child(place),
+                    .text_color(line_color)
+                    .children(agent.map(|agent| agent.mark(px(12.))))
+                    .child(div().flex_1().min_w_0().truncate().child(second)),
             )
         })
         .child(
             div()
                 .id(SharedString::from(format!("chat-actions-{id}")))
-                .flex_none()
+                .absolute()
+                .top(px(3.))
+                .right_0p5()
                 .invisible()
                 .group_hover(group, |style| style.visible())
                 // The menu opens without opening the chat.
@@ -682,20 +765,98 @@ fn chat_row(
                     workspace.clone(),
                     project,
                     session.clone(),
-                    row.pinned,
-                    working || waiting,
+                    (row.pinned, row.settled),
+                    busy,
                 )),
         )
         .test_support()
         .into_any_element()
 }
 
-/// What can be done to a chat: pin, rename, delete (not while it works).
+/// A chat's state as a 14 px glyph: a spinner while it works, amber when
+/// it needs the user, red when it failed, green when there is news; quiet
+/// otherwise.
+fn state_glyph(state: ChatState, pinned: bool, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let frame = || {
+        div()
+            .flex_none()
+            .size(px(14.))
+            .flex()
+            .items_center()
+            .justify_center()
+    };
+    match state {
+        ChatState::Working => frame()
+            .child(Spinner::new().xsmall().color(theme.info))
+            .into_any_element(),
+        ChatState::NeedsYou => frame()
+            .child(crate::agents_board::question_mark(cx))
+            .into_any_element(),
+        ChatState::Failed => frame().child(dot(theme.danger)).into_any_element(),
+        ChatState::Done => frame().child(dot(theme.success)).into_any_element(),
+        ChatState::Idle => frame()
+            .child(
+                Icon::new(if pinned {
+                    Icons::Pin
+                } else {
+                    Icons::MessageSquare
+                })
+                .xsmall()
+                .text_color(theme.muted_foreground),
+            )
+            .into_any_element(),
+    }
+}
+
+/// A workspace's most urgent state in a word or two, for its row.
+fn status_label(status: &crate::status::WorkspaceStatus, cx: &App) -> Option<(String, Hsla)> {
+    let theme = cx.theme();
+    if status.waiting > 0 {
+        return Some(("needs you".into(), theme.warning));
+    }
+    if status.failed {
+        return Some(("failing".into(), theme.danger));
+    }
+    if status.working > 0 {
+        return Some((
+            format!("{} working", status.working),
+            theme.muted_foreground,
+        ));
+    }
+    None
+}
+
+/// How long ago `millis` was, in a list's few characters: now, 5m, 3h,
+/// Tue, Oct 3.
+pub(crate) fn age(millis: i64) -> String {
+    let Ok(at) = jiff::Timestamp::from_millisecond(millis) else {
+        return String::new();
+    };
+    let now = jiff::Timestamp::now();
+    let minutes = (now.as_second() - at.as_second()) / 60;
+    match minutes {
+        ..1 => "now".into(),
+        1..60 => format!("{minutes}m"),
+        60..1440 => format!("{}h", minutes / 60),
+        1440..10080 => at
+            .to_zoned(jiff::tz::TimeZone::system())
+            .strftime("%a")
+            .to_string(),
+        _ => at
+            .to_zoned(jiff::tz::TimeZone::system())
+            .strftime("%b %-d")
+            .to_string(),
+    }
+}
+
+/// What can be done to a chat: pin, mark done, rename, delete (not while
+/// it works).
 fn chat_menu(
     workspace: WeakEntity<Workspace>,
     project: ProjectId,
     session: Session,
-    pinned: bool,
+    (pinned, settled): (bool, bool),
     busy: bool,
 ) -> impl IntoElement {
     let id = session.id;
@@ -705,13 +866,27 @@ fn chat_menu(
         .icon(IconName::Ellipsis)
         .accessibility_label("Chat menu")
         .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-            let (pin, rename, delete) = (workspace.clone(), workspace.clone(), workspace.clone());
+            let (pin, settle, rename, delete) = (
+                workspace.clone(),
+                workspace.clone(),
+                workspace.clone(),
+                workspace.clone(),
+            );
             let (rename_session, delete_session) = (session.clone(), session.clone());
             menu.item(
                 PopupMenuItem::new(if pinned { "Unpin" } else { "Pin to top" })
                     .icon(Icon::new(if pinned { Icons::PinOff } else { Icons::Pin }))
                     .on_click(move |_, _, cx| {
                         _ = pin.update(cx, |workspace, cx| workspace.toggle_pin(id, cx));
+                    }),
+            )
+            .item(
+                PopupMenuItem::new(if settled { "Not done" } else { "Mark as done" })
+                    .icon(Icon::new(if settled { Icons::Undo2 } else { Icons::Check }))
+                    .on_click(move |_, _, cx| {
+                        _ = settle.update(cx, |workspace, cx| {
+                            workspace.toggle_settled(project, id, cx)
+                        });
                     }),
             )
             .item(

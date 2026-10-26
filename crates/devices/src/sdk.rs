@@ -46,6 +46,31 @@ impl Sdk {
     }
 }
 
+/// The JDK bundled with Android Studio, which Studio builds with by default.
+/// The JDK on `PATH` may be too new for the project's Gradle or Kotlin
+/// (Gradle fails with just "25" on Java 25), so builds use this one too.
+pub fn studio_jdk() -> Option<PathBuf> {
+    let home = dirs_home();
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let candidates = [
+        Some(PathBuf::from(
+            "/Applications/Android Studio.app/Contents/jbr/Contents/Home",
+        )),
+        home.as_ref()
+            .map(|home| home.join("Applications/Android Studio.app/Contents/jbr/Contents/Home")),
+        program_files.map(|dir| dir.join("Android/Android Studio/jbr")),
+        local.map(|dir| dir.join("Programs/Android Studio/jbr")),
+        Some(PathBuf::from("/opt/android-studio/jbr")),
+        home.as_ref().map(|home| home.join("android-studio/jbr")),
+        Some(PathBuf::from("/snap/android-studio/current/jbr")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|jdk| jdk.join("bin").join(exe("java")).is_file())
+}
+
 fn exe(name: &str) -> String {
     if cfg!(windows) {
         format!("{name}.exe")

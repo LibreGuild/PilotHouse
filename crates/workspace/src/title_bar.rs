@@ -1,7 +1,11 @@
 //! Contents of the window title bar: the app icon, the two views
 //! (Workspaces and GitHub), the command palette trigger, and window-level
-//! toggles. In the Workspaces view the bar wears a faint wash of the
-//! workspace's colour. Workspaces are picked in the sidebar.
+//! toggles. The bar is quiet chrome: plain, so attention stays on the work.
+//! Workspaces are picked in the sidebar.
+//!
+//! On Windows the whole bar is a caption (drag) area for the system, so a
+//! click on it moves the window and a double click maximises it. Every
+//! control here is `occlude`d so its clicks reach the app instead.
 
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
@@ -13,11 +17,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Background, Context, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Rgba, StatefulInteractiveElement as _, Styled as _, Window, div,
-    linear_color_stop, linear_gradient, px,
+    AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
-use ph_store::projects::Project;
 use ph_ui::Icons;
 use ph_ui::MenuButton as _;
 
@@ -41,6 +43,7 @@ pub(crate) fn render(
         .child(app_icon(cx))
         .child(
             Button::new("toggle-sidebar")
+                .occlude()
                 .ghost()
                 .small()
                 .icon(if workspace.is_sidebar_collapsed() {
@@ -58,30 +61,43 @@ pub(crate) fn render(
         .child(
             h_flex()
                 .id("open-command-palette")
+                .role(gpui_kit::accesskit::Role::Button)
+                .aria_label("Search or run a command")
+                .occlude()
                 .w_96()
                 .max_w_1_2()
                 .h_7()
                 .px_2p5()
                 .gap_2()
                 .rounded(cx.theme().radius)
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().background)
+                .bg(cx.theme().muted)
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
                 .cursor_pointer()
-                .hover(|style| style.bg(cx.theme().muted))
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(ToggleCommandPalette), cx)
-                })
+                .hover(|style| style.bg(cx.theme().secondary_hover))
+                // On press, straight to the workspace (see the view tabs).
+                .on_mouse_down(
+                    gpui_kit::MouseButton::Left,
+                    cx.listener(|workspace, _, window, cx| {
+                        cx.stop_propagation();
+                        workspace.toggle_command_palette(&ToggleCommandPalette, window, cx)
+                    }),
+                )
                 .child(Icon::new(IconName::Search).small())
                 .child(div().flex_1().child("Search or run a command"))
                 .when_some(palette_hint, |this, hint| this.child(hint)),
         )
         .child(div().flex_1())
-        .child(crate::inbox::button(&workspace.inbox, cx))
+        .children(update_item(cx))
+        .child(
+            div()
+                .id("inbox-button")
+                .occlude()
+                .child(crate::inbox::button(&workspace.inbox, cx)),
+        )
         .child(
             Button::new("toggle-appearance")
+                .occlude()
                 .ghost()
                 .small()
                 .icon(if dark { IconName::Sun } else { IconName::Moon })
@@ -101,6 +117,7 @@ pub(crate) fn render(
         )
         .child(
             Button::new("toggle-context-panel")
+                .occlude()
                 .ghost()
                 .small()
                 .icon(IconName::PanelRight)
@@ -110,6 +127,7 @@ pub(crate) fn render(
         )
         .child(
             Button::new("open-settings")
+                .occlude()
                 .ghost()
                 .small()
                 .icon(Icons::Settings)
@@ -119,30 +137,29 @@ pub(crate) fn render(
         )
 }
 
-/// The title bar's background: the theme's, washed with the workspace's
-/// colour (none when no workspace is open).
-pub(crate) fn background(project: Option<&Project>, cx: &App) -> Background {
-    let theme = cx.theme();
-    let tint = project.map(|project| {
-        ph_ui::workspace_tint(
-            project.shade(ph_ui::WORKSPACE_COLORS.len()),
-            theme.is_dark(),
-        )
-    });
-    let wash = |color: Hsla| tint.map_or(color, |tint| color.blend(tint));
-    // As gpui-component draws it: a slight fall from the window background.
-    let (bar, back) = (theme.title_bar.to_rgb(), theme.background.to_rgb());
-    let mixed = Hsla::from(Rgba {
-        r: bar.r * 0.55 + back.r * 0.45,
-        g: bar.g * 0.55 + back.g * 0.45,
-        b: bar.b * 0.55 + back.b * 0.45,
-        a: bar.a * 0.55 + back.a * 0.45,
-    });
-    linear_gradient(
-        180.,
-        linear_color_stop(wash(mixed), 0.),
-        linear_color_stop(wash(theme.title_bar), 1.),
-    )
+/// An update, only once there is one: ready to install, waiting to be
+/// downloaded, or (for an install PilotHouse cannot update) on GitHub.
+fn update_item(cx: &App) -> Option<AnyElement> {
+    use crate::updates::{self, Status};
+    let dot = |color| div().size(px(6.)).rounded_full().bg(color);
+    let button =
+        |id: &'static str, label: String| Button::new(id).occlude().ghost().small().label(label);
+    let item = match updates::Updater::status(cx) {
+        Status::Ready { version, .. } => button("update-restart", "Restart to update".into())
+            .child(dot(cx.theme().success))
+            .tooltip(format!(
+                "PilotHouse {version} is downloaded. Restart to install it now; otherwise it installs when you quit."
+            ))
+            .on_click(|_, _, cx| updates::restart_to_update(cx)),
+        Status::Available { version } => button("update-download", format!("Update to {version}"))
+            .tooltip("Download and install the new version")
+            .on_click(|_, _, cx| updates::download_update(cx)),
+        Status::Manual { version } => button("update-manual", format!("{version} available"))
+            .tooltip("This copy cannot update itself: get the new version from GitHub")
+            .on_click(|_, _, cx| cx.open_url(updates::RELEASES_URL)),
+        _ => return None,
+    };
+    Some(item.into_any_element())
 }
 
 /// The app's mark. Off macOS, where there is no menu bar, it opens the
@@ -153,6 +170,7 @@ fn app_icon(_: &App) -> AnyElement {
         return mark.into_any_element();
     }
     Button::new("app-menu")
+        .occlude()
         .ghost()
         .small()
         .child(mark)
@@ -178,20 +196,31 @@ fn app_icon(_: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// The two views, side by side: Workspaces and GitHub (with how many pull
-/// requests wait for the user's review).
+/// The three views, side by side: Workspaces, Agents (how many chats need
+/// the user) and GitHub (how many pull requests wait for the user's review).
 fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let current = workspace.view();
     let waiting = workspace
         .github_view()
         .map_or(0, |github| github.read(cx).waiting_for_review());
-    let wants_you = workspace
+    // Other workspaces with something for the user: amber when an agent
+    // waits for an answer, green when there is only news.
+    let others: Vec<crate::status::WorkspaceStatus> = workspace
         .projects()
         .iter()
         .map(|project| project.id)
         .chain(workspace.chats_space().map(|chats| chats.id))
         .filter(|id| Some(*id) != workspace.active_project_id() || current != View::Workspaces)
-        .any(|id| workspace.status(id).wants_you());
+        .map(|id| workspace.status(id))
+        .collect();
+    let news_color = if others.iter().any(|status| status.waiting > 0) {
+        Some(cx.theme().warning)
+    } else if others.iter().any(|status| status.unseen > 0) {
+        Some(cx.theme().success)
+    } else {
+        None
+    };
+    let this = cx.entity().downgrade();
     let item = |view: View,
                 id: &'static str,
                 label: &'static str,
@@ -202,6 +231,9 @@ fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
         let selected = view == current;
         h_flex()
             .id(id)
+            // Blocks the title bar behind it: pressing here must not start a
+            // window move (which swallows the click if the mouse moves).
+            .occlude()
             .relative()
             .h_6()
             .px_2p5()
@@ -228,31 +260,57 @@ fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
                 gpui_kit::component::tooltip::Tooltip::new(format!("{label} ({hint})"))
                     .build(window, cx)
             })
-            .on_click(move |_, window, cx| {
-                let action: Box<dyn gpui_kit::Action> = match view {
-                    View::Workspaces => Box::new(ShowWorkspacesView),
-                    View::GitHub => Box::new(ShowGitHubView),
-                };
-                window.dispatch_action(action, cx)
+            // On press, like a tab: nothing can come between press and
+            // release to lose it (the mouse moving, a slow frame). Straight
+            // to the workspace, not as an action: an action goes where the
+            // keyboard is, and that can be a view no longer shown.
+            .on_mouse_down(gpui_kit::MouseButton::Left, {
+                let this = this.clone();
+                move |_, window, cx| {
+                    cx.stop_propagation();
+                    _ = this.update(cx, |workspace, cx| workspace.set_view(view, window, cx));
+                }
             })
             .child(Icon::new(icon).small())
             .child(label)
             .children(badge)
             .test_support()
     };
-    let (workspaces_hint, github_hint) = if cfg!(target_os = "macos") {
-        ("⌘⇧E", "⌘⇧G")
+    let (workspaces_hint, agents_hint, github_hint) = if cfg!(target_os = "macos") {
+        ("⌘⇧E", "⌘⇧A", "⌘⇧G")
     } else {
-        ("Ctrl+Shift+E", "Ctrl+Shift+G")
+        ("Ctrl+Shift+E", "Ctrl+Shift+A", "Ctrl+Shift+G")
     };
-    let dot = wants_you.then(|| {
+    // Agents: how many need the user (amber), else how many work.
+    let (needs_you, working) = crate::agents_board::counts(workspace, cx);
+    let agents_badge = if needs_you > 0 {
+        Some(
+            div()
+                .px_1p5()
+                .rounded_full()
+                .bg(cx.theme().warning.opacity(0.2))
+                .text_color(cx.theme().warning)
+                .text_xs()
+                .child(needs_you.to_string())
+                .into_any_element(),
+        )
+    } else {
+        (working > 0).then(|| {
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(working.to_string())
+                .into_any_element()
+        })
+    };
+    let dot = news_color.map(|color| {
         div()
             .absolute()
             .top(px(2.))
             .right(px(2.))
             .size(px(7.))
             .rounded_full()
-            .bg(cx.theme().warning)
+            .bg(color)
             .into_any_element()
     });
     let count = (waiting > 0).then(|| {
@@ -267,6 +325,7 @@ fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
     });
     h_flex()
         .id("view-toggle")
+        .occlude()
         .role(gpui_kit::accesskit::Role::TabList)
         .p_0p5()
         .gap_0p5()
@@ -279,6 +338,15 @@ fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             Icons::LayoutGrid,
             workspaces_hint,
             dot,
+            cx,
+        ))
+        .child(item(
+            View::Agents,
+            "view-agents",
+            "Agents",
+            Icons::Bot,
+            agents_hint,
+            agents_badge,
             cx,
         ))
         .child(item(

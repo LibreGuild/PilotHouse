@@ -13,6 +13,8 @@ pub(crate) mod keys {
     pub const SIDEBAR_EXPANDED: &str = "workspace.sidebar_expanded";
     /// Chats pinned to the top of the sidebar, in pin order.
     pub const SIDEBAR_PINNED: &str = "workspace.sidebar_pinned";
+    /// Chats marked done: listed apart, under *Done*.
+    pub const SIDEBAR_SETTLED: &str = "workspace.sidebar_settled";
     /// Sidebar sections folded away (`chats`, `workspaces`).
     pub const SIDEBAR_FOLDED: &str = "workspace.sidebar_folded";
     pub const DISABLED_FEATURES: &str = "features.disabled";
@@ -32,7 +34,13 @@ impl Global for AppState {}
 impl AppState {
     /// Installs the app state and the saved look-and-feel preferences.
     pub fn install(store: Store, cx: &mut App) {
-        let preferences: Preferences = store.setting(keys::PREFERENCES);
+        let mut preferences: Preferences = store.setting(keys::PREFERENCES);
+        // Sizes saved with older defaults move to the new ones, once.
+        if preferences.migrate_sizes()
+            && let Err(err) = store.set_setting(keys::PREFERENCES, &preferences)
+        {
+            tracing::warn!("saving the preferences failed: {err:#}");
+        }
         cx.set_global(Self { store });
         cx.set_global(preferences);
     }

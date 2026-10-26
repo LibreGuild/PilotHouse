@@ -11,9 +11,10 @@ use std::sync::Arc;
 
 use agent_client_protocol_schema::ProtocolVersion;
 use agent_client_protocol_schema::v1::{
-    ClientCapabilities, FileSystemCapabilities, Implementation, InitializeRequest,
-    InitializeResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome,
+    ClientCapabilities, ElicitationCapabilities, ElicitationFormCapabilities,
+    FileSystemCapabilities, Implementation, InitializeRequest, InitializeResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome,
 };
 use futures::FutureExt as _;
 use futures::future::Shared;
@@ -37,6 +38,8 @@ pub struct Ready {
     pub load_session: bool,
     /// Ways to sign in that the agent handles itself (`authenticate`).
     pub sign_in: Vec<SignInMethod>,
+    /// A message can be added to a running turn (`_session/steering`).
+    pub steering: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,16 +153,24 @@ impl AgentConnection {
     fn handle(&mut self, message: Incoming, cx: &mut Context<Self>) {
         match message {
             Incoming::Notification { method, params } if method == "session/update" => {
-                let Some((session_id, update)) = parse_update(&params) else {
+                let Some(parsed) = parse_update(&params) else {
                     return;
                 };
-                if let Some(thread) = self.thread(&session_id) {
-                    thread.update(cx, |thread, cx| thread.apply_update(update, cx));
+                if let Some(info) = &parsed.rate_limit {
+                    crate::rate_limits::RateLimits::record(self.spec.name, info, cx);
+                }
+                if let Some(thread) = self.thread(&parsed.session_id) {
+                    thread.update(cx, |thread, cx| {
+                        thread.apply_update(parsed.update, parsed.parent, cx)
+                    });
                 }
             }
             Incoming::Notification { .. } => {}
             Incoming::Request { id, method, params } if method == "session/request_permission" => {
                 self.request_permission(id, params, cx);
+            }
+            Incoming::Request { id, method, params } if method == "elicitation/create" => {
+                self.ask(id, params, cx);
             }
             Incoming::Request { id, method, .. } => {
                 // We advertise no fs/terminal capabilities, so agents should
@@ -230,6 +241,42 @@ impl AgentConnection {
     }
 }
 
+impl AgentConnection {
+    /// A question with a form (Claude's AskUserQuestion, an MCP server
+    /// asking for a value), shown in the chat it belongs to.
+    fn ask(&mut self, id: Value, params: Value, cx: &mut Context<Self>) {
+        let Some(process) = self.process.clone() else {
+            return;
+        };
+        let respond = move |reply: crate::permission::Reply, _: &mut App| {
+            use crate::permission::Reply;
+            let response = match reply {
+                Reply::Answered(content) => json!({ "action": "accept", "content": content }),
+                Reply::Declined => json!({ "action": "decline" }),
+                Reply::Chose(_) | Reply::Cancelled => json!({ "action": "cancel" }),
+            };
+            let _ = process.respond(id, Ok(response));
+        };
+        let Some(form) = crate::form::Form::parse(&params) else {
+            return respond(crate::permission::Reply::Declined, cx);
+        };
+        // A subagent's question names its own session: find the chat by
+        // the tool call it asks for instead.
+        let session = params["sessionId"].as_str().unwrap_or_default();
+        let tool_call = params["toolCallId"].as_str();
+        let thread = self.thread(session).or_else(|| {
+            self.threads
+                .values()
+                .filter_map(WeakEntity::upgrade)
+                .find(|thread| tool_call.is_some_and(|id| thread.read(cx).has_tool_call(id)))
+        });
+        match thread {
+            Some(thread) => thread.update(cx, |thread, cx| thread.ask(form, respond, cx)),
+            None => respond(crate::permission::Reply::Cancelled, cx),
+        }
+    }
+}
+
 /// The ACP handshake. We offer no file-system or terminal capabilities:
 /// agents use their own tools, and PilotHouse watches the results.
 async fn initialize(
@@ -242,7 +289,11 @@ async fn initialize(
                 .fs(FileSystemCapabilities::new()
                     .read_text_file(false)
                     .write_text_file(false))
-                .terminal(false),
+                .terminal(false)
+                // Questions with forms are answered in the chat.
+                .elicitation(
+                    ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
+                ),
         )
         .client_info(Implementation::new("pilothouse", env!("CARGO_PKG_VERSION")));
     let params = serde_json::to_value(&request).unwrap_or_else(|_| json!({}));
@@ -254,6 +305,7 @@ async fn initialize(
             format!("{} did not start: {err:#}\n{tail}", spec.name)
         })
     })?;
+    let steering = result["_meta"]["steering"]["supported"].as_bool() == Some(true);
     // Sign-in methods are read from raw JSON: the typed enum also holds
     // terminal-based methods we cannot run.
     let sign_in = result
@@ -291,5 +343,6 @@ async fn initialize(
         images: capabilities.prompt_capabilities.image,
         load_session: capabilities.load_session,
         sign_in,
+        steering,
     })
 }

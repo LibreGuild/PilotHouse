@@ -14,3 +14,6 @@
 
 # Logs and local data
 *.log
+
+# Local research notes and third-party sources: never committed.
+/research/

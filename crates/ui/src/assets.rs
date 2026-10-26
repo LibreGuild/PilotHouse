@@ -82,6 +82,16 @@ icon_assets!(
         Terminal,
         Trash,
         Zap,
+        ArrowDownToLine,
+        ChevronsLeft,
+        Clock,
+        GripVertical,
+        Layers,
+        LayoutPanelTop,
+        ListPlus,
+        Pointer,
+        Wifi,
+        WifiOff,
     ]
 );
 

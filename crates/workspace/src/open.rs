@@ -124,7 +124,9 @@ fn in_main_window(target: Target, cx: &mut App) -> Result<()> {
         .update(cx, |_, window, cx| {
             window.activate_window();
             workspace.update(cx, |workspace, cx| match target {
-                Target::Folder(path) => workspace.add_project_path(&path, window, cx),
+                Target::Folder(path) => {
+                    workspace.add_project_path(&path, window, cx);
+                }
                 Target::Workspace(project) => workspace.open_project(project, window, cx),
                 Target::ProjectFile { project, path } => {
                     workspace.open_project_file(project, &path, window, cx)

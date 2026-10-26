@@ -1,5 +1,6 @@
-//! Attachment chips you can look inside: hovering shows a large preview,
-//! clicking opens the whole image or text in a dialog. Used for the
+//! Attachment chips you can look inside: resting on one shows a large
+//! preview, clicking it (or the preview) opens the whole image or text in a
+//! dialog. Used for the
 //! composer's chips and for attachments in sent messages.
 
 use std::path::{Path, PathBuf};
@@ -26,6 +27,9 @@ use ph_ui::Icons;
 const FILE_PREVIEW_BYTES: usize = 256 * 1024;
 /// Lines shown in the hover card.
 const CARD_LINES: usize = 24;
+/// How long the pointer rests on an attachment before its preview shows, so
+/// passing over one does not pop it up.
+const CARD_DELAY: Duration = Duration::from_secs(2);
 
 /// What an attachment shows when you look inside.
 #[derive(Debug, Clone, PartialEq)]
@@ -99,7 +103,7 @@ pub fn chip(
         .child(div().max_w_48().truncate().pr_1().child(label.clone()))
         .children(trailing)
         .test_support();
-    hover(id, body.into_any_element(), preview)
+    hover(id, label, body.into_any_element(), preview)
 }
 
 /// A sent image shown as a thumbnail, with the same hover and click.
@@ -125,14 +129,28 @@ pub fn thumbnail(id: impl Into<ElementId>, label: String, path: PathBuf, cx: &Ap
         .hover(|style| style.border_color(cx.theme().ring))
         .on_click(open)
         .child(img(path).h_24().max_w_48().object_fit(ObjectFit::Cover));
-    hover(id, body.into_any_element(), preview)
+    hover(id, label, body.into_any_element(), preview)
 }
 
-fn hover(id: ElementId, trigger: AnyElement, preview: PreviewSource) -> AnyElement {
+fn hover(id: ElementId, label: String, trigger: AnyElement, preview: PreviewSource) -> AnyElement {
     HoverCard::new(SharedString::from(format!("{id}-hover")))
-        .open_delay(Duration::from_millis(250))
+        .open_delay(CARD_DELAY)
         .trigger(trigger)
-        .content(move |_, _, cx| card(preview(cx), cx))
+        .content(move |_, _, cx| {
+            let shown = preview(cx);
+            let open = {
+                let (preview, label) = (preview.clone(), label.clone());
+                move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut App| {
+                    open_dialog(label.clone(), preview(cx), window, cx)
+                }
+            };
+            div()
+                .id("attachment-card")
+                .cursor_pointer()
+                .on_click(open)
+                .child(card(shown, cx))
+                .into_any_element()
+        })
         .into_any_element()
 }
 

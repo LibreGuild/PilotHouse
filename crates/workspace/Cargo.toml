@@ -26,6 +26,7 @@ ph-files.workspace = true
 ph-media.workspace = true
 ph-store.workspace = true
 ph-terminal.workspace = true
+ph-control.workspace = true
 ph-theme.workspace = true
 ph-ui.workspace = true
 ph-uitest.workspace = true
@@ -35,10 +36,18 @@ jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+rusqlite.workspace = true
+ureq = { version = "3.5", default-features = false, features = ["native-tls-no-default", "gzip"] }
+sha2 = "0.11"
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

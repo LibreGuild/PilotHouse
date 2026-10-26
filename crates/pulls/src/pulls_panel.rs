@@ -793,18 +793,15 @@ impl PullsPanel {
 }
 
 /// `main` unless the remote's default branch says otherwise.
+/// The branch a pull request goes into: the repository's default (the same
+/// one the Git tab's Branch view compares with), by its name on GitHub.
 fn default_base(root: &std::path::Path) -> String {
-    ph_git::git(
-        root,
-        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    )
-    .ok()
-    .and_then(|name| {
-        name.trim()
-            .split_once('/')
-            .map(|(_, branch)| branch.to_string())
-    })
-    .unwrap_or_else(|| "main".into())
+    ph_git::diff::default_base(root)
+        .map(|base| match base.split_once('/') {
+            Some((_, branch)) => branch.to_string(),
+            None => base,
+        })
+        .unwrap_or_else(|| "main".into())
 }
 
 impl Render for PullsPanel {

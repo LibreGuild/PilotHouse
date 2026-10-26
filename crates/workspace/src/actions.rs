@@ -24,6 +24,8 @@ actions!(
         ToggleCommandPalette,
         /// Start a new chat session in the current project.
         NewSession,
+        /// Ask something aside, in a chat that has read the one in front.
+        SideChat,
         /// Search the words of every chat (⌘⇧K).
         SearchChats,
         /// Tokens and cost by agent or project.
@@ -65,12 +67,18 @@ actions!(
         UseDarkAppearance,
         /// Remove the workspace in front from PilotHouse (its folders stay).
         RemoveWorkspace,
+        /// A new task: a branch in its own worktree, as a workspace.
+        NewTask,
+        /// The task in front is done: its worktree and workspace go.
+        FinishTask,
         /// Back to the workspace shown before this one (Ctrl+Tab).
         PreviousWorkspace,
         /// The Workspaces view: workspaces and their chats (⌘⇧E).
         ShowWorkspacesView,
         /// The GitHub view: pull requests across repositories, reviews (⌘⇧G).
         ShowGitHubView,
+        /// The Agents view: chats at work or waiting, across workspaces (⌘⇧A).
+        ShowAgentsView,
         /// Move the workspace in front to a window of its own.
         OpenInNewWindow,
         Quit,
@@ -93,6 +101,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-k", ToggleCommandPalette, context),
         KeyBinding::new("secondary-o", AddProject, context),
         KeyBinding::new("secondary-n", NewSession, context),
+        KeyBinding::new("secondary-;", SideChat, context),
         KeyBinding::new("secondary-shift-k", SearchChats, context),
         KeyBinding::new("secondary-b", ToggleSidebar, context),
         KeyBinding::new("secondary-j", ToggleContextPanel, context),
@@ -113,6 +122,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-tab", PreviousWorkspace, context),
         KeyBinding::new("secondary-shift-e", ShowWorkspacesView, context),
         KeyBinding::new("secondary-shift-g", ShowGitHubView, context),
+        KeyBinding::new("secondary-shift-a", ShowAgentsView, context),
     ]);
     // ⌘/Ctrl+digits show tools, so workspaces take the other modifier.
     let modifier = if cfg!(target_os = "macos") {

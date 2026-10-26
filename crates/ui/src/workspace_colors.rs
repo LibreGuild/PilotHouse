@@ -1,6 +1,6 @@
-//! The colours workspaces can wear, so the title bar says at a glance which
-//! one is in front. Hues keep clear of the status colours (red, amber, green)
-//! and read on light and dark backgrounds.
+//! The colours workspaces can wear: a small mark beside the workspace's name,
+//! so lists say at a glance which one a row belongs to. Hues keep clear of the
+//! status colours (red, amber, green) and read on light and dark backgrounds.
 
 use gpui_kit::{Hsla, hsla};
 
@@ -23,9 +23,4 @@ pub fn workspace_color(index: usize, dark: bool) -> Hsla {
     let (_, hue) = WORKSPACE_COLORS[index % WORKSPACE_COLORS.len()];
     let lightness = if dark { 0.62 } else { 0.48 };
     hsla(hue / 360., 0.58, lightness, 1.)
-}
-
-/// Colour `index` as a faint wash over the title bar.
-pub fn workspace_tint(index: usize, dark: bool) -> Hsla {
-    workspace_color(index, dark).opacity(if dark { 0.10 } else { 0.08 })
 }

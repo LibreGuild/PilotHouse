@@ -148,6 +148,9 @@ pub struct WorkspaceScreen {
     /// The window shows its sidebar (with the chat lists); the chat offers
     /// its own history menu only when not.
     sidebar_shown: bool,
+    /// Ports and CI, for the status bar.
+    signals: crate::signals::Signals,
+    _signals: gpui_kit::Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -296,6 +299,8 @@ impl WorkspaceScreen {
             tests: None,
             visible: true,
             sidebar_shown: true,
+            signals: Default::default(),
+            _signals: crate::signals::watch(store.clone(), cx),
             _subscriptions: vec![chat_subscription, chats_subscription, dock_subscription],
         };
         space.git_folder = space.first_repo_folder();
@@ -489,6 +494,18 @@ impl WorkspaceScreen {
 
     pub fn project(&self) -> &Project {
         &self.project
+    }
+
+    pub(crate) fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    pub(crate) fn signals(&self) -> &crate::signals::Signals {
+        &self.signals
+    }
+
+    pub(crate) fn signals_mut(&mut self) -> &mut crate::signals::Signals {
+        &mut self.signals
     }
 
     pub fn sessions(&self) -> &[Session] {
@@ -915,6 +932,12 @@ impl WorkspaceScreen {
         });
         self.save_layout(cx);
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
+        cx.notify();
+    }
+
+    /// Steps aside from the chat in front into a side chat about it.
+    pub fn side_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat.update(cx, |chat, cx| chat.side_chat(window, cx));
         cx.notify();
     }
 

@@ -6,7 +6,7 @@
 
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _,
-    button::Button,
+    button::{Button, ButtonVariants as _},
     h_flex,
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
     v_flex,
@@ -222,7 +222,7 @@ fn appearance_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {
                     .keywords(["font", "typeface", "family"]),
                 )
                 .item(
-                    SettingItem::new("Interface size", number(11.0, 20.0, 1.0, |p| p.ui_font_size as f64, |p, v| p.ui_font_size = v as f32))
+                    SettingItem::new("Interface size", number(11.0, ph_theme::preferences::MAX_UI_FONT_SIZE as f64, 1.0, |p| p.ui_font_size as f64, |p, v| p.ui_font_size = v as f32))
                         .description("Text size across the app, in points.")
                         .keywords(["font size", "zoom", "bigger", "smaller"]),
                 ),
@@ -575,6 +575,92 @@ fn about_page() -> SettingPage {
                     )
                 })),
         )
+        .group(
+            SettingGroup::new()
+                .title("Updates")
+                .item(SettingItem::render(|_, _, cx| update_status(cx)))
+                .item(
+                    SettingItem::new(
+                        "Check for updates",
+                        SettingField::switch(
+                            crate::updates::auto_check,
+                            crate::updates::set_auto_check,
+                        ),
+                    )
+                    .description("Looks at the project's GitHub releases at start and every six hours. Nothing is sent.")
+                    .keywords(["update", "version", "release"]),
+                )
+                .item(
+                    SettingItem::new(
+                        "Download updates by themselves",
+                        SettingField::switch(
+                            crate::updates::auto_install,
+                            crate::updates::set_auto_install,
+                        ),
+                    )
+                    .description("A new version downloads in the background and installs when you quit (or at once with Restart to update). Each download is checked against the release's SHA-256.")
+                    .keywords(["update", "install", "download"]),
+                ),
+        )
+}
+
+/// Where updates stand, with *Check now* (or *Restart to update*).
+fn update_status(cx: &App) -> impl IntoElement + use<> {
+    use crate::updates::{self, Status};
+    let status = updates::Updater::status(cx);
+    let text = match &status {
+        Status::Idle => "Not checked yet.".to_string(),
+        Status::Checking => "Checking…".to_string(),
+        Status::UpToDate => format!("PilotHouse {} is the newest version.", ph_ui::version()),
+        Status::Available { version } => format!("PilotHouse {version} is available."),
+        Status::Downloading { version } => match updates::Updater::progress(cx) {
+            Some((done, total)) if total > 0 => format!(
+                "Downloading PilotHouse {version}… {}%",
+                (done * 100 / total).min(100)
+            ),
+            _ => format!("Downloading PilotHouse {version}…"),
+        },
+        Status::Ready { version, .. } => {
+            format!("PilotHouse {version} is ready: it installs when you quit.")
+        }
+        Status::Manual { version } => format!(
+            "PilotHouse {version} is available. This copy cannot update itself: download it from GitHub."
+        ),
+        Status::Failed(reason) => format!("The update failed: {reason}"),
+    };
+    let action = match status {
+        Status::Ready { .. } => Button::new("restart-to-update")
+            .small()
+            .primary()
+            .label("Restart to update")
+            .on_click(|_, _, cx| updates::restart_to_update(cx)),
+        Status::Available { .. } => Button::new("download-update")
+            .small()
+            .outline()
+            .label("Download")
+            .on_click(|_, _, cx| updates::download_update(cx)),
+        Status::Manual { .. } => Button::new("open-release")
+            .small()
+            .outline()
+            .label("Open GitHub")
+            .on_click(|_, _, cx| cx.open_url(updates::RELEASES_URL)),
+        Status::Checking | Status::Downloading { .. } => Button::new("check-updates")
+            .small()
+            .outline()
+            .label("Check now")
+            .loading(true),
+        _ => Button::new("check-updates")
+            .small()
+            .outline()
+            .label("Check now")
+            .on_click(|_, _, cx| updates::check(true, cx)),
+    };
+    h_flex()
+        .w_full()
+        .justify_between()
+        .gap_3()
+        .child(note(text, cx))
+        .child(action)
 }
 
 fn note(text: String, cx: &App) -> impl IntoElement + use<> {

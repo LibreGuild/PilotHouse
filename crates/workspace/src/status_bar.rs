@@ -1,6 +1,8 @@
 //! The bar at the bottom of the window: the git branch (click for the
 //! branch picker), the project folder, where its work runs when it is on a
-//! network drive, and the detected stack.
+//! network drive, how CI went for the commit checked out, the ports the
+//! workspace's processes listen on, the detected stack, and how close each
+//! agent subscription is to its limits.
 
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _,
@@ -61,6 +63,11 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
         .map(|space| space.stacks().iter().map(|stack| stack.label()).collect())
         .unwrap_or_default();
     let drive = space.and_then(|space| drive_item(space, cx));
+    let ci = space.and_then(|space| ci_item(space.signals().ci.as_ref(), cx));
+    let ports = space.and_then(|space| ports_item(&space.signals().ports, cx));
+    let merged = space
+        .filter(|space| space.signals().merged_task)
+        .map(|_| merged_item(cx));
     let branch = space_entity.and_then(|space| branch_item(&space, cx));
 
     StatusBar::new()
@@ -71,6 +78,8 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .children(branch)
+                .children(merged)
+                .children(ci)
                 .child(
                     h_flex()
                         .id("status-folders")
@@ -87,16 +96,189 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                                 .child(div().truncate().child(path))
                         }),
                 )
-                .children(drive),
+                .children(drive)
+                .children(ports),
         )
         .right(
             h_flex()
                 .gap_3()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
+                .children(limits(cx))
                 .when(!stacks.is_empty(), |this| this.child(stacks.join(" · ")))
                 .child(format!("PilotHouse {}", ph_ui::version())),
         )
+}
+
+/// Each agent's limit windows as small meters ("Claude 5h ▰▰▱ 62%"), amber
+/// when close and red when reached; reset times in the tooltip.
+fn limits(cx: &Context<Workspace>) -> Vec<AnyElement> {
+    let theme = cx.theme();
+    ph_agent::rate_limits::RateLimits::all(cx)
+        .into_iter()
+        .enumerate()
+        .map(|(ix, (agent, windows))| {
+            let tip = windows
+                .iter()
+                .map(|limit| {
+                    let resets = limit
+                        .resets_at
+                        .and_then(|at| jiff::Timestamp::from_second(at).ok())
+                        .map(|at| {
+                            at.to_zoned(jiff::tz::TimeZone::system())
+                                .strftime(" · resets %a %H:%M")
+                                .to_string()
+                        })
+                        .unwrap_or_default();
+                    let used = limit
+                        .used
+                        .map(|used| format!("{:.0}% used", used * 100.0))
+                        .unwrap_or_else(|| "usage not reported".into());
+                    format!("{agent} {}: {used}{resets}", limit.window)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            h_flex()
+                .id(("status-limits", ix))
+                .gap_1p5()
+                .child(agent)
+                .children(windows.into_iter().map(|limit| {
+                    let color = match limit.state {
+                        ph_agent::rate_limits::LimitState::Reached => theme.danger,
+                        ph_agent::rate_limits::LimitState::Warning => theme.warning,
+                        ph_agent::rate_limits::LimitState::Fine => theme.muted_foreground,
+                    };
+                    h_flex().gap_1().child(limit.window.clone()).when_some(
+                        limit.used,
+                        |this, used| {
+                            this.child(
+                                div()
+                                    .w(gpui_kit::px(28.))
+                                    .h(gpui_kit::px(4.))
+                                    .rounded_full()
+                                    .bg(theme.muted)
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .rounded_full()
+                                            .w(gpui_kit::relative(used))
+                                            .bg(color),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_color(color)
+                                    .child(format!("{:.0}%", used * 100.0)),
+                            )
+                        },
+                    )
+                }))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
+                .into_any_element()
+        })
+        .collect()
+}
+
+/// CI of the commit checked out: a check when all passed, a spinner while
+/// some run, red when one failed. Opens the failed (or running) check.
+fn ci_item(ci: Option<&crate::signals::Ci>, cx: &Context<Workspace>) -> Option<AnyElement> {
+    let ci = ci?;
+    let theme = cx.theme();
+    let (icon, label, color): (AnyElement, String, gpui_kit::Hsla) = if !ci.failed.is_empty() {
+        (
+            Icon::new(gpui_kit::component::IconName::CircleX)
+                .xsmall()
+                .text_color(theme.danger)
+                .into_any_element(),
+            format!("CI {} failed", ci.failed.len()),
+            theme.danger,
+        )
+    } else if ci.pending > 0 {
+        (
+            Spinner::new().xsmall().color(theme.info).into_any_element(),
+            "CI running".into(),
+            theme.muted_foreground,
+        )
+    } else {
+        (
+            Icon::new(gpui_kit::component::IconName::CircleCheck)
+                .xsmall()
+                .text_color(theme.success)
+                .into_any_element(),
+            "CI".into(),
+            theme.muted_foreground,
+        )
+    };
+    let mut tip = format!(
+        "Checks of the commit checked out: {} passed, {} running, {} failed",
+        ci.passed,
+        ci.pending,
+        ci.failed.len()
+    );
+    for (name, _) in &ci.failed {
+        tip.push_str(&format!("\n✕ {name}"));
+    }
+    let url = ci.url.clone();
+    Some(
+        h_flex()
+            .id("status-ci")
+            .gap_1()
+            .text_color(color)
+            .child(icon)
+            .child(label)
+            .when_some(url, |this, url| {
+                this.cursor_pointer()
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+            })
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            })
+            .into_any_element(),
+    )
+}
+
+/// A task whose branch is merged: an offer to finish it.
+fn merged_item(cx: &Context<Workspace>) -> AnyElement {
+    Button::new("status-task-merged")
+        .ghost()
+        .xsmall()
+        .icon(
+            Icon::new(gpui_kit::component::IconName::CircleCheck)
+                .xsmall()
+                .text_color(cx.theme().success),
+        )
+        .label("Merged · Finish task")
+        .tooltip("The task's branch is in its base: remove its worktree and workspace")
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::FinishTask), cx))
+        .into_any_element()
+}
+
+/// The ports the workspace's processes listen on; opens the Run tool.
+fn ports_item(ports: &[u16], _: &Context<Workspace>) -> Option<AnyElement> {
+    if ports.is_empty() {
+        return None;
+    }
+    let label = ports
+        .iter()
+        .take(2)
+        .map(|port| format!(":{port}"))
+        .chain((ports.len() > 2).then(|| format!("+{}", ports.len() - 2)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(
+        Button::new("status-ports")
+            .ghost()
+            .xsmall()
+            .icon(Icon::new(Icons::Globe).xsmall())
+            .label(label)
+            .tooltip("Listening here: open, copy or stop in the Run tool")
+            .on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(crate::actions::ShowRuns), cx)
+            })
+            .into_any_element(),
+    )
 }
 
 /// Where the workspace's work runs when its folder is on a network drive:
