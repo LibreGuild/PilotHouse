@@ -2,7 +2,7 @@
 
 PilotHouse is a tool people look at all day. Its own interface should recede and frame the work (chats, code, terminals, devices), and draw the eye only where something needs the user. Every UI change follows these rules; review screens against the checklist at the end.
 
-Tokens live in `crates/theme/themes/pilothouse.json` (light and dark) and `crates/theme/src/preferences.rs` (the user's accent, fonts, sizes and corners on top). Never hard-code a colour in a view when a theme token covers the role.
+Tokens live in `crates/theme/themes/pilothouse.json` (light and dark) and `crates/theme/src/preferences.rs` (the brand accent, and the user's fonts, sizes and corners on top). Never hard-code a colour in a view when a theme token covers the role.
 
 ## 1. Colour: quiet chrome, loud state
 
@@ -19,7 +19,7 @@ The look is a calm graphite, cool rather than warm: near-black with a faint blue
 | Hairlines | `border` | every divider and outline | emphasis |
 | Text | `foreground`, `muted_foreground` | text; secondary text, captions, paths | |
 | The one action | `primary` | the single affirmative button of a surface (Send, Commit, Save): near-white on dark, near-black on light | decoration, secondary actions |
-| Accent | `ring`, `selection`, `caret`, `link`, `info` (the user's accent) | focus, text selection, links, "working" spinners, progress | backgrounds, icons for decoration, selected tabs |
+| Accent | `ring`, `selection`, `caret`, `link`, `info`: signal magenta (`#ff5aa8` dark, `#c2186e` light), the icon's colour; not a setting | focus, text selection, links, "working" spinners, progress | backgrounds, icons for decoration, selected tabs |
 | State | `success`, `warning`, `danger` | done / needs you / failed, git added / modified / deleted, errors | anything that is not state |
 
 - A workspace's colour is a small mark beside its name, never a wash over chrome.

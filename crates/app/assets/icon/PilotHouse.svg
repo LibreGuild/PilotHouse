@@ -1,27 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <!-- PilotHouse: a house (the workspace) with a prompt in it (the agents at
-       work). The macOS tile; Windows and the in-app mark use the same
-       drawing on a tile inset 24 with corner radius 220. -->
+  <!-- PilotHouse: "PH" on a signal-magenta tile. The macOS tile; Windows,
+       Linux and the in-app mark use the same drawing on a tile inset 24
+       with corner radius 220. Drawn by scripts/package/icon.py. -->
   <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#1f6e4a"/>
-      <stop offset="1" stop-color="#0b2e21"/>
+    <linearGradient id="tile" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff4fa3"/>
+      <stop offset="1" stop-color="#b01262"/>
     </linearGradient>
-    <radialGradient id="glow" cx="512" cy="300" r="380" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#78e6aa" stop-opacity="0.24"/>
-      <stop offset="1" stop-color="#78e6aa" stop-opacity="0"/>
-    </radialGradient>
   </defs>
   <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
-  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#glow)"/>
-  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <g stroke="#7ce6a9" stroke-width="66">
-      <polyline points="262,488 512,282 762,488"/>
-      <polyline points="322,438.6 322,748 702,748 702,438.6"/>
-    </g>
-    <g stroke="#f4fbf6" stroke-width="58">
-      <polyline points="418,548 500,614 418,680"/>
-      <line x1="548" y1="680" x2="614" y2="680"/>
-    </g>
-  </g>
+  <path fill="#ffffff" fill-rule="evenodd" d="M315.2 554.7V498.5H374.7Q385.8 498.5 394.9 493.9Q404 489.4 409.5 480.4Q415 471.4 415 458.4Q415 445.3 409.5 436.3Q404 427.3 394.9 422.8Q385.8 418.3 374.7 418.3H315.2V362H387.7Q416.6 362 439.8 373.6Q462.9 385.2 476.5 406.7Q490 428.2 490 458.3Q490 488.2 476.5 509.9Q462.9 531.6 439.8 543.2Q416.6 554.7 387.7 554.7ZM255.5 662V362H331.1V662ZM509.4 662V362H585V662ZM692.9 662V362H768.5V662ZM552.3 540.3V476.6H720.3V540.3Z"/>
 </svg>

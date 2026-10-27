@@ -1,4 +1,4 @@
-//! How the user tuned the look: accent, fonts, sizes, corners, translucency,
+//! How the user tuned the look: fonts, sizes, corners, translucency,
 //! and editor behavior.
 //!
 //! Preferences sit on top of the light/dark theme: [`apply`] re-applies them
@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
-    pub accent: Accent,
     /// Interface font family; empty for the platform's own.
     pub ui_font: String,
     pub ui_font_size: f32,
@@ -55,7 +54,6 @@ impl Default for Preferences {
     fn default() -> Self {
         let (ui_size, code_size) = DEFAULT_SIZES;
         Self {
-            accent: Accent::Green,
             ui_font: String::new(),
             ui_font_size: ui_size,
             code_font: String::new(),
@@ -119,66 +117,23 @@ impl Default for EditorPreferences {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Accent {
-    /// Warm terracotta, matching the warm dark theme.
-    Clay,
-    Blue,
-    Violet,
-    Teal,
-    Green,
-    Amber,
-    Rose,
+/// PilotHouse's colour: signal magenta, the colour of its icon. It marks
+/// focus, selections, links and progress, and is the same for everyone
+/// (there is no setting): it stays apart from the status colours (green,
+/// amber, red), so a dot never reads as the brand.
+pub fn accent(dark: bool) -> Hsla {
+    // Lighter on dark backgrounds, deeper on light ones (for contrast).
+    rgb(if dark { 0xff5aa8 } else { 0xc2186e }).into()
 }
 
-impl Accent {
-    pub const ALL: [Accent; 7] = [
-        Accent::Clay,
-        Accent::Blue,
-        Accent::Violet,
-        Accent::Teal,
-        Accent::Green,
-        Accent::Amber,
-        Accent::Rose,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Accent::Clay => "Clay",
-            Accent::Blue => "Blue",
-            Accent::Violet => "Violet",
-            Accent::Teal => "Teal",
-            Accent::Green => "Green",
-            Accent::Amber => "Amber",
-            Accent::Rose => "Rose",
-        }
-    }
-
-    /// The accent in dark and light themes (lighter on dark backgrounds).
-    pub fn color(self, dark: bool) -> Hsla {
-        let (dark_hex, light_hex) = match self {
-            Accent::Clay => (0xd97757, 0xc15f3c),
-            Accent::Blue => (0x6b8cff, 0x3d6df2),
-            Accent::Violet => (0xa78bfa, 0x7c3aed),
-            Accent::Teal => (0x2dd4bf, 0x0d9488),
-            // Softer than a pure green, so it marks without shouting.
-            Accent::Green => (0x5bbf85, 0x1f8a4c),
-            Accent::Amber => (0xfbbf24, 0xd97706),
-            Accent::Rose => (0xfb7185, 0xe11d48),
-        };
-        rgb(if dark { dark_hex } else { light_hex }).into()
-    }
-
-    /// The accent as a fill behind white text (an `info` button): a
-    /// deeper, calmer shade of [`Self::color`].
-    pub fn fill(self, dark: bool) -> Hsla {
-        let accent = self.color(dark);
-        Hsla {
-            s: accent.s * 0.75,
-            l: accent.l.min(if dark { 0.34 } else { 0.38 }),
-            ..accent
-        }
+/// The accent as a fill behind white text (an `info` button): a deeper,
+/// calmer shade of [`accent`].
+pub fn accent_fill(dark: bool) -> Hsla {
+    let accent = accent(dark);
+    Hsla {
+        s: accent.s * 0.85,
+        l: accent.l.min(if dark { 0.42 } else { 0.42 }),
+        ..accent
     }
 }
 
@@ -365,8 +320,8 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
     });
     Theme::update(cx, |theme| {
         let dark = theme.mode.is_dark();
-        let accent = preferences.accent.color(dark);
-        let fill = preferences.accent.fill(dark);
+        let accent = accent(dark);
+        let fill = accent_fill(dark);
         let white = hsla(0., 0., 1., 1.);
         theme.font_family = ui_font.into();
         theme.font_size = px(preferences.ui_font_size.clamp(11.0, MAX_UI_FONT_SIZE));
@@ -456,7 +411,6 @@ mod tests {
     fn old_or_partial_settings_still_load() {
         let partial: Preferences =
             serde_json::from_str(r#"{"accent":"teal","code_font_size":15}"#).unwrap();
-        assert_eq!(partial.accent, Accent::Teal);
         assert_eq!(partial.code_font_size, 15.0);
         assert_eq!(partial.editor.tab_size, 4);
         assert_eq!(

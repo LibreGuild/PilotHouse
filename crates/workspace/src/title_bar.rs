@@ -162,10 +162,12 @@ fn update_item(cx: &App) -> Option<AnyElement> {
     Some(item.into_any_element())
 }
 
-/// The app's mark. Off macOS, where there is no menu bar, it opens the
-/// app's menu.
-fn app_icon(_: &App) -> AnyElement {
-    let mark = div().flex_none().mr_1().child(ph_ui::app_icon(px(22.)));
+/// The app's name, in its own script (no icon: the Dock and taskbar show
+/// that). Off macOS, where there is no menu bar, it opens the app's menu.
+fn app_icon(cx: &App) -> AnyElement {
+    let mark = ph_ui::wordmark(px(17.))
+        .mx_1()
+        .text_color(cx.theme().foreground);
     if cfg!(target_os = "macos") {
         return mark.into_any_element();
     }
