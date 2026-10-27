@@ -26,14 +26,6 @@ else
     target/aarch64-apple-darwin/release/pilothouse \
     target/x86_64-apple-darwin/release/pilothouse
   NAME=PilotHouse-macOS-universal.dmg
-  # A CI runner's disk is small: two release builds leave too little room
-  # for the disk image, so their intermediates go first.
-  if [ -n "${CI:-}" ]; then
-    for arch in aarch64-apple-darwin x86_64-apple-darwin; do
-      rm -rf "target/$arch/release/deps" "target/$arch/release/build" \
-        "target/$arch/release/incremental"
-    done
-  fi
 fi
 
 rm -rf "$APP" && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -52,6 +44,18 @@ STAGE=$(mktemp -d)
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 rm -f "$DIST/$NAME"
-hdiutil create -volname PilotHouse -srcfolder "$STAGE" -ov -format UDZO "$DIST/$NAME" >/dev/null
+# The image's size is given, not guessed: hdiutil's own estimate can come
+# out too small ("create failed - No space left on device" with the disk
+# nearly empty, as on CI for 0.3.0). A failed try is retried once or twice,
+# since hdiutil also fails now and then when the system holds the files.
+SIZE_MB=$(( $(du -sk "$STAGE" | cut -f1) / 1024 * 12 / 10 + 32 ))
+for try in 1 2 3; do
+  if hdiutil create -volname PilotHouse -srcfolder "$STAGE" -fs HFS+ -size "${SIZE_MB}m" \
+    -ov -format UDZO "$DIST/$NAME" >/dev/null; then
+    break
+  fi
+  [ "$try" = 3 ] && exit 1
+  sleep 5
+done
 rm -rf "$STAGE"
 echo "$DIST/$NAME"
