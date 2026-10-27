@@ -18,8 +18,8 @@ pub mod models;
 pub mod pulls;
 pub mod search;
 pub mod secrets;
-#[cfg(test)]
-mod testing;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use accounts::Account;
 pub use client::Client;

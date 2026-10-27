@@ -14,4 +14,6 @@ pub mod motion;
 pub mod preferences;
 
 pub use appearance::{Appearance, apply_appearance, init};
-pub use preferences::{Accent, ChatWidth, Corners, EditorPreferences, Preferences, WindowStyle};
+pub use preferences::{
+    ChatWidth, Corners, EditorPreferences, Preferences, WindowStyle, accent, accent_fill,
+};

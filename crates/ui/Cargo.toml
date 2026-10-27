@@ -8,3 +8,4 @@ publish.workspace = true
 
 [dependencies]
 gpui-kit.workspace = true
+tracing.workspace = true

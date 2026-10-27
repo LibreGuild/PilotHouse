@@ -32,6 +32,8 @@ pub(crate) enum Target {
 /// One chat, or agent in a terminal, on the board.
 pub(crate) struct Card {
     pub project: ProjectId,
+    /// A chat of the GitHub view (a review), shown there.
+    pub github: bool,
     pub target: Target,
     pub title: String,
     pub place: String,
@@ -92,6 +94,35 @@ pub(crate) fn cards(workspace: &Workspace, cx: &App) -> Vec<Card> {
         places.push((chats.id, "Chats".into(), None));
     }
     let mut cards = Vec::new();
+    // Reviews and other chats of the GitHub view.
+    if let Some(github) = workspace.github_view() {
+        let store = crate::app_state::AppState::store(cx);
+        for (project, name) in github.read(cx).spaces() {
+            let Some(chats) = ph_agent::ChatHub::existing(*project, cx) else {
+                continue;
+            };
+            for (session, summary) in chats.read(cx).live(cx) {
+                let Some(stored) = store.session(session).ok().flatten() else {
+                    continue;
+                };
+                if workspace.is_settled(session)
+                    && !matches!(summary.state, ChatState::Working | ChatState::NeedsYou)
+                {
+                    continue;
+                }
+                cards.push(Card {
+                    project: *project,
+                    github: true,
+                    target: Target::Chat(session),
+                    title: stored.title.clone(),
+                    place: format!("GitHub · {name}"),
+                    color: None,
+                    updated_at: stored.updated_at,
+                    summary,
+                });
+            }
+        }
+    }
     for (project, place, color) in places.iter().cloned() {
         let Some(chats) = ph_agent::ChatHub::existing(project, cx) else {
             continue;
@@ -109,6 +140,7 @@ pub(crate) fn cards(workspace: &Workspace, cx: &App) -> Vec<Card> {
             }
             cards.push(Card {
                 project,
+                github: false,
                 target: Target::Chat(session),
                 title: stored.title.clone(),
                 place: place.clone(),
@@ -130,6 +162,7 @@ pub(crate) fn cards(workspace: &Workspace, cx: &App) -> Vec<Card> {
             .unwrap_or_else(|| agent.agent.name.into());
         cards.push(Card {
             project: agent.project,
+            github: false,
             target: Target::Terminal(agent.pane.clone()),
             title: agent
                 .title
@@ -154,11 +187,16 @@ pub(crate) fn cards(workspace: &Workspace, cx: &App) -> Vec<Card> {
 /// tab in the title bar.
 pub(crate) fn counts(workspace: &Workspace, cx: &App) -> (usize, usize) {
     let mut counts = (0, 0);
+    let github: Vec<ProjectId> = workspace
+        .github_view()
+        .map(|github| github.read(cx).spaces().iter().map(|(id, _)| *id).collect())
+        .unwrap_or_default();
     for project in workspace
         .projects()
         .iter()
         .map(|project| project.id)
         .chain(workspace.chats_space().map(|chats| chats.id))
+        .chain(github)
     {
         if let Some(chats) = ph_agent::ChatHub::existing(project, cx) {
             let activity = chats.read(cx).activity(cx);
@@ -244,10 +282,14 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyE
                         )
                     })
                     .children(items.into_iter().map(|card| {
-                        let (project, target) = (card.project, card.target.clone());
+                        let (project, target, github) =
+                            (card.project, card.target.clone(), card.github);
                         let entity = entity.clone();
                         card_view(card, cx).on_click(move |_, window, cx| {
                             _ = entity.update(cx, |workspace, cx| match &target {
+                                Target::Chat(session) if github => {
+                                    workspace.show_session(*session, window, cx)
+                                }
                                 Target::Chat(session) => {
                                     workspace.open_chat(project, *session, window, cx)
                                 }

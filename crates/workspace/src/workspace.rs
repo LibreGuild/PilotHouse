@@ -809,13 +809,24 @@ impl Workspace {
             window,
             move |this, _, event: &WorkspaceScreenEvent, window, cx| match event {
                 WorkspaceScreenEvent::SessionsChanged => cx.notify(),
-                WorkspaceScreenEvent::Review { hosting, pull } => {
-                    let (hosting, pull) = ((**hosting).clone(), (**pull).clone());
+                WorkspaceScreenEvent::Agent { hosting, request } => {
+                    let (hosting, request) = ((**hosting).clone(), request.clone());
+                    if matches!(
+                        request,
+                        ph_pulls::AgentRequest::Fix { .. } | ph_pulls::AgentRequest::Address { .. }
+                    ) {
+                        this.fix_pull(hosting, request, window, cx);
+                        return;
+                    }
                     this.set_view(View::GitHub, window, cx);
                     let github = this.github(cx);
-                    let template = ph_review::templates::default_review(AppState::store(cx));
+                    github.update(cx, |github, cx| github.agent(hosting, request, window, cx));
+                }
+                WorkspaceScreenEvent::OpenFindings(review_id) => {
+                    this.set_view(View::GitHub, window, cx);
+                    let github = this.github(cx);
                     github.update(cx, |github, cx| {
-                        github.review(hosting, pull, template, window, cx)
+                        github.open_findings(*review_id, window, cx)
                     });
                 }
                 WorkspaceScreenEvent::ReviewAgain(review_id) => {
@@ -1265,6 +1276,150 @@ impl Workspace {
                     .detach();
             },
         );
+    }
+
+    /// Fixes findings of a pull request, or addresses the comments on one
+    /// (`request`), in a new task on its head: from a workspace's checkout
+    /// of the repository when there is one, else the GitHub view's clone.
+    /// The task's chat starts with the work.
+    pub fn fix_pull(
+        &mut self,
+        hosting: ph_pulls::Hosting,
+        request: ph_pulls::AgentRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = AppState::store(cx).clone();
+        let (pull, findings) = match request {
+            ph_pulls::AgentRequest::Fix { pull, findings } => (pull, Some(findings)),
+            ph_pulls::AgentRequest::Address { pull } => (pull, None),
+            _ => return,
+        };
+        let wanted = (
+            hosting.account.host.to_ascii_lowercase(),
+            hosting.repo.owner.to_ascii_lowercase(),
+            hosting.repo.name.to_ascii_lowercase(),
+        );
+        let local = self.projects.iter().find_map(|project| {
+            project.folders().into_iter().find_map(|folder| {
+                let hosted = ph_git::remote::hosted_repo(&folder)?;
+                let same = (
+                    hosted.host.to_ascii_lowercase(),
+                    hosted.owner.to_ascii_lowercase(),
+                    hosted.name.to_ascii_lowercase(),
+                ) == wanted;
+                same.then(|| (folder, project.name.clone()))
+            })
+        });
+        let clone = ph_pulls::clones::RepoId::of(&hosting).clone_dir();
+        let (root, parent_name) = match local {
+            Some(found) => found,
+            None if clone.join(".git").exists() => (clone, hosting.repo.name.clone()),
+            None => {
+                window.push_notification(
+                    Notification::warning(
+                        "Open the repository in a workspace (or review the pull request first) to fix it in a task.",
+                    ),
+                    cx,
+                );
+                return;
+            }
+        };
+        let number = pull.number;
+        let name = format!("PR {number} fix");
+        let work = {
+            let (root, store) = (root.clone(), store.clone());
+            cx.background_spawn(async move {
+                let sha = ph_pulls::hosting::fetch_head(&root, &hosting, number)?;
+                let worktrees = ph_store::paths::data_dir().join("tasks");
+                let made = crate::tasks::create_for_pull(&root, number, &sha, &worktrees)?;
+                // Someone else's settings must not act on the agent.
+                let theirs = !pull.user.login.eq_ignore_ascii_case(&hosting.account.login);
+                let removed = if theirs {
+                    ph_pulls::clones::sanitize_worktree(&made.path)
+                } else {
+                    Vec::new()
+                };
+                let fork = pull
+                    .head
+                    .label
+                    .split_once(':')
+                    .is_some_and(|(owner, _)| !owner.eq_ignore_ascii_case(&hosting.repo.owner));
+                let push = if fork {
+                    format!(
+                        "Its branch is on {}'s fork: push there ({}) if they let maintainers edit.",
+                        pull.head.label.split(':').next().unwrap_or_default(),
+                        pull.head.name
+                    )
+                } else {
+                    format!(
+                        "Push with `git push {} HEAD:{}` when done.",
+                        hosting.remote, pull.head.name
+                    )
+                };
+                let (prompt, display) = match findings {
+                    Some(findings) => {
+                        let labels: Vec<&str> = findings.iter().map(|f| f.label.as_str()).collect();
+                        (
+                            ph_review::prompt::fix_prompt(&findings),
+                            format!("Fix {} of #{number} “{}”. {push}", labels.join(", "), pull.title),
+                        )
+                    }
+                    None => {
+                        let comments = ph_review::github::comments_to_address(
+                            &store,
+                            &crate::review::pull_ref(&hosting, number),
+                        )?;
+                        if comments.is_empty() {
+                            anyhow::bail!("No comments to address on #{number}.");
+                        }
+                        (
+                            ph_review::prompt::address_prompt(number, &comments),
+                            format!(
+                                "Address the {} review comments on #{number} “{}”. {push}",
+                                comments.len(),
+                                pull.title
+                            ),
+                        )
+                    }
+                };
+                let display = if removed.is_empty() {
+                    display
+                } else {
+                    format!(
+                        "{display} (The pull request's agent settings are taken out of this task so they cannot act on the agent: {}.)",
+                        removed.join(", ")
+                    )
+                };
+                anyhow::Ok((made, prompt, display))
+            })
+        };
+        let workspace = cx.entity().downgrade();
+        window
+            .spawn(cx, async move |cx| {
+                let result = work.await;
+                _ = workspace.update_in(cx, |workspace, window, cx| match result {
+                    Ok((made, prompt, display)) => {
+                        let path = made.path.clone();
+                        workspace.open_task(&root, &parent_name, &name, made, window, cx);
+                        let space = workspace
+                            .spaces
+                            .values()
+                            .find(|space| space.read(cx).project().path == path)
+                            .cloned();
+                        if let Some(space) = space {
+                            space.update(cx, |space, cx| {
+                                space.ask_chat(name.clone(), display, prompt, window, cx)
+                            });
+                        }
+                    }
+                    Err(err) => window.push_notification(
+                        Notification::error(format!("Could not make the task: {err:#}")),
+                        cx,
+                    ),
+                });
+            })
+            .detach();
     }
 
     /// Opens a task just made: a workspace on its worktree, named after it,

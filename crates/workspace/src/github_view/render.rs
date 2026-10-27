@@ -157,10 +157,25 @@ impl GithubView {
     /// One inbox list: each pull request with its repository.
     fn render_inbox(&self, kind: Inbox, cx: &mut Context<Self>) -> AnyElement {
         let list = self.inbox.get(&kind);
-        let items = list.map(|list| list.items.clone()).unwrap_or_default();
+        let mut items = list.map(|list| list.items.clone()).unwrap_or_default();
         let error = list.and_then(|list| list.error.clone());
+        let key = |host: &str, pull: &ph_github::search::FoundPull| {
+            pull.repo()
+                .map(|(owner, name)| (host.to_string(), owner, name, pull.number))
+        };
+        if self.review_first {
+            // Assessed ones by rank; the rest after, by date as read.
+            items.sort_by_key(|(host, pull)| {
+                key(host, pull)
+                    .and_then(|key| self.triage.get(&key))
+                    .map(|(_, triage)| (0, triage.rank()))
+                    .unwrap_or((1, (9, 9, 9, ph_review::triage::Size::Large)))
+            });
+        }
         let rows =
             items.into_iter().enumerate().map(|(ix, (host, pull))| {
+                let triage = key(&host, &pull)
+                    .and_then(|key| self.triage.get(&key).map(|(_, triage)| triage.clone()));
                 let repo = pull
                     .repo()
                     .and_then(|(owner, name)| RepoId::parse(&format!("{host}/{owner}/{name}")));
@@ -209,14 +224,19 @@ impl GithubView {
                             ),
                     )
                     .child(
-                        div()
+                        h_flex()
+                            .gap_1()
+                            .flex_wrap()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(format!(
                                 "{place} #{number} · {} · {}",
                                 pull.user.login,
                                 ph_pulls::short_date(&pull.updated_at)
-                            )),
+                            ))
+                            .when_some(triage, |this, triage| {
+                                this.children(triage_chips(&triage, cx))
+                            }),
                     )
                     .test_support()
                     .into_any_element()
@@ -244,7 +264,22 @@ impl GithubView {
                             .child(kind.label()),
                     )
                     .child(div().flex_1())
-                    .when(self.loading, |this| this.child(Spinner::new().xsmall())),
+                    .when(self.loading, |this| this.child(Spinner::new().xsmall()))
+                    .child(
+                        Button::new("inbox-sort")
+                            .xsmall()
+                            .ghost()
+                            .label(if self.review_first { "Review first" } else { "Newest first" })
+                            .tooltip(if self.review_first {
+                                "Sorted for review: pushed since your review, CI not failing, risky, small. Click for newest first."
+                            } else {
+                                "Sorted by date. Click to sort for review."
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let on = !this.review_first;
+                                this.set_review_first(on, cx)
+                            })),
+                    ),
             )
             .when_some(error, |this, error| {
                 this.child(
@@ -357,6 +392,40 @@ impl Render for GithubView {
 }
 
 /// A sidebar section's title, with `actions` added by the caller.
+/// An inbox pull request's triage, as small chips.
+fn triage_chips(triage: &ph_review::triage::Triage, cx: &App) -> Vec<AnyElement> {
+    use ph_review::triage::Ci;
+    let chip = |text: String, color: gpui_kit::Hsla| {
+        div()
+            .px_1p5()
+            .rounded_full()
+            .bg(color.opacity(0.14))
+            .text_color(color)
+            .child(text)
+            .into_any_element()
+    };
+    let mut chips = Vec::new();
+    if triage.behind {
+        chips.push(chip("pushed since your review".into(), cx.theme().info));
+    } else if triage.reviewed {
+        chips.push(chip("reviewed".into(), cx.theme().muted_foreground));
+    }
+    chips.push(chip(
+        format!("{} · {} lines", triage.size.label(), triage.lines),
+        cx.theme().muted_foreground,
+    ));
+    match triage.ci {
+        Ci::Failing => chips.push(chip("CI failing".into(), cx.theme().danger)),
+        Ci::Running => chips.push(chip("CI running".into(), cx.theme().warning)),
+        Ci::Passing => chips.push(chip("CI green".into(), cx.theme().success)),
+        Ci::None => {}
+    }
+    for risk in &triage.risks {
+        chips.push(chip((*risk).to_string(), cx.theme().warning));
+    }
+    chips
+}
+
 fn section(title: &'static str, cx: &App) -> gpui_kit::Div {
     h_flex()
         .flex_none()

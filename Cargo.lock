@@ -5758,6 +5758,7 @@ name = "ph-github"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "ph-store",
  "security-framework",
  "serde",
@@ -5841,6 +5842,8 @@ name = "ph-review"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "ph-git",
  "ph-github",
  "ph-store",
  "serde",
@@ -5914,6 +5917,7 @@ name = "ph-ui"
 version = "0.3.0"
 dependencies = [
  "gpui-kit",
+ "tracing",
 ]
 
 [[package]]

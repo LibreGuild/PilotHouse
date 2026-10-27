@@ -16,8 +16,14 @@ This product bundles third-party works under their own licences:
 - Interface icons: from Lucide, ISC licence, embedded through the gpui-kit
   crates.
 
+- The Courgette font, crates/ui/assets/fonts/: by Sorkin Type Co, SIL Open
+  Font License 1.1 (crates/ui/assets/fonts/OFL.txt). It sets the app's name
+  in the title bar.
+
 - crates/ui/src/menu.rs is adapted from gpui-component's
   menu/dropdown_menu.rs, Apache License 2.0.
 
 The PilotHouse app icon (crates/app/assets/icon/) was made for this project
-and is covered by the Apache License 2.0 with the rest of the repository.
+and is covered by the Apache License 2.0 with the rest of the repository. Its
+letters are outlines of the Outfit font (The Outfit Project Authors, SIL Open
+Font License 1.1).

@@ -23,7 +23,7 @@ const MAX_KEPT: usize = 24;
 pub(crate) const DEFAULT_AGENT_KEY: &str = "agent.default";
 
 /// The agent new chats start with.
-pub(crate) fn default_agent(store: &Store) -> &'static AgentSpec {
+pub fn default_agent(store: &Store) -> &'static AgentSpec {
     let id: String = store.setting(DEFAULT_AGENT_KEY);
     agents::find(&id).unwrap_or(&AGENTS[0])
 }

@@ -42,6 +42,9 @@ pub enum ChangesPanelEvent {
     OpenFile { path: String, line: u32 },
     /// Give the review notes (as one message) to the chat in front.
     SendNotes(String),
+    /// Have an agent review the changes before they are pushed; its
+    /// findings come back as notes on the lines.
+    ReviewChanges,
 }
 
 enum State {
@@ -588,6 +591,17 @@ impl ChangesPanel {
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             .child(div().flex_1().truncate().child(summary))
+            .when(matches!(&self.state, State::Loaded(changes) if !changes.files.is_empty() || !changes.untracked.is_empty()), |this| {
+                this.child(
+                    Button::new("review-changes")
+                        .ghost()
+                        .xsmall()
+                        .icon(ph_ui::Icons::Sparkles)
+                        .label("Review")
+                        .tooltip("An agent reviews these changes before you push; its findings land on the lines as notes")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesPanelEvent::ReviewChanges))),
+                )
+            })
             .when(!self.undo.is_empty(), |this| {
                 this.child(
                     Button::new("undo-discard")
@@ -904,6 +918,15 @@ impl ChangesPanel {
             .into_any_element()
     }
 
+    /// Puts an agent's review findings on the lines as notes, in place of
+    /// those of its review before.
+    pub fn set_review_notes(&mut self, notes: Vec<crate::notes::Note>, cx: &mut Context<Self>) {
+        self.notes.retain(|note| !note.from_review);
+        self.notes.extend(notes);
+        self.list.remeasure();
+        cx.notify();
+    }
+
     /// Adds a review note.
     pub fn add_note(&mut self, note: crate::notes::Note, cx: &mut Context<Self>) {
         if !note.text.trim().is_empty() {
@@ -1080,7 +1103,11 @@ impl ChangesPanel {
                     Button::new("send-notes")
                         .small()
                         .primary()
-                        .label("Send to chat")
+                        .label(if self.notes.iter().any(|note| note.from_review) {
+                            "Fix with agent"
+                        } else {
+                            "Send to chat"
+                        })
                         .tooltip("Give every note to the chat in front, as one message")
                         .on_click(cx.listener(|this, _, _, cx| {
                             let text = crate::notes::prompt(&this.notes, &this.root);
@@ -1316,6 +1343,7 @@ fn ask_note(
                     line,
                     code: code.clone(),
                     text,
+                    from_review: false,
                 };
                 _ = panel.update(cx, |panel, cx| panel.add_note(note, cx));
                 true

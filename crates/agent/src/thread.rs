@@ -149,6 +149,18 @@ pub enum ThreadEvent {
     Review(ReviewCardEvent),
 }
 
+/// What a review chat's turn is for, read from the agent's reply when the
+/// turn ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewTurn {
+    /// A round of the chat's review: its findings.
+    Round,
+    /// Whether the author is right about finding `finding_id` (stored).
+    Claim { finding_id: i64 },
+    /// A walkthrough, saved as run `run_id`.
+    Walkthrough { run_id: i64 },
+}
+
 /// The agent session id, once set up; shared so concurrent callers await one setup.
 type SetupTask = Shared<Task<Result<String, SharedString>>>;
 
@@ -177,6 +189,8 @@ pub struct ChatThread {
     scroller: Entity<MessageScrollerState>,
     /// The PR review this chat runs, if it is a review chat.
     review_id: Option<i64>,
+    /// What the turn under way is for (see [`ReviewTurn`]).
+    review_turn: Option<ReviewTurn>,
     /// A lane of a parallel run: the agent works in its own worktree
     /// (`project.path`), remembered with the session.
     parallel: bool,
@@ -253,6 +267,7 @@ impl ChatThread {
             status: ThreadStatus::Idle,
             scroller,
             review_id: None,
+            review_turn: None,
             parallel: false,
             reads_this_turn: false,
             app_tools_this_turn: false,
@@ -275,9 +290,17 @@ impl ChatThread {
         }
     }
 
-    /// Makes this draft a PR review chat (the review run already exists).
+    /// Makes this draft a PR review chat (the review run already exists):
+    /// its first turn's reply is read as the round's findings.
     pub fn set_review(&mut self, review_id: i64) {
         self.review_id = Some(review_id);
+        self.review_turn = Some(ReviewTurn::Round);
+    }
+
+    /// The next turn's reply is read as `turn` (an author's claim checked,
+    /// a walkthrough). Reads run without asking, as in a review.
+    pub fn set_review_turn(&mut self, turn: ReviewTurn) {
+        self.review_turn = Some(turn);
     }
 
     pub fn review_id(&self) -> Option<i64> {
@@ -312,54 +335,129 @@ impl ChatThread {
         }
     }
 
-    /// After a review chat's turn: reads the agent's findings from its reply,
-    /// matches them to the previous run, saves them, and shows the card.
+    /// After a review chat's turn: reads the agent's reply for what the turn
+    /// was for (see [`ReviewTurn`]) and saves it; a round's findings show
+    /// as a card.
     fn record_review(&mut self, cx: &mut Context<Self>) {
-        let Some(review_id) = self.review_id else {
+        let Some(turn) = self.review_turn.take() else {
             return;
         };
-        let reply = self.entries.iter().rev().find_map(|entry| match entry {
-            Entry::Agent { text, .. } => Some(text.clone()),
-            Entry::User { .. } => Some(String::new()),
-            _ => None,
-        });
-        let Some(report) = reply.as_deref().and_then(ph_review::parse) else {
-            self.push(
-                Entry::Notice {
-                    text: "No findings block in that reply. Ask the agent to finish with the pilothouse-review block to see the findings here.".into(),
-                    is_error: false,
-                },
-                cx,
-            );
+        let reply = self
+            .entries
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                Entry::Agent { text, .. } => Some(text.clone()),
+                Entry::User { .. } => Some(String::new()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        match turn {
+            ReviewTurn::Round => self.record_round(reply, cx),
+            ReviewTurn::Claim { finding_id } => {
+                let notice = match (
+                    ph_review::prompt::parse_claim(&reply),
+                    self.store.pr_finding(finding_id).ok().flatten(),
+                ) {
+                    (Some((agree, draft)), Some(mut finding)) => {
+                        finding.claim = if agree { "agree" } else { "disagree" }.into();
+                        finding.draft_reply = draft;
+                        match self.store.update_finding(&finding) {
+                            Ok(()) => format!(
+                                "{} {} a reply is drafted under the finding, to post or change.",
+                                finding.label,
+                                if agree {
+                                    "holds up for the author:"
+                                } else {
+                                    "still stands:"
+                                }
+                            ),
+                            Err(err) => format!("Could not save the answer: {err:#}"),
+                        }
+                    }
+                    _ => "No answer block in that reply (pilothouse-claim).".into(),
+                };
+                self.push(
+                    Entry::Notice {
+                        text: notice,
+                        is_error: false,
+                    },
+                    cx,
+                );
+                cx.emit(ThreadEvent::TurnEnded);
+            }
+            ReviewTurn::Walkthrough { run_id } => {
+                let notice = match ph_review::walkthrough::parse(&reply) {
+                    Some(walkthrough) => {
+                        let data = serde_json::to_string(&walkthrough).unwrap_or_default();
+                        match self
+                            .store
+                            .finish_pr_run(run_id, &walkthrough.gist.what, &data)
+                        {
+                            Ok(()) => {
+                                "The walkthrough is ready in the pull request's Walkthrough tab."
+                                    .to_string()
+                            }
+                            Err(err) => format!("Could not save the walkthrough: {err:#}"),
+                        }
+                    }
+                    None => "No walkthrough block in that reply (pilothouse-walkthrough).".into(),
+                };
+                self.push(
+                    Entry::Notice {
+                        text: notice,
+                        is_error: false,
+                    },
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// A round's findings: built from the previous round's off the UI
+    /// thread (git, files), saved, and shown as the card.
+    fn record_round(&mut self, reply: String, cx: &mut Context<Self>) {
+        let Some(review_id) = self.review_id else {
             return;
         };
         let Ok(Some(review)) = self.store.pr_review(review_id) else {
             return;
         };
-        let previous = self
-            .store
-            .latest_pr_review(&review.pull, Some(review_id))
-            .ok()
-            .flatten()
-            .and_then(|earlier| self.store.pr_findings(earlier.id).ok())
-            .unwrap_or_default();
-        let findings = ph_review::merge::merge(review_id, &report, &previous);
-        if let Err(err) =
-            self.store
-                .finish_pr_review(review_id, &report.summary, &report.verdict, &findings)
-        {
-            self.push(
-                Entry::Notice {
-                    text: format!("Could not save the review: {err:#}"),
-                    is_error: true,
-                },
-                cx,
-            );
-            return;
-        }
-        let entry = Entry::review(review_id, cx);
-        self.watch_card(&entry, cx);
-        self.push(entry, cx);
+        let store = self.store.clone();
+        let worktree = self.project.path.clone();
+        let agent = self.agent.name;
+        let work = cx.background_spawn(async move {
+            ph_review::rounds::finish(&store, &review, &reply, &worktree, agent)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(Some(_)) => {
+                        let entry = Entry::review(review_id, cx);
+                        this.watch_card(&entry, cx);
+                        this.push(entry, cx);
+                    }
+                    Ok(None) => this.push(
+                        Entry::Notice {
+                            text: "No findings block in that reply. Ask the agent to finish with the pilothouse-review block to see the findings here.".into(),
+                            is_error: false,
+                        },
+                        cx,
+                    ),
+                    Err(err) => this.push(
+                        Entry::Notice {
+                            text: format!("Could not save the review: {err:#}"),
+                            is_error: true,
+                        },
+                        cx,
+                    ),
+                }
+                this.persist(cx);
+                cx.emit(ThreadEvent::TurnEnded);
+            });
+        })
+        .detach();
     }
 
     /// A stored chat with its transcript.
@@ -1208,7 +1306,11 @@ impl ChatThread {
             .unwrap_or_else(|| "Use a tool".to_string());
         // A review, a quick question or a GitHub chat only reads: let it,
         // without waking anyone up.
-        if self.review_id.is_some() || self.reads_this_turn || self.project.read_only {
+        if self.review_id.is_some()
+            || self.review_turn.is_some()
+            || self.reads_this_turn
+            || self.project.read_only
+        {
             let known =
                 self.tool_index(&request.tool_call.tool_call_id.0)
                     .and_then(|ix| match &self.entries[ix] {
@@ -1640,6 +1742,11 @@ impl ChatThread {
         };
         let result_kind = result.as_ref().ok().cloned();
         let result_failed = result.is_err();
+        // A turn that did not finish has no answer to read; what is said
+        // next is conversation.
+        if !matches!(result_kind, Some(StopReason::EndTurn)) {
+            self.review_turn = None;
+        }
         match result {
             Ok(StopReason::EndTurn) => self.record_review(cx),
             Ok(StopReason::Cancelled) => self.push(notice("Stopped.", false), cx),

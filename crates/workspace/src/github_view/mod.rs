@@ -34,6 +34,7 @@ use ph_store::sessions::SessionId;
 use crate::app_state::AppState;
 use crate::workspace::Workspace;
 
+mod agents;
 mod render;
 
 /// The repositories the user added (`host/owner/name` each).
@@ -41,6 +42,16 @@ const ADDED_KEY: &str = "github.repositories";
 
 /// The inbox is read again when shown after this long.
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(120);
+/// Watched pull requests are looked at this often.
+const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(180);
+/// Pull requests of each inbox list assessed for triage (each costs a few
+/// requests).
+const TRIAGED: usize = 15;
+/// Settings key: the inbox sorted for review (not by date).
+const REVIEW_FIRST_KEY: &str = "github.inbox.review_first";
+
+/// A pull request in the inbox: host, owner, name, number.
+pub(crate) type PullKey = (String, String, String, u64);
 
 /// What the middle shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +96,14 @@ pub struct GithubView {
     /// one open in that repository's panel).
     chats: HashMap<RepoId, (Entity<ChatPanel>, Subscription)>,
     attached: HashMap<RepoId, u64>,
+    /// Inbox pull requests assessed (size, risk, CI, your review), and when
+    /// each was last updated (assessed again only once it changes).
+    pub(crate) triage: HashMap<PullKey, (String, ph_review::triage::Triage)>,
+    /// The inbox sorted for review, not by date.
+    pub(crate) review_first: bool,
+    /// Each repository space with a chat open, and its name (for the
+    /// Agents board: reviews show there).
+    spaces: Vec<(ph_store::projects::ProjectId, String)>,
     /// The "add a repository" box, while open.
     pub(crate) adding: Option<(Entity<InputState>, Subscription)>,
     pub(crate) sidebar_shown: bool,
@@ -114,13 +133,105 @@ impl GithubView {
             panels: HashMap::new(),
             chats: HashMap::new(),
             attached: HashMap::new(),
+            spaces: Vec::new(),
+            triage: HashMap::new(),
+            review_first: store_flag(AppState::store(cx), REVIEW_FIRST_KEY),
             adding: None,
             sidebar_shown: true,
             _load: None,
             _work: Vec::new(),
         };
         view.refresh(cx);
+        view.watch(cx);
         view
+    }
+
+    /// Looks at watched pull requests every few minutes: new commits and
+    /// answers to findings are announced (and the answers applied).
+    fn watch(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        self._work.push(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(WATCH_EVERY).await;
+                let store = store.clone();
+                let news = cx
+                    .background_spawn(async move {
+                        ph_review::github::watched(&store)
+                            .into_iter()
+                            .filter_map(|pull| {
+                                let news = ph_review::github::check_watched(&store, &pull)
+                                    .map_err(|err| {
+                                        tracing::info!("watching #{}: {err:#}", pull.number)
+                                    })
+                                    .ok()?;
+                                Some((pull, news))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .await;
+                let alive = this.update(cx, |this, cx| this.announce(news, cx)).is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Tells the user what changed on watched pull requests.
+    fn announce(
+        &mut self,
+        news: Vec<(ph_store::reviews::PullRef, ph_review::github::News)>,
+        cx: &mut Context<Self>,
+    ) {
+        for (pull, news) in news {
+            let name = format!("{}/{} #{}", pull.owner, pull.repo, pull.number);
+            let mut lines = Vec::new();
+            if news.pushed.is_some() {
+                lines.push("New commits: check the fixes".to_string());
+            }
+            for (label, status, who) in &news.answers {
+                let who = if who.is_empty() {
+                    "the author"
+                } else {
+                    who.as_str()
+                };
+                lines.push(format!(
+                    "{label}: {} ({who})",
+                    ph_review::comment::status_label(status)
+                ));
+            }
+            for (label, who) in &news.talk {
+                lines.push(format!("{who} replied on {label}"));
+            }
+            if news.closed {
+                lines.push("Merged or closed: no longer watched".into());
+                let _ = ph_review::github::set_watched(&self.store, &pull, false);
+            }
+            if lines.is_empty() {
+                continue;
+            }
+            cx.show_system_notification(gpui_kit::SystemNotification {
+                tag: format!("watch-{name}").into(),
+                title: name.into(),
+                body: lines.join(" · ").into(),
+                actions: Vec::new(),
+            });
+            let id = RepoId {
+                host: pull.host.clone(),
+                owner: pull.owner.clone(),
+                name: pull.repo.clone(),
+            };
+            if let Some(panel) = self.panel_of(&id).cloned() {
+                panel.update(cx, |panel, cx| panel.review_changed(cx));
+            }
+        }
+    }
+
+    /// Sorts the inbox for review, or by date.
+    pub(crate) fn set_review_first(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.review_first = on;
+        let _ = self.store.set_setting(REVIEW_FIRST_KEY, &Some(on));
+        cx.notify();
     }
 
     /// The view came into sight, with the workspaces' `folders` as they are
@@ -161,10 +272,13 @@ impl GithubView {
         self.accounts = ph_github::accounts::accounts(&self.store);
         let accounts = self.accounts.clone();
         let folders = self.folders.clone();
+        let store = self.store.clone();
+        let assessed = self.triage.clone();
         self.loading = true;
         cx.notify();
         let load = cx.background_spawn(async move {
             let mut inbox: HashMap<Inbox, List> = HashMap::new();
+            let mut triage = HashMap::new();
             for account in &accounts {
                 let client = match account.client() {
                     Ok(client) => client,
@@ -178,9 +292,31 @@ impl GithubView {
                 for kind in Inbox::ALL {
                     let list = inbox.entry(kind).or_default();
                     match ph_github::search::pulls(&client, kind) {
-                        Ok(found) => list
-                            .items
-                            .extend(found.into_iter().map(|pull| (account.host.clone(), pull))),
+                        Ok(found) => {
+                            for pull in found.iter().take(TRIAGED) {
+                                let Some((owner, name)) = pull.repo() else {
+                                    continue;
+                                };
+                                let key = (account.host.clone(), owner, name, pull.number);
+                                if triage.contains_key(&key) {
+                                    continue;
+                                }
+                                let known = assessed
+                                    .get(&key)
+                                    .filter(|(updated, _)| *updated == pull.updated_at)
+                                    .map(|(_, known)| {
+                                        known
+                                            .clone()
+                                            .with_review(reviewed_at(&store, &key).as_deref())
+                                    });
+                                if let Some(found) = known.or_else(|| assess(&store, &client, &key))
+                                {
+                                    triage.insert(key, (pull.updated_at.clone(), found));
+                                }
+                            }
+                            list.items
+                                .extend(found.into_iter().map(|pull| (account.host.clone(), pull)))
+                        }
                         Err(err) => list.error = Some(format!("{}: {err:#}", account.host)),
                     }
                 }
@@ -207,12 +343,13 @@ impl GithubView {
                     }
                 }
             }
-            (inbox, repos)
+            (inbox, repos, triage)
         });
         self._load = Some(cx.spawn(async move |this, cx| {
-            let (inbox, repos) = load.await;
+            let (inbox, repos, triage) = load.await;
             _ = this.update(cx, |this, cx| {
                 this.inbox = inbox;
+                this.triage = triage;
                 this.from_workspaces = repos;
                 this.loading = false;
                 this.loaded_at = Some(std::time::Instant::now());
@@ -286,9 +423,8 @@ impl GithubView {
                 PullsPanelEvent::OpenSettings => {
                     window.dispatch_action(Box::new(crate::actions::OpenSettings), cx)
                 }
-                PullsPanelEvent::ReviewWithAgent { hosting, pull } => {
-                    let template = ph_review::templates::default_review(&this.store);
-                    this.review((**hosting).clone(), (**pull).clone(), template, window, cx)
+                PullsPanelEvent::Agent { hosting, request } => {
+                    this.agent((**hosting).clone(), request.clone(), window, cx)
                 }
                 PullsPanelEvent::OpenSession(session) => this.show_session_id(*session, window, cx),
             },
@@ -434,6 +570,7 @@ impl GithubView {
         if let Some((chat, _)) = self.chats.get(id) {
             return chat.clone();
         }
+        self.spaces.push((project.id, id.full_name()));
         let store = self.store.clone();
         let chat = cx.new(|cx| {
             let mut chat = ChatPanel::new(store.clone(), project.clone(), window, cx);
@@ -461,6 +598,9 @@ impl GithubView {
                 ChatPanelEvent::ReviewAgain { review_id } => {
                     this.review_again(*review_id, window, cx)
                 }
+                ChatPanelEvent::OpenFindings { review_id } => {
+                    this.open_findings(*review_id, window, cx)
+                }
                 ChatPanelEvent::OpenFile { path, .. } => this.open_file(chat, path, cx),
                 ChatPanelEvent::WantPulls => {
                     if let Some(panel) = this.panel_of(&repo).cloned() {
@@ -481,6 +621,11 @@ impl GithubView {
         );
         self.chats.insert(id.clone(), (chat.clone(), subscription));
         chat
+    }
+
+    /// The repository spaces with a chat open: (space, `owner/name`).
+    pub(crate) fn spaces(&self) -> &[(ph_store::projects::ProjectId, String)] {
+        &self.spaces
     }
 
     /// The chat beside the pull request in view, if one is open.
@@ -574,7 +719,7 @@ impl GithubView {
             _ = this.update_in(cx, |this, window, cx| match result {
                 Ok((hosting, pull)) => match template.kind {
                     ph_review::templates::TemplateKind::Review => {
-                        this.review(hosting, pull, template, window, cx)
+                        this.review(hosting, pull, template, "full", window, cx)
                     }
                     ph_review::templates::TemplateKind::Prompt => {
                         this.ask(hosting, pull, template, window, cx)
@@ -600,7 +745,7 @@ impl GithubView {
             return;
         };
         let work = cx.background_spawn(async move {
-            let (_, sha) = ph_pulls::clones::check_out_pull(&hosting, pull.number)?;
+            let (_, sha, _) = ph_pulls::clones::check_out_pull(&hosting, pull.number)?;
             let info = ph_review::prompt::PullInfo {
                 number: pull.number,
                 title: &pull.title,
@@ -626,93 +771,6 @@ impl GithubView {
                     chat.start_prompt(title, display, prompt, window, cx)
                 }
                 Err(err) => chat.set_failed(format!("{err:#}"), cx),
-            });
-        }));
-    }
-
-    /// Starts an agent review of `pull` with review `template`: checks it
-    /// out beside the repository's clone (made the first time), then opens
-    /// a review chat there that starts by itself.
-    pub fn review(
-        &mut self,
-        hosting: Hosting,
-        pull: PullRequest,
-        template: Template,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let id = RepoId::of(&hosting);
-        let number = pull.number;
-        self.show_pull(id.clone(), number, window, cx);
-        let project = match self.space(&id) {
-            Ok(project) => project,
-            Err(err) => {
-                window.push_notification(Notification::error(format!("{err:#}")), cx);
-                return;
-            }
-        };
-        let chat = self.chat_for(&id, project.clone(), window, cx);
-        let first = !id.clone_dir().join(".git").exists();
-        chat.update(cx, |chat, cx| {
-            chat.set_busy(
-                Some(if first {
-                    format!("Cloning {} for the review of #{number}…", id.full_name())
-                } else {
-                    format!("Getting #{number} ready for the review…")
-                }),
-                cx,
-            )
-        });
-        let store = self.store.clone();
-        let work = cx.background_spawn(async move {
-            crate::review::prepare(&store, project.id, &hosting, &pull, &template)
-        });
-        self._work.push(cx.spawn_in(window, async move |this, cx| {
-            let result = work.await;
-            _ = this.update_in(cx, |_, window, cx| {
-                chat.update(cx, |chat, cx| match result {
-                    Ok(prepared) => chat.start_review(
-                        prepared.review_id,
-                        prepared.worktree,
-                        prepared.title,
-                        prepared.display,
-                        prepared.prompt,
-                        window,
-                        cx,
-                    ),
-                    Err(err) => chat.set_failed(format!("Could not start the review: {err:#}"), cx),
-                });
-                cx.notify();
-            });
-        }));
-    }
-
-    /// A new run of review `review_id`, on its pull request's latest head,
-    /// with the default review template.
-    pub fn review_again(&mut self, review_id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        let store = self.store.clone();
-        let find = cx.background_spawn(async move {
-            let review = store
-                .pr_review(review_id)?
-                .ok_or_else(|| anyhow::anyhow!("review not found"))?;
-            let id = RepoId {
-                host: review.pull.host.clone(),
-                owner: review.pull.owner.clone(),
-                name: review.pull.repo.clone(),
-            };
-            let hosting = ph_pulls::hosting::for_repo(&store, &id)
-                .map_err(|missing| anyhow::anyhow!("{}", missing.explain()))?;
-            let pull = ph_github::pulls::get(&hosting.client, &hosting.repo, review.pull.number)?;
-            anyhow::Ok((hosting, pull))
-        });
-        self._work.push(cx.spawn_in(window, async move |this, cx| {
-            let result = find.await;
-            _ = this.update_in(cx, |this, window, cx| match result {
-                Ok((hosting, pull)) => {
-                    let template = ph_review::templates::default_review(&this.store);
-                    this.review(hosting, pull, template, window, cx)
-                }
-                Err(err) => window.push_notification(Notification::error(format!("{err:#}")), cx),
             });
         }));
     }
@@ -844,6 +902,49 @@ impl GithubView {
 /// The repository `text` names: a URL (`https://host/owner/name`,
 /// `git@host:owner/name.git`), or `owner/name` on github.com when there is
 /// an account for it, else on the only account's host.
+/// A flag kept in the settings (true when never set).
+fn store_flag(store: &Store, key: &str) -> bool {
+    store.setting::<Option<bool>>(key).unwrap_or(true)
+}
+
+/// Triage of inbox pull request `key` (host, owner, name, number):
+/// blocking, a few requests.
+fn assess(
+    store: &Store,
+    client: &ph_github::Client,
+    key: &PullKey,
+) -> Option<ph_review::triage::Triage> {
+    let (_, owner, name, number) = key;
+    let repo = ph_github::Repo::new(owner, name).ok()?;
+    let pull = ph_github::pulls::get(client, &repo, *number).ok()?;
+    let files = ph_github::pulls::files(client, &repo, *number).unwrap_or_default();
+    let checks = ph_github::pulls::checks(client, &repo, &pull.head.sha).unwrap_or_default();
+    Some(ph_review::triage::assess(
+        &pull,
+        &files,
+        &checks,
+        reviewed_at(store, key).as_deref(),
+    ))
+}
+
+/// The commit your newest review of inbox pull request `key` read.
+fn reviewed_at(store: &Store, key: &PullKey) -> Option<String> {
+    let (host, owner, name, number) = key;
+    store
+        .latest_pr_review(
+            &ph_store::reviews::PullRef {
+                host: host.clone(),
+                owner: owner.clone(),
+                repo: name.clone(),
+                number: *number,
+            },
+            None,
+        )
+        .ok()
+        .flatten()
+        .map(|round| round.head_sha)
+}
+
 fn parse_repository(text: &str, accounts: &[Account]) -> Option<RepoId> {
     let text = text.trim();
     let (host, owner, name) = match ph_git::remote::parse_url(text) {

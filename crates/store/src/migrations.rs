@@ -245,6 +245,36 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE pr_findings ADD COLUMN evidence TEXT NOT NULL DEFAULT '';
     "#,
+    // 13: reviews in rounds with a findings ledger. A finding keeps a label
+    // (`F3`) across rounds; its severity comes from what goes wrong (impact)
+    // and how often (likelihood); its status says who set it and why; a
+    // round knows its number and kind; the PR keeps one summary comment.
+    // Statuses become open, fixed, not_problem and wont_fix.
+    r#"
+    ALTER TABLE pr_findings ADD COLUMN label TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pr_findings ADD COLUMN impact TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pr_findings ADD COLUMN likelihood TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pr_findings ADD COLUMN status_source TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pr_findings ADD COLUMN status_by TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pr_findings ADD COLUMN reason TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pr_findings ADD COLUMN first_round INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE pr_findings ADD COLUMN found_late INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE pr_findings ADD COLUMN verified INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE pr_findings ADD COLUMN agents TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pr_findings ADD COLUMN note TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pr_findings ADD COLUMN issue_number INTEGER;
+    ALTER TABLE pr_findings ADD COLUMN last_reply_id INTEGER;
+    ALTER TABLE pr_findings ADD COLUMN suggested_code TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pr_findings ADD COLUMN claim TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pr_findings ADD COLUMN draft_reply TEXT NOT NULL DEFAULT '';
+    UPDATE pr_findings SET status = 'open' WHERE status = 'new';
+    UPDATE pr_findings SET status = 'not_problem' WHERE status = 'dismissed';
+    ALTER TABLE pr_reviews ADD COLUMN round INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE pr_reviews ADD COLUMN kind TEXT NOT NULL DEFAULT 'full';
+    ALTER TABLE pr_reviews ADD COLUMN agent TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pr_reviews ADD COLUMN summary_comment_id INTEGER;
+    ALTER TABLE pr_reviews ADD COLUMN data TEXT NOT NULL DEFAULT '';
+    "#,
 ];
 
 /// Backups kept of a database file, newest first; older ones are deleted.

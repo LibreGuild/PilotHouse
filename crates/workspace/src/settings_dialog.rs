@@ -9,14 +9,13 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
-    v_flex,
 };
 use gpui_kit::{
-    App, AppContext as _, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    App, AppContext as _, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
+    px,
 };
 use ph_theme::preferences::{self, installed_fonts};
-use ph_theme::{Accent, Appearance, ChatWidth, Corners, Preferences, WindowStyle};
+use ph_theme::{Appearance, ChatWidth, Corners, Preferences, WindowStyle};
 use ph_ui::Icons;
 
 use crate::app_state::AppState;
@@ -177,10 +176,6 @@ fn appearance_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {
                     .keywords(["dark", "light", "theme"]),
                 )
                 .item(
-                    SettingItem::render(|_, _, cx| accent_swatches(cx))
-                        .keywords(["accent", "color", "colour", "highlight"]),
-                )
-                .item(
                     SettingItem::new("Corners", choice(&Corners::ALL, Corners::label, |p| p.corners, |p, v| p.corners = v))
                         .description("How rounded panels, buttons and cards are."),
                 ),
@@ -227,43 +222,6 @@ fn appearance_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {
                         .keywords(["font size", "zoom", "bigger", "smaller"]),
                 ),
         )
-}
-
-/// Six accent swatches; the chosen one is ringed.
-fn accent_swatches(cx: &mut App) -> impl IntoElement + use<> {
-    let current = prefs(cx).accent;
-    let dark = cx.theme().is_dark();
-    h_flex()
-        .w_full()
-        .justify_between()
-        .gap_4()
-        .child(
-            v_flex()
-                .gap_0p5()
-                .child(div().text_sm().child("Accent color"))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Focus rings, selections, links and highlights."),
-                ),
-        )
-        .child(h_flex().gap_2().children(Accent::ALL.map(|accent| {
-            let selected = accent == current;
-            div()
-                .id(SharedString::from(format!("accent-{}", accent.label())))
-                .size_6()
-                .rounded_full()
-                .bg(accent.color(dark))
-                .cursor_pointer()
-                .border_2()
-                .border_color(if selected {
-                    cx.theme().foreground
-                } else {
-                    cx.theme().background
-                })
-                .on_click(move |_, _, cx| AppState::update_preferences(cx, |p| p.accent = accent))
-        })))
 }
 
 fn editor_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {

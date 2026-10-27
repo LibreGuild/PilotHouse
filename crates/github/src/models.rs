@@ -184,8 +184,35 @@ pub(crate) struct CommitStatus {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DraftComment {
     pub path: String,
-    /// The line in the new file (`RIGHT`) the comment is on.
+    /// The line in the new file (`RIGHT`) the comment is on (the last one
+    /// of several).
     pub line: u64,
     pub side: String,
     pub body: String,
+    /// The first line, for a comment on several lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_side: Option<String>,
+}
+
+/// A pull request's line-comment thread (GraphQL), by its first comment.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Thread {
+    /// GraphQL node id, to resolve it.
+    pub id: String,
+    pub resolved: bool,
+    /// The REST id of its first comment.
+    pub first_comment: u64,
+}
+
+/// An issue, as created.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Issue {
+    pub number: u64,
+    pub title: String,
+    /// `open` or `closed`.
+    pub state: String,
+    pub html_url: String,
 }

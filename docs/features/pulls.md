@@ -45,20 +45,76 @@ What agents are asked to do with a pull request (`ph_review::templates`). Shippe
 ## A pull request
 
 - **Overview**: the description and conversation (Markdown), reviews with their state, then Comment / Request changes / Approve, and Merge (merge, squash or rebase; asks to confirm).
-- **Files**: each file's diff with its line comment threads; Reply in a thread. Only the files in sight are drawn (patches are parsed once), and a diff over 400 lines is folded behind *Show diff*, so a large pull request scrolls smoothly.
+- **Findings**: what agent reviews found, kept across rounds (see [Findings](#findings)). The tab shows how many are open; opening it reads the author's ticks and replies.
+- **Walkthrough**: the change explained (see [Walkthrough](#walkthrough)).
+- **Files**: each file's diff with its line comment threads; Reply in a thread. Only the files in sight are drawn (patches are parsed once), and a diff over 400 lines is folded behind *Show diff*. **Ask about lines** under a file asks an agent about some of its lines (type `start-end: question`). When there is a walkthrough, its tour runs along the top: each stop shows its file.
 - **Commits**, **Checks** (click to open a check's page).
+- **Watch**: PilotHouse looks at the pull request every three minutes and tells you (a system notification) when the author pushes or answers a finding; answers are applied. Merged or closed pull requests stop being watched.
+- **Address comments** (your own pull requests): a [task](#fix-in-a-task) on the branch whose agent works through the reviewers' comments not yet resolved, changes what is right and drafts a reply for each.
 - **Check out** (in a workspace's PRs tool): fetches the PR head and switches to a local `pr/<number>` branch.
-- The last agent review's state (open and fixed findings) with **Open review chat**.
+
+## The inbox, for review
+
+The *Review requested*, *My pull requests* and *Assigned to me* lists show, for the first 15 pull requests of each: the size (small, medium, large, and lines changed), CI (green, failing, running), what the change touches that deserves care (auth, security, migrations, payments, CI, dependencies) and whether you reviewed it and the author pushed since. **Review first** (the default; **Newest first** sorts by date) puts first the reviews the author answered with commits, then pull requests whose CI is not failing, risky before plain, small before large (`ph_review::triage`).
 
 ## Review with agent
 
-1. PilotHouse brings the repository's [managed clone](#where-it-works-the-managed-clones) up to date (every branch, so `origin/<base>` is current), fetches the PR head (`pull/<n>/head`) and checks it out in `pr-<n>` beside the clone (reused and moved to the new head on later runs). Your checkout is not touched. Reviews started from a workspace's PRs tool run here too. Reviews made before this lived in `<data dir>/worktrees/<project>-pr-<n>`, which is tidied as before.
-2. A **review chat** opens in the GitHub view's chat for the repository and starts by itself with the default agent. The prompt (`ph_review::prompt`) asks it to read the change in the context of the whole codebase, find real problems (bugs, security, data loss, races, error handling, performance, compatibility, tests), not edit anything, and end with a fixed template: a JSON block with a summary, a verdict and findings (`severity` critical/major/minor/nit, `path`, `line`, `title`, `details`, `suggestion`, a stable `key`).
-3. In a review chat, reads, searches and a short list of read-only commands (`git diff/log/show/blame…`, `rg`, `grep`, `ls`, `cat`…, no shell operators) are approved automatically, so a review can run unattended. Anything else still asks.
-4. When the turn ends, the findings become a **card** in the chat: grouped by severity, each with its file and line, its **Issue**, **Evidence** and **Fix**, and New / Still open / Fixed / Dismissed. Posted comments carry the same three parts. Nothing goes to GitHub until you pick findings and click:
-   - **Post as line comments**: one review on the reviewed commit, a line comment for each finding on a line the diff shows, the rest in the review's text.
-   - **Post as one comment**: one conversation comment listing them.
-   - **Dismiss** a finding (it will not come back as new).
-5. **Review again** (after the author pushes): a new run on the latest head. The previous findings go into the prompt; the agent re-reports those still there with the same key and lists fixed ones. The card then shows what is still open (keeping its posted comment), what is new, and what is fixed. **Mark fixed on GitHub** replies "Fixed" on each fixed finding's line thread, or posts one comment for the rest.
+1. PilotHouse brings the repository's [managed clone](#where-it-works-the-managed-clones) up to date, fetches the PR head (`pull/<n>/head`) and checks it out in `pr-<n>` beside the clone. Your checkout is not touched. The reviewed commit is kept (`refs/pilothouse/reviewed/<n>/<sha>`) so the next round can see how lines moved, even after a force-push.
+2. **A clean checkout.** What a pull request carries that would act on the agent instead of being read is taken out of the checkout before the agent starts: agent settings with hooks (`.claude/settings*.json`, `.claude/hooks`), MCP servers (`.mcp.json`, `.vscode/mcp.json`), other agents' folders (`.gemini`, `.codex`, `.cursor`, `.agents`, `.clinerules`) and the root's `.env` files. The chat's first message lists what was taken out. Findings are still checked against the commit itself.
+3. **The repository's guidance**, from the base branch (never the head, which the author controls): its rules in `.pilothouse/review.md`, its notes for agents (`AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`) as context, and the rules PilotHouse learned for the repository (see *Remember why*). The first message says which were used.
+4. A **review chat** opens beside the pull request and starts by itself with the default agent. It reads the change in the context of the whole codebase and ends with a fixed answer block (`ph_review::prompt`): per finding its place, title, details, the code it is about copied from the file (evidence), a fix (optionally replacement code), and two answers: **what goes wrong** (security, crash, wrong result, slow, maintainability, improvement) and **how often** (in normal use, in specific conditions, rarely). PilotHouse works the severity out from those two answers (`ph_review::severity`), so the same problem gets the same severity whichever agent finds it.
+5. **Checked quotes.** Each finding's evidence is looked for in the file at the reviewed commit (whitespace and diff marks aside); found, the finding moves to the lines quoted; not found, it is marked *code not found* and never posted (`ph_review::grounding`).
+6. When the turn ends the round is saved and a short card in the chat says what is new, fixed and open, with **Open findings** and **Check the fixes**. Later messages in that chat are an ordinary conversation.
 
-History lives in SQLite (`pr_reviews`, `pr_findings`): every run, its findings, their status and the GitHub comment each was posted as.
+### Rounds
+
+A pull request's findings are one list carried from round to round (`ph_review::ledger`), each labelled `F1`, `F2`… for good:
+
+- **Check the fixes** (after the author pushes): a round on the new head that checks each open finding (fixed or still there, and a "fixed" someone only claimed) and looks at what changed. Findings follow their lines through git's line map, not the agent's memory; one found in code that had not changed since the last round is marked *missed earlier*.
+- **Second opinion**: a round by another installed agent that has not reviewed the pull request; a problem both find is marked *both agents*.
+- **Double-check**: an agent tries to disprove each open finding; those that do not hold up are marked not a problem by the double-check.
+
+### Findings
+
+The Findings tab (Open, Done, All), each finding with its severity and why (*Crash or hang, in normal use*), its place (opens it in Files), its text, the last check's note, and who decided what (*Not a problem · by alice: validated upstream*). For each:
+
+- **Fixed**, **Not a problem…**, **Won't fix…** (with why), **Reopen**.
+- **Is the author right?** (after the author answered): an agent reads the code again and says whether the answer holds, with a drafted reply to **Post** or **Edit first**.
+- **Fix in a task**, **Reply…** (on its thread on GitHub), **Open issue** (labelled `pilothouse`, with the place at the reviewed commit, the code, what is wrong and the fix; a security finding in a public repository first suggests a private security advisory instead).
+- **Remember why…** (findings that were not a problem): a rule every later review of the repository is told, kept on this computer (`review.learned.<repository>`, listed and forgettable under the toolbar), or **Propose to the repository**: a pull request adding it to `.pilothouse/review.md`, for everyone's reviews.
+
+And for all: **Post to GitHub** / **Update on GitHub**, **Summary only**, **Read replies**, **Fix N in a task**, **Copy as Markdown**, and **Stats** (for the repository: pull requests reviewed, findings and what came of them, rounds per pull request, findings missed by a round, the share of decided findings that were not a problem, and per agent how many it found and how many were not a problem).
+
+### On GitHub
+
+**Post to GitHub** (`ph_review::post`, `ph_review::github`):
+
+- Each open, checked finding not yet on the code becomes a **line comment** (one GitHub review, neither approving nor requesting changes), on the part of its lines the diff shows. When the agent's replacement covers exactly those lines, it is a **one-click suggestion**. Should GitHub refuse one line, the rest are posted one by one.
+- One **summary comment** for the whole pull request, rewritten in place on every post (only by its author, the reviewer): the verdict, open findings by severity, each with **tick boxes** (Fixed / Not a problem / Won't fix), what is done, and a hidden data block with the findings themselves (kept under GitHub's size limit by shortening). Anyone's PilotHouse that opens the pull request, the author's included, shows those findings in its Findings tab, and the author answers each there: their answer is posted as a reply.
+- Threads of findings no longer open are **resolved**.
+- **Reading back** (on opening the tab, **Read replies**, a watch): ticks in the summary comment, and replies on a finding's thread or naming it in the conversation (`F3: not a problem, …`) that start with *Fixed*, *Not a problem* (or *false positive*) or *Won't fix* set its status, with the author's name and reason. The next check of the fixes verifies a claimed fix.
+
+### Fix in a task
+
+**Fix in a task** (a finding, or all open ones) and **Address comments** make a [task](workspace.md) on the pull request's head: from a workspace's checkout of the repository when there is one, else the GitHub view's clone (branch `task/pr-<n>-fix`). Its chat starts with the findings (or comments) and says how to push to the pull request's branch. In a task on someone else's pull request, their agent settings are taken out (and hidden from git, so the removal is never committed).
+
+## Walkthrough
+
+**Walk me through it** (Walkthrough tab) asks an agent to explain the change, in three parts (`ph_review::walkthrough`):
+
+- **The gist**: what it does, why, and where the why comes from (the description, the commits, or a guess, marked as such), and before and after, one line each.
+- **At a glance**: the changed files grouped by purpose (core logic, API, UI, data, tests, config, docs…); a group shows only its files in the Files tab.
+- **Read in this order**: three to six stops, each a few lines of a changed file with one sentence; each opens its file, and the tour runs along the top of the Files tab.
+- When calls cross several files, a small **flow** of who calls what, drawn by PilotHouse from the agent's steps.
+
+Stops in files the change does not touch are dropped. **Copy** gives it as Markdown (with the flow as a Mermaid diagram) for a description or a message.
+
+## Review your changes before pushing
+
+**Review** in the Git tab (over the changes) has an agent review what you have not pushed yet: commits ahead of the upstream and work not committed (or only the latter without an upstream), with the repository's rules and learned rules. Its findings come back as **notes on the changed lines**, and **Fix with agent** gives them to the chat. **Review again** carries the findings on, as rounds do for pull requests.
+
+## Agents board
+
+Review chats of the GitHub view show on the Agents board with the workspaces' chats (*GitHub · owner/name*), and count in its tab.
+
+History lives in SQLite (`pr_reviews`: every round, its kind, agent, round number and summary comment; `pr_findings`: each finding of each round with its status, who set it and why, its comments and issue).

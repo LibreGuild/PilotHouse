@@ -36,6 +36,7 @@ impl WorkspaceScreen {
                         .unwrap_or_else(|| path.clone());
                     this.open_file(&path, Some(*line), window, cx);
                 }
+                ChangesPanelEvent::ReviewChanges => this.review_changes(window, cx),
                 ChangesPanelEvent::SendNotes(text) => {
                     this.reveal_chat(cx);
                     let attachment = Attachment::Text {
@@ -201,10 +202,10 @@ impl WorkspaceScreen {
                     window.dispatch_action(Box::new(crate::actions::OpenSettings), cx)
                 }
                 // Reviews run in the GitHub view, on its own clone.
-                PullsPanelEvent::ReviewWithAgent { hosting, pull } => {
-                    cx.emit(WorkspaceScreenEvent::Review {
+                PullsPanelEvent::Agent { hosting, request } => {
+                    cx.emit(WorkspaceScreenEvent::Agent {
                         hosting: hosting.clone(),
-                        pull: pull.clone(),
+                        request: request.clone(),
                     })
                 }
                 PullsPanelEvent::OpenSession(id) => cx.emit(WorkspaceScreenEvent::ShowSession(*id)),

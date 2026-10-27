@@ -46,7 +46,9 @@ Opening a project should not run its code:
 - Git reaches the host over HTTPS with the account's token, passed per call in the environment as a header scoped to that host's URL (`http.https://HOST/.extraHeader` through `GIT_CONFIG_*`): never on a command line other processes can list, in the remote URL, or in a config file. Error messages name only the Git command, not its settings.
 - Files a chat names open from the GitHub view only when their real path (links and `..` resolved) is inside those clones.
 - Chats in the GitHub view only read: edits, deletes and moves are refused without asking, and no checkpoints are taken. Antigravity's "go on with every permission for the rest of the turn" is never given automatically, in these chats or in reviews.
-- A repository's own review rules are read from its base branch, never from the pull request's head.
+- A repository's own review rules and its notes for agents (`AGENTS.md`, `CLAUDE.md`, Copilot's instructions) are read from its base branch, never from the pull request's head.
+- What a pull request carries that would act on the agent reviewing it is taken out of the checkout first: agent settings with hooks (`.claude/settings*.json`, `.claude/hooks`), MCP servers (`.mcp.json`, `.vscode/mcp.json`), other agents' folders (`.gemini`, `.codex`, `.cursor`, `.agents`, `.clinerules`) and the root's `.env` files. A task fixing someone else's pull request takes out the tracked ones too and hides the removal from git (`--skip-worktree`), so it is never committed.
+- A security finding in a public repository is not turned into an issue without a warning that suggests a private security advisory instead.
 
 ## Housekeeping
 

@@ -13,11 +13,21 @@
 //!    one review, or as one conversation comment; fixed ones can be marked on
 //!    GitHub. Nothing is posted without the user asking.
 
-pub mod merge;
+pub mod comment;
+pub mod github;
+pub mod grounding;
+pub mod ledger;
+pub mod linemap;
 pub mod parse;
 pub mod post;
 pub mod prompt;
+pub mod replies;
+pub mod rounds;
+pub mod severity;
+pub mod stats;
 pub mod templates;
+pub mod triage;
+pub mod walkthrough;
 
 pub use parse::{Report, ReportedFinding, parse};
 

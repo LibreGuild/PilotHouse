@@ -65,6 +65,7 @@ fn run_app(open: Vec<std::path::PathBuf>) -> Result<()> {
     });
     app.run(move |cx| {
         gpui_kit::init(cx);
+        ph_ui::init(cx);
         ph_theme::init(cx);
         ph_browser::init(store.clone(), cx);
         ph_devices::init(cx);

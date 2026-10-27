@@ -53,4 +53,4 @@ pub use chats::{
 };
 pub use connection::AgentConnection;
 pub use permission::{ApprovalInbox, PermissionRequest};
-pub use thread::{ChatThread, ThreadStatus};
+pub use thread::{ChatThread, ReviewTurn, ThreadStatus};

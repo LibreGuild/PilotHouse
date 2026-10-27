@@ -116,6 +116,41 @@ impl Client {
         self.send("PUT", path, body)
     }
 
+    /// A GraphQL request (`https://api.github.com/graphql`, or
+    /// `https://HOST/api/graphql` for GitHub Enterprise Server); the
+    /// reply's `data`.
+    pub fn graphql(&self, query: &str, variables: Value) -> Result<Value> {
+        let url = match self.base.strip_suffix("/v3") {
+            Some(api) => format!("{api}/graphql"),
+            None => format!("{}/graphql", self.base),
+        };
+        if host_of(&url) != host_of(&self.base) {
+            bail!("refusing to send the token to another host: {url}");
+        }
+        let response = self
+            .agent
+            .post(&url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .send_json(serde_json::json!({ "query": query, "variables": variables }))
+            .map_err(|err| anyhow!("could not reach {}: {err}", host_of(&self.base)))?;
+        let mut response = check(response)?;
+        let reply: Value = response
+            .body_mut()
+            .read_json()
+            .context("unexpected reply from GitHub")?;
+        if let Some(errors) = reply.get("errors").and_then(Value::as_array)
+            && !errors.is_empty()
+        {
+            let messages: Vec<&str> = errors
+                .iter()
+                .filter_map(|error| error.get("message").and_then(Value::as_str))
+                .collect();
+            bail!("GitHub: {}", messages.join("; "));
+        }
+        Ok(reply.get("data").cloned().unwrap_or(Value::Null))
+    }
+
     fn send<T: DeserializeOwned>(&self, method: &str, path: &str, body: &Value) -> Result<T> {
         let response = self.request(method, path, "application/vnd.github+json", Some(body))?;
         let mut response = check(response)?;

@@ -37,3 +37,29 @@ pub use gpui_kit::assets::IconName as Icons;
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").replacen('-', " ", 1)
 }
+
+/// The family of the font the name "PilotHouse" is set in (Courgette, SIL
+/// Open Font License, bundled; see [`init`]).
+pub const WORDMARK_FONT: &str = "Courgette";
+
+/// Loads the fonts PilotHouse ships (the wordmark's).
+pub fn init(cx: &mut gpui_kit::App) {
+    let fonts = vec![std::borrow::Cow::Borrowed(
+        include_bytes!("../assets/fonts/Courgette-Regular.ttf").as_slice(),
+    )];
+    if let Err(err) = cx.text_system().add_fonts(fonts) {
+        tracing::warn!("loading the wordmark font failed: {err:#}");
+    }
+}
+
+/// "PilotHouse" in its own script, as the title bar shows it: the app's
+/// name, in the text colour (the font is its only mark).
+pub fn wordmark(size: gpui_kit::Pixels) -> gpui_kit::Div {
+    use gpui_kit::{ParentElement as _, Styled as _};
+    gpui_kit::div()
+        .flex_none()
+        .font_family(WORDMARK_FONT)
+        .text_size(size)
+        .line_height(gpui_kit::relative(1.))
+        .child("PilotHouse")
+}
