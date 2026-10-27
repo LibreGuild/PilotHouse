@@ -26,6 +26,14 @@ else
     target/aarch64-apple-darwin/release/pilothouse \
     target/x86_64-apple-darwin/release/pilothouse
   NAME=PilotHouse-macOS-universal.dmg
+  # A CI runner's disk is small: two release builds leave too little room
+  # for the disk image, so their intermediates go first.
+  if [ -n "${CI:-}" ]; then
+    for arch in aarch64-apple-darwin x86_64-apple-darwin; do
+      rm -rf "target/$arch/release/deps" "target/$arch/release/build" \
+        "target/$arch/release/incremental"
+    done
+  fi
 fi
 
 rm -rf "$APP" && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

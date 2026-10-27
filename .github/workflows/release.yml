@@ -58,6 +58,14 @@ jobs:
           toolchain: stable
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The runner's disk is mostly SDKs this build never uses; two release
+      # builds and the disk image need the room (0.3.0's first try ran out).
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf "${ANDROID_HOME:-/nonexistent}" "$HOME/Library/Android" \
+            /usr/local/share/dotnet "$HOME/.dotnet" /usr/local/lib/node_modules || true
+          df -h /
       - name: Build
         run: scripts/package/macos.sh
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
