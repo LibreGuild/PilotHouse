@@ -16,8 +16,8 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{
-        Enter, Escape, IndentInline, InputEvent, InputState, MoveDown, MoveUp, Textarea,
-        TextareaState,
+        Enter, Escape, IndentInline, InputEvent, InputState, MoveDown, MoveUp, OutdentInline,
+        Textarea, TextareaState,
     },
     menu::{PopupMenu, PopupMenuItem},
     message_scroller::MessageScroller,
@@ -202,6 +202,13 @@ pub struct ChatPanel {
     context: Option<ChatContext>,
     /// Something readying the chat (a clone), or why it failed.
     busy: Option<SharedString>,
+    /// The list of the turn's subagents is open above the composer.
+    subagents_open: bool,
+    /// The side chat in front and the chat it stepped aside from.
+    side: Option<(WeakEntity<ChatThread>, Session)>,
+    /// New chats sent off with ⌘Enter, held until they are stored and the
+    /// workspace's chats keep them.
+    sent_off: Vec<(Entity<ChatThread>, Subscription)>,
     failed: Option<SharedString>,
     _prepare: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -217,6 +224,7 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        crate::view_mode::ViewMode::load(&store, cx);
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder(PLACEHOLDER)
@@ -228,6 +236,10 @@ impl ChatPanel {
             window,
             |this, _, event: &InputEvent, window, cx| {
                 match event {
+                    InputEvent::PressEnter {
+                        shift: false,
+                        secondary: true,
+                    } => this.send_and_start_new(window, cx),
                     InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
                     // Start the agent while the user is still typing.
                     InputEvent::Focus => this.warm_up(cx),
@@ -276,6 +288,9 @@ impl ChatPanel {
             history_menu: false,
             context: None,
             busy: None,
+            subagents_open: false,
+            sent_off: Vec::new(),
+            side: None,
             failed: None,
             _prepare: None,
             _subscriptions: vec![subscription, picker_subscription],
@@ -632,6 +647,9 @@ impl ChatPanel {
     }
 
     fn watch_active(&mut self, cx: &mut Context<Self>) {
+        let viewing = self.active.read(cx).session().map(|session| session.id);
+        self.chats
+            .update(cx, |chats, cx| chats.set_viewing(viewing, cx));
         self._active_subscriptions = vec![
             cx.observe(&self.active, |_, _, cx| cx.notify()),
             cx.subscribe(
@@ -639,8 +657,10 @@ impl ChatPanel {
                 |this, thread, event: &ThreadEvent, cx| match event {
                     ThreadEvent::SessionCreated(session) => {
                         let id = session.id;
-                        this.chats
-                            .update(cx, |chats, cx| chats.keep(id, thread, cx));
+                        this.chats.update(cx, |chats, cx| {
+                            chats.keep(id, thread, cx);
+                            chats.set_viewing(Some(id), cx);
+                        });
                         cx.emit(ChatPanelEvent::SessionsChanged);
                     }
                     ThreadEvent::TurnEnded => cx.emit(ChatPanelEvent::TurnEnded),
@@ -670,6 +690,12 @@ impl ChatPanel {
             .update(cx, |chats, cx| chats.connection(spec, cx))
     }
 
+    /// Starts the agent and its session now (a resumed session is loaded,
+    /// with its history), rather than when the composer is first focused.
+    pub fn start_agent(&mut self, cx: &mut Context<Self>) {
+        self.warm_up(cx);
+    }
+
     fn warm_up(&mut self, cx: &mut Context<Self>) {
         // A folder still to be made (a clone) has nothing to start in yet.
         if self
@@ -688,12 +714,92 @@ impl ChatPanel {
             .update(cx, |thread, cx| thread.warm_up(connection, cx));
     }
 
+    /// Steps aside from this chat: a new chat with the same agent that has
+    /// read this one's recent history, to ask something without adding to
+    /// it. The header leads back.
+    pub fn side_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (recap, agent, title, session) = {
+            let thread = self.active.read(cx);
+            (
+                thread.side_recap(cx),
+                thread.agent(),
+                thread.title(),
+                thread.session().cloned(),
+            )
+        };
+        let (Some(recap), Some(session)) = (recap, session) else {
+            return;
+        };
+        self.set_session(None, cx);
+        self.choose_agent(agent, cx);
+        let origin = format!(
+            "A side chat about “{title}”: {} has read it, and nothing here goes back to it.",
+            agent.name
+        );
+        self.active
+            .update(cx, |thread, cx| thread.continue_from(recap, origin, cx));
+        self.side = Some((self.active.downgrade(), session));
+        self.next_title = Some(format!("Aside: {title}"));
+        cx.emit(ChatPanelEvent::SessionsChanged);
+        self.warm_up(cx);
+        self.focus_composer(window, cx);
+    }
+
+    /// The chat a side chat in front stepped aside from.
+    pub(super) fn side_of(&self) -> Option<&Session> {
+        self.side
+            .as_ref()
+            .filter(|(side, _)| *side == self.active.downgrade())
+            .map(|(_, session)| session)
+    }
+
+    /// Sends, then opens a fresh draft: the chat goes on by itself (its
+    /// card in the sidebar shows how it does) while the next one starts.
+    fn send_and_start_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let sent_from = self.active.clone();
+        let queued_before = sent_from.read(cx).queued().len();
+        self.send(window, cx);
+        // Not when the message is still waiting (a folder being readied)
+        // or went into the queue of a working chat.
+        let started = sent_from.read(cx).has_started();
+        let queued = sent_from.read(cx).queued().len() > queued_before;
+        if self.busy.is_none() && started && !queued && self.active == sent_from {
+            // The workspace's chats keep it from here: now if it is stored
+            // already, else once its agent session exists (until then
+            // nothing else holds it).
+            if let Some(id) = sent_from.read(cx).session().map(|session| session.id) {
+                self.chats
+                    .update(cx, |chats, cx| chats.keep(id, sent_from.clone(), cx));
+                cx.emit(ChatPanelEvent::SessionsChanged);
+            } else {
+                let watch = cx.subscribe(&sent_from, |this, thread, event: &ThreadEvent, cx| {
+                    if let ThreadEvent::SessionCreated(session) = event {
+                        let id = session.id;
+                        this.chats
+                            .update(cx, |chats, cx| chats.keep(id, thread.clone(), cx));
+                        this.sent_off.retain(|(held, _)| *held != thread);
+                        cx.emit(ChatPanelEvent::SessionsChanged);
+                    }
+                });
+                self.sent_off.push((sent_from.clone(), watch));
+            }
+            self.set_session(None, cx);
+            self.composer
+                .update(cx, |composer, cx| composer.focus(window, cx));
+        }
+    }
+
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().trim().to_string();
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
-        if *self.active.read(cx).status() != ThreadStatus::Idle || self.busy.is_some() {
+        if self.busy.is_some() {
+            return;
+        }
+        // While the agent works, the message waits its turn.
+        if *self.active.read(cx).status() != ThreadStatus::Idle {
+            self.send_prepared(window, cx);
             return;
         }
         // A new chat about something readies its folder first (clones the
@@ -733,9 +839,6 @@ impl ChatPanel {
     fn send_prepared(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().trim().to_string();
         if text.is_empty() && self.attachments.is_empty() {
-            return;
-        }
-        if *self.active.read(cx).status() != ThreadStatus::Idle {
             return;
         }
         let title = self.next_title.take().unwrap_or_else(|| title_from(&text));
@@ -786,7 +889,20 @@ impl ChatPanel {
         let spec = self.active.read(cx).agent();
         let connection = self.connection(spec, cx);
         self.active.update(cx, |thread, cx| {
-            thread.send(text, summaries, title, blocks, connection, cx)
+            if *thread.status() == ThreadStatus::Idle {
+                thread.send(text, summaries, title, blocks, connection, cx)
+            } else {
+                thread.queue(
+                    crate::thread::QueuedPrompt {
+                        display: text,
+                        attachments: summaries,
+                        title,
+                        blocks,
+                        shown_at: None,
+                    },
+                    cx,
+                )
+            }
         });
         // A chat in use stays loaded in the workspace (and its status shows).
         if let Some(id) = self.active_session_id(cx) {
@@ -801,6 +917,17 @@ impl ChatPanel {
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
         self.active.update(cx, |thread, cx| thread.cancel(cx));
+    }
+
+    /// Puts a queued message back in the composer to change it.
+    fn edit_queued(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.active.update(cx, |thread, cx| thread.unqueue(ix, cx)) else {
+            return;
+        };
+        self.composer.update(cx, |composer, cx| {
+            composer.set_value(prompt.display, window, cx)
+        });
+        self.focus_composer(window, cx);
     }
 
     // ---- Rendering -----------------------------------------------------------

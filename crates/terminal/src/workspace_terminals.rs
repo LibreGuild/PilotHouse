@@ -13,13 +13,27 @@ use crate::terminal::{Terminal, TerminalEvent};
 #[derive(Default)]
 pub struct TerminalHub {
     terminals: HashMap<i64, Entity<WorkspaceTerminals>>,
+    /// Where each workspace's terminal text is kept between runs.
+    state_dir: Option<PathBuf>,
+}
+
+/// How much of each terminal is kept when PilotHouse quits.
+const KEPT_LINES: usize = 2000;
+/// Most terminals of a workspace brought back.
+const KEPT_TERMINALS: usize = 8;
+
+/// A terminal as it was when PilotHouse quit.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Kept {
+    text: String,
 }
 
 impl Global for TerminalHub {}
 
 impl TerminalHub {
     /// The terminals of workspace `id` (shells start in `cwd`), made on
-    /// first use.
+    /// first use, with those it had when PilotHouse last quit (however they
+    /// are first wanted: the tab, a run, an agent).
     pub fn terminals(id: i64, cwd: PathBuf, cx: &mut App) -> Entity<WorkspaceTerminals> {
         if let Some(terminals) = Self::existing(id, cx) {
             return terminals;
@@ -28,6 +42,7 @@ impl TerminalHub {
         cx.default_global::<Self>()
             .terminals
             .insert(id, terminals.clone());
+        Self::restore(id, cx);
         terminals
     }
 
@@ -35,10 +50,103 @@ impl TerminalHub {
         cx.try_global::<Self>()?.terminals.get(&id).cloned()
     }
 
-    /// Closes a removed workspace's terminals (their shells stop).
+    /// Every workspace's terminals, with the workspace's id.
+    pub fn all(cx: &App) -> Vec<(i64, Entity<WorkspaceTerminals>)> {
+        cx.try_global::<Self>()
+            .map(|hub| {
+                hub.terminals
+                    .iter()
+                    .map(|(id, terminals)| (*id, terminals.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Keeps every workspace's terminal text in `dir` when PilotHouse
+    /// quits, for [`Self::restore`] on the next start.
+    pub fn keep_between_runs(dir: PathBuf, cx: &mut App) {
+        cx.default_global::<Self>().state_dir = Some(dir);
+        cx.on_app_quit(|cx| {
+            Self::save(cx);
+            async {}
+        })
+        .detach();
+    }
+
+    fn save(cx: &App) {
+        let Some(hub) = cx.try_global::<Self>() else {
+            return;
+        };
+        let Some(dir) = hub.state_dir.clone() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        for (id, terminals) in &hub.terminals {
+            let kept: Vec<Kept> = terminals
+                .read(cx)
+                .terminals()
+                .iter()
+                .take(KEPT_TERMINALS)
+                .map(|terminal| Kept {
+                    text: terminal.read(cx).history_text(KEPT_LINES),
+                })
+                .filter(|kept| !kept.text.trim().is_empty())
+                .collect();
+            let file = dir.join(format!("{id}.json"));
+            if kept.is_empty() {
+                let _ = std::fs::remove_file(&file);
+            } else if let Ok(json) = serde_json::to_vec(&kept) {
+                let _ = std::fs::write(&file, json);
+            }
+        }
+    }
+
+    /// Opens the terminals workspace `id` had when PilotHouse last quit,
+    /// each a new shell with the old text above it. False when there were
+    /// none (or none were kept).
+    fn restore(id: i64, cx: &mut App) -> bool {
+        let Some(terminals) = Self::existing(id, cx) else {
+            return false;
+        };
+        let Some(dir) = cx
+            .try_global::<Self>()
+            .and_then(|hub| hub.state_dir.clone())
+        else {
+            return false;
+        };
+        let file = dir.join(format!("{id}.json"));
+        let Ok(json) = std::fs::read(&file) else {
+            return false;
+        };
+        let _ = std::fs::remove_file(&file);
+        let Ok(kept) = serde_json::from_slice::<Vec<Kept>>(&json) else {
+            return false;
+        };
+        let mut restored = false;
+        for kept in kept.iter().take(KEPT_TERMINALS) {
+            let terminal = terminals.update(cx, |terminals, cx| terminals.new_terminal(cx));
+            if let Some(terminal) = terminal {
+                terminal
+                    .read(cx)
+                    .show_restored(&kept.text, "from the last run of PilotHouse");
+                restored = true;
+            }
+        }
+        if restored {
+            terminals.update(cx, |terminals, cx| terminals.select(0, cx));
+        }
+        restored
+    }
+
+    /// Closes a removed workspace's terminals (their shells stop) and
+    /// forgets their text kept from the last run.
     pub fn remove(id: i64, cx: &mut App) {
         if cx.has_global::<Self>() {
-            cx.global_mut::<Self>().terminals.remove(&id);
+            let hub = cx.global_mut::<Self>();
+            hub.terminals.remove(&id);
+            if let Some(dir) = &hub.state_dir {
+                let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
+            }
         }
     }
 }
@@ -148,7 +256,7 @@ impl WorkspaceTerminals {
                     cx.notify()
                 }
                 TerminalEvent::Exited => this.close(&terminal, cx),
-                TerminalEvent::TitleChanged => cx.notify(),
+                TerminalEvent::TitleChanged | TerminalEvent::ProgramStatus => cx.notify(),
             },
         ));
         self.terminals.push(terminal.clone());

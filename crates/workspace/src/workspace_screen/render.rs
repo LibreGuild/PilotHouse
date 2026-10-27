@@ -223,8 +223,8 @@ impl WorkspaceScreen {
                         .h(px(14.))
                         .px(px(3.))
                         .rounded_full()
-                        .bg(cx.theme().info)
-                        .text_color(cx.theme().info_foreground)
+                        .bg(cx.theme().secondary_active)
+                        .text_color(cx.theme().foreground)
                         .text_size(px(9.))
                         .flex()
                         .items_center()
@@ -249,11 +249,11 @@ impl WorkspaceScreen {
                     .rounded(cx.theme().radius)
                     .cursor_pointer()
                     .text_color(if selected {
-                        cx.theme().info
+                        cx.theme().foreground
                     } else {
                         cx.theme().muted_foreground
                     })
-                    .when(selected, |this| this.bg(cx.theme().info.opacity(0.14)))
+                    .when(selected, |this| this.bg(cx.theme().secondary_hover))
                     .when(!selected, |this| {
                         this.hover(|style| {
                             style

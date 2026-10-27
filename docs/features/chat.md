@@ -17,8 +17,16 @@ Agents and terminals use your **login shell's** environment (`ph-env`), so tools
 
 1. **First message** creates a session (named after the message) and starts the agent process for this project. The process is reused by later chats with the same agent.
 2. `initialize`, then `session/new` with the project folder as cwd, plus the [PilotHouse MCP server](board.md#agent-tools).
-3. `session/prompt`. Streamed `session/update`s become transcript entries: replies (markdown), thoughts (collapsed), tool calls (status and expandable diffs and output), and plans.
-4. **Permission requests** appear inline and in the title-bar **Approvals** inbox (across all projects). Answering either one answers the agent once. Stop, or an agent exit, cancels them.
+3. `session/prompt`. Streamed `session/update`s become transcript entries: replies (markdown), thoughts, tool calls and plans. Thoughts and tool calls read as one line of muted text each (a spinner while running, red when failed, the size of an edit), and open on click to show diffs and output; steps of one run sit close together, a new message stands apart.
+   - **Subagents.** Claude Code marks what its subagents say and do (`_meta.claudeCode.parentToolUseId`). Those steps go under the tool call that started the subagent (shown with a bot and "N steps") instead of between the main agent's own.
+   - **Working.** Under the newest entry, a line says the agent is working, for how long, and the step under way (the running tool, or the subagent's). Claude Code also carries on by itself after background commands or subagents finish, without a prompt: such updates show the line too ("carrying on by itself") until it has been quiet for a few seconds with no tool running.
+   - **Runs.** In the *Normal* view, two or more tool calls with no words between fold into one line saying what they did ("Read 3 files, ran 2 commands · 1 failed"; while one runs, "Running `cargo test`"). Click it to open the steps under it (`transcript::run_of`, `run_summary`).
+   - **Turn summary.** Under a turn that changed files: how many, the lines added and removed, **Review changes** (the turn's diffs, merged per file) and **Undo turn** (the checkpoint before its message, after asking).
+   - **View** (the layers button in the header, for every chat, kept in `chat.view_mode`): *Detailed* shows every step, *Normal* folds runs, *Summary* shows only messages, replies, questions and the turn summaries.
+4. **Permission requests** appear inline and in the title-bar **Approvals** inbox (across all projects). Answering either one answers the agent once. Stop, or an agent exit, cancels them. Once answered, a request shrinks to a muted line.
+   - **Plans.** When the agent asks to leave plan mode (ACP `switch_mode`), the card shows the plan, as Markdown, above the choices.
+   - **Questions.** PilotHouse accepts ACP form elicitation (`elicitation/create`, `form.rs`): Claude Code's *AskUserQuestion* and MCP servers asking for values arrive as a question card. Pick one (radio) or several (checks) of the offered answers, or type your own (*Other…*); **Answer** sends, **Skip** declines. A single one-answer question is answered by the pick. Questions wait in the inbox like permissions, and make the chat *Needs you*.
+   - **Subagents.** While subagents work, a line above the composer says how many ("2 subagents running"); it opens to each one's state, latest step, steps and time, and a row jumps to it in the transcript. Claude starts subagents in the background, so one counts as working while a step of it runs or for a few seconds after its last. Codex's `spawnAgent` calls show as subagents too, but its adapter keeps their own steps to itself.
 
 ## The composer
 
@@ -26,11 +34,14 @@ Agents and terminals use your **login shell's** environment (`ph-env`), so tools
 - **Effort and mode** are their own buttons beside the model (🧠 *Medium*, 🛡 *Manual*), each a short menu of the agent's levels or modes.
 - **Who wrote what.** Each reply starts with the agent's mark and name (Claude's orange burst, Codex, Gemini, Antigravity). The chat header shows the agent's mark with a dot for its state (the words are in its tooltip), and the picker shows each agent's mark.
 - **Diagrams.** A ```` ```mermaid ```` block in a reply is drawn as a picture once its closing fence arrives (flowcharts, sequence, class, state and ER diagrams, timelines, Gantt and more; `reply.rs`, drawn to SVG without a browser by `mermaid-rs-renderer`, in the theme's light or dark). One that does not parse stays code, with the reason; hovering a diagram offers to copy its source. The marks are bundled from Lobe Icons (MIT); see `crates/ui/assets/agents/`.
-- **Mode** (permission mode) has its own pill; anything else the agent offers is under **⋯**.
+- **Mode** (permission mode) has its own pill; anything else the agent offers is under **⋯**. ⇧Tab in the composer switches to the next mode (Manual, Accept edits, Plan, Auto), as in Claude Code, but never to one that skips permissions.
 - **Warm start.** Focusing the composer starts the agent and its session in the background, so the pickers fill in and the first reply comes sooner. Nothing is stored until the first message.
-- **Attachments** show as chips (images with thumbnails) and are sent as ACP content: files as resource links, images as image content when the agent accepts images, text as text. Hovering a chip (in the composer or a sent message) shows a large preview; clicking opens the whole image, text or file (first 256 KB) in a dialog with Copy (`attachment_view.rs`).
+- **Attachments** show as chips (images with thumbnails) and are sent as ACP content: files as resource links, images as image content when the agent accepts images, text as text. Resting on a chip for two seconds (in the composer or a sent message) shows a large preview; clicking the chip or the preview opens the whole image, text or file (first 256 KB) in a dialog with Copy (`attachment_view.rs`).
 - **Agent setup.** When an agent cannot start, the empty chat shows a setup card instead: CLI installed (with the install command to copy), Node.js for adapters (download link), adapter already in npm's cache, sign-in hint, and **Check again** (`setup.rs`, `setup_view.rs`). The picker lists such agents as **Set up** with the real reason. Settings → Agents shows every agent's card.
 - An empty chat suggests starter prompts.
+- **While the agent works**, Enter queues the message instead of sending it. Queued messages wait above the composer and go one at a time when a turn ends; each can be edited or removed. **Send now** adds the first to the turn under way when the agent supports steering (Claude Code and Codex: `_session/steering`, advertised in the handshake's `_meta.steering`), and otherwise (Gemini CLI, Antigravity) stops the agent and sends it.
+- **⌘Enter** (Ctrl+Enter elsewhere) sends and opens a new chat at once: the sent one carries on in the sidebar, where its card shows how it does.
+- **Commands.** `/` at the start of a message offers the agent's own commands (ACP `available_commands_update`, e.g. Claude Code's `/review` or `/compact`) with their descriptions.
 
 ## Mentions
 
@@ -63,6 +74,10 @@ From the editor (see [files.md](files.md)): *Explain*, *Find bugs* and *Write te
 ## Handing off to another agent
 
 The ↗ button in the chat header (*Continue with…*) moves the work to another agent: a new chat opens with that agent, says where it came from, and offers a first message to send or edit. With that message the new agent gets a recap of the old chat (its recent messages and tool calls, up to 8,000 characters) and is told to check the files' current state first. The old chat stays as it was.
+
+## Side chat
+
+**⌘;** (*Side chat about this one* in ⌘K) steps aside from the chat in front: a new chat with the same agent opens, titled *Aside: …*, and its first message carries a recap of the chat it came from. Nothing goes back to that chat. The ← in its header returns to it.
 
 ## Usage
 

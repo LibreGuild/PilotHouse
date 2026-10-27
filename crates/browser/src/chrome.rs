@@ -169,6 +169,10 @@ impl Chrome {
                 "--use-mock-keychain",
                 "--password-store=basic",
                 "--window-size=1280,800",
+                // Pages would otherwise see `navigator.webdriver` (Chrome
+                // sets it for any browser driven over DevTools), which bot
+                // checks look at first.
+                "--disable-blink-features=AutomationControlled",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

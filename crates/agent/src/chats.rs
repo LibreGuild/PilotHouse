@@ -4,7 +4,7 @@
 //! screen is closed or rebuilt (another window, an unloaded workspace), and
 //! a schedule can start one with no screen at all.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, Subscription};
 use ph_store::Store;
@@ -53,6 +53,18 @@ impl ChatHub {
         cx.try_global::<Self>()?.chats.get(&project_id).cloned()
     }
 
+    /// Every workspace's chats made so far.
+    pub fn all(cx: &App) -> Vec<(ProjectId, Entity<WorkspaceChats>)> {
+        cx.try_global::<Self>()
+            .map(|hub| {
+                hub.chats
+                    .iter()
+                    .map(|(id, chats)| (*id, chats.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Ends a removed workspace's chats (its agents stop).
     pub fn remove(project_id: ProjectId, cx: &mut App) {
         if cx.has_global::<Self>() {
@@ -85,6 +97,30 @@ pub struct ChatsActivity {
     pub unseen: usize,
 }
 
+/// Where a chat stands, for its row in lists: the most urgent first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatState {
+    /// The agent waits for the user's answer.
+    NeedsYou,
+    /// The agent is starting or working.
+    Working,
+    /// The last turn ended in an error.
+    Failed,
+    /// A turn finished that the user has not looked at.
+    Done,
+    Idle,
+}
+
+/// A chat in a few words, for lists and boards.
+#[derive(Debug, Clone)]
+pub struct ChatSummary {
+    pub state: ChatState,
+    pub title: gpui_kit::SharedString,
+    pub agent: &'static AgentSpec,
+    /// The question, the step under way, or the start of the last reply.
+    pub line: Option<String>,
+}
+
 /// A loaded chat.
 struct Kept {
     thread: Entity<ChatThread>,
@@ -108,6 +144,10 @@ pub struct WorkspaceChats {
     on_screen: bool,
     /// Chats whose turn ended while it was not.
     unseen: Vec<SessionId>,
+    /// The chat shown in the workspace's chat column.
+    viewing: Option<SessionId>,
+    /// Chats with a finished turn not looked at yet.
+    unread: HashSet<SessionId>,
 }
 
 impl EventEmitter<WorkspaceChatsEvent> for WorkspaceChats {}
@@ -123,6 +163,8 @@ impl WorkspaceChats {
             _background: Vec::new(),
             on_screen: false,
             unseen: Vec::new(),
+            viewing: None,
+            unread: HashSet::new(),
         }
     }
 
@@ -177,11 +219,13 @@ impl WorkspaceChats {
             // Status follows the chats' state.
             cx.observe(&thread, |_, _, cx| cx.notify()),
             cx.subscribe(&thread, move |this, _, event: &ThreadEvent, cx| {
-                if let ThreadEvent::TurnEnded = event
-                    && !this.on_screen
-                    && !this.unseen.contains(&session)
-                {
-                    this.unseen.push(session);
+                if let ThreadEvent::TurnEnded = event {
+                    if !this.on_screen && !this.unseen.contains(&session) {
+                        this.unseen.push(session);
+                    }
+                    if !(this.on_screen && this.viewing == Some(session)) {
+                        this.unread.insert(session);
+                    }
                     cx.notify();
                 }
             }),
@@ -286,13 +330,82 @@ impl WorkspaceChats {
     /// The workspace is (or is no longer) shown in a window. Showing it
     /// counts as seeing what finished: the chats whose turn ended while it
     /// was away are returned (and forgotten).
+    /// Counts chat `session`'s news as seen.
+    pub fn mark_read(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        if self.unread.remove(&session) {
+            cx.notify();
+        }
+    }
+
     pub fn set_on_screen(&mut self, on_screen: bool, cx: &mut Context<Self>) -> Vec<SessionId> {
         self.on_screen = on_screen;
+        if on_screen
+            && let Some(viewing) = self.viewing
+            && self.unread.remove(&viewing)
+        {
+            cx.notify();
+        }
         if !on_screen || self.unseen.is_empty() {
             return Vec::new();
         }
         cx.notify();
         std::mem::take(&mut self.unseen)
+    }
+
+    /// The chat column shows `session` now: it counts as read.
+    pub fn set_viewing(&mut self, session: Option<SessionId>, cx: &mut Context<Self>) {
+        self.viewing = session;
+        if let Some(session) = session
+            && self.on_screen
+            && self.unread.remove(&session)
+        {
+            cx.notify();
+        }
+    }
+
+    /// Where chat `session` stands, when it is loaded.
+    pub fn summary(&self, session: SessionId, cx: &App) -> Option<ChatSummary> {
+        let thread = self.threads.get(&session)?.thread.read(cx);
+        let question = thread.pending_question(cx);
+        let state = if question.is_some() {
+            ChatState::NeedsYou
+        } else if matches!(
+            thread.status(),
+            ThreadStatus::Working | ThreadStatus::Connecting
+        ) {
+            ChatState::Working
+        } else if thread.failed() {
+            ChatState::Failed
+        } else if self.unread.contains(&session) {
+            ChatState::Done
+        } else {
+            ChatState::Idle
+        };
+        let line = match state {
+            ChatState::NeedsYou => question,
+            ChatState::Working => thread.activity().and_then(|(_, step)| step),
+            _ => thread.last_reply(),
+        }
+        .map(|text| first_line(&text));
+        Some(ChatSummary {
+            state,
+            title: thread.title(),
+            agent: thread.agent(),
+            line,
+        })
+    }
+
+    /// Whether `session` is the chat on screen.
+    pub fn is_viewing(&self, session: SessionId) -> bool {
+        self.on_screen && self.viewing == Some(session)
+    }
+
+    /// Every loaded chat that wants the user or is busy, with its summary.
+    pub fn live(&self, cx: &App) -> Vec<(SessionId, ChatSummary)> {
+        self.threads
+            .keys()
+            .filter_map(|id| Some((*id, self.summary(*id, cx)?)))
+            .collect()
     }
 
     /// What the chats are doing now.
@@ -360,5 +473,38 @@ impl WorkspaceChats {
         self.unseen.retain(|id| *id != session);
         cx.emit(WorkspaceChatsEvent::SessionsChanged);
         Ok(())
+    }
+}
+
+/// The first non-empty line of `text`, without Markdown emphasis marks, cut
+/// to a list row's length.
+fn first_line(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .trim_start_matches(['#', '>', '-', '*', ' '])
+        .replace("**", "")
+        .replace('`', "");
+    let mut short: String = line.chars().take(140).collect();
+    if line.chars().count() > 140 {
+        short.push('…');
+    }
+    short
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_lines_skip_blank_lines_and_marks() {
+        assert_eq!(
+            first_line("\n\n## **Done.** PR is `green`\nmore"),
+            "Done. PR is green"
+        );
+        assert_eq!(first_line(""), "");
+        assert_eq!(first_line(&"x".repeat(200)).chars().count(), 141);
     }
 }

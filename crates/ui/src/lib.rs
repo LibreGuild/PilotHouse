@@ -26,7 +26,7 @@ pub use file_icons::{
 pub use menu::{MenuButton, POPUP_GAP, SpacedMenu};
 pub use pane_header::PaneHeader;
 pub use surface::Surface;
-pub use workspace_colors::{WORKSPACE_COLORS, workspace_color, workspace_tint};
+pub use workspace_colors::{WORKSPACE_COLORS, workspace_color};
 
 /// The complete Lucide icon catalog. Only the icons listed in
 /// [`PilotHouseAssets`] (plus gpui-component's defaults) are embedded, so use a

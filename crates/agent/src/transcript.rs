@@ -99,9 +99,29 @@ pub struct ToolEntry {
     /// Text output of the tool (already trimmed for display).
     pub output: String,
     pub diffs: Vec<FileDiff>,
+    /// A subagent's own tool calls, when this call started one (Claude
+    /// Code's Agent/Task tool).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ToolEntry>,
+    /// What the subagent said, newest last (cut to the last few KB).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent_text: String,
     #[serde(skip)]
     pub expanded: bool,
+    /// When the call started, if in this run of the app.
+    #[serde(skip)]
+    pub started: Option<std::time::Instant>,
+    /// When its subagent last did something, if in this run of the app.
+    #[serde(skip)]
+    pub touched: Option<std::time::Instant>,
 }
+
+/// How long a subagent counts as at work after its last step (Claude runs
+/// subagents in the background: their call ends as they start).
+const SUBAGENT_QUIET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How much of a subagent's text is kept.
+const SUBAGENT_TEXT: usize = 4_000;
 
 /// What a tool does, reduced to the cases the UI distinguishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,7 +223,88 @@ impl ToolEntry {
             status: ToolStatus::Pending,
             output: String::new(),
             diffs: Vec::new(),
+            children: Vec::new(),
+            agent_text: String::new(),
             expanded: false,
+            started: None,
+            touched: None,
+        }
+    }
+
+    /// Whether the call started a subagent (Claude Code's Agent tool, Codex's
+    /// `spawnAgent`): it has steps or words of its own, or is a running
+    /// "think" call, which is how Claude's starts.
+    pub fn is_subagent(&self) -> bool {
+        !self.children.is_empty()
+            || !self.agent_text.is_empty()
+            || (self.kind == ToolKindLabel::Think && self.is_running())
+            // Codex names its call; its subagent's own steps stay unseen.
+            || self.title == "spawnAgent"
+    }
+
+    /// A subagent's latest step: its newest tool call, else the last line
+    /// it said.
+    pub fn last_step(&self) -> Option<String> {
+        self.children
+            .last()
+            .map(ToolEntry::display_title)
+            .or_else(|| {
+                self.agent_text
+                    .lines()
+                    .rev()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(str::to_string)
+            })
+    }
+
+    /// Whether the call is still going (it, or a subagent step under it).
+    pub fn is_running(&self) -> bool {
+        matches!(self.status, ToolStatus::Pending | ToolStatus::Running)
+    }
+
+    /// Whether its subagent is at work: the call or one of its steps runs,
+    /// or it did something moments ago. Only meaningful while the turn
+    /// goes on.
+    pub fn is_busy(&self) -> bool {
+        self.is_running()
+            || self.children.iter().any(ToolEntry::is_running)
+            || self
+                .touched
+                .is_some_and(|touched| touched.elapsed() < SUBAGENT_QUIET)
+    }
+
+    /// Adds a subagent's tool call, or replaces it when known.
+    pub fn child_call(&mut self, call: &ToolCall) {
+        self.touched = Some(std::time::Instant::now());
+        let child = Self::from_call(call);
+        match self.children.iter_mut().find(|known| known.id == child.id) {
+            Some(known) => *known = child,
+            None => self.children.push(child),
+        }
+    }
+
+    pub fn child_update(&mut self, update: &ToolCallUpdate) {
+        self.touched = Some(std::time::Instant::now());
+        if let Some(child) = self
+            .children
+            .iter_mut()
+            .find(|child| child.id == update.tool_call_id.0.as_ref())
+        {
+            child.apply(update);
+        }
+    }
+
+    /// Appends what the subagent said.
+    pub fn push_agent_text(&mut self, text: &str) {
+        self.touched = Some(std::time::Instant::now());
+        self.agent_text.push_str(text);
+        if self.agent_text.len() > SUBAGENT_TEXT {
+            let mut cut = self.agent_text.len() - SUBAGENT_TEXT;
+            while !self.agent_text.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.agent_text.drain(..cut);
         }
     }
 
@@ -215,7 +316,11 @@ impl ToolEntry {
             status: (&call.status).into(),
             output: String::new(),
             diffs: Vec::new(),
+            children: Vec::new(),
+            agent_text: String::new(),
             expanded: false,
+            started: Some(std::time::Instant::now()),
+            touched: None,
         };
         entry.set_content(&call.content);
         entry
@@ -316,6 +421,122 @@ pub fn block_text(block: &ContentBlock) -> Option<String> {
         ContentBlock::ResourceLink(link) => Some(format!("[{}]({})", link.name, link.uri)),
         _ => None,
     }
+}
+
+// ---- Runs of steps -------------------------------------------------------------
+
+/// Whether `entry` is a step of the agent's work that folds into a run:
+/// a tool call, a thought, or the blank text between them.
+fn is_step(entry: &Entry) -> bool {
+    match entry {
+        Entry::Tool(_) | Entry::Thought { .. } => true,
+        Entry::Agent { text, .. } => text.trim().is_empty(),
+        _ => false,
+    }
+}
+
+/// The run of steps entry `ix` belongs to: the steps around it with no
+/// prose, question or message between, when it holds two tool calls or
+/// more (one alone stays its own row).
+pub fn run_of(entries: &[Entry], ix: usize) -> Option<std::ops::Range<usize>> {
+    if !entries.get(ix).is_some_and(is_step) {
+        return None;
+    }
+    let start = entries[..ix]
+        .iter()
+        .rposition(|entry| !is_step(entry))
+        .map_or(0, |before| before + 1);
+    let end = entries[ix..]
+        .iter()
+        .position(|entry| !is_step(entry))
+        .map_or(entries.len(), |after| ix + after);
+    let tools = entries[start..end]
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Tool(_)))
+        .count();
+    (tools >= 2).then_some(start..end)
+}
+
+/// The tool calls of a run.
+pub fn run_tools(entries: &[Entry], run: std::ops::Range<usize>) -> Vec<&ToolEntry> {
+    entries[run]
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Tool(tool) => Some(tool),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What a run did, in a line: "Edited 2 files, ran 3 commands", and how
+/// many of its calls failed.
+pub fn run_summary(tools: &[&ToolEntry]) -> (String, usize) {
+    let mut counts: Vec<(&str, &str, usize)> = Vec::new();
+    let mut add = |verb: &'static str, noun: &'static str| match counts
+        .iter_mut()
+        .find(|(known, ..)| *known == verb)
+    {
+        Some((_, _, count)) => *count += 1,
+        None => counts.push((verb, noun, 1)),
+    };
+    for tool in tools {
+        match tool.kind {
+            _ if tool.is_subagent() => add("ran", "subagent"),
+            ToolKindLabel::Read => add("read", "file"),
+            ToolKindLabel::Edit | ToolKindLabel::Delete | ToolKindLabel::Move => {
+                add("edited", "file")
+            }
+            ToolKindLabel::Execute => add("ran", "command"),
+            ToolKindLabel::Search => add("searched", "time"),
+            ToolKindLabel::Fetch => add("fetched", "page"),
+            ToolKindLabel::Think | ToolKindLabel::Other => add("used", "tool"),
+        }
+    }
+    let parts: Vec<String> = counts
+        .iter()
+        .map(|(verb, noun, count)| match (*noun, *count) {
+            ("time", 1) => format!("{verb} once"),
+            ("time", n) => format!("{verb} {n} times"),
+            (noun, 1) => format!("{verb} 1 {noun}"),
+            (noun, n) => format!("{verb} {n} {noun}s"),
+        })
+        .collect();
+    let mut text = parts.join(", ");
+    if let Some(first) = text.get(..1) {
+        text = first.to_uppercase() + &text[1..];
+    }
+    let failed = tools
+        .iter()
+        .filter(|tool| tool.status == ToolStatus::Failed)
+        .count();
+    (text, failed)
+}
+
+/// The files a turn changed (every edit of its tool calls and their
+/// subagents' calls), merged by path, with the lines added and removed.
+pub fn turn_changes(entries: &[Entry]) -> Vec<FileDiff> {
+    let mut files: Vec<FileDiff> = Vec::new();
+    let mut take = |diff: &FileDiff| match files.iter_mut().find(|file| file.path == diff.path) {
+        Some(file) => {
+            file.added += diff.added;
+            file.removed += diff.removed;
+            file.lines.extend(diff.lines.iter().cloned());
+            file.hidden_lines += diff.hidden_lines;
+        }
+        None => files.push(diff.clone()),
+    };
+    for entry in entries {
+        if let Entry::Tool(tool) = entry {
+            for diff in tool
+                .diffs
+                .iter()
+                .chain(tool.children.iter().flat_map(|child| child.diffs.iter()))
+            {
+                take(diff);
+            }
+        }
+    }
+    files
 }
 
 // ---- Persistence ------------------------------------------------------------
@@ -452,14 +673,36 @@ impl Entry {
     }
 }
 
+/// A parsed `session/update` notification.
+pub struct Update {
+    pub session_id: String,
+    pub update: agent_client_protocol_schema::v1::SessionUpdate,
+    /// The tool call that started the subagent this update comes from
+    /// (Claude Code stamps `_meta.claudeCode.parentToolUseId` on a
+    /// subagent's messages and tool calls).
+    pub parent: Option<String>,
+    /// Claude's subscription limit report riding on a usage update.
+    pub rate_limit: Option<Value>,
+}
+
 /// Parses a `session/update` notification's update, tolerating update types
 /// newer than this build (they are ignored, not treated as errors).
-pub fn parse_update(
-    params: &Value,
-) -> Option<(String, agent_client_protocol_schema::v1::SessionUpdate)> {
+pub fn parse_update(params: &Value) -> Option<Update> {
     let notification: agent_client_protocol_schema::v1::SessionNotification =
         serde_json::from_value(params.clone()).ok()?;
-    Some((notification.session_id.0.to_string(), notification.update))
+    let parent = params["update"]["_meta"]["claudeCode"]["parentToolUseId"]
+        .as_str()
+        .map(str::to_string);
+    let rate_limit = params["update"]["_meta"]
+        .get("_claude/rateLimit")
+        .filter(|info| info.is_object())
+        .cloned();
+    Some(Update {
+        session_id: notification.session_id.0.to_string(),
+        update: notification.update,
+        parent,
+        rate_limit,
+    })
 }
 
 #[cfg(test)]
@@ -490,7 +733,11 @@ mod tests {
             status: ToolStatus::Done,
             output: "ok".into(),
             diffs: Vec::new(),
+            children: Vec::new(),
+            agent_text: String::new(),
             expanded: false,
+            started: None,
+            touched: None,
         };
         assert_eq!(tool.display_title(), "board list · pilothouse");
         let body = serde_json::to_string(&StoredEntry::Tool(tool.clone())).unwrap();
@@ -498,6 +745,60 @@ mod tests {
             StoredEntry::Tool(restored) => assert_eq!(restored, tool),
             _ => panic!("expected a tool entry"),
         }
+    }
+
+    fn tool(kind: ToolKindLabel, status: ToolStatus) -> Entry {
+        Entry::Tool(ToolEntry {
+            kind,
+            status,
+            ..ToolEntry::placeholder()
+        })
+    }
+
+    fn text(text: &str) -> Entry {
+        Entry::Agent {
+            text: text.into(),
+            view: None,
+        }
+    }
+
+    #[test]
+    fn steps_fold_into_runs_between_prose() {
+        let entries = vec![
+            text("Looking."),
+            tool(ToolKindLabel::Read, ToolStatus::Done),
+            text("\n"),
+            tool(ToolKindLabel::Read, ToolStatus::Done),
+            tool(ToolKindLabel::Execute, ToolStatus::Failed),
+            text("Found it."),
+            tool(ToolKindLabel::Edit, ToolStatus::Done),
+        ];
+        assert_eq!(run_of(&entries, 2), Some(1..5));
+        assert_eq!(run_of(&entries, 0), None, "prose is not a step");
+        assert_eq!(run_of(&entries, 6), None, "one call alone stays a row");
+        let tools = run_tools(&entries, 1..5);
+        assert_eq!(
+            run_summary(&tools),
+            ("Read 2 files, ran 1 command".to_string(), 1)
+        );
+    }
+
+    #[test]
+    fn turn_changes_merge_by_file() {
+        let edit = |path: &str, old: &str, new: &str| {
+            Entry::Tool(ToolEntry {
+                diffs: vec![FileDiff::new(path, old, new)],
+                ..ToolEntry::placeholder()
+            })
+        };
+        let entries = vec![
+            edit("a.rs", "", "x\n"),
+            edit("a.rs", "x\n", "y\n"),
+            edit("b.rs", "", "z\n"),
+        ];
+        let files = turn_changes(&entries);
+        assert_eq!(files.len(), 2);
+        assert_eq!((files[0].added, files[0].removed), (2, 1));
     }
 
     #[test]
@@ -512,7 +813,21 @@ mod tests {
             "sessionId": "s1",
             "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "hi" } }
         });
-        let (session, _) = parse_update(&params).unwrap();
-        assert_eq!(session, "s1");
+        let parsed = parse_update(&params).unwrap();
+        assert_eq!(parsed.session_id, "s1");
+        assert!(parsed.parent.is_none());
+
+        let params = serde_json::json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "from a subagent" },
+                "_meta": { "claudeCode": { "parentToolUseId": "toolu_1" } }
+            }
+        });
+        assert_eq!(
+            parse_update(&params).unwrap().parent.as_deref(),
+            Some("toolu_1")
+        );
     }
 }

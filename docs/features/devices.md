@@ -7,6 +7,7 @@ Crate: `ph-devices`. Android emulators and phones, through the SDK you already h
 - **Connected devices** come from `adb track-devices`, which reports changes as they happen (no polling). Emulators are named by their AVD.
 - **Emulators** (AVDs from `emulator -list-avds`) start headless (`-no-window -no-audio -no-boot-anim`) and show in the pane. Start them from the device menu, the empty state, or an agent (`device_start_emulator`). PilotHouse waits for `sys.boot_completed`. Stop one from the device menu. Emulators keep running after PilotHouse quits, as they do with Android Studio.
 - **Phones** need USB debugging on. An unauthorized phone shows how to allow it.
+- **Over Wi-Fi**: *Connect over Wi-Fi…* in the device menu takes the address from the phone's *Wireless debugging* screen and, the first time, its pairing address and code (`adb pair`, then `adb connect`; `connect_dialog.rs`). The new device is picked once it appears; *Disconnect this device* forgets it.
 
 - **Make, wipe and delete emulators** from the device menu (*New emulator…*, *Wipe data*, *Delete emulator*) or the empty state. *New emulator* asks for a name, one of the installed system images, and a phone or tablet screen, then starts it. PilotHouse writes the AVD's `<name>.ini` and `config.ini` itself (`avd.rs`), as `avdmanager` does, so it works without the SDK command-line tools, and Android Studio sees the same AVDs. *Wipe data* removes the user data, cache and snapshots (the configuration and SD card stay), like Android Studio's *Wipe Data*; *Delete* removes the AVD folder. Both ask first and are offered only for stopped emulators. AVDs live in `$ANDROID_AVD_HOME`, else `$ANDROID_USER_HOME/avd`, else `~/.android/avd`. With no system image installed, the dialog says how to get one in Android Studio's SDK Manager.
 
@@ -17,7 +18,7 @@ Not yet: iOS.
 | Source | Frames | Input |
 |---|---|---|
 | Emulator | gRPC `streamScreenshot` from the emulator's local controller, RGB at up to 640×1280: ~35–40 fps while the screen changes, nothing when it is still | gRPC `sendTouch` / `sendKey`, in real time (drags and scrolls feel native) |
-| Phone (or an emulator without gRPC) | `adb exec-out screencap`, polled as fast as the device answers (raw pixels, or PNG if raw is slow) | Gestures sent on release through one long-lived `adb shell` (`input tap`/`swipe`/`text`/`keyevent`) |
+| Phone (or an emulator without gRPC) | `adb exec-out screenrecord --output-format=frames`: raw RGB frames scaled down on the phone's GPU (to fit 640×1280, or 400×880 over Wi-Fi) and sent only when the screen changes. A device that cannot is polled with `screencap` (full-size frames, slow) | Gestures sent on release through one long-lived `adb shell` (`input tap`/`swipe`/`text`/`keyevent`) |
 
 The emulator writes its gRPC port and token to a discovery file (`…/avd/running/pid_*.ini`); PilotHouse reads it, so nothing needs configuring. A killed emulator leaves its file behind, so the newest file for the port wins. Just after boot the endpoint turns callers away for a few seconds, so the screen tries again for up to 8 s before falling back to adb (an emulator with no endpoint falls back at once). The gRPC client is hand-written (`grpc.rs`, HTTP/2 cleartext with HPACK literals and protobuf for the few messages needed), so there is no tokio or protoc dependency. Input calls are sent one at a time in order: separate calls could otherwise be handled out of order, and a lift that overtakes a move leaves the finger down. Each received frame is handed over without copying and converted to the GPU's layout in one pass. A connection is closed as soon as its pane, screen or agent call is done, so no socket or thread is left behind.
 
@@ -25,9 +26,10 @@ Back, Home and Recents are in the toolbar. Esc is Back, typing types, and ⌘V p
 
 ## Tools in the pane
 
-- **Install an APK** (file picker → `adb install -r`) and **Launch** an installed app (from `pm list packages -3`).
-- **Drawer**: **Logcat** (live, filter, errors only, send to chat), **UI** (the uiautomator hierarchy; click a node to outline it), and **Files** (browse, upload, save to Downloads).
-- **Live tools**: annotate, the element picker (the smallest UI node under the click, sent with its id, text and bounds), capture, record, before/after. See [live-panes.md](live-panes.md).
+- **Install an APK** (file picker → `adb install -r -t`) and **Launch** an installed app (from `pm list packages -3`).
+- **Drawer** (drag its top edge to resize): **Logcat**, **Layout** (the uiautomator hierarchy; click a node to outline it) and **Files** (browse, upload, save to Downloads).
+- **Logcat** (`logcat.rs`, `logcat_view.rs`) shows the last 20,000 lines in columns: time, level, tag (a steady colour per tag) and message, coloured by level. Pick the lowest level shown and one app (*All apps* or an installed package; its processes are found with `pidof` and followed through ActivityManager's "Start proc" lines). The filter box takes words (all must match the tag or message, and are highlighted), `tag:Name`, `-tag:Name`, `package:com.app` and `pid:123`. It follows new lines until you scroll back; click a line for its full text, pid and tid, to copy it or send it to chat. **Send to chat** sends the last 80 lines shown.
+- **Live tools**: annotate, the element picker (the smallest UI node under the click, sent with its id, text and bounds), capture, record, before/after. Drag the bar by its grip anywhere over the screen (double-click the grip to put it back), or fold it to one button. See [live-panes.md](live-panes.md).
 
 The screen and logcat run only while the pane is visible.
 
@@ -44,5 +46,7 @@ The screen and logcat run only while the pane is visible.
 | `manager.rs` | Devices, AVDs, the selected device, starting and stopping emulators |
 | `avd.rs`, `avd_dialog.rs` | System images; making, wiping and deleting AVDs; their dialogs |
 | `screen.rs` | One device's live screen and input |
-| `logcat.rs`, `ui_tree.rs` | Live logcat; uiautomator XML parsing and hit testing |
+| `logcat.rs`, `logcat_view.rs`, `ui_tree.rs` | Live logcat, its query and its drawer; uiautomator XML parsing and hit testing |
+| `connect_dialog.rs` | Pairing and connecting a phone over Wi-Fi |
+| `android_project.rs`, `android_run.rs` | App modules and build variants; the Run tab's Android card |
 | `devices_panel.rs`, `control.rs` | The pane; `device.*` control methods |

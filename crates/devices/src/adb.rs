@@ -29,6 +29,22 @@ impl DeviceInfo {
     }
 }
 
+/// Whether `serial` is a device connected over Wi-Fi: `192.168.1.5:5555`
+/// after `adb connect`, `adb-<id>._adb-tls-connect._tcp` after pairing.
+/// Emulators (`emulator-5554`) are local.
+pub fn is_wireless(serial: &str) -> bool {
+    serial.contains("._adb-tls-connect.")
+        || (serial.contains(':') && !serial.starts_with("emulator-"))
+}
+
+/// Whether `name` looks like an Android package (safe in a shell command).
+pub fn is_package_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+}
+
 /// A file or folder on the device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteFile {
@@ -157,18 +173,54 @@ impl Adb {
 
     pub fn install(&self, serial: &str, apk: &Path) -> Result<()> {
         let apk = apk.to_string_lossy();
-        let output = self.text(Some(serial), &["install", "-r", &apk])?;
+        // `-t`: builds made the way Android Studio makes them are marked
+        // test-only, and the package manager refuses those without it.
+        let output = self.text(Some(serial), &["install", "-r", "-t", &apk])?;
         if output.contains("Failure") {
             bail!("{}", output.trim());
         }
         Ok(())
     }
 
+    /// `adb connect host:port`: a phone with wireless debugging on.
+    pub fn connect(&self, address: &str) -> Result<String> {
+        let output = self.text(None, &["connect", address])?;
+        // adb exits 0 even when it could not connect.
+        if output.contains("cannot") || output.contains("failed") || output.contains("unable") {
+            bail!("{}", output.trim());
+        }
+        Ok(output.trim().to_string())
+    }
+
+    /// `adb pair host:port code`: the first time a phone is used over Wi-Fi.
+    pub fn pair(&self, address: &str, code: &str) -> Result<String> {
+        let output = self.text(None, &["pair", address, code])?;
+        if !output.contains("Successfully paired") {
+            bail!("{}", output.trim());
+        }
+        Ok(output.trim().to_string())
+    }
+
+    pub fn disconnect(&self, address: &str) -> Result<()> {
+        self.text(None, &["disconnect", address]).map(drop)
+    }
+
+    /// The running processes of `package` (none when it is not running).
+    pub fn pids_of(&self, serial: &str, package: &str) -> std::collections::HashSet<u32> {
+        if !is_package_name(package) {
+            return Default::default();
+        }
+        self.shell(serial, &format!("pidof {package}"))
+            .map(|out| {
+                out.split_whitespace()
+                    .filter_map(|pid| pid.parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn launch(&self, serial: &str, package: &str) -> Result<()> {
-        if !package
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
-        {
+        if !is_package_name(package) {
             bail!("`{package}` is not a package name");
         }
         let output = self.shell(
@@ -363,6 +415,14 @@ mod tests {
         assert!(devices[0].emulator && devices[0].is_ready());
         assert_eq!(devices[0].name, "sdk gphone64 arm64");
         assert_eq!(devices[1].state, "unauthorized");
+    }
+
+    #[test]
+    fn tells_wireless_devices() {
+        assert!(is_wireless("192.168.1.5:5555"));
+        assert!(is_wireless("adb-R5CT1234._adb-tls-connect._tcp"));
+        assert!(!is_wireless("emulator-5554"));
+        assert!(!is_wireless("R5CT1234ABC"));
     }
 
     #[test]

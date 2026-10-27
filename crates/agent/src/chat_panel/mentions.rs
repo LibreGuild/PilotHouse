@@ -62,9 +62,11 @@ impl ChatPanel {
             .iter()
             .map(|pull| (pull.number, pull.title.clone()))
             .collect();
+        let commands = self.active.read(cx).commands().to_vec();
         let extra = mention_complete::Extra {
             symbols: &self.symbols,
             pulls: &pulls,
+            commands: &commands,
         };
         let items = mention_complete::suggestions(&typing, files, &cards, &extra);
         let selected = self

@@ -13,6 +13,18 @@ pub fn open(
     cx: &mut App,
     done: impl Fn(String, &mut Window, &mut App) + 'static,
 ) {
+    ask(title, "Rename", current, window, cx, done)
+}
+
+/// [`open`] with `ok` on the button.
+pub fn ask(
+    title: &'static str,
+    ok: &'static str,
+    current: String,
+    window: &mut Window,
+    cx: &mut App,
+    done: impl Fn(String, &mut Window, &mut App) + 'static,
+) {
     let input = cx.new(|cx| {
         let mut input = InputState::new(window, cx);
         input.set_value(current, window, cx);
@@ -26,7 +38,7 @@ pub fn open(
             .title(title)
             .w(px(420.))
             .child(Input::new(&input))
-            .footer(ph_ui::dialog_buttons("Rename", true))
+            .footer(ph_ui::dialog_buttons(ok, true))
             .on_ok(move |_, window, cx| {
                 let name = input.read(cx).value().to_string();
                 done(name, window, cx);

@@ -28,24 +28,70 @@ pub struct Preferences {
     pub chat_width: ChatWidth,
     /// Names under the tool icons on the right, not only in tooltips.
     pub tool_labels: bool,
+    /// Which default sizes these preferences were saved with (missing in
+    /// ones saved before; see [`Preferences::migrate_sizes`]).
+    #[serde(default)]
+    pub sizes_version: u32,
 }
+
+/// Default interface and code sizes. A Windows pixel reads smaller than a
+/// macOS point, so the same numbers look cramped there.
+const DEFAULT_SIZES: (f32, f32) = if cfg!(windows) {
+    (18.0, 15.0)
+} else {
+    (15.0, 14.0)
+};
+
+/// The default sizes before version 1 (PilotHouse 0.2), on every system.
+const OLD_SIZES: (f32, f32) = (14.0, 13.0);
+
+/// The version of [`DEFAULT_SIZES`].
+const SIZES_VERSION: u32 = 1;
+
+/// The largest interface size (the whole UI scales with it).
+pub const MAX_UI_FONT_SIZE: f32 = 24.0;
 
 impl Default for Preferences {
     fn default() -> Self {
+        let (ui_size, code_size) = DEFAULT_SIZES;
         Self {
             accent: Accent::Green,
             ui_font: String::new(),
-            ui_font_size: 14.0,
+            ui_font_size: ui_size,
             code_font: String::new(),
-            code_font_size: 13.0,
-            terminal_font_size: 13.0,
+            code_font_size: code_size,
+            terminal_font_size: code_size,
             corners: Corners::Rounded,
             window: WindowStyle::Solid,
             opacity: 0.86,
             editor: EditorPreferences::default(),
             chat_width: ChatWidth::Comfortable,
             tool_labels: false,
+            sizes_version: SIZES_VERSION,
         }
+    }
+}
+
+impl Preferences {
+    /// Brings sizes saved with older defaults to the current ones; a size
+    /// the user chose stays. True when something changed (save it).
+    pub fn migrate_sizes(&mut self) -> bool {
+        if self.sizes_version >= SIZES_VERSION {
+            return false;
+        }
+        let (ui, code) = DEFAULT_SIZES;
+        let (old_ui, old_code) = OLD_SIZES;
+        if self.ui_font_size == old_ui {
+            self.ui_font_size = ui;
+        }
+        if self.code_font_size == old_code {
+            self.code_font_size = code;
+        }
+        if self.terminal_font_size == old_code {
+            self.terminal_font_size = code;
+        }
+        self.sizes_version = SIZES_VERSION;
+        true
     }
 }
 
@@ -124,8 +170,8 @@ impl Accent {
         rgb(if dark { dark_hex } else { light_hex }).into()
     }
 
-    /// The accent as a fill behind white text (primary and send buttons):
-    /// a deeper, calmer shade of [`Self::color`].
+    /// The accent as a fill behind white text (an `info` button): a
+    /// deeper, calmer shade of [`Self::color`].
     pub fn fill(self, dark: bool) -> Hsla {
         let accent = self.color(dark);
         Hsla {
@@ -323,12 +369,15 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
         let fill = preferences.accent.fill(dark);
         let white = hsla(0., 0., 1., 1.);
         theme.font_family = ui_font.into();
-        theme.font_size = px(preferences.ui_font_size.clamp(11.0, 20.0));
+        theme.font_size = px(preferences.ui_font_size.clamp(11.0, MAX_UI_FONT_SIZE));
         theme.mono_font_family = code_font.into();
         theme.mono_font_size = px(preferences.code_font_size.clamp(10.0, 24.0));
         theme.radius = px(radius);
         theme.radius_lg = px(radius_lg);
 
+        // The accent marks focus, selection, links and progress: where the
+        // eye should go. Surfaces, filled buttons and selected rows stay
+        // neutral (the theme's own), so colour keeps its meaning.
         let colors = &mut theme.colors;
         colors.ring = accent;
         colors.info = accent;
@@ -336,38 +385,15 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
         colors.link_hover = accent.opacity(0.85);
         colors.link_active = accent;
         colors.selection = accent.opacity(0.25);
-        colors.list_active = accent.opacity(0.12);
-        colors.list_active_border = accent;
         colors.drag_border = accent;
         colors.drop_target = accent.opacity(0.12);
         colors.caret = accent;
         colors.slider_bar = accent;
         colors.progress_bar = accent;
-        // Filled buttons wear a deeper shade of it, with white text.
-        colors.primary = fill;
-        colors.primary_hover = fill.opacity(0.88);
-        colors.primary_active = fill.opacity(0.76);
-        colors.primary_foreground = white;
-        // Buttons read their own colors (the send button is an info one).
-        for (button, hover, active, text) in [
-            (
-                &mut colors.button_primary,
-                &mut colors.button_primary_hover,
-                &mut colors.button_primary_active,
-                &mut colors.button_primary_foreground,
-            ),
-            (
-                &mut colors.button_info,
-                &mut colors.button_info_hover,
-                &mut colors.button_info_active,
-                &mut colors.button_info_foreground,
-            ),
-        ] {
-            *button = fill;
-            *hover = fill.opacity(0.88);
-            *active = fill.opacity(0.76);
-            *text = white;
-        }
+        colors.button_info = fill;
+        colors.button_info_hover = fill.opacity(0.88);
+        colors.button_info_active = fill.opacity(0.76);
+        colors.button_info_foreground = white;
 
         if translucent {
             // The desktop shows through. The window paints `background`
@@ -402,6 +428,20 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_default_sizes_move_to_the_new_ones() {
+        let mut saved: Preferences = serde_json::from_str(
+            r#"{"ui_font_size":14.0,"code_font_size":16.0,"terminal_font_size":13.0}"#,
+        )
+        .unwrap();
+        assert!(saved.migrate_sizes());
+        assert_eq!(saved.ui_font_size, DEFAULT_SIZES.0);
+        assert_eq!(saved.code_font_size, 16.0, "a size the user chose stays");
+        assert_eq!(saved.terminal_font_size, DEFAULT_SIZES.1);
+        assert!(!saved.migrate_sizes(), "once");
+        assert!(!Preferences::default().clone().migrate_sizes());
+    }
 
     #[test]
     fn two_layers_make_the_chosen_opacity() {

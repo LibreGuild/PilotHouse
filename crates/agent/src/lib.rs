@@ -21,8 +21,10 @@ mod attachment_view;
 pub mod attachments;
 mod chat_panel;
 pub mod chats;
+pub mod cli_transcript;
 mod connection;
 mod entry_view;
+pub mod form;
 pub mod instructions;
 pub mod mcp_config;
 mod mention_complete;
@@ -30,6 +32,7 @@ mod model_picker;
 pub mod oneshot;
 pub mod options;
 mod permission;
+pub mod rate_limits;
 mod reply;
 pub mod review_card;
 mod review_policy;
@@ -41,10 +44,13 @@ mod thread;
 pub mod tools_view;
 mod transcript;
 pub mod usage_meter;
+pub mod view_mode;
 
 pub use attachments::{Attachment, LiveSources, PullBrief};
 pub use chat_panel::{ChatContext, ChatPanel, ChatPanelEvent, Prepare, Starter};
-pub use chats::{ChatHub, ChatsActivity, WorkspaceChats, WorkspaceChatsEvent};
+pub use chats::{
+    ChatHub, ChatState, ChatSummary, ChatsActivity, WorkspaceChats, WorkspaceChatsEvent,
+};
 pub use connection::AgentConnection;
 pub use permission::{ApprovalInbox, PermissionRequest};
 pub use thread::{ChatThread, ThreadStatus};

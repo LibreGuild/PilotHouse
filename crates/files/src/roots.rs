@@ -65,18 +65,26 @@ impl Roots {
         &self.0[0].path
     }
 
-    /// The folder a path is in, and the path within it.
+    /// The folder a path is in, and the path within it; `None` for a path
+    /// that names no folder, or that would lead out of its folder (`..`, or
+    /// an absolute path, which `join` would take as it is).
     pub fn split<'a>(&self, path: &'a str) -> Option<(&Root, &'a str)> {
-        if !self.is_multi() {
-            return Some((&self.0[0], path));
-        }
-        let (name, rest) = path.split_once('/').unwrap_or((path, ""));
-        self.0
-            .iter()
-            .find(|root| root.name == name)
-            .map(|root| (root, rest))
+        let (root, rest) = if self.is_multi() {
+            let (name, rest) = path.split_once('/').unwrap_or((path, ""));
+            (self.0.iter().find(|root| root.name == name)?, rest)
+        } else {
+            (&self.0[0], path)
+        };
+        let inside = Path::new(rest).components().all(|part| {
+            matches!(
+                part,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        });
+        inside.then_some((root, rest))
     }
 
+    /// Where `path` is on disk (see [`Self::split`]).
     pub fn absolute(&self, path: &str) -> Option<PathBuf> {
         let (root, rest) = self.split(path)?;
         Some(if rest.is_empty() {
@@ -197,6 +205,15 @@ mod tests {
             Some("src/main.rs")
         );
         assert_eq!(roots.list_dir("")[0].name, "src");
+        assert_eq!(roots.absolute("../outside"), None, "no way out");
+        assert_eq!(roots.absolute("src/../../outside"), None);
+        assert_eq!(
+            roots.absolute("/etc/passwd"),
+            None,
+            "join would take it whole"
+        );
+        assert!(roots.list_dir("../..").is_empty());
+        assert!(roots.list_dir("/etc").is_empty());
     }
 
     #[test]

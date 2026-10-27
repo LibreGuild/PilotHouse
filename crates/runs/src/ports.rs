@@ -25,6 +25,28 @@ impl Port {
     }
 }
 
+/// [`listening`], as seen at most `max_age` ago: several windows and the
+/// Run tool look every few seconds, and one `lsof` serves them all.
+pub fn listening_within(max_age: std::time::Duration) -> Vec<Port> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    /// When the ports were last read, and what they were.
+    type Seen = Option<(Instant, Vec<Port>)>;
+    static LAST: OnceLock<Mutex<Seen>> = OnceLock::new();
+    let last = LAST.get_or_init(|| Mutex::new(None));
+    if let Ok(last) = last.lock()
+        && let Some((at, ports)) = last.as_ref()
+        && at.elapsed() <= max_age
+    {
+        return ports.clone();
+    }
+    let ports = listening();
+    if let Ok(mut last) = last.lock() {
+        *last = Some((Instant::now(), ports.clone()));
+    }
+    ports
+}
+
 /// Listening ports of this user's processes, sorted by port. Empty when the
 /// platform tool (`lsof`, or `netstat` on Windows) is not available.
 pub fn listening() -> Vec<Port> {

@@ -1046,6 +1046,16 @@ async fn prepare(browser: &Cdp) -> Result<(Cdp, String)> {
     ] {
         page.call(domain, json!({})).await?;
     }
+    // Headless Chrome names itself `HeadlessChrome` in its user agent and
+    // client hints, which many sites answer with a CAPTCHA: present it as
+    // the Chrome it is.
+    if let Ok(version) = browser.call("Browser.getVersion", json!({})).await
+        && let Some(agent) = version["userAgent"].as_str()
+    {
+        page.call("Network.setUserAgentOverride", user_agent_override(agent))
+            .await
+            .ok();
+    }
     // `Page.lifecycleEvent`s name the loader, so a wait ends on its own load.
     page.call("Page.setLifecycleEventsEnabled", json!({ "enabled": true }))
         .await?;
@@ -1059,6 +1069,70 @@ async fn prepare(browser: &Cdp) -> Result<(Cdp, String)> {
         json!({ "expression": scripts::SINGLE_PANE }),
     );
     Ok((page, target_id))
+}
+
+/// `Network.setUserAgentOverride` parameters that describe headless Chrome
+/// like the desktop browser: no `Headless` in the user agent, and client
+/// hints (`Sec-CH-UA`) with the browser's own brand.
+fn user_agent_override(agent: &str) -> Value {
+    let agent = agent.replace("HeadlessChrome", "Chrome");
+    let full_version = agent
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("Chrome/"))
+        .unwrap_or("0.0.0.0")
+        .to_string();
+    let major = full_version.split('.').next().unwrap_or("0").to_string();
+    // Edge names its own version (`Edg/…`) beside Chromium's.
+    let edge = agent
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("Edg/"))
+        .map(str::to_string);
+    let brand = if edge.is_some() {
+        "Microsoft Edge"
+    } else {
+        "Google Chrome"
+    };
+    let brands = |version: &str, full: bool| {
+        let own = match &edge {
+            Some(edge) if full => edge.clone(),
+            Some(edge) => edge.split('.').next().unwrap_or("0").to_string(),
+            None => version.to_string(),
+        };
+        json!([
+            { "brand": "Chromium", "version": version },
+            { "brand": brand, "version": own },
+            { "brand": "Not.A/Brand", "version": if full { "99.0.0.0" } else { "99" } },
+        ])
+    };
+    let (platform, navigator_platform) = if cfg!(target_os = "macos") {
+        ("macOS", "MacIntel")
+    } else if cfg!(windows) {
+        ("Windows", "Win32")
+    } else if cfg!(target_arch = "aarch64") {
+        ("Linux", "Linux aarch64")
+    } else {
+        ("Linux", "Linux x86_64")
+    };
+    let architecture = if cfg!(target_arch = "aarch64") {
+        "arm"
+    } else {
+        "x86"
+    };
+    json!({
+        "userAgent": agent,
+        "platform": navigator_platform,
+        "userAgentMetadata": {
+            "brands": brands(&major, false),
+            "fullVersionList": brands(&full_version, true),
+            "fullVersion": full_version,
+            "platform": platform,
+            "platformVersion": "",
+            "architecture": architecture,
+            "model": "",
+            "mobile": false,
+            "bitness": "64",
+        },
+    })
 }
 
 /// Runs `expression` in the page and returns its JSON value.
@@ -1151,5 +1225,18 @@ mod tests {
         assert_eq!(normalize_url("127.0.0.1:8080"), "http://127.0.0.1:8080");
         assert_eq!(normalize_url("example.com"), "https://example.com");
         assert_eq!(normalize_url("http://x.dev"), "http://x.dev");
+    }
+
+    #[test]
+    fn headless_chrome_presents_as_chrome() {
+        let value = user_agent_override(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/131.0.6778.86 Safari/537.36",
+        );
+        let agent = value["userAgent"].as_str().unwrap();
+        assert!(!agent.contains("Headless") && agent.contains("Chrome/131.0.6778.86"));
+        let metadata = &value["userAgentMetadata"];
+        assert_eq!(metadata["brands"][1]["brand"], "Google Chrome");
+        assert_eq!(metadata["brands"][1]["version"], "131");
+        assert_eq!(metadata["fullVersion"], "131.0.6778.86");
     }
 }

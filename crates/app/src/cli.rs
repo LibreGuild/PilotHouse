@@ -15,6 +15,8 @@ usage:
   pilothouse mcp [--project PATH] [--agent NAME] [--workspace ID]
                                      run the MCP server agents use for board tools
   pilothouse agy-acp                 run Google Antigravity (agy) as an ACP agent
+  pilothouse agent-hook --socket PATH --pane ID
+                                     pass a terminal agent's hook event (stdin) to the app
 ";
 
 /// What `main` does after reading the arguments.
@@ -35,6 +37,7 @@ pub fn run(args: &[String]) -> Launch {
         Some("ctl") => Launch::Exit(ctl(&args[1..])),
         Some("mcp") => Launch::Exit(mcp(&args[1..])),
         Some("agy-acp") => Launch::Exit(agy_acp()),
+        Some("agent-hook") => Launch::Exit(agent_hook(&args[1..])),
         Some("-h" | "--help" | "help") => {
             print!("{USAGE}");
             Launch::Exit(0)
@@ -140,6 +143,35 @@ fn agy_acp() -> i32 {
             1
         }
     }
+}
+
+/// A hook of an agent running in a PilotHouse terminal (Claude Code's
+/// `--settings` hooks): the event JSON on stdin goes to the app as
+/// `agent.event` for terminal pane `--pane`. It prints nothing and always
+/// succeeds, so the agent is never held up or blocked by it.
+fn agent_hook(args: &[String]) -> i32 {
+    use std::io::Read as _;
+    let value_of = |flag: &str| {
+        args.iter()
+            .position(|arg| arg == flag)
+            .and_then(|at| args.get(at + 1))
+            .cloned()
+    };
+    let (Some(socket), Some(pane)) = (value_of("--socket"), value_of("--pane")) else {
+        return 0;
+    };
+    // All of it (a large tool event too): the agent must not hit a closed
+    // pipe. An event that does not parse is not sent.
+    let mut input = Vec::new();
+    let _ = std::io::stdin().take(64 << 20).read_to_end(&mut input);
+    let Ok(event) = serde_json::from_slice::<Value>(&input) else {
+        return 0;
+    };
+    let params = serde_json::json!({ "pane": pane, "event": event });
+    // Sent, not waited for: a busy app never holds the agent's tool up.
+    let _ = ControlClient::connect(Path::new(&socket))
+        .and_then(|mut client| client.send("agent.event", params));
+    0
 }
 
 /// `pilothouse ctl <method> [json-params]`: prints the JSON result.

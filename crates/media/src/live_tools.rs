@@ -1,6 +1,9 @@
 //! The floating toolbar on a live pane: annotate, capture, record, compare.
 //!
-//! Shared by the browser and device panes. It owns the recording and the
+//! Shared by the browser and device panes, which lay it over the whole live
+//! area: it sits at the bottom centre until dragged by its grip somewhere
+//! that hides less (double-click the grip to put it back), and folds to a
+//! single button. It owns the recording and the
 //! "before" frame; captures are saved to the data directory and handed to the
 //! owner as [`LiveToolsEvent::Captured`], which the project forwards to chat.
 
@@ -14,8 +17,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Task, Window, div,
+    AppContext as _, Context, DragMoveEvent, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Point, Render, StatefulInteractiveElement as _,
+    Styled as _, Task, Window, div, point, px, relative,
 };
 use ph_ui::Icons;
 
@@ -57,6 +61,15 @@ pub struct LiveTools {
     recorder: Option<Recorder>,
     baseline: Option<Frame>,
     busy: bool,
+    /// Where the user dragged the bar, as fractions of the live area (top
+    /// left corner); `None` for the bottom centre.
+    placed: Option<(f32, f32)>,
+    /// Where on the grip the drag started.
+    grab: Point<Pixels>,
+    /// Folded to one button.
+    folded: bool,
+    /// The bar's size as last drawn, to keep it whole inside the area.
+    bar_size: gpui_kit::Size<Pixels>,
     /// Redraws the recording timer once a second while recording.
     _tick: Option<Task<()>>,
 }
@@ -78,6 +91,10 @@ impl LiveTools {
             recorder: None,
             baseline: None,
             busy: false,
+            placed: None,
+            grab: Point::default(),
+            folded: false,
+            bar_size: gpui_kit::size(px(96.), px(44.)),
             _tick: None,
         }
     }
@@ -229,6 +246,78 @@ impl LiveTools {
     }
 }
 
+/// What is dragged when the bar moves: whose bar (every live area hears
+/// every drag of this kind).
+struct MoveBar(gpui_kit::EntityId);
+
+/// Nothing follows the pointer: the bar itself moves.
+struct NoGhost;
+
+impl Render for NoGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// How far in from the bar's corner the grip is (the bar's padding and
+/// border).
+const EDGE: f32 = 5.0;
+
+impl LiveTools {
+    fn move_bar(&mut self, event: &DragMoveEvent<MoveBar>, cx: &mut Context<Self>) {
+        if event.drag(cx).0 != cx.entity_id() {
+            return;
+        }
+        let area = event.bounds;
+        let (width, height) = (f32::from(area.size.width), f32::from(area.size.height));
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        // The grip sits just inside the bar's left edge.
+        let corner = event.event.position - area.origin - self.grab - point(px(EDGE), px(EDGE));
+        // The whole bar stays inside, as wide as it is drawn.
+        let (bar_width, bar_height) = (
+            f32::from(self.bar_size.width),
+            f32::from(self.bar_size.height),
+        );
+        let x = f32::from(corner.x).clamp(0.0, (width - bar_width).max(0.0));
+        let y = f32::from(corner.y).clamp(0.0, (height - bar_height).max(0.0));
+        self.placed = Some((x / width, y / height));
+        cx.notify();
+    }
+
+    fn grip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        let owner = cx.entity_id();
+        div()
+            .id("tool-grip")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w_4()
+            .h_6()
+            .rounded_full()
+            .cursor_grab()
+            .text_color(cx.theme().muted_foreground)
+            .hover(|style| style.bg(cx.theme().secondary_hover))
+            .child(gpui_kit::component::Icon::new(Icons::GripVertical).xsmall())
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new("Drag to move; double-click to put back")
+                    .build(window, cx)
+            })
+            .on_drag(MoveBar(owner), move |_, offset, _, cx| {
+                _ = this.update(cx, |this, _| this.grab = offset);
+                cx.new(|_| NoGhost)
+            })
+            .on_click(cx.listener(|this, event: &gpui_kit::ClickEvent, _, cx| {
+                if event.click_count() == 2 {
+                    this.placed = None;
+                    cx.notify();
+                }
+            }))
+    }
+}
+
 fn file_stem(source: &str) -> String {
     let stem: String = source
         .chars()
@@ -271,8 +360,50 @@ impl Render for LiveTools {
             .as_ref()
             .map(|recorder| recorder.elapsed().as_secs());
 
-        h_flex()
+        let fold = Button::new("tool-fold")
+            .ghost()
+            .small()
+            .icon(if self.folded {
+                Icons::Pencil
+            } else {
+                Icons::ChevronsLeft
+            })
+            .tooltip(if self.folded {
+                "Show the markup tools"
+            } else {
+                "Fold the markup tools"
+            })
+            .accessibility_label(if self.folded {
+                "Show the markup tools"
+            } else {
+                "Fold the markup tools"
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.folded = !this.folded;
+                // A mode left on would keep taking the page's clicks with
+                // its button hidden.
+                if this.folded {
+                    this.surface.update(cx, |surface, cx| {
+                        surface.set_mode(SurfaceMode::Interact, cx)
+                    });
+                }
+                cx.notify();
+            }));
+        let this = cx.entity().downgrade();
+        let bar = h_flex()
             .id("live-tools")
+            .relative()
+            // Its size, for keeping it inside the area while it is dragged.
+            .child(
+                gpui_kit::canvas(
+                    move |bounds, _, cx| {
+                        _ = this.update(cx, |this, _| this.bar_size = bounds.size);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             // Clicks on the toolbar must not reach the live page under it.
             .occlude()
             .gap_0p5()
@@ -282,7 +413,19 @@ impl Render for LiveTools {
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
             .shadow_lg()
-            .child(mode_button(
+            .child(self.grip(cx));
+        let bar = if self.folded {
+            bar.child(fold).when_some(recording, |this, seconds| {
+                this.child(
+                    div()
+                        .px_1()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .child(format!("● {}:{:02}", seconds / 60, seconds % 60)),
+                )
+            })
+        } else {
+            bar.child(mode_button(
                 "tool-interact",
                 Icons::MousePointer2,
                 "Use the app",
@@ -405,5 +548,35 @@ impl Render for LiveTools {
                     .accessibility_label("Before and after")
                     .on_click(cx.listener(|this, _, _, cx| this.compare(cx))),
             )
+            .child(divider())
+            .child(fold)
+        };
+        // A layer over the live area that only listens for the bar's drag,
+        // so the page under it stays usable.
+        let layer = div()
+            .id("live-tools-layer")
+            .size_full()
+            .relative()
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<MoveBar>, _, cx| this.move_bar(event, cx)),
+            );
+        match self.placed {
+            Some((x, y)) => layer.child(
+                div()
+                    .absolute()
+                    .left(relative(x))
+                    .top(relative(y))
+                    .child(bar),
+            ),
+            None => layer.child(
+                h_flex()
+                    .absolute()
+                    .bottom_3()
+                    .left_0()
+                    .right_0()
+                    .justify_center()
+                    .child(bar),
+            ),
+        }
     }
 }

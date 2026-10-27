@@ -220,8 +220,10 @@ impl Panel for DockPane {
             })
     }
 
+    /// Zoom sits in the pane's ⋯ menu (and ⌘⇧J), not as a button on
+    /// every pane header.
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {
-        Some(PanelControl::Toolbar)
+        Some(PanelControl::Menu)
     }
 
     fn inner_padding(&self, _: &App) -> bool {
@@ -327,9 +329,13 @@ impl Panes {
             .iter()
             .map(|(pane, entity)| (pane.name(), panel_handle(entity.clone())))
             .collect();
-        cx.global_mut::<DockPanes>()
-            .0
-            .insert(area.entity_id(), handles);
+        let area_id = area.entity_id();
+        cx.global_mut::<DockPanes>().0.insert(area_id, handles);
+        // A screen closed (an idle workspace) takes its panes along.
+        cx.observe_release(&area, move |_, cx| {
+            cx.global_mut::<DockPanes>().0.remove(&area_id);
+        })
+        .detach();
         Self { area, panes }
     }
 

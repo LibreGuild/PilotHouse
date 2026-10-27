@@ -36,6 +36,9 @@ sed "s/@VERSION@/${VERSION%%-*}/g" scripts/package/Info.plist > "$APP/Contents/I
 cp LICENSE NOTICE "$APP/Contents/Resources/"
 codesign --force --deep --sign - "$APP"
 
+# The app zipped, for PilotHouse's updater (it replaces the app with this).
+ditto -c -k --keepParent "$APP" "$DIST/${NAME%.dmg}.zip"
+
 # The disk image: the app and a shortcut to Applications, to drag it onto.
 STAGE=$(mktemp -d)
 cp -R "$APP" "$STAGE/"

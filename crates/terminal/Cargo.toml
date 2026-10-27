@@ -9,10 +9,14 @@ publish.workspace = true
 [dependencies]
 alacritty_terminal = "0.26"
 anyhow.workspace = true
+# The same versions alacritty_terminal uses (its PTY traits name their types).
+base64 = "0.22"
+polling = "3"
 gpui-kit.workspace = true
 ph-env.workspace = true
 ph-remote.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 ph-theme.workspace = true
 ph-ui.workspace = true
 smol.workspace = true

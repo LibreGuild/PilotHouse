@@ -1,4 +1,5 @@
-//! The ⌘K command palette: every workspace command, searchable in one place.
+//! The ⌘K command palette: every workspace command, searchable in one place,
+//! under the chats to jump to (those waiting for an answer or working first).
 //!
 //! Rows run workspace actions, so a palette entry, its keyboard shortcut and
 //! any button for it always do the same thing.
@@ -27,6 +28,7 @@ use crate::workspace::Workspace;
 enum Run {
     Action(Box<dyn Action>),
     OpenProject(ProjectId),
+    OpenChat(ProjectId, ph_store::sessions::SessionId),
     /// Start an agent CLI without a chat in a terminal.
     /// Open the Utilities dialog at one utility.
     Utility(&'static str),
@@ -55,9 +57,82 @@ impl Entry {
     }
 }
 
+/// Most chats offered when nothing is typed (typing searches them all).
+const CHATS: usize = 40;
+
+/// Chats to jump to, those that want the user first: waiting for an
+/// answer, working, with news; then every chat, newest first.
+fn chats(workspace: &Workspace, cx: &App) -> Vec<Entry> {
+    use ph_agent::ChatState;
+    let rank = |state: ChatState| match state {
+        ChatState::NeedsYou => 0,
+        ChatState::Working => 1,
+        ChatState::Done | ChatState::Failed => 2,
+        ChatState::Idle => 3,
+    };
+    let mut live = crate::agents_board::cards(workspace, cx);
+    live.sort_by_key(|card| rank(card.summary.state));
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = Vec::new();
+    for (card, session) in live.iter().filter_map(|card| match card.target {
+        crate::agents_board::Target::Chat(session) if card.summary.state != ChatState::Idle => {
+            Some((card, session))
+        }
+        _ => None,
+    }) {
+        seen.insert(session);
+        let state = match card.summary.state {
+            ChatState::NeedsYou => "needs you",
+            ChatState::Working => "working",
+            ChatState::Failed => "failed",
+            _ => "finished",
+        };
+        entries.push(Entry {
+            label: format!("{} · {} · {state}", card.title, card.place).into(),
+            icon: Icons::MessageSquare.into(),
+            keywords: &["chat", "agent"],
+            run: Run::OpenChat(card.project, session),
+        });
+    }
+    let mut stored: Vec<(String, ph_store::sessions::Session)> = workspace
+        .projects()
+        .iter()
+        .map(|project| (project.id, project.name.clone()))
+        .chain(
+            workspace
+                .chats_space()
+                .map(|chats| (chats.id, "Chats".to_string())),
+        )
+        .flat_map(|(id, place)| {
+            workspace
+                .sessions_of(id, cx)
+                .into_iter()
+                .map(move |session| (place.clone(), session))
+        })
+        .filter(|(_, session)| !seen.contains(&session.id))
+        .collect();
+    stored.sort_by_key(|(_, session)| std::cmp::Reverse(session.updated_at));
+    entries.extend(
+        stored
+            .into_iter()
+            .take(CHATS)
+            .map(|(place, session)| Entry {
+                label: format!("{} · {place}", session.title).into(),
+                icon: Icons::MessageSquare.into(),
+                keywords: &["chat"],
+                run: Run::OpenChat(session.project_id, session.id),
+            }),
+    );
+    entries
+}
+
 /// Builds the palette's groups from the current workspace state.
-fn groups(workspace: &Workspace) -> Vec<(&'static str, Vec<Entry>)> {
+fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
     let mut groups = Vec::new();
+    let chats = chats(workspace, cx);
+    if !chats.is_empty() {
+        groups.push(("Chats", chats));
+    }
 
     let mut general = vec![
         Entry::action(
@@ -65,6 +140,24 @@ fn groups(workspace: &Workspace) -> Vec<(&'static str, Vec<Entry>)> {
             Icons::SquarePen,
             NewSession,
             &["session", "conversation"],
+        ),
+        Entry::action(
+            "New task in a worktree…",
+            Icons::GitBranch,
+            NewTask,
+            &["worktree", "branch", "task", "parallel"],
+        ),
+        Entry::action(
+            "Finish this task…",
+            Icons::Check,
+            FinishTask,
+            &["worktree", "task", "done", "archive"],
+        ),
+        Entry::action(
+            "Side chat about this one",
+            Icons::MessagesSquare,
+            SideChat,
+            &["aside", "btw", "question", "fork"],
         ),
         Entry::action(
             "Open folder as workspace…",
@@ -220,6 +313,12 @@ fn groups(workspace: &Workspace) -> Vec<(&'static str, Vec<Entry>)> {
                 &["view", "sidebar", "chats"],
             ),
             Entry::action(
+                "Show the Agents view",
+                ph_ui::Icons::Bot,
+                ShowAgentsView,
+                &["agents", "board", "working", "needs", "waiting"],
+            ),
+            Entry::action(
                 "Show the GitHub view",
                 ph_ui::Icons::Github,
                 ShowGitHubView,
@@ -292,7 +391,7 @@ fn row(entry: &Entry) -> CommandItem {
     let icon = entry.icon.clone();
     let action = match &entry.run {
         Run::Action(action) => Some(action.boxed_clone()),
-        Run::OpenProject(_) | Run::Utility(_) => None,
+        Run::OpenProject(_) | Run::OpenChat(..) | Run::Utility(_) => None,
     };
     CommandItem::new()
         .label(entry.label.clone())
@@ -319,7 +418,7 @@ pub(crate) fn open(
     cx: &mut App,
 ) {
     let state = cx.new(|cx| CommandState::new(window, cx));
-    let groups = Rc::new(groups(workspace));
+    let groups = Rc::new(groups(workspace, cx));
     let workspace = handle;
 
     // Focus the search field once, after the dialog has mounted.
@@ -351,6 +450,12 @@ pub(crate) fn open(
                         let id = *id;
                         workspace
                             .update(cx, |workspace, cx| workspace.open_project(id, window, cx));
+                    }
+                    Run::OpenChat(project, session) => {
+                        let (project, session) = (*project, *session);
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.open_chat(project, session, window, cx)
+                        });
                     }
                     Run::Utility(id) => crate::utilities::open(Some(id), window, cx),
                 }

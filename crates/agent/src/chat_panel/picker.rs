@@ -16,6 +16,40 @@ impl ChatPanel {
             .update(cx, |thread, cx| thread.set_option(option_id, value, cx));
     }
 
+    /// Switches the agent to its next mode (Manual, Accept edits, Plan…),
+    /// as ⇧Tab does in Claude Code; never to one that skips permissions.
+    /// False when the agent has no modes.
+    pub(super) fn cycle_mode(&mut self, cx: &mut Context<Self>) -> bool {
+        let thread = self.active.read(cx);
+        let Some((id, next)) = thread
+            .options()
+            .iter()
+            .find(|option| option.category == OptionCategory::Mode)
+            .and_then(|option| match &option.kind {
+                OptionKind::Select(choices) => {
+                    // Skipping permissions is never one key press away
+                    // (Claude's bypassPermissions, Codex's agent-full-access,
+                    // Gemini's yolo).
+                    let cycle: Vec<_> = choices
+                        .iter()
+                        .filter(|choice| !skips_permissions(&choice.value, &choice.name))
+                        .collect();
+                    let at = cycle
+                        .iter()
+                        .position(|choice| choice.value == option.current)
+                        .map_or(0, |at| at + 1);
+                    let next = cycle.get(at % cycle.len().max(1))?;
+                    (next.value != option.current).then(|| (option.id.clone(), next.value.clone()))
+                }
+                _ => None,
+            })
+        else {
+            return false;
+        };
+        self.choose_option(&id, &next, cx);
+        true
+    }
+
     /// What the model picker lists: this chat's agent live, the others from
     /// their cached options with remembered choices applied.
     pub(super) fn picker_data(&self, cx: &App) -> PickerData {
@@ -174,5 +208,34 @@ impl ChatPanel {
         // Start it now, so its models fill in.
         self.warm_up(cx);
         self.focus_composer(window, cx);
+    }
+}
+
+/// Whether a mode lets the agent act without asking.
+fn skips_permissions(value: &str, name: &str) -> bool {
+    let text = format!("{value} {name}").to_lowercase();
+    [
+        "bypass",
+        "full-access",
+        "full_access",
+        "full access",
+        "yolo",
+        "danger",
+    ]
+    .iter()
+    .any(|word| text.contains(word))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skips_permissions;
+
+    #[test]
+    fn knows_modes_that_skip_permissions() {
+        assert!(skips_permissions("bypassPermissions", "Bypass permissions"));
+        assert!(skips_permissions("agent-full-access", "Full access"));
+        assert!(skips_permissions("yolo", "YOLO"));
+        assert!(!skips_permissions("plan", "Plan"));
+        assert!(!skips_permissions("auto", "Auto"));
     }
 }

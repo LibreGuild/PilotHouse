@@ -35,7 +35,7 @@ fn main() {
     // The helpers run beside the app and keep to stderr.
     let helper = matches!(
         args.first().map(String::as_str),
-        Some("ctl" | "mcp" | "agy-acp")
+        Some("ctl" | "mcp" | "agy-acp" | "agent-hook")
     );
     logs::init(!helper);
     logs::install_crash_handler();

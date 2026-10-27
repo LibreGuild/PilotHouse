@@ -35,6 +35,8 @@ pub enum RunsPanelEvent {
     },
     /// Show `url` in the project's browser pane.
     OpenUrl(String),
+    /// An Android app started on a device: show the Devices pane.
+    ShowDevices,
 }
 
 pub struct RunsPanel {
@@ -44,6 +46,8 @@ pub struct RunsPanel {
     project_id: i64,
     detected: Vec<RunConfig>,
     custom: Vec<RunConfig>,
+    /// The Android card, when a folder is a Gradle project with an app.
+    android: Option<Entity<ph_devices::AndroidRun>>,
     ports: Vec<Port>,
     adding: bool,
     /// Show ports of other programs too, not just this project's.
@@ -83,6 +87,7 @@ impl RunsPanel {
             folders,
             detected: Vec::new(),
             custom,
+            android: None,
             ports: Vec::new(),
             adding: false,
             show_other_ports: false,
@@ -135,15 +140,53 @@ impl RunsPanel {
     fn rescan(&mut self, cx: &mut Context<Self>) {
         let folders = self.folders.clone();
         cx.spawn(async move |this, cx| {
-            let detected = cx
-                .background_spawn(async move { detect_all(&folders) })
+            let (detected, android) = cx
+                .background_spawn(async move {
+                    let android = folders
+                        .iter()
+                        .find_map(|(_, folder)| ph_devices::AndroidRun::detect(folder));
+                    (detect_all(&folders), android)
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.detected = detected;
+                this.set_android(android, cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    fn set_android(
+        &mut self,
+        found: Option<(PathBuf, Vec<ph_devices::android_project::AndroidModule>)>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((root, modules)) = found else {
+            // A scan in the middle of a build (gradlew gone for a moment, a
+            // branch switch) does not take the card away from it.
+            if !self
+                .android
+                .as_ref()
+                .is_some_and(|android| android.read(cx).is_busy())
+            {
+                self.android = None;
+            }
+            return;
+        };
+        if let Some(android) = &self.android {
+            android.update(cx, |android, cx| android.set_modules(modules, cx));
+            return;
+        }
+        let android = cx.new(|cx| ph_devices::AndroidRun::new(root, modules, cx));
+        cx.subscribe(
+            &android,
+            |_, _, event: &ph_devices::AndroidRunEvent, cx| match event {
+                ph_devices::AndroidRunEvent::Launched => cx.emit(RunsPanelEvent::ShowDevices),
+            },
+        )
+        .detach();
+        self.android = Some(android);
     }
 
     fn save_custom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -200,8 +243,14 @@ impl RunsPanel {
                     }
                 })
                 .await;
+            // Fresh: the port just stopped must not show from the cache.
             let ports = cx
-                .background_spawn(async move { listening(server.as_ref()) })
+                .background_spawn(async move {
+                    match &server {
+                        Some(server) => ports::listening_on(server),
+                        None => ports::listening_within(std::time::Duration::ZERO),
+                    }
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.status = Some(match result {
@@ -409,11 +458,12 @@ impl RunsPanel {
     }
 }
 
-/// Listening ports here, or on `server`.
+/// Listening ports here (as seen in the last two seconds, shared with the
+/// status bar), or on `server`.
 fn listening(server: Option<&ph_remote::Mapping>) -> Vec<Port> {
     match server {
         Some(server) => ports::listening_on(server),
-        None => ports::listening(),
+        None => ports::listening_within(std::time::Duration::from_secs(2)),
     }
 }
 
@@ -455,6 +505,9 @@ impl Render for RunsPanel {
             .overflow_y_scroll()
             .px_2()
             .pb_3()
+            .when_some(self.android.clone(), |this, android| {
+                this.child(div().pt_2().child(android))
+            })
             .child(
                 section("Run configurations", None, cx)
                     .child(

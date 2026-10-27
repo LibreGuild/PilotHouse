@@ -39,16 +39,32 @@ pub struct StartedShell {
     term: Arc<FairMutex<Term<Listener>>>,
     pty: EventLoopSender,
     events: smol::channel::Receiver<Event>,
+    /// Program status reports (OSC 7501) found in the output.
+    statuses: smol::channel::Receiver<crate::program_status::Message>,
     title: SharedString,
     /// The shell's name, as the user picked it (`zsh`, `PowerShell 7`).
     shell: SharedString,
+    /// Where it started.
+    cwd: std::path::PathBuf,
     columns: usize,
     rows: usize,
+}
+
+/// What an agent running in the terminal is doing, as its tab shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentBadge {
+    Working,
+    /// It waits for the user.
+    NeedsYou,
+    /// It finished a turn the user has not looked at.
+    Done,
 }
 
 #[derive(Debug, Clone)]
 pub enum TerminalEvent {
     TitleChanged,
+    /// The program in it reported a new state (OSC 7501).
+    ProgramStatus,
     Exited,
 }
 
@@ -58,8 +74,15 @@ pub struct Terminal {
     title: SharedString,
     /// The shell started (see [`Terminal::shell`]).
     shell: SharedString,
+    /// Where the shell started.
+    cwd: std::path::PathBuf,
     /// A fixed name (a run configuration's), shown instead of the shell's title.
     label: Option<SharedString>,
+    /// An agent's state, when an agent runs in it.
+    badge: Option<AgentBadge>,
+    /// What the program in it says about itself (OSC 7501), if it does.
+    program: Option<crate::program_status::ProgramStatus>,
+    _statuses: Task<()>,
     exited: bool,
     /// How the program ended, once it has (`Some(0)`: it succeeded).
     exit_code: Option<i32>,
@@ -118,10 +141,14 @@ impl Terminal {
         extra_env.insert("TERM".into(), "xterm-256color".into());
         extra_env.insert("COLORTERM".into(), "truecolor".into());
         extra_env.insert("TERM_PROGRAM".into(), "PilotHouse".into());
+        // BSD `ls` and friends on macOS colour their output only when asked.
+        extra_env
+            .entry("CLICOLOR".into())
+            .or_insert_with(|| "1".into());
 
         let options = tty::Options {
             shell: Some(tty::Shell::new(program.to_string(), args)),
-            working_directory: Some(cwd),
+            working_directory: Some(cwd.clone()),
             drain_on_exit: true,
             env: extra_env,
             #[cfg(target_os = "windows")]
@@ -135,6 +162,8 @@ impl Terminal {
             cell_height: 16,
         };
         let pty = tty::new(&options, size, 0)?;
+        let (status_sender, statuses) = smol::channel::bounded(64);
+        let pty = crate::program_status::Tapped::new(pty, status_sender);
 
         let (sender, events) = smol::channel::unbounded();
         let listener = Listener(sender);
@@ -160,8 +189,10 @@ impl Terminal {
             term,
             pty,
             events,
+            statuses,
             shell: title.clone(),
             title,
+            cwd,
             columns,
             rows,
         })
@@ -184,12 +215,27 @@ impl Terminal {
                 }
             }
         });
+        let statuses = shell.statuses;
+        let status_task = cx.spawn(async move |this, cx| {
+            while let Ok(message) = statuses.recv().await {
+                if this
+                    .update(cx, |this, cx| this.handle_status(message, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         Self {
             term: shell.term,
             pty: shell.pty,
             title: shell.title,
             shell: shell.shell,
+            cwd: shell.cwd,
             label: None,
+            badge: None,
+            program: None,
+            _statuses: status_task,
             exited: false,
             exit_code: None,
             columns: shell.columns,
@@ -211,8 +257,66 @@ impl Terminal {
         self.label.as_ref()
     }
 
+    /// The title the program in it set, whatever its tab is named.
+    pub fn program_title(&self) -> &SharedString {
+        &self.title
+    }
+
     pub fn set_label(&mut self, label: impl Into<SharedString>) {
         self.label = Some(label.into());
+    }
+
+    pub fn badge(&self) -> Option<AgentBadge> {
+        self.badge
+    }
+
+    /// What the program running in it says it is doing (OSC 7501).
+    pub fn program_status(&self) -> Option<&crate::program_status::ProgramStatus> {
+        self.program.as_ref()
+    }
+
+    /// The user looked at it: a finished program's news is seen.
+    pub fn acknowledge(&mut self, cx: &mut Context<Self>) {
+        if self.badge == Some(AgentBadge::Done) {
+            self.set_badge(None, cx);
+        }
+    }
+
+    fn handle_status(&mut self, message: crate::program_status::Message, cx: &mut Context<Self>) {
+        use crate::program_status::{Message, ProgramState};
+        match message {
+            // Saying yes is what makes a program report at all.
+            Message::Query => self.write(crate::program_status::QUERY_REPLY.to_vec()),
+            Message::Status(status) => {
+                let badge = status.as_ref().and_then(|status| match status.state {
+                    ProgramState::Working => Some(AgentBadge::Working),
+                    ProgramState::Blocked => Some(AgentBadge::NeedsYou),
+                    ProgramState::Done => Some(AgentBadge::Done),
+                    ProgramState::Idle | ProgramState::Error => None,
+                });
+                // Done stays only as news: a program that sits idle after
+                // reporting it keeps the dot until the user looks.
+                let keep_done = self.badge == Some(AgentBadge::Done)
+                    && status
+                        .as_ref()
+                        .is_some_and(|status| status.state == ProgramState::Idle);
+                if !keep_done {
+                    self.set_badge(badge, cx);
+                }
+                self.program = status;
+                cx.emit(TerminalEvent::ProgramStatus);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Shows what the agent in it is doing on its tab.
+    pub fn set_badge(&mut self, badge: Option<AgentBadge>, cx: &mut Context<Self>) {
+        if self.badge != badge {
+            self.badge = badge;
+            cx.emit(TerminalEvent::TitleChanged);
+            cx.notify();
+        }
     }
 
     /// Types `command` and presses Enter, as if the user had.
@@ -250,6 +354,16 @@ impl Terminal {
                     cx.emit(TerminalEvent::TitleChanged);
                 }
                 Event::PtyWrite(text) => self.write(text.into_bytes()),
+                // A program asks for a colour (OSC 4/10/11): it gets the one
+                // it is drawn with, its own if it set one.
+                Event::ColorRequest(index, format) => {
+                    use gpui_kit::component::ActiveTheme as _;
+                    let set = self.term.lock().colors()[index];
+                    let color = set.unwrap_or_else(|| {
+                        crate::palette::Palette::from_theme(cx.theme()).query(index)
+                    });
+                    self.write(format(color).into_bytes());
+                }
                 Event::ClipboardStore(_, text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
                 }
@@ -310,12 +424,86 @@ impl Terminal {
         self.write(bytes);
     }
 
+    /// The text of grid line `line`, one character per column (wide
+    /// characters' second halves as spaces), so a column indexes it.
+    pub(crate) fn line_text(&self, line: alacritty_terminal::index::Line) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        if line < alacritty_terminal::index::Line(-(grid.history_size() as i32))
+            || line.0 >= term.screen_lines() as i32
+        {
+            return String::new();
+        }
+        let row = &grid[line];
+        (0..term.columns())
+            .map(|column| {
+                let cell = &row[alacritty_terminal::index::Column(column)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    ' '
+                } else {
+                    cell.c
+                }
+            })
+            .collect()
+    }
+
     /// The selected text, if any.
     pub fn selected_text(&self) -> Option<String> {
         self.term
             .lock()
             .selection_to_string()
             .filter(|text| !text.is_empty())
+    }
+
+    /// The folder the shell started in.
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    /// The history and the screen as text, at most the last `max_lines`
+    /// lines, without trailing blanks: what is kept when PilotHouse quits.
+    pub fn history_text(&self, max_lines: usize) -> String {
+        use alacritty_terminal::index::{Column, Line};
+        let term = self.term.lock();
+        let grid = term.grid();
+        let top = grid.topmost_line().0;
+        let bottom = grid.bottommost_line().0;
+        let mut lines: Vec<String> = (top..=bottom)
+            .map(|line| {
+                let row = &grid[Line(line)];
+                (0..term.columns())
+                    .filter_map(|column| {
+                        let cell = &row[Column(column)];
+                        (!cell.flags.contains(Flags::WIDE_CHAR_SPACER)).then_some(cell.c)
+                    })
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        let start = lines.len().saturating_sub(max_lines);
+        lines[start..].join("\n")
+    }
+
+    /// Shows text kept from an earlier run above the new shell's output,
+    /// dimmed, with a line saying when it is from.
+    pub(crate) fn show_restored(&self, text: &str, note: &str) {
+        let mut bytes = b"\x1b[2m".to_vec();
+        for line in text.lines() {
+            // Only text: whatever escapes it held are not replayed.
+            let clean: String = line.chars().filter(|c| !c.is_control()).collect();
+            bytes.extend_from_slice(clean.as_bytes());
+            bytes.extend_from_slice(b"\r\n");
+        }
+        bytes.extend_from_slice(
+            format!("\x1b[0m\x1b[2m\u{2500}\u{2500} {note} \u{2500}\u{2500}\x1b[0m\r\n").as_bytes(),
+        );
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut *self.term.lock(), &bytes);
     }
 
     /// The lines on screen now, without trailing blanks.

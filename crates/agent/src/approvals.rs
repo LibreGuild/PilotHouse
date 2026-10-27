@@ -3,7 +3,7 @@
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::{AnyElement, App, IntoElement, ParentElement as _, Styled as _, div};
 
-use crate::entry_view::permission_buttons;
+use crate::entry_view::{form_answers, permission_buttons};
 use crate::permission::ApprovalInbox;
 
 /// How many agent questions wait for an answer.
@@ -33,7 +33,10 @@ pub fn rows(cx: &mut App) -> Vec<AnyElement> {
                         .child(request.source.clone()),
                 )
                 .child(div().text_sm().child(request.title.clone()))
-                .child(permission_buttons(handle, request))
+                .child(match request.form() {
+                    Some(form) => form_answers(handle, form, cx),
+                    None => permission_buttons(handle, request),
+                })
                 .into_any_element()
         })
         .collect()

@@ -3,14 +3,17 @@
 //! - Emulators: frames stream over the emulator's gRPC endpoint (tens of
 //!   frames per second, only when the screen changes) and touches are sent
 //!   in real time, so dragging and scrolling feel native.
-//! - Phones (and emulators without gRPC): frames are polled with
-//!   `screencap`, and gestures are sent as `input tap`/`swipe` through one
-//!   long-lived `adb shell`, so each event costs no process start.
+//! - Phones (and emulators without gRPC): `screenrecord` streams frames,
+//!   scaled down on the phone's GPU and sent only when the screen changes,
+//!   so the picture keeps up over USB. Devices whose `screenrecord` cannot
+//!   do that are polled with `screencap` (slow: full-size frames). Gestures
+//!   are sent as `input tap`/`swipe` through one long-lived `adb shell`, so
+//!   each event costs no process start.
 
 use std::io::Write as _;
 use std::process::{Child, ChildStdin, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui_kit::{AppContext as _, Context, EventEmitter, Keystroke, Task};
@@ -23,6 +26,9 @@ use crate::emulator::{self, EmulatorControl};
 /// fill a tall pane on a Retina screen; full resolution would double the
 /// pixels to copy for no visible gain. Agents' screenshots use full size.
 const STREAM_SIZE: (u32, u32) = (640, 1280);
+/// Phones on Wi-Fi stream smaller frames: raw pixels over a wireless link
+/// would otherwise arrive a few a second.
+const WIRELESS_STREAM_SIZE: (u32, u32) = (400, 880);
 /// Redraws for a moving screen are capped at about 30 a second: smooth to
 /// the eye, and each one repaints the window.
 const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -53,6 +59,9 @@ pub struct DeviceScreen {
     display: Option<(u32, u32)>,
     frame_size: (u32, u32),
     stop: Arc<AtomicBool>,
+    /// The phone's `screenrecord`, killed when the pane closes (it waits
+    /// for the next change of a still screen).
+    recorder: Arc<Mutex<Option<Child>>>,
     shell: Option<(Child, ChildStdin)>,
     press: Option<Press>,
     _stream: Option<Task<()>>,
@@ -73,6 +82,10 @@ impl Drop for DeviceScreen {
         if let Some(control) = &self.emulator {
             control.close();
         }
+        if let Some(mut child) = self.recorder.lock().ok().and_then(|mut slot| slot.take()) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         if let Some((mut child, _)) = self.shell.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -89,6 +102,7 @@ impl DeviceScreen {
             display: None,
             frame_size: (0, 0),
             stop: Arc::default(),
+            recorder: Arc::default(),
             shell: None,
             press: None,
             _stream: None,
@@ -107,6 +121,7 @@ impl DeviceScreen {
 
     fn start(&mut self, cx: &mut Context<Self>) {
         let (serial, adb, stop) = (self.serial.clone(), self.adb.clone(), self.stop.clone());
+        let recorder = self.recorder.clone();
         let (frames, ready) = Latest::new();
         self._stream = Some(cx.spawn(async move |this, cx| {
             // Connect and learn the display size off the UI thread.
@@ -135,7 +150,16 @@ impl DeviceScreen {
                 .name(format!("screen-{serial}"))
                 .spawn(move || match control {
                     Some(control) => stream_emulator(&control, &frames, &stop),
-                    None => poll_adb(&adb, &serial, &frames, &stop),
+                    None => {
+                        let phone = Phone {
+                            adb: &adb,
+                            serial: &serial,
+                            recorder: &recorder,
+                        };
+                        if !phone.stream(display, &frames, &stop) {
+                            poll_adb(&adb, &serial, &frames, &stop);
+                        }
+                    }
                 })
                 .ok();
             let mut shown = Instant::now() - MIN_FRAME_INTERVAL;
@@ -373,6 +397,160 @@ fn stream_frames(control: &EmulatorControl, frames: &Latest, stop: &AtomicBool) 
     }
 }
 
+/// A phone's screen through `adb`.
+struct Phone<'a> {
+    adb: &'a Adb,
+    serial: &'a str,
+    recorder: &'a Mutex<Option<Child>>,
+}
+
+/// How `screenrecord` ended.
+enum Recorded {
+    /// The pane closed.
+    Stopped,
+    /// It sent frames, then stopped (a time limit, the screen turned off).
+    Ended,
+    /// It never sent a frame: this device cannot stream raw frames.
+    Unsupported,
+}
+
+impl Phone<'_> {
+    /// Streams frames until the pane closes; `false` when the device cannot,
+    /// before any frame was sent.
+    fn stream(&self, display: Option<(u32, u32)>, frames: &Latest, stop: &AtomicBool) -> bool {
+        let fit = if adb::is_wireless(self.serial) {
+            WIRELESS_STREAM_SIZE
+        } else {
+            STREAM_SIZE
+        };
+        let size = stream_size(display.unwrap_or(STREAM_SIZE), fit);
+        let mut streamed = false;
+        loop {
+            match self.record(size, frames, stop) {
+                Recorded::Stopped => return true,
+                Recorded::Ended => streamed = true,
+                Recorded::Unsupported if streamed => {
+                    // It worked before: the device went away or is asleep.
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                Recorded::Unsupported => return false,
+            }
+            if stop.load(Ordering::Relaxed) {
+                return true;
+            }
+        }
+    }
+
+    /// One `screenrecord --output-format=frames` run: each frame is a
+    /// little-endian header (length of the rest, width, height, stride,
+    /// pixel format) and RGB888 pixels.
+    fn record(&self, (width, height): (u32, u32), frames: &Latest, stop: &AtomicBool) -> Recorded {
+        let size = format!("{width}x{height}");
+        let child = self
+            .adb
+            .command(Some(self.serial))
+            .args([
+                "exec-out",
+                "screenrecord",
+                "--output-format=frames",
+                "--size",
+                &size,
+                "-",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        let mut child = match child {
+            Ok(child) => child,
+            Err(err) => {
+                tracing::info!("screenrecord failed to start: {err}");
+                return Recorded::Unsupported;
+            }
+        };
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        if let Ok(mut slot) = self.recorder.lock() {
+            *slot = Some(child);
+        }
+        let mut sent = 0usize;
+        let mut buffer = Vec::new();
+        let ended = loop {
+            if stop.load(Ordering::Relaxed) {
+                break Recorded::Stopped;
+            }
+            let Some(frame) = read_frame(&mut stdout, &mut buffer) else {
+                break if sent > 0 {
+                    Recorded::Ended
+                } else {
+                    Recorded::Unsupported
+                };
+            };
+            sent += 1;
+            if !frames.put(Ok(frame)) {
+                break Recorded::Stopped;
+            }
+        };
+        if let Some(mut child) = self.recorder.lock().ok().and_then(|mut slot| slot.take()) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if stop.load(Ordering::Relaxed) {
+            return Recorded::Stopped;
+        }
+        ended
+    }
+}
+
+/// The streamed size: the display scaled to fit `fit` (either way round),
+/// in even numbers as video sizes must be.
+fn stream_size((width, height): (u32, u32), fit: (u32, u32)) -> (u32, u32) {
+    let (max_w, max_h) = if width > height { (fit.1, fit.0) } else { fit };
+    let scale = (max_w as f32 / width as f32)
+        .min(max_h as f32 / height as f32)
+        .min(1.0);
+    let even = |value: u32| ((value as f32 * scale) as u32).max(2) & !1;
+    (even(width), even(height))
+}
+
+/// One frame of `screenrecord --output-format=frames`; `None` at the end of
+/// the stream or on anything unexpected.
+fn read_frame(input: &mut impl std::io::Read, buffer: &mut Vec<u8>) -> Option<Frame> {
+    let mut length = [0u8; 4];
+    input.read_exact(&mut length).ok()?;
+    let length = u32::from_le_bytes(length) as usize;
+    // A header of four words, and no frame bigger than 8K.
+    if !(16..=16 + 7680 * 4320 * 3).contains(&length) {
+        return None;
+    }
+    buffer.resize(length, 0);
+    input.read_exact(buffer).ok()?;
+    parse_frame(buffer)
+}
+
+/// Width, height, stride and pixel format, then the pixels.
+fn parse_frame(packet: &[u8]) -> Option<Frame> {
+    let word = |at: usize| Some(u32::from_le_bytes(packet.get(at..at + 4)?.try_into().ok()?));
+    let (width, height, stride) = (word(0)?, word(4)?, word(8)? as usize);
+    let row = width as usize * 3;
+    let pixels = packet.get(16..)?;
+    if width == 0 || height == 0 || stride < row || pixels.len() < stride * height as usize {
+        return None;
+    }
+    if stride == row {
+        return Some(Frame::from_rgb_slice(
+            width,
+            height,
+            &pixels[..row * height as usize],
+        ));
+    }
+    let rows: Vec<u8> = pixels
+        .chunks(stride)
+        .take(height as usize)
+        .flat_map(|line| &line[..row])
+        .copied()
+        .collect();
+    Some(Frame::from_rgb_slice(width, height, &rows))
+}
+
 /// Polls `screencap` as fast as the device answers. Raw pixels are faster on
 /// emulators and fast cables; PNG is used if a raw grab is slow.
 fn poll_adb(adb: &Adb, serial: &str, frames: &Latest, stop: &AtomicBool) {
@@ -461,4 +639,39 @@ fn scroll_with_touch(control: EmulatorControl, (x, y): (i32, i32), dy: i32) {
         }
         control.touch(x, y - dy * 3, false);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_size_fits_and_stays_even() {
+        assert_eq!(stream_size((1080, 2400), STREAM_SIZE), (576, 1280));
+        assert_eq!(stream_size((2400, 1080), STREAM_SIZE), (1280, 576));
+        assert_eq!(stream_size((480, 800), STREAM_SIZE), (480, 800));
+        assert_eq!(stream_size((1081, 2401), STREAM_SIZE), (576, 1280));
+        assert_eq!(stream_size((1080, 2400), WIRELESS_STREAM_SIZE), (396, 880));
+    }
+
+    #[test]
+    fn reads_frames_until_the_stream_ends() {
+        let (width, height) = (2u32, 2u32);
+        let mut stream = Vec::new();
+        for _ in 0..2 {
+            stream.extend((16 + width * height * 3).to_le_bytes());
+            for word in [width, height, width * 3, 3] {
+                stream.extend(word.to_le_bytes());
+            }
+            stream.extend([10u8, 20, 30].repeat(4));
+        }
+        let mut input = std::io::Cursor::new(stream);
+        let mut buffer = Vec::new();
+        for _ in 0..2 {
+            let frame = read_frame(&mut input, &mut buffer).unwrap();
+            assert_eq!((frame.width, frame.height), (2, 2));
+            assert_eq!(&frame.bgra()[..4], &[30, 20, 10, 255]);
+        }
+        assert!(read_frame(&mut input, &mut buffer).is_none());
+    }
 }

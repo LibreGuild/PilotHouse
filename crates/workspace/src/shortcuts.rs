@@ -48,6 +48,7 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
                 ),
                 ("Search chats", action(Box::new(SearchChats))),
                 ("New chat", action(Box::new(NewSession))),
+                ("Side chat about this one", action(Box::new(SideChat))),
                 ("Open a folder as a workspace", action(Box::new(AddProject))),
                 ("Settings", action(Box::new(OpenSettings))),
                 ("Keyboard shortcuts", action(Box::new(ShowShortcuts))),
@@ -58,6 +59,7 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
             "Workspaces and layout",
             vec![
                 ("Workspaces view", action(Box::new(ShowWorkspacesView))),
+                ("Agents view", action(Box::new(ShowAgentsView))),
                 ("GitHub view", action(Box::new(ShowGitHubView))),
                 ("Workspace 1 to 9", Keys::Text(workspace_keys.into())),
                 ("Previous workspace", action(Box::new(PreviousWorkspace))),

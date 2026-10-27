@@ -163,6 +163,8 @@ impl Render for LoneFile {
                         .child(div().flex_1())
                         .child(
                             Button::new("open-folder-as-project")
+                                // Windows treats the bar as a drag area otherwise.
+                                .occlude()
                                 .flex_none()
                                 .ghost()
                                 .xsmall()

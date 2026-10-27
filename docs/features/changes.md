@@ -17,7 +17,9 @@ The shared `Repo` model (`repo.rs`) holds status and runs one operation at a tim
 - **Changes**
   - **Commit box**: message, **Write message** (an agent writes it from the staged diff), **Amend** (prefills the last message), Commit. Staged files, each with Unstage.
   - **Conflicts**: during a merge, rebase or cherry-pick, conflicted files are listed with **Abort**. **Resolve** opens the resolver: each block side by side with **Ours / Theirs / Both / Ask agent**; **Save and mark resolved** writes the file and stages it. Unresolved blocks keep their markers.
-  - **Review**: unstaged edits per hunk. **Keep** stages (`git apply --cached`); **Discard** reverts with an undo stack (20 deep). New files can be kept.
+  - **Review**: unstaged edits per hunk, as plain rows: a file's line counts, its Open/Discard/Keep on hover, its hunks in one block under it. The list is drawn only where it shows (a row per file and per hunk), so many files with long diffs scroll smoothly. **Keep** stages (`git apply --cached`); **Discard** reverts with an undo stack (20 deep). New files can be kept.
+  - **Review notes**: hovering a line of a hunk offers **+**: a note on that line (of the file as it is now). Notes show under their lines; a bar counts them and **Send to chat** gives them all to the chat in front as one attachment, each with its file, line and code (`notes.rs`), asking the agent to address them.
+- **Branch**: what the branch checked out changed against the default branch (`origin/HEAD`, else `main` or `master`) since it left it, file by file (`ph_git::diff::branch_changes`). With the turn summary in chat (one turn) and Changes (uncommitted), it gives three scopes of review.
 - **History**: commits with a branch graph (lanes, merges, branch and tag badges), all branches or HEAD only, 200 per page. Clicking a commit shows its message and diff against its first parent. **Write changelog**: an agent writes release notes from the commits since the last tag.
 - **Stashes**: stash everything (new files included) with an optional message; list, show diff, Apply, Pop, Drop.
 

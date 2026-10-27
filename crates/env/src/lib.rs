@@ -58,7 +58,9 @@ pub fn var(name: &str) -> Option<&'static str> {
 /// extensions are tried too, so `which("npx")` finds `npx.cmd`.
 pub fn which(program: &str) -> Option<PathBuf> {
     if program.contains('/') || program.contains(std::path::MAIN_SEPARATOR) {
-        return candidates(PathBuf::from(program)).find(|path| is_executable(path));
+        return candidates(PathBuf::from(program))
+            .into_iter()
+            .find(|path| is_executable(path));
     }
     let path = var("PATH")?;
     std::env::split_paths(path)
@@ -66,27 +68,38 @@ pub fn which(program: &str) -> Option<PathBuf> {
         .find(|candidate| is_executable(candidate))
 }
 
-/// `path` itself, then (on Windows, without an extension) `path.exe`, `.cmd`…
-fn candidates(path: PathBuf) -> impl Iterator<Item = PathBuf> {
-    let extensions: Vec<String> = if cfg!(windows) && path.extension().is_none() {
-        var("PATHEXT")
-            .unwrap_or(".COM;.EXE;.BAT;.CMD")
+/// `path` itself or, on Windows unless it already ends in a runnable
+/// extension, `path.exe`, `.cmd`… only: npm puts an extensionless shell
+/// script (`npx`) next to `npx.cmd`, and Windows cannot start it ("%1 is
+/// not a valid Win32 application"). A dot in a name (`python3.12`) is no
+/// such extension.
+fn candidates(path: PathBuf) -> Vec<PathBuf> {
+    if !cfg!(windows) {
+        return vec![path];
+    }
+    let pathext = var("PATHEXT").unwrap_or(".COM;.EXE;.BAT;.CMD");
+    let runnable = path.extension().is_some_and(|ext| {
+        let ext = format!(".{}", ext.to_string_lossy());
+        pathext
             .split(';')
-            .filter(|ext| !ext.is_empty())
-            .map(|ext| ext.to_ascii_lowercase())
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let with_extensions: Vec<PathBuf> = extensions
-        .iter()
+            .any(|known| known.eq_ignore_ascii_case(&ext))
+    });
+    if runnable {
+        return vec![path];
+    }
+    with_extensions(&path, pathext)
+}
+
+fn with_extensions(path: &Path, pathext: &str) -> Vec<PathBuf> {
+    pathext
+        .split(';')
+        .filter(|ext| !ext.is_empty())
         .map(|ext| {
-            let mut name = path.clone().into_os_string();
-            name.push(ext);
+            let mut name = path.as_os_str().to_owned();
+            name.push(ext.to_ascii_lowercase());
             PathBuf::from(name)
         })
-        .collect();
-    std::iter::once(path).chain(with_extensions)
+        .collect()
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -336,6 +349,15 @@ pub fn shells() -> Vec<Shell> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pathext_names_replace_the_bare_one() {
+        let names = with_extensions(Path::new("bin/npx"), ".EXE;.CMD;");
+        assert_eq!(
+            names,
+            [PathBuf::from("bin/npx.exe"), PathBuf::from("bin/npx.cmd")]
+        );
+    }
 
     #[test]
     fn the_default_shell_is_listed_first() {

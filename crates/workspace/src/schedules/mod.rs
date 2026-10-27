@@ -201,8 +201,21 @@ fn announce_reminders(cx: &mut App) {
 }
 
 /// A notification was clicked: show what it was about (the schedule's
-/// workspace and the chat it ran, or the reminder's workspace).
+/// workspace and the chat it ran, a chat that finished or needs an answer,
+/// or the reminder's workspace).
 fn open_from_notification(tag: &str, cx: &mut App) {
+    // An agent in a terminal.
+    if let Some((project, pane)) = crate::attention::terminal_of_tag(tag) {
+        if let Some((handle, workspace)) = crate::main_workspace(cx) {
+            let _ = handle.update(cx, |_, window, cx| {
+                window.activate_window();
+                workspace.update(cx, |workspace, cx| {
+                    workspace.open_terminal_agent(project, &pane, window, cx)
+                });
+            });
+        }
+        return;
+    }
     let store = AppState::store(cx).clone();
     let target = if let Some(id) = tag.strip_prefix("schedule-").and_then(|id| id.parse().ok()) {
         store
@@ -210,6 +223,8 @@ fn open_from_notification(tag: &str, cx: &mut App) {
             .ok()
             .flatten()
             .map(|schedule| (Some(schedule.project_id), schedule.last_session))
+    } else if let Some((project, session)) = crate::attention::chat_of_tag(tag) {
+        Some((Some(project), Some(session)))
     } else if let Some(id) = tag.strip_prefix("todo-").and_then(|id| id.parse().ok()) {
         store
             .todo(id)

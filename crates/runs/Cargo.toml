@@ -12,6 +12,7 @@ gpui-kit.workspace = true
 ph-env.workspace = true
 ph-remote.workspace = true
 ph-control.workspace = true
+ph-devices.workspace = true
 ph-store.workspace = true
 ph-ui.workspace = true
 serde.workspace = true
