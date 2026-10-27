@@ -229,6 +229,166 @@ pub fn submit_review(
     client.post(&repo.path(&format!("pulls/{number}/reviews")), &request)
 }
 
+/// One conversation comment by id.
+pub fn issue_comment(client: &Client, repo: &Repo, comment_id: u64) -> Result<IssueComment> {
+    client.get(&repo.path(&format!("issues/comments/{comment_id}")))
+}
+
+/// A line comment of its own (outside a review), on `line` (or lines
+/// `start_line..=line`) of the new version of `path` at `commit`.
+pub fn line_comment(
+    client: &Client,
+    repo: &Repo,
+    number: u64,
+    commit: &str,
+    draft: &DraftComment,
+) -> Result<ReviewComment> {
+    let mut request = json!({
+        "body": draft.body,
+        "commit_id": commit,
+        "path": draft.path,
+        "line": draft.line,
+        "side": draft.side,
+    });
+    if let Some(start) = draft.start_line {
+        request["start_line"] = json!(start);
+        request["start_side"] = json!(draft.start_side.as_deref().unwrap_or("RIGHT"));
+    }
+    client.post(&repo.path(&format!("pulls/{number}/comments")), &request)
+}
+
+/// The pull request's line-comment threads (the first 100), to resolve
+/// them by their first comment.
+pub fn threads(client: &Client, repo: &Repo, number: u64) -> Result<Vec<Thread>> {
+    let data = client.graphql(
+        "query($owner: String!, $name: String!, $number: Int!) {
+           repository(owner: $owner, name: $name) {
+             pullRequest(number: $number) {
+               reviewThreads(first: 100) {
+                 nodes { id isResolved comments(first: 1) { nodes { databaseId } } }
+               }
+             }
+           }
+         }",
+        json!({ "owner": repo.owner, "name": repo.name, "number": number }),
+    )?;
+    let nodes = data["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    Ok(nodes
+        .iter()
+        .filter_map(|node| {
+            Some(Thread {
+                id: node["id"].as_str()?.to_string(),
+                resolved: node["isResolved"].as_bool().unwrap_or(false),
+                first_comment: node["comments"]["nodes"][0]["databaseId"].as_u64()?,
+            })
+        })
+        .collect())
+}
+
+/// Marks thread `id` (GraphQL) resolved.
+pub fn resolve_thread(client: &Client, id: &str) -> Result<()> {
+    client.graphql(
+        "mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }",
+        json!({ "id": id }),
+    )?;
+    Ok(())
+}
+
+/// Opens an issue; `labels` are added when the repository has them (a
+/// label GitHub refuses is left off).
+pub fn create_issue(
+    client: &Client,
+    repo: &Repo,
+    title: &str,
+    body: &str,
+    labels: &[&str],
+) -> Result<Issue> {
+    let path = repo.path("issues");
+    if !labels.is_empty()
+        && let Ok(issue) = client.post::<Issue>(
+            &path,
+            &json!({ "title": title, "body": body, "labels": labels }),
+        )
+    {
+        return Ok(issue);
+    }
+    client.post(&path, &json!({ "title": title, "body": body }))
+}
+
+pub fn issue(client: &Client, repo: &Repo, number: u64) -> Result<Issue> {
+    client.get(&repo.path(&format!("issues/{number}")))
+}
+
+/// A file of branch `branch`: its text and blob sha; `None` when missing.
+pub fn file_at(
+    client: &Client,
+    repo: &Repo,
+    path: &str,
+    branch: &str,
+) -> Result<Option<(String, String)>> {
+    use base64::Engine as _;
+    let value: Value = match client.get(&repo.path(&format!("contents/{path}?ref={branch}"))) {
+        Ok(value) => value,
+        // Missing; anything else (no network, a bad token) is an error, not
+        // a reason to write the file afresh.
+        Err(err) if err.to_string().contains("(404)") => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let sha = value["sha"].as_str().unwrap_or_default().to_string();
+    let encoded: String = value["content"]
+        .as_str()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect();
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+    Ok(Some((String::from_utf8_lossy(&bytes).into_owned(), sha)))
+}
+
+/// Creates branch `name` at commit `sha`.
+pub fn create_branch(client: &Client, repo: &Repo, name: &str, sha: &str) -> Result<()> {
+    client.post::<Value>(
+        &repo.path("git/refs"),
+        &json!({ "ref": format!("refs/heads/{name}"), "sha": sha }),
+    )?;
+    Ok(())
+}
+
+/// Writes `text` to `path` on `branch` as a commit (`sha`: the file's blob
+/// when it exists).
+pub fn put_file(
+    client: &Client,
+    repo: &Repo,
+    path: &str,
+    branch: &str,
+    message: &str,
+    text: &str,
+    sha: Option<&str>,
+) -> Result<()> {
+    use base64::Engine as _;
+    let mut request = json!({
+        "message": message,
+        "content": base64::engine::general_purpose::STANDARD.encode(text),
+        "branch": branch,
+    });
+    if let Some(sha) = sha {
+        request["sha"] = json!(sha);
+    }
+    client.put::<Value>(&repo.path(&format!("contents/{path}")), &request)?;
+    Ok(())
+}
+
+/// The commit branch `name` points at.
+pub fn branch_head(client: &Client, repo: &Repo, name: &str) -> Result<String> {
+    let value: Value = client.get(&repo.path(&format!("git/ref/heads/{name}")))?;
+    value["object"]["sha"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("branch {name} not found"))
+}
+
 pub fn merge(client: &Client, repo: &Repo, number: u64, method: MergeMethod) -> Result<Value> {
     client.put(
         &repo.path(&format!("pulls/{number}/merge")),
@@ -321,6 +481,8 @@ mod tests {
             line: 1,
             side: "RIGHT".into(),
             body: "Nit".into(),
+            start_line: None,
+            start_side: None,
         }];
         let review = submit_review(
             &client,

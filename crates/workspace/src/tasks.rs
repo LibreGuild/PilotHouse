@@ -193,6 +193,65 @@ pub(crate) fn create(root: &Path, name: &str, worktrees: &Path) -> Result<Create
     })
 }
 
+/// Makes a task on pull request `number`'s head commit `sha` (already
+/// fetched into `root`): branch `task/pr-<number>-fix` (or `-2`, `-3`… when
+/// taken) in its own worktree. Blocking.
+pub(crate) fn create_for_pull(
+    root: &Path,
+    number: u64,
+    sha: &str,
+    worktrees: &Path,
+) -> Result<Created> {
+    let repo = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".into());
+    let (branch, path) = (1..100)
+        .map(|n| {
+            let slug = if n == 1 {
+                format!("pr-{number}-fix")
+            } else {
+                format!("pr-{number}-fix-{n}")
+            };
+            (
+                format!("task/{slug}"),
+                worktrees.join(format!("{repo}-{slug}")),
+            )
+        })
+        .find(|(branch, path)| {
+            !path.exists()
+                && ph_git::git(
+                    root,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{branch}"),
+                    ],
+                )
+                .is_err()
+        })
+        .context("too many tasks for this pull request")?;
+    let config = config(root)?;
+    std::fs::create_dir_all(worktrees)?;
+    ph_git::worktree::add_branch(root, &path, &branch, sha)?;
+    let extras = match bring_extras(&config, root, &path) {
+        Ok(extras) => extras,
+        Err(err) => {
+            let _ = ph_git::worktree::remove(root, &path, true);
+            let _ = ph_git::git(root, &["branch", "-D", "--", &branch]);
+            return Err(err);
+        }
+    };
+    Ok(Created {
+        path,
+        branch,
+        base: sha.to_string(),
+        start: sha.to_string(),
+        extras,
+    })
+}
+
 /// Copies and links into the new worktree `path` what `config` names.
 fn bring_extras(config: &WorktreeConfig, root: &Path, path: &Path) -> Result<Vec<PathBuf>> {
     let mut extras = Vec::new();

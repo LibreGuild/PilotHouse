@@ -68,6 +68,8 @@ pub enum ChatPanelEvent {
     OpenFile { path: String, line: Option<u64> },
     /// Run a new review of the same pull request.
     ReviewAgain { review_id: i64 },
+    /// Show the findings of the pull request review `review_id` is of.
+    OpenFindings { review_id: i64 },
     /// Show this chat (from the history menu), or a new one (`None`).
     SelectSession(Option<SessionId>),
     /// Give `prompt` (the composer's text) to several agents in parallel.
@@ -457,9 +459,52 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.start_review_turn(
+            Some(review_id),
+            Some(crate::thread::ReviewTurn::Round),
+            None,
+            cwd,
+            title,
+            display,
+            prompt,
+            window,
+            cx,
+        )
+    }
+
+    /// Starts a chat that asks `prompt` about a pull request, working in
+    /// its checkout `cwd` and only reading.
+    pub fn start_question(
+        &mut self,
+        cwd: std::path::PathBuf,
+        title: String,
+        display: String,
+        prompt: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_review_turn(None, None, None, cwd, title, display, prompt, window, cx)
+    }
+
+    /// Starts a review chat for `turn` (a round of review `review_id`, an
+    /// author's claim, a walkthrough; none for a plain question), with
+    /// agent `agent` (the default when none), working in `cwd`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_review_turn(
+        &mut self,
+        review_id: Option<i64>,
+        turn: Option<crate::thread::ReviewTurn>,
+        agent: Option<&'static AgentSpec>,
+        cwd: std::path::PathBuf,
+        title: String,
+        display: String,
+        prompt: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.busy = None;
         self.failed = None;
-        let agent = default_agent(&self.store);
+        let agent = agent.unwrap_or_else(|| default_agent(&self.store));
         let store = self.store.clone();
         // A review works in its worktree alone.
         let project = ThreadProject {
@@ -470,7 +515,13 @@ impl ChatPanel {
         };
         self.active = cx.new(|cx| {
             let mut thread = ChatThread::draft(store, project, agent, cx);
-            thread.set_review(review_id);
+            match (review_id, turn) {
+                (Some(review_id), Some(crate::thread::ReviewTurn::Round)) => {
+                    thread.set_review(review_id)
+                }
+                (_, Some(turn)) => thread.set_review_turn(turn),
+                (_, None) => thread.allow_reads_for_turn(),
+            }
             thread
         });
         self.watch_active(cx);
@@ -672,6 +723,11 @@ impl ChatPanel {
                     }
                     ThreadEvent::Review(ReviewCardEvent::ReviewAgain { review_id }) => {
                         cx.emit(ChatPanelEvent::ReviewAgain {
+                            review_id: *review_id,
+                        })
+                    }
+                    ThreadEvent::Review(ReviewCardEvent::OpenFindings { review_id }) => {
+                        cx.emit(ChatPanelEvent::OpenFindings {
                             review_id: *review_id,
                         })
                     }

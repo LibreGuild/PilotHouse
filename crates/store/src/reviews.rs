@@ -1,6 +1,9 @@
-//! Pull request reviews by an agent, and their findings. Each run is a row;
-//! findings carry a stable `key` so the next run can say which are fixed,
-//! and the GitHub comment they were posted as, so it can be updated.
+//! Pull request reviews by an agent, and their findings. Each run is a row
+//! (a *round*: a full review, a check of the fixes, a second opinion…);
+//! the newest finished round holds the pull request's findings (its
+//! ledger), each with a label (`F3`) kept across rounds, a status saying
+//! who set it and why, and the GitHub comment it was posted as. A
+//! walkthrough is a row too (kind `walkthrough`), outside the rounds.
 
 use anyhow::Result;
 use rusqlite::{OptionalExtension as _, Row, params};
@@ -28,21 +31,43 @@ pub struct PrReview {
     pub head_sha: String,
     pub session_id: Option<SessionId>,
     pub summary: String,
-    /// `approve`, `comment` or `request_changes`, as the agent judged it.
+    /// `approve`, `comment` or `request_changes`, worked out from the open
+    /// findings.
     pub verdict: String,
     pub finished: bool,
     pub created_at: i64,
+    /// 1 for the first round of the pull request (0: not a round).
+    pub round: u32,
+    /// `full`, `followup` (check the fixes), `second` (another agent),
+    /// `double_check`, `self` (a branch before its pull request) or
+    /// `walkthrough`.
+    pub kind: String,
+    /// The agent that ran it (its id).
+    pub agent: String,
+    /// The pull request's summary comment, once posted.
+    pub summary_comment_id: Option<u64>,
+    /// Kind-specific JSON (a walkthrough's content).
+    pub data: String,
 }
 
+/// The kinds of review run that make up a pull request's rounds.
+pub const ROUND_KINDS: &str = "('full', 'followup', 'second', 'double_check', 'self')";
+
 /// One finding of a review.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Finding {
     pub id: i64,
     pub review_id: i64,
-    /// Stable across runs (the agent's id, or one made from path and title).
+    /// The agent's id for it, or one made from path and title.
     pub key: String,
+    /// `F1`, `F2`…: the pull request's name for it, kept across rounds.
+    pub label: String,
     /// `critical`, `major`, `minor` or `nit`.
     pub severity: String,
+    /// What goes wrong and how often, which the severity is read from
+    /// (empty for findings from before).
+    pub impact: String,
+    pub likelihood: String,
     pub path: String,
     pub line: Option<u64>,
     pub end_line: Option<u64>,
@@ -53,8 +78,35 @@ pub struct Finding {
     pub evidence: String,
     /// How to fix it.
     pub suggestion: String,
-    /// `new`, `open` (seen before, still there), `fixed` or `dismissed`.
+    /// Replacement code for exactly the quoted lines, when the agent gave
+    /// one (posted as a one-click GitHub suggestion).
+    pub suggested_code: String,
+    /// `open`, `fixed`, `not_problem` or `wont_fix`.
     pub status: String,
+    /// Who set the status: `agent`, `me`, `author` (a reply or tick on
+    /// GitHub), or `double_check`; and their name, and why.
+    pub status_source: String,
+    pub status_by: String,
+    pub reason: String,
+    /// The round it was first found in.
+    pub first_round: u32,
+    /// Found in code that had not changed since the round before (an
+    /// earlier round missed it).
+    pub found_late: bool,
+    /// Whether the code it quotes was found in the file.
+    pub verified: bool,
+    /// The agents that found it, comma-separated.
+    pub agents: String,
+    /// The last check's word on it ("still there: …", "refuted: …").
+    pub note: String,
+    /// A GitHub issue tracking it.
+    pub issue_number: Option<u64>,
+    /// The newest reply on GitHub already taken into account.
+    pub last_reply_id: Option<u64>,
+    /// An agent's view of the author's last answer: `agree` or `disagree`
+    /// (empty when not asked), and the reply it drafted for them.
+    pub claim: String,
+    pub draft_reply: String,
     /// The GitHub comment it was posted as, and whether that is a `line`
     /// comment or one `conversation` comment.
     pub comment_id: Option<u64>,
@@ -81,6 +133,13 @@ impl PrReview {
             verdict: row.get("verdict")?,
             finished: row.get::<_, i64>("finished")? != 0,
             created_at: row.get("created_at")?,
+            round: row.get::<_, i64>("round")?.max(0) as u32,
+            kind: row.get("kind")?,
+            agent: row.get("agent")?,
+            summary_comment_id: row
+                .get::<_, Option<i64>>("summary_comment_id")?
+                .map(|id| id as u64),
+            data: row.get("data")?,
         })
     }
 }
@@ -95,7 +154,10 @@ impl Finding {
             id: row.get("id")?,
             review_id: row.get("review_id")?,
             key: row.get("key")?,
+            label: row.get("label")?,
             severity: row.get("severity")?,
+            impact: row.get("impact")?,
+            likelihood: row.get("likelihood")?,
             path: row.get("path")?,
             line: number("line")?,
             end_line: number("end_line")?,
@@ -103,7 +165,20 @@ impl Finding {
             body: row.get("body")?,
             evidence: row.get("evidence")?,
             suggestion: row.get("suggestion")?,
+            suggested_code: row.get("suggested_code")?,
             status: row.get("status")?,
+            status_source: row.get("status_source")?,
+            status_by: row.get("status_by")?,
+            reason: row.get("reason")?,
+            first_round: row.get::<_, i64>("first_round")?.max(1) as u32,
+            found_late: row.get::<_, i64>("found_late")? != 0,
+            verified: row.get::<_, i64>("verified")? != 0,
+            agents: row.get("agents")?,
+            note: row.get("note")?,
+            issue_number: number("issue_number")?,
+            last_reply_id: number("last_reply_id")?,
+            claim: row.get("claim")?,
+            draft_reply: row.get("draft_reply")?,
             comment_id: number("comment_id")?,
             comment_kind: row.get("comment_kind")?,
             fixed_notified: row.get::<_, i64>("fixed_notified")? != 0,
@@ -112,7 +187,50 @@ impl Finding {
 }
 
 impl Store {
-    /// Starts a review run (its findings come with [`Store::finish_pr_review`]).
+    /// Starts a review run of kind `kind` by agent `agent` (its findings come
+    /// with [`Store::finish_pr_review`]). A round is numbered after the
+    /// pull request's newest one; a walkthrough is round 0.
+    pub fn create_pr_run(
+        &self,
+        project_id: ProjectId,
+        pull: &PullRef,
+        title: &str,
+        head_sha: &str,
+        kind: &str,
+        agent: &str,
+    ) -> Result<PrReview> {
+        let round = if kind == "walkthrough" {
+            0
+        } else {
+            self.latest_pr_review(pull, None)?
+                .map_or(1, |latest| latest.round + 1)
+        };
+        let now = now_millis();
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO pr_reviews (project_id, host, owner, repo, number, title, head_sha,
+                created_at, round, kind, agent)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                project_id,
+                pull.host,
+                pull.owner,
+                pull.repo,
+                pull.number as i64,
+                title,
+                head_sha,
+                now,
+                round,
+                kind,
+                agent
+            ],
+        )?;
+        let id = conn.last_insert_rowid();
+        drop(conn);
+        Ok(self.pr_review(id)?.expect("just inserted"))
+    }
+
+    /// A full review round by an unnamed agent (see [`Store::create_pr_run`]).
     pub fn create_pr_review(
         &self,
         project_id: ProjectId,
@@ -120,16 +238,7 @@ impl Store {
         title: &str,
         head_sha: &str,
     ) -> Result<PrReview> {
-        let now = now_millis();
-        let conn = self.conn();
-        conn.execute(
-            "INSERT INTO pr_reviews (project_id, host, owner, repo, number, title, head_sha, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![project_id, pull.host, pull.owner, pull.repo, pull.number as i64, title, head_sha, now],
-        )?;
-        let id = conn.last_insert_rowid();
-        drop(conn);
-        Ok(self.pr_review(id)?.expect("just inserted"))
+        self.create_pr_run(project_id, pull, title, head_sha, "full", "")
     }
 
     pub fn pr_review(&self, id: i64) -> Result<Option<PrReview>> {
@@ -162,7 +271,8 @@ impl Store {
         Ok(())
     }
 
-    /// The newest finished review of `pull` (before `before`, if given).
+    /// The newest finished round of `pull` (before `before`, if given): it
+    /// holds the pull request's findings.
     pub fn latest_pr_review(
         &self,
         pull: &PullRef,
@@ -171,10 +281,12 @@ impl Store {
         Ok(self
             .conn()
             .query_row(
-                "SELECT * FROM pr_reviews
-                 WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4
-                   AND finished = 1 AND id < ?5
-                 ORDER BY id DESC LIMIT 1",
+                &format!(
+                    "SELECT * FROM pr_reviews
+                     WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4
+                       AND finished = 1 AND id < ?5 AND kind IN {ROUND_KINDS}
+                     ORDER BY id DESC LIMIT 1"
+                ),
                 params![
                     pull.host,
                     pull.owner,
@@ -185,6 +297,59 @@ impl Store {
                 PrReview::from_row,
             )
             .optional()?)
+    }
+
+    /// The newest finished run of `kind` (a walkthrough) of `pull`.
+    pub fn latest_pr_run(&self, pull: &PullRef, kind: &str) -> Result<Option<PrReview>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT * FROM pr_reviews
+                 WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4
+                   AND finished = 1 AND kind = ?5
+                 ORDER BY id DESC LIMIT 1",
+                params![pull.host, pull.owner, pull.repo, pull.number as i64, kind],
+                PrReview::from_row,
+            )
+            .optional()?)
+    }
+
+    /// Every finished round of every pull request of `host/owner/repo`, the
+    /// newest round of each pull request only (for the stats).
+    pub fn latest_rounds_of_repo(
+        &self,
+        host: &str,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<PrReview>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare(&format!(
+            "SELECT * FROM pr_reviews r
+             WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND finished = 1
+               AND kind IN {ROUND_KINDS}
+               AND id = (SELECT max(id) FROM pr_reviews o
+                         WHERE o.host = r.host AND o.owner = r.owner AND o.repo = r.repo
+                           AND o.number = r.number AND o.finished = 1
+                           AND o.kind IN {ROUND_KINDS})
+             ORDER BY id DESC"
+        ))?;
+        let reviews = statement
+            .query_map(params![host, owner, repo], PrReview::from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(reviews)
+    }
+
+    /// The repositories with reviews, as (host, owner, repo).
+    pub fn reviewed_repos(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare(
+            "SELECT DISTINCT host, owner, repo FROM pr_reviews WHERE finished = 1 AND host != 'local'
+             ORDER BY owner, repo",
+        )?;
+        let repos = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(repos)
     }
 
     /// Saves what the agent found and marks the run finished.
@@ -201,8 +366,12 @@ impl Store {
         for finding in findings {
             tx.execute(
                 "INSERT INTO pr_findings (review_id, key, severity, path, line, end_line, title, body,
-                    suggestion, status, comment_id, comment_kind, fixed_notified, evidence)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    suggestion, status, comment_id, comment_kind, fixed_notified, evidence,
+                    label, impact, likelihood, status_source, status_by, reason, first_round,
+                    found_late, verified, agents, note, issue_number, last_reply_id, suggested_code,
+                    claim, draft_reply)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                    ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
                 params![
                     id,
                     finding.key,
@@ -218,6 +387,22 @@ impl Store {
                     finding.comment_kind,
                     finding.fixed_notified as i64,
                     finding.evidence,
+                    finding.label,
+                    finding.impact,
+                    finding.likelihood,
+                    finding.status_source,
+                    finding.status_by,
+                    finding.reason,
+                    finding.first_round,
+                    finding.found_late as i64,
+                    finding.verified as i64,
+                    finding.agents,
+                    finding.note,
+                    finding.issue_number.map(|v| v as i64),
+                    finding.last_reply_id.map(|v| v as i64),
+                    finding.suggested_code,
+                    finding.claim,
+                    finding.draft_reply,
                 ],
             )?;
         }
@@ -229,6 +414,49 @@ impl Store {
         Ok(())
     }
 
+    /// Finishes a run that has no findings (a walkthrough) with `data`.
+    pub fn finish_pr_run(&self, id: i64, summary: &str, data: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE pr_reviews SET summary = ?2, data = ?3, finished = 1 WHERE id = ?1",
+            params![id, summary, data],
+        )?;
+        Ok(())
+    }
+
+    /// Changes the verdict of round `id` (its findings changed).
+    pub fn set_pr_review_verdict(&self, id: i64, verdict: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE pr_reviews SET verdict = ?2 WHERE id = ?1",
+            params![id, verdict],
+        )?;
+        Ok(())
+    }
+
+    /// The pull request's summary comment, posted from round `id`.
+    pub fn set_summary_comment(&self, id: i64, comment_id: u64) -> Result<()> {
+        self.conn().execute(
+            "UPDATE pr_reviews SET summary_comment_id = ?2 WHERE id = ?1",
+            params![id, comment_id as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The summary comment of `pull`, from any round.
+    pub fn summary_comment_of(&self, pull: &PullRef) -> Result<Option<u64>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT summary_comment_id FROM pr_reviews
+                 WHERE host = ?1 AND owner = ?2 AND repo = ?3 AND number = ?4
+                   AND summary_comment_id IS NOT NULL
+                 ORDER BY id DESC LIMIT 1",
+                params![pull.host, pull.owner, pull.repo, pull.number as i64],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(|id| id as u64))
+    }
+
     pub fn pr_findings(&self, review_id: i64) -> Result<Vec<Finding>> {
         let conn = self.conn();
         let mut statement =
@@ -237,6 +465,47 @@ impl Store {
             .query_map(params![review_id], Finding::from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(findings)
+    }
+
+    pub fn pr_finding(&self, id: i64) -> Result<Option<Finding>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT * FROM pr_findings WHERE id = ?1",
+                params![id],
+                Finding::from_row,
+            )
+            .optional()?)
+    }
+
+    /// Saves the parts of a finding that change after its round: status
+    /// (with who and why), severity, note, posting, issue, replies read.
+    pub fn update_finding(&self, finding: &Finding) -> Result<()> {
+        self.conn().execute(
+            "UPDATE pr_findings SET status = ?2, status_source = ?3, status_by = ?4, reason = ?5,
+                severity = ?6, note = ?7, comment_id = ?8, comment_kind = ?9, fixed_notified = ?10,
+                issue_number = ?11, last_reply_id = ?12, verified = ?13, claim = ?14,
+                draft_reply = ?15
+             WHERE id = ?1",
+            params![
+                finding.id,
+                finding.status,
+                finding.status_source,
+                finding.status_by,
+                finding.reason,
+                finding.severity,
+                finding.note,
+                finding.comment_id.map(|v| v as i64),
+                finding.comment_kind,
+                finding.fixed_notified as i64,
+                finding.issue_number.map(|v| v as i64),
+                finding.last_reply_id.map(|v| v as i64),
+                finding.verified as i64,
+                finding.claim,
+                finding.draft_reply,
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn set_finding_status(&self, id: i64, status: &str) -> Result<()> {
@@ -285,6 +554,7 @@ mod tests {
             comment_id: None,
             comment_kind: None,
             fixed_notified: false,
+            ..Finding::default()
         }
     }
 
@@ -312,7 +582,7 @@ mod tests {
                 first.id,
                 "Two issues",
                 "request_changes",
-                &[finding("a", "new"), finding("b", "new")],
+                &[finding("a", "open"), finding("b", "open")],
             )
             .unwrap();
         let findings = store.pr_findings(first.id).unwrap();
@@ -321,7 +591,7 @@ mod tests {
             .set_finding_comment(findings[0].id, 55, "line")
             .unwrap();
         store
-            .set_finding_status(findings[1].id, "dismissed")
+            .set_finding_status(findings[1].id, "not_problem")
             .unwrap();
 
         let second = store
@@ -337,6 +607,31 @@ mod tests {
         );
         let again = store.pr_findings(first.id).unwrap();
         assert_eq!(again[0].comment_id, Some(55));
-        assert_eq!(again[1].status, "dismissed");
+        assert_eq!(again[1].status, "not_problem");
+        assert_eq!((first.round, second.round), (1, 2), "rounds are numbered");
+
+        // Every field a round carries on is kept, and read back as written.
+        let mut carried = again[1].clone();
+        carried.claim = "agree".into();
+        carried.draft_reply = "Thanks, you are right.".into();
+        carried.status_source = "author".into();
+        carried.reason = "checked upstream".into();
+        carried.suggested_code = "x = 1".into();
+        carried.found_late = true;
+        carried.verified = true;
+        carried.issue_number = Some(9);
+        carried.last_reply_id = Some(77);
+        store
+            .finish_pr_review(second.id, "", "comment", std::slice::from_ref(&carried))
+            .unwrap();
+        let read = &store.pr_findings(second.id).unwrap()[0];
+        assert_eq!(
+            Finding {
+                id: read.id,
+                review_id: read.review_id,
+                ..carried
+            },
+            *read
+        );
     }
 }

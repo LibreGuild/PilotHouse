@@ -71,11 +71,14 @@ pub enum WorkspaceScreenEvent {
     MakePrimary(std::path::PathBuf),
     /// Take this folder out of the workspace.
     RemoveFolder(std::path::PathBuf),
-    /// Review this pull request with an agent (in the GitHub view).
-    Review {
+    /// Work for an agent about a pull request (in the GitHub view, or a
+    /// task for fixes).
+    Agent {
         hosting: Box<ph_pulls::Hosting>,
-        pull: Box<ph_github::models::PullRequest>,
+        request: ph_pulls::AgentRequest,
     },
+    /// Show the findings of review `review_id`.
+    OpenFindings(i64),
     /// Run agent review `review_id` again on its PR's latest head.
     ReviewAgain(i64),
     /// Show chat `id`, wherever it is (a review in the GitHub view).
@@ -207,7 +210,18 @@ impl WorkspaceScreen {
                     this.open_file(path, line, window, cx);
                 }
                 ChatPanelEvent::ReviewAgain { review_id } => {
-                    cx.emit(WorkspaceScreenEvent::ReviewAgain(*review_id))
+                    if this.is_own_review(*review_id, cx) {
+                        this.review_changes(window, cx)
+                    } else {
+                        cx.emit(WorkspaceScreenEvent::ReviewAgain(*review_id))
+                    }
+                }
+                ChatPanelEvent::OpenFindings { review_id } => {
+                    if this.is_own_review(*review_id, cx) {
+                        this.show_review_notes(*review_id, window, cx)
+                    } else {
+                        cx.emit(WorkspaceScreenEvent::OpenFindings(*review_id))
+                    }
                 }
             },
         );
@@ -932,6 +946,96 @@ impl WorkspaceScreen {
         });
         self.save_layout(cx);
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
+        cx.notify();
+    }
+
+    /// Whether review `review_id` is of this workspace's own changes.
+    fn is_own_review(&self, review_id: i64, cx: &App) -> bool {
+        AppState::store(cx)
+            .pr_review(review_id)
+            .ok()
+            .flatten()
+            .is_some_and(|review| review.kind == "self" && review.project_id == self.project.id)
+    }
+
+    /// Has an agent review the changes in the Git tab's folder before they
+    /// are pushed, in a chat; its findings come back as notes on the lines.
+    pub(crate) fn review_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.project.folders().get(self.git_folder).cloned() else {
+            return;
+        };
+        let store = AppState::store(cx).clone();
+        let (project_id, agent) = (self.project.id, ph_agent::chats::default_agent(&store));
+        let template = ph_review::templates::default_review(&store);
+        self.reveal_chat(cx);
+        let work = cx.background_spawn(async move {
+            crate::review::prepare_self(&store, project_id, &root, &template, agent.name)
+        });
+        let chat = self.chat.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let result = work.await;
+            _ = chat.update_in(cx, |chat, window, cx| match result {
+                Ok(prepared) => chat.start_review_turn(
+                    Some(prepared.review_id),
+                    Some(ph_agent::ReviewTurn::Round),
+                    Some(agent),
+                    prepared.worktree,
+                    prepared.title,
+                    prepared.display,
+                    prepared.prompt,
+                    window,
+                    cx,
+                ),
+                Err(err) => chat.set_failed(format!("Could not start the review: {err:#}"), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Puts review `review_id`'s open findings on the changed lines in the
+    /// Git tab, as notes to fix with the agent.
+    fn show_review_notes(&mut self, review_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let store = AppState::store(cx).clone();
+        let findings = store.pr_findings(review_id).unwrap_or_default();
+        let notes = findings
+            .iter()
+            .filter(|f| f.status == "open" && !f.path.is_empty())
+            .map(|f| ph_changes::notes::Note {
+                path: f.path.clone(),
+                line: f.line.unwrap_or(1) as u32,
+                code: f.evidence.lines().next().unwrap_or_default().to_string(),
+                text: format!(
+                    "{} [{}] {}{}",
+                    f.label,
+                    f.severity,
+                    f.title.trim(),
+                    if f.suggestion.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(". Fix: {}", f.suggestion.trim())
+                    }
+                ),
+                from_review: true,
+            })
+            .collect();
+        let changes = self.changes(window, cx);
+        changes.update(cx, |changes, cx| changes.set_review_notes(notes, cx));
+        self.show_tab(ContextTab::Changes, window, cx);
+    }
+
+    /// Starts a new chat named `title` that shows `display` and asks
+    /// `prompt` (a fix in a task).
+    pub fn ask_chat(
+        &mut self,
+        title: String,
+        display: String,
+        prompt: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat.update(cx, |chat, cx| {
+            chat.start_prompt(title, display, prompt, window, cx)
+        });
         cx.notify();
     }
 

@@ -159,10 +159,100 @@ fn ensure_locked(hosting: &Hosting) -> Result<PathBuf> {
     Ok(clone)
 }
 
+/// What a pull request may carry that would act on the agent reading it,
+/// not just be read: settings with hooks that run commands, MCP servers
+/// that start programs, API addresses that take the keys, environment
+/// files the agent loads. Removed from the checkout before an agent works
+/// there (the next checkout puts tracked ones back).
+pub const AGENT_SETTINGS: &[&str] = &[
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".claude/hooks",
+    ".mcp.json",
+    ".gemini",
+    ".codex",
+    ".cursor",
+    ".agents",
+    ".clinerules",
+    ".vscode/mcp.json",
+];
+
+/// [`AGENT_SETTINGS`] and the root's `.env` files, as present in `folder`.
+fn agent_files(folder: &Path) -> Vec<String> {
+    let env_files = std::fs::read_dir(folder)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name == ".env" || name.starts_with(".env."))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    AGENT_SETTINGS
+        .iter()
+        .map(|path| path.to_string())
+        .chain(env_files)
+        .filter(|path| std::fs::symlink_metadata(folder.join(path)).is_ok())
+        .collect()
+}
+
+/// Removes [`AGENT_SETTINGS`] and the root's `.env` files from checkout
+/// `folder`; returns what was removed.
+pub fn sanitize(folder: &Path) -> Vec<String> {
+    remove(folder, agent_files(folder))
+}
+
+fn remove(folder: &Path, paths: Vec<String>) -> Vec<String> {
+    let mut removed = Vec::new();
+    for relative in paths {
+        let path = folder.join(&relative);
+        // A link is removed itself, never what it points to.
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let gone = if meta.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if gone.is_ok() {
+            removed.push(relative);
+        }
+    }
+    removed
+}
+
+/// [`sanitize`] for a checkout someone will commit in (a task fixing
+/// another's pull request): what is taken out is also hidden from git
+/// (`--skip-worktree`), so it is never committed as deleted.
+pub fn sanitize_worktree(folder: &Path) -> Vec<String> {
+    // Only what the pull request carries: files the task copied in from
+    // the user's own checkout (an `.env`) are theirs and stay.
+    let mut tracked = Vec::new();
+    let mut theirs = Vec::new();
+    for path in agent_files(folder) {
+        let files = ph_git::git(folder, &["ls-files", "--", &path]).unwrap_or_default();
+        if !files.trim().is_empty() {
+            tracked.extend(files.lines().map(str::to_string));
+            theirs.push(path);
+        }
+    }
+    let removed = remove(folder, theirs);
+    if !tracked.is_empty() {
+        let mut args = vec!["update-index", "--skip-worktree", "--"];
+        args.extend(tracked.iter().map(String::as_str));
+        if let Err(err) = ph_git::git(folder, &args) {
+            tracing::warn!("hiding the agent settings taken out from git failed: {err:#}");
+        }
+    }
+    removed
+}
+
 /// Fetches pull request `number`'s head and checks it out (detached) in its
-/// own folder beside the clone, which is made or updated first. Returns
-/// the folder and the commit (blocking; network).
-pub fn check_out_pull(hosting: &Hosting, number: u64) -> Result<(PathBuf, String)> {
+/// own folder beside the clone, which is made or updated first; then takes
+/// out what would act on an agent ([`sanitize`]). Returns the folder, the
+/// commit and what was taken out (blocking; network).
+pub fn check_out_pull(hosting: &Hosting, number: u64) -> Result<(PathBuf, String, Vec<String>)> {
     let _one = GIT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -203,7 +293,39 @@ pub fn check_out_pull(hosting: &Hosting, number: u64) -> Result<(PathBuf, String
         }
         ph_git::worktree::add_detached(&clone, &folder, &sha)?;
     }
-    Ok((folder, sha))
+    // The reviewed commit stays reachable for the next round's line map,
+    // even after a force-push.
+    let _ = ph_git::git(
+        &clone,
+        &[
+            "update-ref",
+            &format!("refs/pilothouse/reviewed/{number}/{sha}"),
+            &sha,
+        ],
+    );
+    let removed = sanitize(&folder);
+    Ok((folder, sha, removed))
+}
+
+/// The repository's notes for agents on branch `base` of the clone
+/// (`AGENTS.md`, `CLAUDE.md`, GitHub Copilot's instructions), by file:
+/// context for reviews, from the base, never the pull request's head.
+pub fn agent_notes(clone: &Path, base: &str) -> Vec<(String, String)> {
+    if ph_git::check_ref(base).is_err() {
+        return Vec::new();
+    }
+    ["AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md"]
+        .iter()
+        .filter_map(|file| {
+            let text = ph_git::git(
+                clone,
+                &["show", "--no-textconv", &format!("origin/{base}:{file}")],
+            )
+            .ok()?;
+            (!text.trim().is_empty())
+                .then(|| (file.to_string(), text.chars().take(8_000).collect()))
+        })
+        .collect()
 }
 
 /// The repository's own review rules ([`ph_review::templates::TEAM_RULES`])
@@ -309,6 +431,77 @@ mod tests {
             RepoId::from_clone_in(root, Path::new("/elsewhere/a/b/c/repo")),
             None
         );
+    }
+
+    #[test]
+    fn takes_out_what_would_act_on_an_agent() {
+        let folder = std::env::temp_dir().join(format!("ph-sanitize-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join(".claude/hooks")).unwrap();
+        std::fs::create_dir_all(folder.join(".vscode")).unwrap();
+        std::fs::create_dir_all(folder.join("src")).unwrap();
+        for file in [
+            ".claude/settings.json",
+            ".mcp.json",
+            ".env",
+            ".env.local",
+            ".vscode/mcp.json",
+            ".vscode/extensions.json",
+            "src/main.rs",
+            "AGENTS.md",
+        ] {
+            std::fs::write(folder.join(file), "x").unwrap();
+        }
+        let mut removed = sanitize(&folder);
+        removed.sort();
+        assert_eq!(
+            removed,
+            [
+                ".claude/hooks",
+                ".claude/settings.json",
+                ".env",
+                ".env.local",
+                ".mcp.json",
+                ".vscode/mcp.json"
+            ]
+        );
+        assert!(folder.join("src/main.rs").exists() && folder.join("AGENTS.md").exists());
+        assert!(folder.join(".vscode/extensions.json").exists());
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_task_keeps_its_own_files_and_never_commits_the_removal() {
+        let folder = std::env::temp_dir().join(format!("ph-sanitize-task-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "user.email=t@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(&folder)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&ok.stdout).into_owned()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(folder.join(".mcp.json"), "{}").unwrap();
+        std::fs::write(folder.join("main.rs"), "fn main() {}").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "pr"]);
+        // Copied in from the user's checkout, not part of the pull request.
+        std::fs::write(folder.join(".env"), "MINE=1").unwrap();
+        assert_eq!(sanitize_worktree(&folder), [".mcp.json"]);
+        assert!(folder.join(".env").exists() && !folder.join(".mcp.json").exists());
+        assert_eq!(git(&["status", "--porcelain", "--untracked-files=no"]), "");
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]

@@ -1,66 +1,56 @@
-//! The findings of an agent's PR review, shown in its chat: grouped by
-//! severity, each with its place in the code, the issue, its evidence and
-//! the fix, and whether it is new, still open, fixed or dismissed. The reviewer picks
-//! findings and posts them to GitHub as line comments or one comment.
-//!
-//! Posting is done by the app ([`ReviewService`], set by the workspace),
-//! since it needs the GitHub account; this card only asks.
+//! A review round's result in its chat: the verdict, what is new, fixed and
+//! still open, and the open findings in a few lines each. The findings live
+//! in the pull request's Findings tab, where they are posted, answered and
+//! fixed; this card points there.
 
-use std::collections::HashSet;
-use std::rc::Rc;
-
-use anyhow::Result;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
-    checkbox::Checkbox,
-    h_flex,
-    notification::Notification,
-    spinner::Spinner,
-    v_flex,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Context, EventEmitter, Global, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
-    Window, div,
+    ParentElement as _, Render, SharedString, Styled as _, Window, div,
 };
-use ph_review::post::PostMode;
 use ph_store::Store;
 use ph_store::reviews::{Finding, PrReview};
 
-/// Posts findings (by id) of review `review_id`; says what happened.
-pub type PostFindings = Rc<dyn Fn(i64, Vec<i64>, PostMode, &mut App) -> Task<Result<String>>>;
-/// Tells GitHub which posted findings of `review_id` are fixed.
-pub type AnnounceFixed = Rc<dyn Fn(i64, &mut App) -> Task<Result<String>>>;
-
-/// What the app does for review cards.
+/// What review cards need from the app.
 pub struct ReviewService {
     pub store: Store,
-    pub post: PostFindings,
-    pub announce_fixed: AnnounceFixed,
 }
 
 impl Global for ReviewService {}
 
 #[derive(Debug, Clone)]
 pub enum ReviewCardEvent {
-    OpenFile { path: String, line: Option<u64> },
-    ReviewAgain { review_id: i64 },
+    OpenFile {
+        path: String,
+        line: Option<u64>,
+    },
+    /// Check the fixes: a new round on the pull request's latest head.
+    ReviewAgain {
+        review_id: i64,
+    },
+    /// Show the pull request's Findings tab.
+    OpenFindings {
+        review_id: i64,
+    },
 }
 
 pub struct ReviewCard {
     review_id: i64,
     review: Option<PrReview>,
     findings: Vec<Finding>,
-    selected: HashSet<i64>,
-    expanded: HashSet<i64>,
-    show_dismissed: bool,
-    busy: Option<&'static str>,
-    _task: Option<Task<()>>,
+    /// Findings the round before had, by label and status.
+    before: Vec<(String, String)>,
 }
 
 impl EventEmitter<ReviewCardEvent> for ReviewCard {}
+
+/// Most open findings the card lists.
+const LISTED: usize = 6;
 
 impl ReviewCard {
     pub fn new(review_id: i64, cx: &mut Context<Self>) -> Self {
@@ -68,257 +58,91 @@ impl ReviewCard {
             review_id,
             review: None,
             findings: Vec::new(),
-            selected: HashSet::new(),
-            expanded: HashSet::new(),
-            show_dismissed: false,
-            busy: None,
-            _task: None,
+            before: Vec::new(),
         };
         card.reload(true, cx);
         card
     }
 
-    fn store(cx: &App) -> Option<Store> {
-        cx.try_global::<ReviewService>()
+    /// Re-reads the round.
+    pub fn reload(&mut self, _select: bool, cx: &mut Context<Self>) {
+        let Some(store) = cx
+            .try_global::<ReviewService>()
             .map(|service| service.store.clone())
-    }
-
-    /// Re-reads the review; `select` picks the findings worth posting.
-    pub fn reload(&mut self, select: bool, cx: &mut Context<Self>) {
-        let Some(store) = Self::store(cx) else { return };
+        else {
+            return;
+        };
         self.review = store.pr_review(self.review_id).ok().flatten();
         self.findings = store.pr_findings(self.review_id).unwrap_or_default();
-        if select {
-            self.selected = self
-                .findings
-                .iter()
-                .filter(|f| {
-                    matches!(f.status.as_str(), "new" | "open")
-                        && f.severity != "nit"
-                        && f.comment_id.is_none()
-                })
-                .map(|f| f.id)
-                .collect();
-        }
-        cx.notify();
-    }
-
-    fn post(&mut self, mode: PostMode, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(service) = cx.try_global::<ReviewService>() else {
-            return;
-        };
-        let ids: Vec<i64> = self
-            .findings
-            .iter()
-            .filter(|f| self.selected.contains(&f.id))
-            .map(|f| f.id)
+        self.before = self
+            .review
+            .as_ref()
+            .and_then(|review| {
+                store
+                    .latest_pr_review(&review.pull, Some(review.id))
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|earlier| store.pr_findings(earlier.id).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|f| (f.label, f.status))
             .collect();
-        if ids.is_empty() {
-            return;
-        }
-        let task = (service.post.clone())(self.review_id, ids, mode, cx);
-        self.run("Posting…", task, window, cx);
-    }
-
-    fn announce(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(service) = cx.try_global::<ReviewService>() else {
-            return;
-        };
-        let task = (service.announce_fixed.clone())(self.review_id, cx);
-        self.run("Updating GitHub…", task, window, cx);
-    }
-
-    fn run(
-        &mut self,
-        label: &'static str,
-        task: Task<Result<String>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.busy = Some(label);
         cx.notify();
-        self._task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            _ = this.update_in(cx, |this, window, cx| {
-                this.busy = None;
-                match result {
-                    Ok(message) => window.push_notification(Notification::success(message), cx),
-                    Err(err) => window.push_notification(
-                        Notification::error(format!("{err:#}")).title("GitHub"),
-                        cx,
-                    ),
-                }
-                this.reload(false, cx);
-                // What was posted leaves the selection; the rest stays picked
-                // (marking fixed ones on GitHub posts none of them).
-                let posted: HashSet<i64> = this
-                    .findings
-                    .iter()
-                    .filter(|f| f.comment_id.is_some())
-                    .map(|f| f.id)
-                    .collect();
-                this.selected.retain(|id| !posted.contains(id));
-            });
-        }));
-    }
-
-    fn set_status(&mut self, id: i64, status: &str, cx: &mut Context<Self>) {
-        if let Some(store) = Self::store(cx) {
-            let _ = store.set_finding_status(id, status);
-        }
-        self.selected.remove(&id);
-        self.reload(false, cx);
     }
 
     fn render_finding(&self, finding: &Finding, cx: &mut Context<Self>) -> AnyElement {
-        let id = finding.id;
-        let color = severity_color(&finding.severity, cx);
-        let expanded = self.expanded.contains(&id);
-        let selected = self.selected.contains(&id);
-        let fixed = finding.status == "fixed";
-        let dismissed = finding.status == "dismissed";
         let (path, line) = (finding.path.clone(), finding.line);
-        let place = match finding.line {
-            Some(line) => format!("{}:{line}", finding.path),
-            None => finding.path.clone(),
-        };
-        v_flex()
-            .flex_none()
-            .gap_1()
-            .px_2()
-            .py_1p5()
-            .rounded(cx.theme().radius)
-            .border_l_2()
-            .border_color(color.opacity(if fixed || dismissed { 0.3 } else { 0.9 }))
-            .bg(cx.theme().background.opacity(0.5))
+        let round = self.review.as_ref().map_or(1, |r| r.round);
+        h_flex()
+            .id(SharedString::from(format!("card-finding-{}", finding.id)))
+            .gap_2()
+            .text_sm()
+            .min_w_0()
             .child(
-                h_flex()
-                    .gap_2()
-                    .items_start()
-                    .when(!fixed && !dismissed, |this| {
-                        this.child(
-                            Checkbox::new(("finding-select", id as u64))
-                                .checked(selected)
-                                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                    if *checked {
-                                        this.selected.insert(id);
-                                    } else {
-                                        this.selected.remove(&id);
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .child(
-                        v_flex()
-                            .id(("finding", id as u64))
-                            .flex_1()
-                            .min_w_0()
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.expanded.remove(&id) {
-                                    this.expanded.insert(id);
-                                }
-                                cx.notify();
-                            }))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
-                                    .when(fixed, |this| {
-                                        this.line_through().text_color(cx.theme().muted_foreground)
-                                    })
-                                    .child(finding.title.clone()),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_1p5()
-                                    .min_w_0()
-                                    .child(status_badge(finding, cx))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .truncate()
-                                            .child(place),
-                                    ),
-                            ),
-                    )
-                    .when(!path.is_empty(), |this| {
-                        this.child(
-                            Button::new(("finding-open", id as u64))
-                                .flex_none()
-                                .xsmall()
-                                .ghost()
-                                .icon(IconName::ExternalLink)
-                                .tooltip("Open in the editor")
-                                .accessibility_label("Open in the editor")
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.emit(ReviewCardEvent::OpenFile {
-                                        path: path.clone(),
-                                        line,
-                                    })
-                                })),
-                        )
-                    }),
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(severity_color(&finding.severity, cx))
+                    .child(format!("{} {}", finding.label, finding.severity)),
             )
-            .when(expanded, |this| {
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(finding.title.clone()),
+            )
+            .when(finding.first_round == round && round > 1, |this| {
+                this.child(tag("new", cx.theme().info))
+            })
+            .when(finding.found_late, |this| {
+                this.child(tag("missed earlier", cx.theme().muted_foreground))
+            })
+            .when(!finding.verified, |this| {
+                this.child(tag("code not found", cx.theme().warning))
+            })
+            .when(!path.is_empty(), |this| {
                 this.child(
-                    v_flex()
-                        .gap_1()
-                        .pl_6()
-                        .text_sm()
-                        // Each finding says what is wrong, what shows it and
-                        // how to fix it.
-                        .children(
-                            [
-                                ("Issue", finding.body.clone(), false),
-                                ("Evidence", finding.evidence.clone(), true),
-                                ("Fix", finding.suggestion.clone(), true),
-                            ]
-                            .into_iter()
-                            .filter(|(_, text, _)| !text.trim().is_empty())
-                            .map(|(label, text, boxed)| {
-                                v_flex()
-                                    .gap_0p5()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(label),
-                                    )
-                                    .child(
-                                        div()
-                                            .when(boxed, |this| {
-                                                this.p_2()
-                                                    .rounded(cx.theme().radius)
-                                                    .bg(cx.theme().secondary)
-                                                    .text_xs()
-                                            })
-                                            .child(text),
-                                    )
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(cx.theme().link)
+                        .cursor_pointer()
+                        .child(match line {
+                            Some(line) => format!("{}:{line}", short_path(&path)),
+                            None => short_path(&path),
+                        })
+                        .on_mouse_down(
+                            gpui_kit::MouseButton::Left,
+                            cx.listener(move |_, _, _, cx| {
+                                cx.emit(ReviewCardEvent::OpenFile {
+                                    path: path.clone(),
+                                    line,
+                                })
                             }),
-                        )
-                        .child(h_flex().gap_1().child(if dismissed {
-                            Button::new(("finding-restore", id as u64))
-                                .xsmall()
-                                .ghost()
-                                .label("Restore")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_status(id, "open", cx)
-                                }))
-                        } else {
-                            Button::new(("finding-dismiss", id as u64))
-                                .xsmall()
-                                .ghost()
-                                .label("Dismiss")
-                                .tooltip("Not a problem: re-reviews will not raise it as new")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_status(id, "dismissed", cx)
-                                }))
-                        })),
+                        ),
                 )
             })
             .into_any_element()
@@ -330,31 +154,49 @@ impl Render for ReviewCard {
         let Some(review) = self.review.clone() else {
             return div().into_any_element();
         };
-        let active: Vec<&Finding> = self
+        let open: Vec<&Finding> = self
             .findings
             .iter()
-            .filter(|f| matches!(f.status.as_str(), "new" | "open"))
+            .filter(|f| f.status == "open")
             .collect();
-        let fixed: Vec<&Finding> = self
+        let new = open
+            .iter()
+            .filter(|f| f.first_round == review.round)
+            .count();
+        let fixed = self
             .findings
             .iter()
-            .filter(|f| f.status == "fixed")
-            .collect();
-        let dismissed: Vec<&Finding> = self
-            .findings
-            .iter()
-            .filter(|f| f.status == "dismissed")
-            .collect();
-        let announce = fixed
-            .iter()
-            .any(|f| f.comment_id.is_some() && !f.fixed_notified);
-        let selected = self.selected.len();
-        let busy = self.busy;
+            .filter(|f| {
+                f.status == "fixed"
+                    && self
+                        .before
+                        .iter()
+                        .any(|(label, status)| *label == f.label && status != "fixed")
+            })
+            .count();
         let (verdict, verdict_color) = match review.verdict.as_str() {
             "approve" => ("Looks good", cx.theme().success),
             "request_changes" => ("Changes needed", cx.theme().danger),
             _ => ("Comments", cx.theme().info),
         };
+        let kind = match review.kind.as_str() {
+            "followup" => "Fixes checked",
+            "second" => "Second opinion",
+            "double_check" => "Double-check",
+            "self" => "Your changes",
+            _ => "Review",
+        };
+        let mut counts = Vec::new();
+        if review.round > 1 && new > 0 {
+            counts.push(format!("{new} new"));
+        }
+        if fixed > 0 {
+            counts.push(format!("{fixed} fixed"));
+        }
+        counts.push(match open.len() {
+            0 => "nothing open".to_string(),
+            n => format!("{n} open"),
+        });
         let review_id = self.review_id;
         v_flex()
             .gap_2()
@@ -369,7 +211,7 @@ impl Render for ReviewCard {
                     .child(
                         Icon::new(ph_ui::Icons::GitPullRequest)
                             .small()
-                            .text_color(cx.theme().info),
+                            .text_color(cx.theme().muted_foreground),
                     )
                     .child(
                         div()
@@ -378,198 +220,115 @@ impl Render for ReviewCard {
                             .truncate()
                             .text_sm()
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(format!(
-                                "Review of #{} {}",
-                                review.pull.number, review.title
-                            )),
+                            .child(if review.pull.number > 0 {
+                                format!("{kind} · round {} · #{}", review.round, review.pull.number)
+                            } else {
+                                format!("{kind} · round {}", review.round)
+                            }),
                     )
-                    .child(pill(verdict, verdict_color)),
+                    .child(tag(verdict, verdict_color)),
             )
             .child(
-                h_flex()
-                    .gap_1()
-                    .flex_wrap()
-                    .children(ph_review::SEVERITIES.iter().filter_map(|severity| {
-                        let count = active.iter().filter(|f| f.severity == *severity).count();
-                        (count > 0).then(|| {
-                            pill_owned(format!("{count} {severity}"), severity_color(severity, cx))
-                        })
-                    }))
-                    .when(!fixed.is_empty(), |this| {
-                        this.child(pill_owned(
-                            format!("{} fixed", fixed.len()),
-                            cx.theme().success,
-                        ))
-                    })
-                    .when(active.is_empty() && fixed.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("No findings."),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "at {}",
-                                &review.head_sha[..review.head_sha.len().min(8)]
-                            )),
-                    ),
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "{} · at {}",
+                        counts.join(" · "),
+                        &review.head_sha[..review.head_sha.len().min(8)]
+                    )),
             )
             .when(!review.summary.is_empty(), |this| {
                 this.child(div().text_sm().child(review.summary.clone()))
             })
             .children(
-                active
-                    .iter()
+                open.iter()
+                    .take(LISTED)
                     .map(|finding| self.render_finding(finding, cx)),
             )
-            .when(!fixed.is_empty(), |this| {
+            .when(open.len() > LISTED, |this| {
                 this.child(
                     div()
-                        .pt_1()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Fixed since the last review"),
+                        .child(format!("and {} more", open.len() - LISTED)),
                 )
-                .children(fixed.iter().map(|finding| self.render_finding(finding, cx)))
-            })
-            .when(!dismissed.is_empty(), |this| {
-                this.child(
-                    div()
-                        .id(("show-dismissed", review_id as u64))
-                        .pt_1()
-                        .text_xs()
-                        .cursor_pointer()
-                        .text_color(cx.theme().muted_foreground)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_dismissed = !this.show_dismissed;
-                            cx.notify();
-                        }))
-                        .child(format!(
-                            "{} dismissed {}",
-                            dismissed.len(),
-                            if self.show_dismissed { "▾" } else { "▸" }
-                        )),
-                )
-                .when(self.show_dismissed, |this| {
-                    this.children(
-                        dismissed
-                            .iter()
-                            .map(|finding| self.render_finding(finding, cx)),
-                    )
-                })
             })
             .child(
                 h_flex()
-                    .flex_wrap()
-                    .gap_1p5()
-                    .pt_2()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_24()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(match busy {
-                                Some(busy) => SharedString::from(busy),
-                                None if selected == 0 => {
-                                    "Pick findings to post them to GitHub.".into()
-                                }
-                                None => format!("{selected} selected").into(),
-                            }),
-                    )
-                    .when(busy.is_some(), |this| this.child(Spinner::new().xsmall()))
-                    .child(
-                        Button::new(("review-again", review_id as u64))
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::RefreshCw)
-                            .label("Review again")
-                            .tooltip("A new run on the PR's latest commit, checking these findings")
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(ReviewCardEvent::ReviewAgain { review_id })
-                            })),
-                    )
-                    .when(announce, |this| {
-                        this.child(
-                            Button::new(("announce-fixed", review_id as u64))
-                                .xsmall()
-                                .outline()
-                                .label("Mark fixed on GitHub")
-                                .disabled(busy.is_some())
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.announce(window, cx)),
-                                ),
+                    .gap_2()
+                    .pt_1()
+                    .when(review.kind == "self", |this| {
+                        this.when(!open.is_empty(), |this| {
+                            this.child(
+                                Button::new(("card-notes", review_id as u64))
+                                    .small()
+                                    .outline()
+                                    .label("Show on the lines")
+                                    .tooltip("The open findings as notes on the changes in the Git tab, to fix with the agent")
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(ReviewCardEvent::OpenFindings { review_id })
+                                    })),
+                            )
+                        })
+                        .child(
+                            Button::new(("card-again", review_id as u64))
+                                .small()
+                                .ghost()
+                                .label("Review again")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(ReviewCardEvent::ReviewAgain { review_id })
+                                })),
                         )
                     })
-                    .child(
-                        Button::new(("post-conversation", review_id as u64))
-                            .xsmall()
-                            .outline()
-                            .label("Post as one comment")
-                            .disabled(busy.is_some() || selected == 0)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.post(PostMode::Conversation, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(("post-inline", review_id as u64))
-                            .xsmall()
-                            .primary()
-                            .label("Post as line comments")
-                            .disabled(busy.is_some() || selected == 0)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.post(PostMode::Inline, window, cx)
-                            })),
-                    ),
+                    .when(review.pull.number > 0, |this| {
+                        this.child(
+                            Button::new(("card-findings", review_id as u64))
+                                .small()
+                                .outline()
+                                .label("Open findings")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(ReviewCardEvent::OpenFindings { review_id })
+                                })),
+                        )
+                        .child(
+                            Button::new(("card-again", review_id as u64))
+                                .small()
+                                .ghost()
+                                .label("Check the fixes")
+                                .tooltip("After the author pushes: check each open finding and what changed")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(ReviewCardEvent::ReviewAgain { review_id })
+                                })),
+                        )
+                    }),
             )
             .into_any_element()
     }
 }
 
-fn severity_color(severity: &str, cx: &App) -> Hsla {
+fn short_path(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+/// The colour of a severity.
+pub fn severity_color(severity: &str, cx: &App) -> Hsla {
     match severity {
         "critical" => cx.theme().danger,
-        "major" => gpui_kit::rgb(0xe0956f).into(),
-        "minor" => cx.theme().warning,
+        "major" => cx.theme().warning,
+        "minor" => cx.theme().info,
         _ => cx.theme().muted_foreground,
     }
 }
 
-fn status_badge(finding: &Finding, cx: &App) -> AnyElement {
-    let (text, color) = match finding.status.as_str() {
-        "new" => ("New", cx.theme().info),
-        "open" => ("Still open", cx.theme().warning),
-        "fixed" => ("Fixed", cx.theme().success),
-        _ => ("Dismissed", cx.theme().muted_foreground),
-    };
-    h_flex()
-        .gap_1()
-        .child(pill(text, color))
-        .when(finding.comment_id.is_some(), |this| {
-            this.child(pill("Posted", cx.theme().muted_foreground))
-        })
-        .into_any_element()
-}
-
-fn pill(text: &'static str, color: Hsla) -> AnyElement {
-    pill_owned(text.to_string(), color)
-}
-
-fn pill_owned(text: String, color: Hsla) -> AnyElement {
+fn tag(text: &'static str, color: Hsla) -> AnyElement {
     div()
         .flex_none()
         .px_1p5()
         .rounded_full()
-        .bg(color.opacity(0.15))
-        .text_color(color)
         .text_xs()
+        .bg(color.opacity(0.14))
+        .text_color(color)
         .child(text)
         .into_any_element()
 }

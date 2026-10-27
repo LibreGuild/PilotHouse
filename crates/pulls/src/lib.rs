@@ -17,13 +17,17 @@
 
 mod accounts_view;
 pub mod clones;
+mod findings_view;
 pub mod hosting;
 mod pull_view;
 mod pulls_panel;
+mod request;
 mod templates_view;
+mod walkthrough_view;
 
 pub use accounts_view::AccountsView;
 pub use hosting::Hosting;
 pub use pull_view::{PullView, PullViewEvent, short_date};
 pub use pulls_panel::{PullsPanel, PullsPanelEvent};
+pub use request::AgentRequest;
 pub use templates_view::TemplatesView;

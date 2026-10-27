@@ -39,9 +39,10 @@ const CHECKS_FOR: usize = 20;
 #[derive(Clone)]
 pub enum PullsPanelEvent {
     OpenSettings,
-    ReviewWithAgent {
+    /// Work for an agent about a pull request of the repository.
+    Agent {
         hosting: Box<Hosting>,
-        pull: Box<PullRequest>,
+        request: crate::AgentRequest,
     },
     OpenSession(i64),
 }
@@ -211,6 +212,13 @@ impl PullsPanel {
         }
     }
 
+    /// Shows the Findings tab of the pull request in view.
+    pub fn show_findings(&mut self, cx: &mut Context<Self>) {
+        if let Some((view, _)) = &self.open {
+            view.update(cx, |view, cx| view.show_findings(cx));
+        }
+    }
+
     /// The pull request in view, if one is.
     pub fn showing(&self, cx: &gpui_kit::App) -> Option<u64> {
         self.open.as_ref().map(|(view, _)| view.read(cx).number())
@@ -231,6 +239,14 @@ impl PullsPanel {
             return;
         };
         self.pending_open = None;
+        // The same pull request stays as it is (its tab, its scroll).
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|(view, _)| view.read(cx).number() == number)
+        {
+            return;
+        }
         let (local, store) = (
             self.local().map(|(repo, _)| repo.clone()),
             self.store.clone(),
@@ -243,9 +259,9 @@ impl PullsPanel {
                     this.open = None;
                     this.reload(cx);
                 }
-                PullViewEvent::ReviewWithAgent(pull) => cx.emit(PullsPanelEvent::ReviewWithAgent {
+                PullViewEvent::Agent(request) => cx.emit(PullsPanelEvent::Agent {
                     hosting: Box::new(hosting.clone()),
-                    pull: pull.clone(),
+                    request: request.clone(),
                 }),
                 PullViewEvent::OpenSession(session) => {
                     cx.emit(PullsPanelEvent::OpenSession(*session))

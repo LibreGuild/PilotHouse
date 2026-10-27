@@ -9,7 +9,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Textarea, TextareaState},
+    input::{Input, InputState, Textarea, TextareaState},
     notification::Notification,
     spinner::Spinner,
     text::{TextView, TextViewState},
@@ -19,7 +19,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Hsla, InteractiveElement as _,
     IntoElement, ListAlignment, ListState, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Task, Window, div, list,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, list,
 };
 use ph_changes::Repo as LocalRepo;
 use ph_github::models::{
@@ -28,13 +28,15 @@ use ph_github::models::{
 use ph_github::pulls::{self, MergeMethod, ReviewEvent};
 use ph_ui::Icons;
 
+use crate::findings_view::{FindingsEvent, FindingsView};
 use crate::hosting::{self, Hosting};
+use crate::walkthrough_view::{WalkthroughEvent, WalkthroughView};
 
 #[derive(Debug, Clone)]
 pub enum PullViewEvent {
     Back,
-    /// Start an agent review of this pull request.
-    ReviewWithAgent(Box<PullRequest>),
+    /// Work for an agent about this pull request.
+    Agent(crate::AgentRequest),
     /// Show the chat of an earlier review.
     OpenSession(i64),
 }
@@ -42,6 +44,8 @@ pub enum PullViewEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Overview,
+    Findings,
+    Walkthrough,
     Files,
     Commits,
     Checks,
@@ -87,12 +91,23 @@ pub struct PullView {
     composer: Entity<TextareaState>,
     /// The line comment thread being replied to, and the reply.
     replying: Option<u64>,
+    /// The user asked to hear about new commits and answers.
+    watched: bool,
+    /// The Files tab shows only these (a walkthrough group), when set.
+    only_files: Option<Vec<String>>,
+    /// The file (by index) whose "ask about lines" form is open, and its
+    /// box: `start-end: question`.
+    asking: Option<usize>,
+    ask_box: Entity<InputState>,
     reply_box: Entity<TextareaState>,
     busy: Option<&'static str>,
     confirm_merge: bool,
     merge_method: MergeMethod,
+    findings: Entity<FindingsView>,
+    walkthrough: Entity<WalkthroughView>,
     _load: Option<Task<()>>,
     _act: Option<Task<()>>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<PullViewEvent> for PullView {}
@@ -112,6 +127,40 @@ impl PullView {
                 .rows(3)
         });
         let reply_box = cx.new(|cx| TextareaState::new(window, cx).placeholder("Reply").rows(2));
+        let ask_box = cx
+            .new(|cx| InputState::new(window, cx).placeholder("12-30: why is this retried twice?"));
+        let findings =
+            cx.new(|cx| FindingsView::new(store.clone(), hosting.clone(), number, window, cx));
+        let walkthrough =
+            cx.new(|cx| WalkthroughView::new(store.clone(), hosting.clone(), number, cx));
+        let subscriptions = vec![
+            cx.subscribe(
+                &findings,
+                |this, _, event: &FindingsEvent, cx| match event {
+                    FindingsEvent::Agent(request) => cx.emit(PullViewEvent::Agent(request.clone())),
+                    FindingsEvent::ShowLine { path, line } => this.show_line(path, *line, cx),
+                    FindingsEvent::Changed => {
+                        this.read_last_review();
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe(
+                &walkthrough,
+                |this, _, event: &WalkthroughEvent, cx| match event {
+                    WalkthroughEvent::Agent(request) => {
+                        cx.emit(PullViewEvent::Agent(request.clone()))
+                    }
+                    WalkthroughEvent::ShowLine { path, line } => this.show_line(path, *line, cx),
+                    WalkthroughEvent::Filter(files) => {
+                        this.only_files = files.clone();
+                        this.tab = Tab::Files;
+                        this.reset_files();
+                        cx.notify();
+                    }
+                },
+            ),
+        ];
         let mut view = Self {
             store,
             last_review: None,
@@ -131,18 +180,95 @@ impl PullView {
             busy: None,
             confirm_merge: false,
             merge_method: MergeMethod::Squash,
+            watched: false,
+            findings,
+            walkthrough,
+            only_files: None,
+            asking: None,
+            ask_box,
             _load: None,
             _act: None,
+            _subscriptions: subscriptions,
         };
+        view.watched = ph_review::github::is_watched(&view.store, &view.pull_ref());
         view.reload(cx);
         view
+    }
+
+    fn pull_ref(&self) -> ph_store::reviews::PullRef {
+        ph_store::reviews::PullRef {
+            host: self.hosting.account.host.clone(),
+            owner: self.hosting.repo.owner.clone(),
+            repo: self.hosting.repo.name.clone(),
+            number: self.number,
+        }
+    }
+
+    fn toggle_watch(&mut self, cx: &mut Context<Self>) {
+        let on = !self.watched;
+        if ph_review::github::set_watched(&self.store, &self.pull_ref(), on).is_ok() {
+            self.watched = on;
+        }
+        cx.notify();
+    }
+
+    /// Shows the Findings tab.
+    pub fn show_findings(&mut self, cx: &mut Context<Self>) {
+        self.tab = Tab::Findings;
+        cx.notify();
+    }
+
+    /// Shows `path` (at `line`) in the Files tab.
+    fn show_line(&mut self, path: &str, line: Option<u64>, cx: &mut Context<Self>) {
+        let _ = line;
+        self.only_files = None;
+        self.reset_files();
+        self.tab = Tab::Files;
+        if let Some(ix) = self
+            .data
+            .as_ref()
+            .and_then(|data| data.files.iter().position(|f| f.filename == path))
+        {
+            self.files_list.scroll_to_reveal_item(ix);
+        }
+        cx.notify();
+    }
+
+    /// The files the Files tab lists: all, or a walkthrough group's.
+    fn shown_files(&self) -> Vec<usize> {
+        let Some(data) = &self.data else {
+            return Vec::new();
+        };
+        (0..data.files.len())
+            .filter(|ix| {
+                self.only_files
+                    .as_ref()
+                    .is_none_or(|only| only.contains(&data.files[*ix].filename))
+            })
+            .collect()
+    }
+
+    fn reset_files(&mut self) {
+        let count = self.shown_files().len();
+        self.files_list.reset(count);
     }
 
     /// An agent review of this pull request ended: its line in the header
     /// says what it found.
     pub fn review_changed(&mut self, cx: &mut Context<Self>) {
         self.read_last_review();
+        self.findings.update(cx, |findings, cx| findings.reload(cx));
+        let changed = self.changed_paths();
+        self.walkthrough
+            .update(cx, |walkthrough, cx| walkthrough.reload(&changed, cx));
         cx.notify();
+    }
+
+    fn changed_paths(&self) -> Vec<String> {
+        self.data
+            .as_ref()
+            .map(|data| data.files.iter().map(|f| f.filename.clone()).collect())
+            .unwrap_or_default()
     }
 
     pub fn number(&self) -> u64 {
@@ -164,10 +290,7 @@ impl PullView {
             .flatten()
             .map(|review| {
                 let findings = self.store.pr_findings(review.id).unwrap_or_default();
-                let open = findings
-                    .iter()
-                    .filter(|f| matches!(f.status.as_str(), "new" | "open"))
-                    .count();
+                let open = findings.iter().filter(|f| f.status == "open").count();
                 let fixed = findings.iter().filter(|f| f.status == "fixed").count();
                 let at = review.head_sha[..review.head_sha.len().min(8)].to_string();
                 (review.session_id, open, fixed, at)
@@ -224,14 +347,24 @@ impl PullView {
                             bodies.insert(id, cx.new(|cx| TextViewState::markdown(&body, cx)));
                         }
                         this.bodies = bodies;
-                        // The same files keep their place (a reply was posted).
-                        if this.files_list.item_count() == data.files.len() {
-                            this.files_list.remeasure();
-                        } else {
-                            this.files_list.reset(data.files.len());
-                        }
+                        let (pull, changed): (PullRequest, Vec<String>) = (
+                            data.pull.clone(),
+                            data.files.iter().map(|f| f.filename.clone()).collect(),
+                        );
                         this.data = Some(std::rc::Rc::new(data));
                         this.error = None;
+                        // The same files keep their place (a reply was posted).
+                        let shown = this.shown_files().len();
+                        if this.files_list.item_count() == shown {
+                            this.files_list.remeasure();
+                        } else {
+                            this.files_list.reset(shown);
+                        }
+                        this.findings
+                            .update(cx, |findings, cx| findings.set_pull(pull.clone(), cx));
+                        this.walkthrough.update(cx, |walkthrough, cx| {
+                            walkthrough.set_pull(pull, &changed, cx)
+                        });
                     }
                     Err(err) => this.error = Some(format!("{err:#}").into()),
                 }
@@ -462,11 +595,42 @@ impl PullView {
                                 "Opens a review chat in the GitHub view, on its own copy of the PR",
                             )
                             .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(PullViewEvent::ReviewWithAgent(Box::new(
-                                    review_pull.clone(),
-                                )))
+                                cx.emit(PullViewEvent::Agent(crate::AgentRequest::Review {
+                                    pull: Box::new(review_pull.clone()),
+                                    kind: "full",
+                                }))
                             })),
                     )
+                    .when(
+                        pull.user.login.eq_ignore_ascii_case(&self.hosting.account.login)
+                            && pull.state == "open",
+                        |this| {
+                            let mine = pull.clone();
+                            this.child(
+                                Button::new("pull-address")
+                                    .small()
+                                    .outline()
+                                    .icon(Icons::GitBranch)
+                                    .label("Address comments")
+                                    .tooltip("A task on this branch whose agent works through the reviewers' comments and drafts replies")
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(PullViewEvent::Agent(crate::AgentRequest::Address {
+                                            pull: Box::new(mine.clone()),
+                                        }))
+                                    })),
+                            )
+                        },
+                    )
+                    .child({
+                        let watched = self.watched;
+                        Button::new("pull-watch")
+                            .small()
+                            .ghost()
+                            .icon(if watched { IconName::Eye } else { IconName::EyeOff })
+                            .label(if watched { "Watching" } else { "Watch" })
+                            .tooltip("Tell me when the author pushes or answers a finding")
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_watch(cx)))
+                    })
                     .when(self.local.is_some(), |this| {
                         this.child(
                             Button::new("pull-check-out")
@@ -528,8 +692,16 @@ impl PullView {
             .iter()
             .filter(|c| c.outcome == "failure")
             .count();
+        let findings = self.findings.read(cx);
+        let findings_label = match (findings.has_review(), findings.open_count()) {
+            (false, _) => "Findings".to_string(),
+            (true, 0) => "Findings ✓".to_string(),
+            (true, open) => format!("Findings {open}"),
+        };
         let tabs = [
             (Tab::Overview, "Overview".to_string()),
+            (Tab::Findings, findings_label),
+            (Tab::Walkthrough, "Walkthrough".to_string()),
             (Tab::Files, format!("Files {}", data.files.len())),
             (Tab::Commits, format!("Commits {}", data.commits.len())),
             (
@@ -548,6 +720,8 @@ impl PullView {
                 let selected = self.tab == tab;
                 let name = match tab {
                     Tab::Overview => "Overview",
+                    Tab::Findings => "Findings",
+                    Tab::Walkthrough => "Walkthrough",
                     Tab::Files => "Files",
                     Tab::Commits => "Commits",
                     Tab::Checks => "Checks",
@@ -573,8 +747,12 @@ impl PullView {
                         this.bg(cx.theme().secondary)
                             .font_weight(gpui_kit::FontWeight::MEDIUM)
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         this.tab = tab;
+                        if tab == Tab::Findings {
+                            this.findings
+                                .update(cx, |findings, cx| findings.sync(window, cx));
+                        }
                         cx.notify();
                     }))
                     .child(label)
@@ -782,10 +960,94 @@ impl PullView {
         .into_any_element()
     }
 
-    fn render_file(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// Above the files: the group shown (a walkthrough's), and the tour.
+    fn render_files_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tour = self.walkthrough.read(cx).tour();
+        if self.only_files.is_none() && tour.is_empty() {
+            return None;
+        }
+        Some(
+            h_flex()
+                .gap_1()
+                .flex_wrap()
+                .px_3()
+                .py_1()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .text_xs()
+                .when_some(self.only_files.as_ref(), |this, only| {
+                    this.child(div().text_color(cx.theme().muted_foreground).child(format!(
+                        "Showing {} of {} files",
+                        only.len(),
+                        self.data.as_ref().map_or(0, |d| d.files.len())
+                    )))
+                    .child(
+                        Button::new("files-show-all")
+                            .xsmall()
+                            .ghost()
+                            .label("Show all")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.only_files = None;
+                                this.reset_files();
+                                cx.notify();
+                            })),
+                    )
+                })
+                .when(!tour.is_empty(), |this| {
+                    this.child(div().text_color(cx.theme().muted_foreground).child("Tour:"))
+                        .children(tour.iter().enumerate().map(|(ix, stop)| {
+                            let path = stop.path.clone();
+                            let line = Some(stop.start);
+                            Button::new(("tour-stop", ix))
+                                .xsmall()
+                                .ghost()
+                                .label(format!("{} {}", ix + 1, stop.title))
+                                .tooltip(format!(
+                                    "{}:{}-{} · {}",
+                                    stop.path, stop.start, stop.end, stop.note
+                                ))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.show_line(&path, line, cx)
+                                }))
+                        }))
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Asks the question typed for file `ix` (`start-end: question`).
+    fn ask_lines(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(data) = self.data.clone() else {
+            return;
+        };
+        let Some(file) = data.files.get(ix) else {
+            return;
+        };
+        let text = self.ask_box.read(cx).value().to_string();
+        let Some((start, end, question)) = parse_lines_question(&text) else {
+            return;
+        };
+        self.asking = None;
+        self.files_list.remeasure();
+        cx.emit(PullViewEvent::Agent(crate::AgentRequest::AskLines {
+            pull: Box::new(data.pull.clone()),
+            path: file.filename.clone(),
+            start,
+            end,
+            question,
+        }));
+        cx.notify();
+    }
+
+    fn render_file(&self, list_ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(data) = self.data.clone() else {
             return div().into_any_element();
         };
+        let shown = self.shown_files();
+        let Some(&ix) = shown.get(list_ix) else {
+            return div().into_any_element();
+        };
+        let last = list_ix + 1 == shown.len();
         let (Some(file), Some(change)) = (data.files.get(ix), data.changes.get(ix)) else {
             return div().into_any_element();
         };
@@ -831,7 +1093,7 @@ impl PullView {
                                 .label(format!("Show diff ({lines} lines)"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.unfolded.insert(ix);
-                                    this.files_list.remeasure_items(ix..ix + 1);
+                                    this.files_list.remeasure_items(list_ix..list_ix + 1);
                                     cx.notify();
                                 })),
                         )
@@ -846,14 +1108,49 @@ impl PullView {
                 })
                 .into_any_element(),
         };
+        let asking = self.asking == Some(ix);
         // A list item sizes to its content: fill the column.
         v_flex()
             .w_full()
             .px_3()
             .pt_2()
-            .when(ix + 1 == data.files.len(), |this| this.pb_3())
+            .when(last, |this| this.pb_3())
             .gap_1()
             .child(div().w_full().child(diff))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .justify_end()
+                    .when(asking, |this| {
+                        this.child(div().flex_1().child(Input::new(&self.ask_box).xsmall()))
+                            .child(
+                                Button::new(("ask-lines-go", ix))
+                                    .xsmall()
+                                    .primary()
+                                    .label("Ask")
+                                    .on_click(cx.listener(move |this, _, _, cx| this.ask_lines(ix, cx))),
+                            )
+                    })
+                    .child(
+                        Button::new(("ask-lines", ix))
+                            .xsmall()
+                            .ghost()
+                            .icon(Icons::Sparkles)
+                            .label(if asking { "Cancel" } else { "Ask about lines" })
+                            .tooltip("Ask an agent about some lines of this file: type `start-end: question`")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.asking = if this.asking == Some(ix) { None } else { Some(ix) };
+                                if this.asking.is_some() {
+                                    this.ask_box.update(cx, |input, cx| {
+                                        input.set_value("", window, cx);
+                                        input.focus(window, cx);
+                                    });
+                                }
+                                this.files_list.remeasure_items(list_ix..list_ix + 1);
+                                cx.notify();
+                            })),
+                    ),
+            )
             .children(threads.into_iter().map(|(root, replies)| {
                 v_flex()
                     .ml_3()
@@ -1048,11 +1345,31 @@ impl Render for PullView {
             // A list that scrolls itself, absolutely filled so it gets an
             // exact height (a percentage inside a flex item resolves to the
             // content's, and then nothing scrolls).
-            Tab::Files => div()
-                .relative()
+            Tab::Files => v_flex()
                 .flex_1()
                 .min_h_0()
-                .child(div().absolute().inset_0().child(self.render_files(cx)))
+                .children(self.render_files_bar(cx))
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .child(div().absolute().inset_0().child(self.render_files(cx))),
+                )
+                .into_any_element(),
+            Tab::Findings => div()
+                .id("pull-findings")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(self.findings.clone())
+                .into_any_element(),
+            Tab::Walkthrough => div()
+                .id("pull-walkthrough")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(self.walkthrough.clone())
                 .into_any_element(),
             tab => div()
                 .id("pull-body")
@@ -1072,6 +1389,26 @@ impl Render for PullView {
             .child(body)
             .into_any_element()
     }
+}
+
+/// `start-end: question` (or `line: question`) as typed to ask about lines.
+fn parse_lines_question(text: &str) -> Option<(u64, u64, String)> {
+    let (lines, question) = text.split_once(':')?;
+    let question = question.trim();
+    if question.is_empty() {
+        return None;
+    }
+    let mut parts = lines.split('-').map(|part| part.trim().parse::<u64>());
+    let start = parts.next()?.ok()?;
+    let end = match parts.next() {
+        Some(end) => end.ok()?,
+        None => start,
+    };
+    Some((
+        start.min(end).max(1),
+        start.max(end).max(1),
+        question.to_string(),
+    ))
 }
 
 /// A PR file's patch as a [`ph_git::FileChange`] for the diff view.
@@ -1157,4 +1494,24 @@ pub fn short_date(stamp: &str) -> String {
         .get(..16)
         .map(|s| s.replace('T', " "))
         .unwrap_or_else(|| stamp.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_a_question_about_lines() {
+        assert_eq!(
+            parse_lines_question("30-12: why twice?"),
+            Some((12, 30, "why twice?".into()))
+        );
+        assert_eq!(
+            parse_lines_question("7: what is this"),
+            Some((7, 7, "what is this".into()))
+        );
+        assert_eq!(parse_lines_question("why?"), None);
+        assert_eq!(parse_lines_question("4-x: no"), None);
+        assert_eq!(parse_lines_question("4: "), None);
+    }
 }

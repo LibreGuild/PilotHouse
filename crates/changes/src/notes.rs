@@ -14,6 +14,8 @@ pub struct Note {
     /// The line's text (with its `+`/` ` mark), for context.
     pub code: String,
     pub text: String,
+    /// Written by an agent's review of the changes (replaced by its next).
+    pub from_review: bool,
 }
 
 /// The new-file line number of each line of a hunk (`None` for removed
@@ -82,6 +84,7 @@ mod tests {
             line: 7,
             code: "+    let x = 1;".into(),
             text: "Name this better".into(),
+            from_review: false,
         }];
         let text = prompt(&notes, Path::new("/repo"));
         assert!(text.contains("1. src/app.rs:7"));

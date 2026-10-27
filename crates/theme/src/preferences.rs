@@ -132,7 +132,7 @@ pub fn accent_fill(dark: bool) -> Hsla {
     let accent = accent(dark);
     Hsla {
         s: accent.s * 0.85,
-        l: accent.l.min(if dark { 0.42 } else { 0.42 }),
+        l: accent.l.min(0.42),
         ..accent
     }
 }
