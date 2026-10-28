@@ -191,9 +191,9 @@ fn links_other_computers(svg: &str) -> bool {
             Some(quote @ ('"' | '\'')) => rest[1..].split(quote).next().unwrap_or(""),
             _ => return false,
         };
-        let value = value.trim();
-        let value = value.strip_prefix("file:").unwrap_or(value);
-        ph_ui::platform::is_network_path(value) || value.to_ascii_lowercase().starts_with("&#")
+        let value = value.trim().to_ascii_lowercase();
+        let value = value.strip_prefix("file:").unwrap_or(&value);
+        ph_ui::platform::is_network_path(value) || value.contains("&#")
     })
 }
 
@@ -379,5 +379,24 @@ mod tests {
         assert_eq!(byte_size(1536), "1.5 KB");
         assert_eq!(byte_size(250 * 1024), "250 KB");
         assert_eq!(byte_size(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    #[test]
+    fn refuses_svg_links_to_other_computers() {
+        assert!(links_other_computers(
+            r#"<svg><image href="\\server\share\a.png"/></svg>"#
+        ));
+        assert!(links_other_computers(
+            r#"<svg><image href="FILE:////server/share/a.png"/></svg>"#
+        ));
+        assert!(links_other_computers(
+            r#"<svg><image href="/&#x2f;server/share/a.png"/></svg>"#
+        ));
+        assert!(links_other_computers(
+            r#"<svg><image href="\&#x5c;server\share\a.png"/></svg>"#
+        ));
+        assert!(!links_other_computers(
+            r#"<svg><image href="images/a.png"/></svg>"#
+        ));
     }
 }

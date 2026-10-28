@@ -327,8 +327,15 @@ impl FileView {
         // Closing the file or the window keeps unsaved text right away (the
         // timer may not have fired yet).
         cx.on_release(|this, cx| {
-            if this.dirty && this.content == Content::Text {
-                let text = this.editor.read(cx).value().to_string();
+            if this.content != Content::Text || this.not_utf8 {
+                return;
+            }
+            let editor_text = this.editor.read(cx).value().to_string();
+            let text = match (&this.rich, this.view) {
+                (Some(rich), View::Rich) => rich.update(cx, |rich, cx| rich.text(cx)),
+                _ => editor_text.clone(),
+            };
+            if this.dirty || text != editor_text {
                 if let Err(err) = crate::unsaved::keep(&this.absolute, &text) {
                     tracing::warn!("keeping unsaved changes failed: {err}");
                 }
@@ -869,6 +876,9 @@ impl FileView {
                 match result {
                     Ok((text, kept, not_utf8)) => {
                         this.not_utf8 = not_utf8;
+                        if not_utf8 && this.view == View::Rich {
+                            this.view = View::Source;
+                        }
                         this.attach_lsp(&text, cx);
                         let restored = kept.is_some();
                         let shown = kept.unwrap_or(text);
@@ -907,7 +917,7 @@ impl FileView {
 
     /// How the file is shown: one of its kind's views.
     pub fn set_view(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.kind.views().contains(&view) {
+        if !self.kind.views().contains(&view) || (self.not_utf8 && view == View::Rich) {
             return;
         }
         // Leaving the rich editor, its last keystrokes go to the text first.
@@ -1566,23 +1576,28 @@ impl FileView {
                 .gap_0p5()
                 .rounded(theme.radius)
                 .bg(theme.secondary)
-                .children(views.iter().map(|view| {
-                    let (view, current) = (*view, *view == self.view);
-                    Button::new(SharedString::from(format!("view-{}", view.key())))
-                        .ghost()
-                        .xsmall()
-                        .label(view.label())
-                        .selected(current)
-                        .tooltip(match view {
-                            View::Source => "The file's text",
-                            View::Preview => "The file rendered",
-                            View::Split => "The text and the rendering side by side",
-                            View::Rich => "Edit the document as formatted text",
-                        })
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| this.set_view(view, window, cx)),
-                        )
-                }))
+                .children(
+                    views
+                        .iter()
+                        .filter(|view| !(self.not_utf8 && **view == View::Rich))
+                        .map(|view| {
+                            let (view, current) = (*view, *view == self.view);
+                            Button::new(SharedString::from(format!("view-{}", view.key())))
+                                .ghost()
+                                .xsmall()
+                                .label(view.label())
+                                .selected(current)
+                                .tooltip(match view {
+                                    View::Source => "The file's text",
+                                    View::Preview => "The file rendered",
+                                    View::Split => "The text and the rendering side by side",
+                                    View::Rich => "Edit the document as formatted text",
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.set_view(view, window, cx)
+                                }))
+                        }),
+                )
                 .into_any_element(),
         )
     }

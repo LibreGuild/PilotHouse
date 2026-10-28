@@ -857,7 +857,11 @@ impl FilesPanel {
         cx: &mut Context<Self>,
     ) {
         let target = self.selected_target(cx);
-        let folder = target.as_ref().map(Target::folder).unwrap_or_default();
+        let folder = match &target {
+            Some(target) => target.folder(),
+            None if self.roots.is_multi() => self.roots.list()[0].name.clone(),
+            None => String::new(),
+        };
         let any = action.as_any();
         if any.is::<crate::NewFile>() {
             return self.new_entry(folder, false, window, cx);

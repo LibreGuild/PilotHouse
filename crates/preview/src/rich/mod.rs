@@ -250,8 +250,11 @@ impl RichEditor {
 
     /// The document as it is now (for saving before the timer).
     pub fn text(&mut self, cx: &mut Context<Self>) -> String {
+        self._save = None;
         self.take_input(cx);
-        self.document.text()
+        let text = self.document.text();
+        self.text = text.clone();
+        text
     }
 
     // ---- Editing ---------------------------------------------------------------
