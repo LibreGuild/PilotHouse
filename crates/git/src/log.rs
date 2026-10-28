@@ -69,7 +69,7 @@ pub fn log(root: &Path, limit: usize, skip: usize, all: bool) -> Result<Vec<Comm
     Ok(parse_log(&out))
 }
 
-fn parse_log(out: &str) -> Vec<Commit> {
+pub(crate) fn parse_log(out: &str) -> Vec<Commit> {
     out.split(RECORD)
         .filter_map(|record| {
             let mut fields = record.trim_start_matches('\n').split(FIELD);

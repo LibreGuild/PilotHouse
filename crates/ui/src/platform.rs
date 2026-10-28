@@ -32,20 +32,151 @@ pub fn shortcut(binding: &str) -> String {
     }
 }
 
+/// Whether handing `path` to the system's default app only opens it (a
+/// picture, a document), rather than running it: programs, scripts,
+/// installers and launchers run when opened, so the app does not offer to
+/// open those (an agent may have written them).
+pub fn opens_safely(path: &std::path::Path) -> bool {
+    const RUNNABLE: &[&str] = &[
+        "action",
+        "app",
+        "appimage",
+        "application",
+        "applescript",
+        "appref-ms",
+        "appx",
+        "bash",
+        "bat",
+        "chm",
+        "cmd",
+        "com",
+        "command",
+        "cpl",
+        "csh",
+        "deb",
+        "desktop",
+        "exe",
+        "fileloc",
+        "fish",
+        "gadget",
+        "hta",
+        "inetloc",
+        "inf",
+        "ins",
+        "jar",
+        "jnlp",
+        "js",
+        "jse",
+        "ksh",
+        "lnk",
+        "mobileconfig",
+        "msc",
+        "msi",
+        "msix",
+        "msp",
+        "pif",
+        "pkg",
+        "pl",
+        "ps1",
+        "psm1",
+        "py",
+        "pyw",
+        "rb",
+        "reg",
+        "rpm",
+        "scpt",
+        "scptd",
+        "scr",
+        "sct",
+        "settingcontent-ms",
+        "sh",
+        "shb",
+        "terminal",
+        "tool",
+        "url",
+        "vb",
+        "vbe",
+        "vbs",
+        "webloc",
+        "workflow",
+        "ws",
+        "wsc",
+        "wsf",
+        "wsh",
+        "xll",
+        "zsh",
+    ];
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
+    if extension.is_some_and(|extension| RUNNABLE.contains(&extension.as_str())) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if std::fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// A `/`-separated path as the path part of a URL: the characters that
+/// would end it or change its meaning (space, `#`, `?`, `%`) escaped.
+pub fn url_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            ' ' => encoded.push_str("%20"),
+            '#' => encoded.push_str("%23"),
+            '?' => encoded.push_str("%3F"),
+            '%' => encoded.push_str("%25"),
+            c => encoded.push(c),
+        }
+    }
+    encoded
+}
+
+/// Whether a link from content the app shows (agent output, a document)
+/// is a web or mail link, the only kinds opened with one click: a `file:`
+/// or custom-scheme link could launch a local program.
+pub fn is_web_link(url: &str) -> bool {
+    let scheme = url
+        .split_once(':')
+        .map(|(scheme, _)| scheme.to_ascii_lowercase());
+    matches!(scheme.as_deref(), Some("http" | "https" | "mailto"))
+}
+
+/// Whether `path` names a file on another computer (`\\server\share`,
+/// `//server/share`, `\\?\UNC\…`): on Windows, merely reading one sends
+/// the user's sign-in to that computer, so paths taken from a document
+/// never point there.
+pub fn is_network_path(path: &str) -> bool {
+    let path = path.trim_start();
+    path.starts_with("\\\\")
+        || path.starts_with("//")
+        || path.starts_with("\\/")
+        || path.starts_with("/\\")
+}
+
+/// The menu item that shows a file in the system's file manager.
+pub fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else if cfg!(windows) {
+        "Show in Explorer"
+    } else {
+        "Open Containing Folder"
+    }
+}
+
 /// A `file://` URL for an absolute path, valid on every platform
 /// (`file:///C:/work/app.rs` on Windows).
 pub fn file_url(path: &std::path::Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    let encoded: String = text
-        .chars()
-        .map(|c| match c {
-            ' ' => "%20".to_string(),
-            '#' => "%23".to_string(),
-            '?' => "%3F".to_string(),
-            '%' => "%25".to_string(),
-            c => c.to_string(),
-        })
-        .collect();
+    let encoded = url_path(&path.to_string_lossy().replace('\\', "/"));
     if encoded.starts_with('/') {
         format!("file://{encoded}")
     } else {
@@ -71,6 +202,39 @@ fn shorten_home(path: &std::path::Path, home: Option<&std::path::Path>) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runnable_files_do_not_open() {
+        let dir = std::env::temp_dir().join(format!("ph-opens-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let picture = dir.join("a.png");
+        std::fs::write(&picture, b"x").unwrap();
+        assert!(opens_safely(&picture));
+        assert!(!opens_safely(&dir.join("run.command")));
+        assert!(!opens_safely(&dir.join("SETUP.EXE")));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let tool = dir.join("tool");
+            std::fs::write(&tool, b"x").unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(!opens_safely(&tool));
+        }
+    }
+
+    #[test]
+    fn only_web_links_open_and_network_paths_are_known() {
+        assert!(is_web_link("https://example.com/a"));
+        assert!(is_web_link("MAILTO:a@example.com"));
+        assert!(!is_web_link("file:///Applications/Calculator.app"));
+        assert!(!is_web_link("ms-msdt:/id"));
+        assert!(!is_web_link("notes.md"));
+        assert!(is_network_path(r"\\server\share\a.png"));
+        assert!(is_network_path("//server/share/a.png"));
+        assert!(is_network_path(r"\\?\UNC\server\a.png"));
+        assert!(!is_network_path("images/a.png"));
+        assert!(!is_network_path("/Users/ada/a.png"));
+    }
 
     #[test]
     fn home_is_shown_as_a_tilde() {

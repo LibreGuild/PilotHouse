@@ -44,7 +44,7 @@ impl CommitBox {
         let message = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Commit message")
-                .rows(3)
+                .auto_grow(3, 10)
         });
         cx.observe(&repo, |_, _, cx| cx.notify()).detach();
         Self {

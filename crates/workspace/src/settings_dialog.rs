@@ -15,7 +15,7 @@ use gpui_kit::{
     px,
 };
 use ph_theme::preferences::{self, installed_fonts};
-use ph_theme::{Appearance, ChatWidth, Corners, Preferences, WindowStyle};
+use ph_theme::{Appearance, ChatWidth, Corners, DarkTheme, Preferences, WindowStyle};
 use ph_ui::Icons;
 
 use crate::app_state::AppState;
@@ -174,6 +174,14 @@ fn appearance_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {
                     )
                     .description("Light, dark, or follow the system.")
                     .keywords(["dark", "light", "theme"]),
+                )
+                .item(
+                    SettingItem::new(
+                        "Dark theme",
+                        choice(&DarkTheme::ALL, DarkTheme::label, |p| p.dark_theme, |p, v| p.dark_theme = v),
+                    )
+                    .description("Graphite is cool and deep. Warm is a soft dark brown, easier on the eyes.")
+                    .keywords(["dark", "warm", "brown", "theme", "palette", "colors"]),
                 )
                 .item(
                     SettingItem::new("Corners", choice(&Corners::ALL, Corners::label, |p| p.corners, |p, v| p.corners = v))

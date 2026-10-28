@@ -20,7 +20,6 @@ use gpui_kit::component::{
         Textarea, TextareaState,
     },
     menu::{PopupMenu, PopupMenuItem},
-    message_scroller::MessageScroller,
     popover::Popover,
     shimmer::ShimmerText,
     v_flex,
@@ -48,6 +47,7 @@ use crate::model_picker::{self, Pick, PickerData, PickerKey};
 use crate::options::{self, AgentOption, OptionCategory, OptionKind};
 use crate::review_card::ReviewCardEvent;
 use crate::thread::{ChatThread, ThreadEvent, ThreadProject, ThreadStatus};
+use crate::transcript_scroll::TranscriptList;
 use crate::{setup, setup_view};
 
 mod mentions;
@@ -230,7 +230,7 @@ impl ChatPanel {
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder(PLACEHOLDER)
-                .rows(2)
+                .auto_grow(2, 6)
                 .submit_on_enter(true)
         });
         let subscription = cx.subscribe_in(
@@ -317,6 +317,47 @@ impl ChatPanel {
         self.failed = None;
         self.watch_active(cx);
         cx.notify();
+    }
+
+    /// A new chat whose agent works in `folder`, a folder of the workspace.
+    pub fn new_chat_in(
+        &mut self,
+        folder: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let agent = default_agent(&self.store);
+        let project = ThreadProject {
+            path: folder,
+            ..self.draft_project()
+        };
+        let store = self.store.clone();
+        self.active = cx.new(|cx| {
+            let mut thread = ChatThread::draft(store, project, agent, cx);
+            thread.keep_folder();
+            thread
+        });
+        self.failed = None;
+        self.watch_active(cx);
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    /// Attaches `attachment` and puts `text` in an empty composer, to edit
+    /// and send.
+    pub fn draft_about(
+        &mut self,
+        attachment: Attachment,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.composer.read(cx).value().trim().is_empty() {
+            self.composer.update(cx, |composer, cx| {
+                composer.set_value(text.to_string(), window, cx)
+            });
+        }
+        self.attach(attachment, window, cx);
     }
 
     /// Where a new chat works: the context's folder, else the project's.

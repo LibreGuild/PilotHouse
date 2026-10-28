@@ -14,7 +14,10 @@ crates/
               to-dos, utilities dialog
   agent/      chat with coding agents over ACP, approval inbox
   board/      Kanban board + its control methods (used by MCP)
-  files/      file tree, editor, ⌘P, search, project watcher
+  files/      file tree and its menu (file operations), editor, ⌘P, search, project watcher
+  preview/    viewers: rich Markdown editor, Mermaid, images, data trees, tables, notebooks,
+              audio, video (the system's media framework), PDF, SQLite, spreadsheets, archives,
+              fonts, hex
   changes/    Git tab, branch picker, blame data: commit, history, stashes, conflicts, review
   github/     GitHub REST client, accounts, secrets in the OS keychain
   pulls/      PR list and view, Settings → GitHub, the GitHub view's managed clones
@@ -36,7 +39,7 @@ crates/
   agy/        `pilothouse agy-acp`: Google Antigravity (`agy`) as an ACP agent
   control/    local control socket (+ dev UI automation)
   store/      SQLite persistence (workspaces, chats, board, schedules, to-dos, usage…)
-  theme/      light/dark themes, user preferences, layout + motion tokens
+  theme/      light, dark and warm-dark themes, user preferences, layout + motion tokens
   ui/         icon assets, small shared components
   env/        the login shell's environment (PATH for agents/terminals)
 ```
@@ -46,6 +49,7 @@ Dependency direction (arrows point at dependencies):
 ```
 app ──► workspace ──► agent, board, files, changes, terminal, browser, devices, runs ──► store, ui, theme, env
  │                                        browser, devices ──► media
+ │                                         files, changes ──► preview
  │                          board, browser, devices, runs ──► control
  ├──► mcp ──► control
  └──► agy ──► env

@@ -167,7 +167,7 @@ pub fn render(segments: &[Segment], resolutions: &[Option<Resolution>]) -> Strin
 /// Marks a resolved file as such (stages it).
 pub fn mark_resolved(root: &Path, path: &str) -> Result<()> {
     crate::check_name("path", path)?;
-    git(root, &["add", "--", path]).map(|_| ())
+    git(root, &[crate::run::LITERAL, "add", "--", path]).map(|_| ())
 }
 
 /// What is in progress: a merge, rebase or cherry-pick, if any.

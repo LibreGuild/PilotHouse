@@ -405,13 +405,9 @@ fn working_row(
 }
 
 /// Opens a link from agent output. Only web and mail links: agent text can
-/// echo pages it read, and a `file://` or custom-scheme link could launch a
-/// local program with one click.
+/// echo pages it read (`ph_ui::platform::is_web_link`).
 pub(crate) fn open_link(url: &str, cx: &mut App) {
-    let scheme = url
-        .split_once(':')
-        .map(|(scheme, _)| scheme.to_ascii_lowercase());
-    if matches!(scheme.as_deref(), Some("http" | "https" | "mailto")) {
+    if ph_ui::platform::is_web_link(url) {
         cx.open_url(url);
     } else {
         tracing::info!("not opening a non-web link from agent output: {url}");

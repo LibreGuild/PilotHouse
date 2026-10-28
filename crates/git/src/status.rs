@@ -107,7 +107,7 @@ pub enum ApplyMode {
 
 /// Stages a whole path, new files included.
 pub fn stage_path(root: &Path, path: &str) -> Result<()> {
-    git(root, &["add", "--", path]).map(|_| ())
+    git(root, &[crate::run::LITERAL, "add", "--", path]).map(|_| ())
 }
 
 /// Branch, upstream and the index, from `git status --porcelain=v2`.
@@ -245,7 +245,11 @@ fn parse_status(out: &str) -> RepoStatus {
 
 /// Takes `path` out of the index (keeps the working tree as it is).
 pub fn unstage_path(root: &Path, path: &str) -> Result<()> {
-    git(root, &["restore", "--staged", "--", path]).map(|_| ())
+    git(
+        root,
+        &[crate::run::LITERAL, "restore", "--staged", "--", path],
+    )
+    .map(|_| ())
 }
 
 /// What a commit would contain, for writing its message.

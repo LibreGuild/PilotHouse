@@ -18,6 +18,7 @@ Short, practical notes on how PilotHouse is built. Start with **architecture**, 
 | [features/chat.md](features/chat.md) | Agent chat over ACP, permissions, the approval inbox, mentions |
 | [features/board.md](features/board.md) | Kanban board and the MCP tools agents use |
 | [features/files.md](features/files.md) | File tree, editor, ⌘P finder, project search |
+| [features/previews.md](features/previews.md) | Viewers: rich Markdown and Mermaid, images, data trees, tables, notebooks, audio, video, PDF, databases, archives, fonts |
 | [features/pulls.md](features/pulls.md) | GitHub PRs, accounts, agent reviews with findings and re-review |
 | [features/tests.md](features/tests.md) | UI tests: recorded from an agent's browser or device actions, replayed without AI, repaired by an agent |
 | [features/schedules.md](features/schedules.md) | Agent prompts and UI test runs at set times or on events (files, commits, pull requests, checks, chains) |

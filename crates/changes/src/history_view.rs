@@ -17,8 +17,8 @@ use ph_git::log::{self, Commit, GraphRow};
 
 use crate::branch_picker::ago;
 use crate::commit_box::{Writer, clean_message, cut};
-use crate::diff_view;
 use crate::repo::Repo;
+use ph_preview::diff as diff_view;
 
 /// Commits read per page.
 const PAGE: usize = 200;

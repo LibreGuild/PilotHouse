@@ -24,6 +24,98 @@ impl WorkspaceScreen {
         cx.notify();
     }
 
+    /// What the Files tree's menu asks of the rest of the workspace.
+    pub(super) fn on_file_menu(
+        &mut self,
+        event: &FilesPanelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            FilesPanelEvent::OpenInTerminal(dir) => {
+                let terminal = self.terminal_for_run(window, cx);
+                terminal.update(cx, |terminal, cx| {
+                    terminal.new_terminal_in(dir.clone(), window, cx)
+                });
+            }
+            FilesPanelEvent::OpenInWindow(path) => {
+                if let Err(err) = crate::file_window::open(path.clone(), cx) {
+                    window.push_notification(
+                        Notification::error(format!("Could not open the file: {err:#}")),
+                        cx,
+                    );
+                }
+            }
+            FilesPanelEvent::AddToChat(path) => {
+                self.reveal_chat(cx);
+                let attachment = Attachment::File(path.clone());
+                self.chat
+                    .update(cx, |chat, cx| chat.attach(attachment, window, cx));
+            }
+            FilesPanelEvent::AskAboutFile(path) => {
+                self.reveal_chat(cx);
+                let attachment = Attachment::File(path.clone());
+                self.chat.update(cx, |chat, cx| {
+                    chat.draft_about(
+                        attachment,
+                        "Explain what this file does and how it fits into the project.",
+                        window,
+                        cx,
+                    )
+                });
+            }
+            FilesPanelEvent::NewChatIn(folder) => {
+                self.new_session(window, cx);
+                self.reveal_chat(cx);
+                self.chat
+                    .update(cx, |chat, cx| chat.new_chat_in(folder.clone(), window, cx));
+            }
+            FilesPanelEvent::CompareWithHead(root, path) => {
+                let (root, path) = (root.clone(), path.clone());
+                let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                ph_changes::file_dialogs::load_diff(
+                    format!("{name} since the last commit"),
+                    move || ph_changes::git::files::diff_with_head(&root, &path),
+                    window,
+                    cx,
+                );
+            }
+            FilesPanelEvent::CompareFiles(first, second) => {
+                let (first, second) = (first.clone(), second.clone());
+                let name = |path: &std::path::Path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                };
+                let title = format!("{} ↔ {}", name(&first), name(&second));
+                ph_changes::file_dialogs::load_diff(
+                    title,
+                    move || ph_changes::git::files::diff_files(&first, &second),
+                    window,
+                    cx,
+                );
+            }
+            FilesPanelEvent::ShowHistory(root, path) => {
+                ph_changes::file_dialogs::open_history(root.clone(), path.clone(), window, cx)
+            }
+            FilesPanelEvent::OpenInBrowser(path) => {
+                if !AppState::enabled_tabs(cx).contains(&ContextTab::Browser) {
+                    AppState::set_tab_enabled(ContextTab::Browser, true, cx);
+                }
+                self.show_tab(ContextTab::Browser, window, cx);
+                let url = ph_ui::platform::file_url(path);
+                ph_browser::BrowserHub::browser(self.project.id, cx)
+                    .update(cx, |browser, cx| browser.open(&url, cx));
+            }
+            FilesPanelEvent::RevealInTree => self.show_tab(ContextTab::Files, window, cx),
+            FilesPanelEvent::OpenFilesChanged
+            | FilesPanelEvent::Opened
+            | FilesPanelEvent::Ask(_)
+            | FilesPanelEvent::MakePrimary(_)
+            | FilesPanelEvent::RemoveFolder(_) => {}
+        }
+    }
+
     /// Captures, picked elements and log lines from a live pane.
     pub(super) fn receive_to_chat(
         &mut self,

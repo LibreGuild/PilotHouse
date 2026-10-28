@@ -1,6 +1,7 @@
 //! PilotHouse design system.
 //!
-//! Owns the two product themes (`PilotHouse Light` and `PilotHouse Dark`), the
+//! Owns the product themes (`PilotHouse Light`, and for dark mode
+//! `PilotHouse Dark` or the warm `PilotHouse Warm`), the
 //! user's appearance preference, and the few layout tokens that are not part of
 //! the gpui-component theme (pane widths, motion durations).
 //!
@@ -15,5 +16,5 @@ pub mod preferences;
 
 pub use appearance::{Appearance, apply_appearance, init};
 pub use preferences::{
-    ChatWidth, Corners, EditorPreferences, Preferences, WindowStyle, accent, accent_fill,
+    ChatWidth, Corners, DarkTheme, EditorPreferences, Preferences, WindowStyle, accent, accent_fill,
 };

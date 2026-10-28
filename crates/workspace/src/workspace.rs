@@ -1633,6 +1633,12 @@ impl Workspace {
         });
     }
 
+    fn reset_layout(&mut self, _: &ResetLayout, window: &mut Window, cx: &mut Context<Self>) {
+        self.with_active_space(window, cx, |space, window, cx| {
+            space.reset_layout(window, cx)
+        });
+    }
+
     fn show_tab(&mut self, tab: ContextTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.view != View::Workspaces {
             self.set_view(View::Workspaces, window, cx);
@@ -1722,6 +1728,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_context_panel))
             .on_action(cx.listener(Self::toggle_zoom))
+            .on_action(cx.listener(Self::reset_layout))
             .on_action(cx.listener(Self::quick_open))
             .on_action(cx.listener(Self::find_in_project))
             .on_action(cx.listener(|this, _: &ShowFiles, window, cx| {

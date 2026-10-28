@@ -13,6 +13,7 @@ use gpui_kit::component::{
     h_flex,
     input::{Input, InputEvent, InputState},
     list::ListItem,
+    menu::ContextMenuExt as _,
     tab::{Tab, TabBar},
     tree::{TreeEvent, TreeState, tree},
     v_flex,
@@ -21,7 +22,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, div, px,
+    Styled as _, Subscription, Task, WeakEntity, Window, div, px,
 };
 use ph_ui::{EmptyState, Icons};
 
@@ -41,8 +42,8 @@ const TREE_INDENT: gpui_kit::Pixels = px(14.);
 
 /// Changed paths, and the folders holding them.
 #[derive(Default)]
-struct TreeChanges {
-    files: HashMap<String, ph_git::Change>,
+pub(crate) struct TreeChanges {
+    pub(crate) files: HashMap<String, ph_git::Change>,
     dirs: HashSet<String>,
 }
 
@@ -60,12 +61,36 @@ fn change_color(change: ph_git::Change, cx: &gpui_kit::App) -> gpui_kit::Hsla {
 pub enum FilesPanelEvent {
     /// The set of open files or the active one changed (for layout restore).
     OpenFilesChanged,
+    /// A file was opened or its tab chosen: the editor should be in view.
+    Opened,
     /// Ask the agent about selected code.
     Ask(crate::Ask),
     /// Make this folder the workspace's primary one.
     MakePrimary(PathBuf),
     /// Take this folder out of the workspace (it stays on disk).
     RemoveFolder(PathBuf),
+    /// Open a terminal in this folder.
+    OpenInTerminal(PathBuf),
+    /// Open this file in a window of its own.
+    OpenInWindow(PathBuf),
+    /// Attach this file (a tree path) to the chat's next message.
+    AddToChat(String),
+    /// Attach this file and start a question about it in the chat.
+    AskAboutFile(String),
+    /// Start a chat whose agent works in this folder.
+    NewChatIn(PathBuf),
+    /// Show a file's changes since the last commit: the repository folder
+    /// and the path within it.
+    CompareWithHead(PathBuf, String),
+    /// Show the differences between two files.
+    CompareFiles(PathBuf, PathBuf),
+    /// Show the commits that changed a file: the repository folder and the
+    /// path within it.
+    ShowHistory(PathBuf, String),
+    /// Show this HTML file in the workspace's browser.
+    OpenInBrowser(PathBuf),
+    /// A file was selected in the tree from its tab: show the Files tool.
+    RevealInTree,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +102,8 @@ enum Browse {
 #[derive(Default)]
 struct Search {
     query: String,
+    /// The folder searched, when not the whole workspace.
+    scope: Option<String>,
     results: SearchResults,
     running: bool,
     error: Option<SharedString>,
@@ -84,22 +111,35 @@ struct Search {
 }
 
 pub struct FilesPanel {
+    pub(crate) weak: WeakEntity<Self>,
     /// The workspace's folders (see [`Roots`]).
-    roots: Roots,
+    pub(crate) roots: Roots,
+    /// Per folder: whether it is in a Git repository.
+    pub(crate) repos: Vec<bool>,
     /// Each folder's language servers (started when a file needs one).
     lsps: Vec<Entity<ph_lsp::LspManager>>,
-    tree: DirTree,
-    tree_state: Entity<TreeState>,
+    pub(crate) tree: DirTree,
+    pub(crate) tree_state: Entity<TreeState>,
+    /// Selected once the tree lists it (a file just made or renamed).
+    pub(crate) pending_select: Option<String>,
     browse: Browse,
     search_input: Entity<InputState>,
     search: Search,
-    open_files: Vec<Entity<FileView>>,
-    active: Option<usize>,
+    /// Where Find in Folder searches next (`None`: the whole workspace).
+    pub(crate) search_scope: Option<String>,
+    pub(crate) open_files: Vec<Entity<FileView>>,
+    pub(crate) active: Option<usize>,
+    /// What Copy or Cut picked, for Paste.
+    pub(crate) clipboard: Option<crate::tree_menu::Clipboard>,
+    /// The file picked with Select for Compare.
+    pub(crate) compare: Option<String>,
     /// File list for the finder; rebuilt lazily after file-system changes.
     index: Option<FileList>,
     index_stale: bool,
     /// Git's changes, marked in the tree.
-    changes: Rc<TreeChanges>,
+    pub(crate) changes: Rc<TreeChanges>,
+    /// Tree paths with staged changes.
+    pub(crate) staged: Rc<HashSet<String>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -154,16 +194,36 @@ impl FilesPanel {
                 cx.new(|_| ph_lsp::LspManager::new(path))
             })
             .collect();
+        // Which folders are repositories, for the menu's Git items.
+        let folders: Vec<PathBuf> = roots.list().iter().map(|root| root.path.clone()).collect();
+        let check = cx.background_spawn(async move {
+            folders
+                .iter()
+                .map(|folder| ph_git::is_repository(folder))
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let repos = check.await;
+            _ = this.update(cx, |this, _| this.repos = repos);
+        })
+        .detach();
         let mut panel = Self {
+            weak: cx.weak_entity(),
             lsps,
+            repos: Vec::new(),
             roots,
             tree: DirTree::default(),
             tree_state,
+            pending_select: None,
             browse: Browse::Tree,
             search_input,
             search: Search::default(),
+            search_scope: None,
             open_files: Vec::new(),
             active: None,
+            clipboard: None,
+            compare: None,
+            staged: Rc::default(),
             index: None,
             index_stale: true,
             changes: Rc::default(),
@@ -244,9 +304,16 @@ impl FilesPanel {
                 });
                 self._subscriptions.push(cx.subscribe(
                     &view,
-                    |_, _, event: &crate::file_view::FileViewEvent, cx| match event {
+                    |this, view, event: &crate::file_view::FileViewEvent, cx| match event {
                         crate::file_view::FileViewEvent::Ask(ask) => {
                             cx.emit(FilesPanelEvent::Ask(ask.clone()))
+                        }
+                        crate::file_view::FileViewEvent::OpenInBrowser(path) => {
+                            cx.emit(FilesPanelEvent::OpenInBrowser(path.clone()))
+                        }
+                        crate::file_view::FileViewEvent::RevealInTree => {
+                            let path = view.read(cx).relative_path().to_string();
+                            this.reveal_in_tree(path, cx);
                         }
                     },
                 ));
@@ -257,9 +324,81 @@ impl FilesPanel {
         if let Some(line) = line {
             self.open_files[ix].update(cx, |file, cx| file.go_to_line(line, window, cx));
         }
-        self.active = Some(ix);
+        self.activate(ix, cx);
         cx.emit(FilesPanelEvent::OpenFilesChanged);
+        cx.emit(FilesPanelEvent::Opened);
         cx.notify();
+    }
+
+    /// Closes every tab but `keep`.
+    fn close_others(&mut self, keep: usize, cx: &mut Context<Self>) {
+        self.close_where(|ix, _| ix != keep, cx);
+    }
+
+    /// Closes the tabs after `ix`.
+    fn close_right(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.close_where(|other, _| other > ix, cx);
+    }
+
+    /// Closes the tabs without unsaved changes.
+    fn close_saved(&mut self, cx: &mut Context<Self>) {
+        self.close_where(|_, file| !file.is_dirty(), cx);
+    }
+
+    pub fn close_all(&mut self, cx: &mut Context<Self>) {
+        self.close_where(|_, _| true, cx);
+    }
+
+    /// Closes the tabs `close` picks (by index and file), from the last so
+    /// the indexes stay right. Unsaved text is kept, as for any closed tab.
+    fn close_where(&mut self, close: impl Fn(usize, &FileView) -> bool, cx: &mut Context<Self>) {
+        let picked: Vec<usize> = self
+            .open_files
+            .iter()
+            .enumerate()
+            .filter(|(ix, file)| close(*ix, file.read(cx)))
+            .map(|(ix, _)| ix)
+            .collect();
+        for ix in picked.into_iter().rev() {
+            self.close_file(ix, cx);
+        }
+    }
+
+    /// The tree path of tab `ix`.
+    fn tab_path(&self, ix: usize, cx: &gpui_kit::App) -> Option<String> {
+        self.open_files
+            .get(ix)
+            .map(|file| file.read(cx).relative_path().to_string())
+    }
+
+    /// Selects `path` in the tree (opening the folders above it).
+    fn reveal_in_tree(&mut self, path: String, cx: &mut Context<Self>) {
+        self.browse = Browse::Tree;
+        self.show_new(&path, cx);
+        cx.emit(FilesPanelEvent::RevealInTree);
+    }
+
+    /// Gives the keyboard to the open file in front when its text is on
+    /// screen (not a preview or a viewer, whose hidden text must not take
+    /// keys).
+    pub fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(file) = self.active.and_then(|ix| self.open_files.get(ix)) else {
+            return;
+        };
+        if file.read(cx).takes_keys() {
+            let focus = gpui_kit::Focusable::focus_handle(file.read(cx), cx);
+            focus.focus(window, cx);
+        }
+    }
+
+    /// Brings tab `ix` forward; a video or sound in the tab going back stops.
+    fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(previous) = self.active.filter(|previous| *previous != ix)
+            && let Some(file) = self.open_files.get(previous)
+        {
+            file.update(cx, |file, cx| file.pause_media(cx));
+        }
+        self.active = Some(ix);
     }
 
     /// Opens an absolute path at a 0-based line, if it is in the project.
@@ -329,6 +468,7 @@ impl FilesPanel {
     /// Back from search to the folder tree.
     pub fn show_tree(&mut self, cx: &mut Context<Self>) {
         self.browse = Browse::Tree;
+        self.search_scope = None;
         cx.notify();
     }
 
@@ -371,7 +511,7 @@ impl FilesPanel {
         }
     }
 
-    fn index_of(&self, relative: &str, cx: &gpui_kit::App) -> Option<usize> {
+    pub(crate) fn index_of(&self, relative: &str, cx: &gpui_kit::App) -> Option<usize> {
         self.open_files
             .iter()
             .position(|file| file.read(cx).relative_path().as_ref() == relative)
@@ -392,7 +532,7 @@ impl FilesPanel {
     }
 
     /// Lists `dirs` in the background, then rebuilds the tree once.
-    fn load_dirs(&mut self, dirs: Vec<String>, cx: &mut Context<Self>) {
+    pub(crate) fn load_dirs(&mut self, dirs: Vec<String>, cx: &mut Context<Self>) {
         let roots = self.roots.clone();
         let listings = cx.background_spawn(async move {
             dirs.into_iter()
@@ -414,15 +554,22 @@ impl FilesPanel {
         .detach();
     }
 
-    fn rebuild_tree(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn rebuild_tree(&mut self, cx: &mut Context<Self>) {
         let items = self.tree.items();
-        self.tree_state.update(cx, |state, cx| {
+        let pending = self.pending_select.clone();
+        let found = self.tree_state.update(cx, |state, cx| {
             let selected = state.selected_item().map(|item| item.id.clone());
             state.set_items(items, cx);
-            if let Some(ix) = selected.and_then(|id| state.index_of(&id)) {
+            let pending = pending.and_then(|id| state.index_of(&id.into()));
+            if let Some(ix) = pending.or_else(|| selected.and_then(|id| state.index_of(&id))) {
                 state.set_selected_index(Some(ix), cx);
+                state.scroll_to_item(ix, gpui_kit::ScrollStrategy::Center);
             }
+            pending.is_some()
         });
+        if found {
+            self.pending_select = None;
+        }
         cx.notify();
     }
 
@@ -465,13 +612,27 @@ impl FilesPanel {
 
     // ---- Search ------------------------------------------------------------
 
+    /// Runs the typed query again (the folder searched changed).
+    pub(crate) fn search_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.search_input.read(cx).value().trim().is_empty() {
+            self.run_search(window, cx);
+        }
+    }
+
     fn run_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let query = self.search_input.read(cx).value().to_string();
         let roots = self.roots.clone();
+        let scope = self.search_scope.clone();
         self.search.query = query.clone();
+        self.search.scope = scope.clone();
         self.search.running = true;
         self.search.error = None;
-        let search = cx.background_spawn(async move { roots.search(&query) });
+        let search = cx.background_spawn(async move {
+            match &scope {
+                Some(dir) => roots.search_in(dir, &query),
+                None => roots.search(&query),
+            }
+        });
         // Replacing the task cancels a search that is still running.
         self.search._task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = search.await;
@@ -499,12 +660,19 @@ impl FilesPanel {
         let ignored = self.tree.ignored();
         let multi = self.roots.list().len() > 1;
         let primary = self.roots.list().first().map(|root| root.name.clone());
-        let roots: Vec<(String, PathBuf)> = self
-            .roots
-            .list()
-            .iter()
-            .map(|root| (root.name.clone(), root.path.clone()))
-            .collect();
+        let compare = self.compare.clone();
+        let cut: Rc<HashSet<String>> = Rc::new(
+            self.clipboard
+                .as_ref()
+                .filter(|clip| clip.cut)
+                .map(|clip| {
+                    clip.paths
+                        .iter()
+                        .filter_map(|path| self.roots.path_of(path))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        );
         tree(&self.tree_state, move |ix, entry, selected, _, cx| {
             let item = entry.item();
             let path = item.id.to_string();
@@ -515,7 +683,9 @@ impl FilesPanel {
             let change = changes.files.get(&path).copied();
             let holds_changes = !is_file && changes.dirs.contains(&path);
             let tint = change.map(|change| change_color(change, cx));
-            let is_ignored = ignored.contains(&path);
+            // Ignored files, and what Cut picked, are dimmed.
+            let is_ignored = ignored.contains(&path) || cut.contains(&path);
+            let is_compared = compare.as_deref() == Some(path.as_str());
             let icon = if is_file {
                 ph_ui::file_icon_element(&item.label, px(16.))
             } else {
@@ -579,6 +749,15 @@ impl FilesPanel {
                                     .text_color(theme.muted_foreground)
                                     .child("primary"),
                             )
+                        })
+                        .when(is_compared, |this| {
+                            this.child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("compare"),
+                            )
                         }),
                 )
                 .when_some(change, |this, change| {
@@ -604,35 +783,10 @@ impl FilesPanel {
                     })
                 })
         })
-        // With several folders, a folder's menu makes it primary or takes
-        // it out of the workspace.
-        .context_menu(move |_, entry, menu, _, _| {
-            if !multi || entry.depth() != 0 {
-                return menu;
-            }
-            let name = entry.item().id.to_string();
-            let Some((_, root)) = roots.iter().find(|(root, _)| *root == name).cloned() else {
-                return menu;
-            };
-            let (primary_panel, remove_panel, remove_root) =
-                (menu_panel.clone(), menu_panel.clone(), root.clone());
-            menu.item(
-                gpui_kit::component::menu::PopupMenuItem::new("Make primary (agents start here)")
-                    .on_click(move |_, _, cx| {
-                        _ = primary_panel.update(cx, |_, cx| {
-                            cx.emit(FilesPanelEvent::MakePrimary(root.clone()))
-                        });
-                    }),
-            )
-            .item(
-                gpui_kit::component::menu::PopupMenuItem::new("Remove from workspace").on_click(
-                    move |_, _, cx| {
-                        _ = remove_panel.update(cx, |_, cx| {
-                            cx.emit(FilesPanelEvent::RemoveFolder(remove_root.clone()))
-                        });
-                    },
-                ),
-            )
+        // Every row has the file menu; with several folders, a folder's
+        // own row also makes it primary or takes it out of the workspace.
+        .context_menu(move |_, entry, menu, _, cx| {
+            crate::tree_menu::build(&menu_panel, &entry.item().id, entry.is_folder(), menu, cx)
         })
         .size_full()
         .into_any_element()
@@ -640,7 +794,15 @@ impl FilesPanel {
 
     /// Git's view of the workspace's folders: each changed path (as the
     /// tree names it) and what happened to it.
-    pub fn set_changes(&mut self, files: HashMap<String, ph_git::Change>, cx: &mut Context<Self>) {
+    pub fn set_changes(
+        &mut self,
+        files: HashMap<String, ph_git::Change>,
+        staged: HashSet<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if staged != *self.staged {
+            self.staged = Rc::new(staged);
+        }
         if files == self.changes.files {
             return;
         }
@@ -714,9 +876,33 @@ impl FilesPanel {
             Some(format!("{} matches.", results.matches.len()).into())
         };
 
+        let scope = self.search_scope.clone().map(|dir| {
+            h_flex()
+                .mx_2()
+                .mb_1()
+                .gap_1()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(Icon::new(Icons::FolderOpen).xsmall())
+                .child(div().flex_1().truncate().child(format!("In {dir}")))
+                .child(
+                    Button::new("search-everywhere")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .tooltip("Search the whole workspace")
+                        .accessibility_label("Search the whole workspace")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.search_scope = None;
+                            this.search_again(window, cx);
+                            cx.notify();
+                        })),
+                )
+        });
         v_flex()
             .size_full()
             .child(div().p_2().child(Input::new(&self.search_input).small()))
+            .children(scope)
             .when_some(status, |this, status| {
                 this.child(
                     div()
@@ -764,9 +950,17 @@ impl FilesPanel {
             } else {
                 name
             };
+            let panel = cx.weak_entity();
             Tab::new()
                 .prefix(div().pl_2().child(icon))
-                .label(label)
+                .child(
+                    div()
+                        .id(("open-file-label", ix))
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .child(label)
+                        .context_menu(move |menu, _, _| tab_menu(menu, panel.clone(), ix)),
+                )
                 .suffix(
                     Button::new(("close-file", ix))
                         .ghost()
@@ -785,7 +979,7 @@ impl FilesPanel {
                     .small()
                     .selected_index(self.active.unwrap_or_default())
                     .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.active = Some(*ix);
+                        this.activate(*ix, cx);
                         cx.emit(FilesPanelEvent::OpenFilesChanged);
                         cx.notify();
                     }))
@@ -836,12 +1030,95 @@ impl FileTree {
 impl Render for FileTree {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = self.files.update(cx, |files, cx| files.render_browser(cx));
+        // The tree's keys act on its selected row.
+        fn key<A: gpui_kit::Action>(
+            cx: &mut Context<FileTree>,
+        ) -> impl Fn(&A, &mut Window, &mut gpui_kit::App) + 'static {
+            cx.listener(|this, action: &A, window, cx| {
+                this.files
+                    .update(cx, |files, cx| files.on_tree_key(action, window, cx))
+            })
+        }
         div()
+            .key_context(crate::FILE_TREE_CONTEXT)
             .size_full()
             .on_action(cx.listener(|this, _: &crate::OpenSelected, window, cx| {
                 this.files
                     .update(cx, |files, cx| files.open_selected(window, cx))
             }))
+            .on_action(key::<crate::NewFile>(cx))
+            .on_action(key::<crate::NewFolder>(cx))
+            .on_action(key::<crate::RenameEntry>(cx))
+            .on_action(key::<crate::TrashEntry>(cx))
+            .on_action(key::<crate::CopyEntry>(cx))
+            .on_action(key::<crate::CutEntry>(cx))
+            .on_action(key::<crate::PasteEntry>(cx))
+            .on_action(key::<crate::DuplicateEntry>(cx))
+            .on_action(key::<crate::RevealEntry>(cx))
+            .on_action(key::<crate::CopyEntryPath>(cx))
+            .on_action(key::<crate::CopyRelativePath>(cx))
             .child(body)
     }
+}
+
+/// The menu of open-file tab `ix`.
+fn tab_menu(
+    menu: gpui_kit::component::menu::PopupMenu,
+    panel: gpui_kit::WeakEntity<FilesPanel>,
+    ix: usize,
+) -> gpui_kit::component::menu::PopupMenu {
+    use gpui_kit::component::menu::PopupMenuItem;
+    type Run = fn(&mut FilesPanel, usize, &mut Window, &mut Context<FilesPanel>);
+    let item = |label: &'static str, run: Run| {
+        let panel = panel.clone();
+        PopupMenuItem::new(label).on_click(move |_, window, cx| {
+            _ = panel.update(cx, |panel, cx| run(panel, ix, window, cx));
+        })
+    };
+    menu.item(
+        item("Close", |panel, ix, _, cx| panel.close_file(ix, cx)).action(Box::new(CloseFile)),
+    )
+    .item(item("Close Others", |panel, ix, _, cx| {
+        panel.close_others(ix, cx)
+    }))
+    .item(item("Close to the Right", |panel, ix, _, cx| {
+        panel.close_right(ix, cx)
+    }))
+    .item(item("Close Saved", |panel, _, _, cx| panel.close_saved(cx)))
+    .item(item("Close All", |panel, _, _, cx| panel.close_all(cx)))
+    .separator()
+    .item(item("Copy Path", |panel, ix, _, cx| {
+        if let Some(path) = panel
+            .tab_path(ix, cx)
+            .and_then(|path| panel.roots.absolute(&path))
+        {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                path.to_string_lossy().into_owned(),
+            ));
+        }
+    }))
+    .item(item("Copy Relative Path", |panel, ix, _, cx| {
+        if let Some(path) = panel.tab_path(ix, cx) {
+            let within = panel
+                .roots
+                .split(&path)
+                .map(|(_, within)| within.to_string())
+                .unwrap_or(path);
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(within));
+        }
+    }))
+    .separator()
+    .item(item(ph_ui::platform::reveal_label(), |panel, ix, _, cx| {
+        if let Some(path) = panel
+            .tab_path(ix, cx)
+            .and_then(|path| panel.roots.absolute(&path))
+        {
+            cx.reveal_path(&path);
+        }
+    }))
+    .item(item("Reveal in Files", |panel, ix, _, cx| {
+        if let Some(path) = panel.tab_path(ix, cx) {
+            panel.reveal_in_tree(path, cx);
+        }
+    }))
 }

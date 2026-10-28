@@ -15,16 +15,16 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gpui_kit::component::message_scroller::MessageScroller;
 use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Task,
-    Window, div, px,
+    Window, div,
 };
 use serde_json::Value;
 
 use crate::agents::AgentSpec;
 use crate::thread::{ChatThread, ThreadProject};
 use crate::transcript::{Entry, ToolEntry, ToolKindLabel, ToolStatus};
+use crate::transcript_scroll::TranscriptList;
 
 /// Whose session file it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -536,14 +536,10 @@ impl Render for TranscriptView {
         let mode = crate::view_mode::ViewMode::current(cx);
         thread.update(cx, |thread, cx| thread.set_view_mode(mode, cx));
         let scroller = thread.read(cx).scroller().clone();
-        let mut row_style = gpui_kit::StyleRefinement::default();
-        row_style.padding.bottom = Some(px(0.).into());
-        MessageScroller::new("cli-transcript", scroller, move |ix, _, cx| {
+        TranscriptList::new("cli-transcript", scroller, move |ix, _, cx| {
             thread.update(cx, |thread, cx| thread.prepare_entry(ix, cx));
             crate::entry_view::render_entry(&thread, ix, cx)
         })
-        .with_row_style(row_style)
-        .size_full()
         .into_any_element()
     }
 }

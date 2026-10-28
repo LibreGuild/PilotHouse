@@ -75,10 +75,10 @@ A row of kind `chats` in `projects` (`ph_store::projects::ProjectKind`): no fold
 
 ## Editor, chat and tools
 
-- **Files** is the first tool (⌘1): the folder tree, each folder a root when there are several (the primary one says so), with an icon per file type, chevrons, indent guides and Git marks (**M** changed, **U** new, **D** deleted; a dot on a folder holding changes). Its header's search button (⌘⇧F) turns the tree into workspace search, and **+** adds a folder. Right-click a folder root to make it primary or take it out.
-- Picking a file opens it in the **editor** pane beside the chat; with no file open the pane gives its room back.
+- **Files** is the first tool (⌘1): the folder tree, each folder a root when there are several (the primary one says so), with an icon per file type, chevrons, indent guides and Git marks (**M** changed, **U** new, **D** deleted; a dot on a folder holding changes). Its header's search button (⌘⇧F) turns the tree into workspace search; the others make a file or a folder, fold every folder and add a folder to the workspace. Right-click any row for the file menu ([files](files.md)); a folder root's also makes it primary or takes it out.
+- The **chat and the editor** are two tabs of one group in the layout a workspace starts with: picking a file (from the tree, ⌘P, search, a link) brings the Editor tab to the front, and anything sent to the chat, or ⌘L from the editor, brings the Chat tab back. The Editor tab shows only while a file is open. The panes sit on a rounded card between the sidebar and the icon bar.
 - The **icon bar** on the right shows the tools this workspace uses (Files in a workspace, Git with a repository, PRs with a hosted remote, Browser for web code, Devices for Android, Run with something to run, Tests with tests or an app); the rest are under **⋯**. Names show in tooltips, or under the icons with *Settings → Appearance → Names under tool icons*.
-- **Docking.** Every pane has a tab. Drag a tab into another group to share it, onto a group's edge to split beside or below it, or to the window's left, right or bottom edge to dock it there. A pane's ⋯ menu does the same (*Move beside the chat*, *Move below the chat*, *Move to the left side*, *to the right side*, *to the bottom*), and also works where a drag cannot: the last pane of a dock does not drag out of it. A dock left empty goes away. Tools close with their tab's ×; the chat and the editor stay. The layout is kept per workspace and comes back with it (version `dock::LAYOUT_VERSION`; a layout this build cannot read falls back to the default).
+- **Docking.** Every pane has a tab. Drag a tab into another group to share it, onto a group's edge to split beside or below it, or to the window's left, right or bottom edge to dock it there. A pane's ⋯ menu does the same (*Move into the chat's tabs*, *Move beside the chat*, *Move below the chat*, *Move to the left side*, *to the right side*, *to the bottom*), and also works where a drag cannot: the last pane of a dock does not drag out of it. A dock left empty goes away. Tools close with their tab's ×; the chat and the editor stay. The layout is kept per workspace and comes back with it (version `dock::LAYOUT_VERSION`; a layout this build cannot read falls back to the default). *Reset layout* (the ⋯ menu, or the palette) goes back to the default.
 - A tool shown from the icon bar is selected where it is docked (its dock opens if closed), or docked on the right when it is not. The icon bar highlights every tool on screen.
 - ⌘J opens or closes the dock holding the tool shown last; ⌘⇧J lets that tool fill the window (each pane's ⋯ menu does the same for it).
 
@@ -125,7 +125,7 @@ Removing a folder leaves it on disk; removing the primary folder makes the next 
 ## Settings
 
 Stored in the `settings` table:
-- **Appearance**: System, Light or Dark (`appearance`); names under tool icons.
+- **Appearance**: System, Light or Dark (`appearance`); the dark theme, *Graphite* or *Warm*, a soft dark brown (`Preferences::dark_theme`, `PilotHouse Warm` in `themes/pilothouse.json`); names under tool icons.
 - **Features**: turn tools off (`features.disabled`); *System* holds the file manager menu switch.
 
 ## Architecture map

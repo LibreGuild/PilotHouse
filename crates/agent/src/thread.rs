@@ -11,13 +11,13 @@ use std::time::{Duration, Instant};
 
 use ph_store::usage::{SessionUsage, UsageReport};
 
+use crate::transcript_scroll::TranscriptScroll;
 use agent_client_protocol_schema::v1::{
     CancelNotification, ContentBlock, EnvVariable, McpServer, McpServerStdio, PromptRequest,
     PromptResponse, RequestPermissionRequest, SessionUpdate, StopReason, TextContent,
 };
 use futures::FutureExt as _;
 use futures::future::Shared;
-use gpui_kit::component::message_scroller::MessageScrollerState;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, EventEmitter, SharedString, Subscription, Task,
 };
@@ -186,7 +186,7 @@ pub struct ChatThread {
     /// `entries[..saved]` are in the store.
     saved: usize,
     status: ThreadStatus,
-    scroller: Entity<MessageScrollerState>,
+    scroller: Entity<TranscriptScroll>,
     /// The PR review this chat runs, if it is a review chat.
     review_id: Option<i64>,
     /// What the turn under way is for (see [`ReviewTurn`]).
@@ -194,6 +194,9 @@ pub struct ChatThread {
     /// A lane of a parallel run: the agent works in its own worktree
     /// (`project.path`), remembered with the session.
     parallel: bool,
+    /// The chat works in a folder of the workspace other than the primary
+    /// one (Files: New Chat Here), kept with the session.
+    in_folder: bool,
     /// Read-only tools run without asking during the current turn (a quick
     /// question about code). Review chats always allow them.
     reads_this_turn: bool,
@@ -249,7 +252,7 @@ impl ChatThread {
             options::cached(&store, agent.id),
             &options::preferences(&store, agent.id),
         );
-        let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
+        let scroller = cx.new(|cx| TranscriptScroll::new(0, cx));
         Self {
             store,
             project,
@@ -269,6 +272,7 @@ impl ChatThread {
             review_id: None,
             review_turn: None,
             parallel: false,
+            in_folder: false,
             reads_this_turn: false,
             app_tools_this_turn: false,
             user_message_ids: HashMap::new(),
@@ -310,6 +314,17 @@ impl ChatThread {
     /// Makes this draft a parallel-run lane working in its worktree.
     pub fn set_parallel(&mut self) {
         self.parallel = true;
+    }
+
+    /// Makes this draft work in its project path for good (a folder picked
+    /// in Files), so the chat goes on there when reopened.
+    pub fn keep_folder(&mut self) {
+        self.in_folder = true;
+    }
+
+    /// Where the agent works.
+    pub fn folder(&self) -> &std::path::Path {
+        &self.project.path
     }
 
     /// Lets the next turn read and search without asking (cleared when the
@@ -496,7 +511,7 @@ impl ChatThread {
         }
         thread.saved = entries.len();
         thread.usage = thread.store.session_usage(session.id).ok().flatten();
-        thread.scroller = cx.new(|cx| MessageScrollerState::new(entries.len(), cx));
+        thread.scroller = cx.new(|cx| TranscriptScroll::new(entries.len(), cx));
         thread.entries = entries;
         thread.session = Some(session);
         thread
@@ -547,7 +562,7 @@ impl ChatThread {
         }
     }
 
-    pub fn scroller(&self) -> &Entity<MessageScrollerState> {
+    pub fn scroller(&self) -> &Entity<TranscriptScroll> {
         &self.scroller
     }
 
@@ -820,13 +835,13 @@ impl ChatThread {
             return; // Applied when the session starts.
         };
         let ready = connection.read(cx).ready();
-        let params = option.set_params(session_id, value);
+        let (method, params) = option.set_request(session_id, value);
         cx.spawn(async move |this, cx| {
             let result = async {
                 let ready = ready.await?;
                 ready
                     .process
-                    .request("session/set_config_option", params)
+                    .request(method, params)
                     .await
                     .map_err(|err| SharedString::from(format!("{err:#}")))
             }
@@ -885,8 +900,9 @@ impl ChatThread {
                             .set_session_place(session.id, "parallel", Some(&cwd));
                         session.kind = "parallel".into();
                         session.cwd = Some(cwd);
-                    } else if self.project.read_only {
-                        // A GitHub chat is about the pull request its folder holds.
+                    } else if self.project.read_only || self.in_folder {
+                        // A GitHub chat is about the pull request its folder
+                        // holds; a chat started in a folder stays there.
                         let cwd = self.project.path.to_string_lossy().to_string();
                         let _ = self.store.set_session_place(session.id, "chat", Some(&cwd));
                         session.cwd = Some(cwd);
@@ -1607,21 +1623,15 @@ impl ChatThread {
                 }
             };
 
-            let offered =
-                options::parse_options(result.get("configOptions").unwrap_or(&Value::Null));
+            let offered = options::parse_session_options(&result);
             // Apply remembered choices the agent did not pick itself.
             for option in &offered {
                 if let Some(value) = prefs
                     .get(&option.id)
                     .filter(|value| **value != option.current)
                 {
-                    let _ = ready
-                        .process
-                        .request(
-                            "session/set_config_option",
-                            option.set_params(&session_id, value),
-                        )
-                        .await;
+                    let (method, params) = option.set_request(&session_id, value);
+                    let _ = ready.process.request(method, params).await;
                 }
             }
             let weak = this.clone();
@@ -1670,10 +1680,16 @@ impl ChatThread {
         let Some(raw) = raw else {
             return;
         };
-        let options = options::parse_options(raw);
+        let mut options = options::parse_options(raw);
         if options.is_empty() {
             return;
         }
+        // A model or mode from the older lists stays unless replaced.
+        let older = self.options.iter().filter(|option| {
+            option.source != options::OptionSource::ConfigOption
+                && !options.iter().any(|new| new.category == option.category)
+        });
+        options.extend(older.cloned().collect::<Vec<_>>());
         options::cache(&self.store, self.agent.id, &options);
         self.options = options;
         cx.notify();

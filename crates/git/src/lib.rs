@@ -9,6 +9,8 @@
 //! - [`branches`]: list, switch, create, delete; fetch, pull, push.
 //! - [`commit`]: commit and amend.
 //! - [`stash`], [`log`] (history with graph lanes), [`blame`].
+//! - [`files`]: one file's history and diffs, comparing two files,
+//!   discarding a file's changes, ignoring it.
 //! - [`conflicts`]: parse and resolve merge conflicts.
 //! - [`remote`]: remotes and the hosting repo they point at.
 //! - [`worktree`]: extra working trees (PR reviews, parallel agents).
@@ -24,6 +26,7 @@ pub mod checkpoint;
 pub mod commit;
 pub mod conflicts;
 pub mod diff;
+pub mod files;
 pub mod log;
 pub mod parallel;
 pub mod remote;
