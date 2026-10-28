@@ -207,16 +207,18 @@ mod tests {
 
     #[test]
     fn paths_are_names_not_patterns() {
+        // As a pattern, `[a].rs` is `a.rs`; it must only be the file of that
+        // name (one Windows allows, unlike `*`).
         let root = temp_repo("file-literal");
         std::fs::write(root.join("a.rs"), "one\n").unwrap();
-        std::fs::write(root.join("*.rs"), "star\n").unwrap();
+        std::fs::write(root.join("[a].rs"), "brackets\n").unwrap();
         commit(&root, "first");
         std::fs::write(root.join("a.rs"), "changed\n").unwrap();
-        std::fs::write(root.join("*.rs"), "changed\n").unwrap();
-        discard_path(&root, "*.rs").unwrap();
+        std::fs::write(root.join("[a].rs"), "changed\n").unwrap();
+        discard_path(&root, "[a].rs").unwrap();
         assert_eq!(
-            std::fs::read_to_string(root.join("*.rs")).unwrap(),
-            "star\n"
+            std::fs::read_to_string(root.join("[a].rs")).unwrap(),
+            "brackets\n"
         );
         assert_eq!(
             std::fs::read_to_string(root.join("a.rs")).unwrap(),

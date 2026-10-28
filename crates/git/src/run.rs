@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result, bail};
 const SAFE_CONFIG: &[&str] = &["-c", "core.fsmonitor=false", "-c", "diff.external="];
 
 /// Put first in the arguments of a call naming one file: the path is that
-/// name, never a pattern (discarding a file named `*.rs` touches only it).
+/// name, never a pattern (discarding a file named `[a].rs` leaves `a.rs` alone).
 /// Not for every call: `git stash pop` fails with it.
 pub(crate) const LITERAL: &str = "--literal-pathspecs";
 
