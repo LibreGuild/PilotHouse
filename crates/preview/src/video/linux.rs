@@ -6,6 +6,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
 use std::path::Path;
+use std::ptr::NonNull;
 use std::sync::{Arc, OnceLock};
 
 use gpui_kit::RenderImage;
@@ -53,14 +54,20 @@ struct Gst {
     caps_from_string: unsafe extern "C" fn(*const c_char) -> *mut c_void,
     filename_to_uri: unsafe extern "C" fn(*const c_char, *mut *mut GError) -> *mut c_char,
     free: unsafe extern "C" fn(*mut c_void),
-    error_free: unsafe extern "C" fn(*mut GError),
+    error_free: unsafe extern "C" fn(NonNull<GError>),
     set_state: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
     query_duration: unsafe extern "C" fn(*mut c_void, c_int, *mut i64) -> Gboolean,
     query_position: unsafe extern "C" fn(*mut c_void, c_int, *mut i64) -> Gboolean,
     seek: unsafe extern "C" fn(*mut c_void, f64, c_int, c_int, c_int, i64, c_int, i64) -> Gboolean,
     get_bus: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
     bus_pop_filtered: unsafe extern "C" fn(*mut c_void, c_uint) -> *mut c_void,
-    message_parse_error: unsafe extern "C" fn(*mut c_void, *mut *mut GError, *mut *mut c_char),
+    // The outputs as `Option<NonNull<_>>`, the same as nullable pointers:
+    // no null pointer is ever read.
+    message_parse_error: unsafe extern "C" fn(
+        *mut c_void,
+        *mut Option<NonNull<GError>>,
+        *mut Option<NonNull<c_char>>,
+    ),
     mini_object_unref: unsafe extern "C" fn(*mut c_void),
     try_pull_sample: unsafe extern "C" fn(*mut c_void, u64) -> *mut c_void,
     try_pull_preroll: unsafe extern "C" fn(*mut c_void, u64) -> *mut c_void,
@@ -225,16 +232,13 @@ impl Engine {
             if message.is_null() {
                 return;
             }
-            let mut error: *mut GError = std::ptr::null_mut();
-            let mut debug: *mut c_char = std::ptr::null_mut();
+            let (mut error, mut debug) = (None, None);
             (self.gst.message_parse_error)(message, &mut error, &mut debug);
-            let text = if error.is_null() || (*error).message.is_null() {
-                "GStreamer could not play it.".to_string()
-            } else {
-                CStr::from_ptr((*error).message)
-                    .to_string_lossy()
-                    .into_owned()
-            };
+            let text = error
+                .map(|error| error.as_ref().message)
+                .filter(|message| !message.is_null())
+                .map(|message| CStr::from_ptr(message).to_string_lossy().into_owned())
+                .unwrap_or_else(|| "GStreamer could not play it.".to_string());
             let lower = text.to_lowercase();
             let text =
                 if lower.contains("plugin") || lower.contains("decoder") || lower.contains("codec")
@@ -243,11 +247,11 @@ impl Engine {
                 } else {
                     text
                 };
-            if !error.is_null() {
+            if let Some(error) = error {
                 (self.gst.error_free)(error);
             }
-            if !debug.is_null() {
-                (self.gst.free)(debug.cast());
+            if let Some(debug) = debug {
+                (self.gst.free)(debug.as_ptr().cast());
             }
             (self.gst.mini_object_unref)(message);
             *self.error.borrow_mut() = Some(text);
