@@ -9,6 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
+
 use crate::dir_tree::{DirEntry, list_dir};
 use crate::file_index::{FileList, index_files};
 use crate::search::{SearchResults, search_project};
@@ -158,6 +160,22 @@ impl Roots {
     }
 
     /// Searches every folder; paths in the results name their folder.
+    /// Searches tree folder `dir` only; paths come back as the tree names
+    /// them.
+    pub fn search_in(&self, dir: &str, query: &str) -> anyhow::Result<SearchResults> {
+        let (root, within) = self.split(dir).context("not a folder in this workspace")?;
+        let mut found = search_project(&root.path.join(within), query)?;
+        for hit in &mut found.matches {
+            let inside = if within.is_empty() {
+                hit.path.clone()
+            } else {
+                format!("{}/{}", within.trim_end_matches('/'), hit.path)
+            };
+            hit.path = self.prefixed(root, &inside);
+        }
+        Ok(found)
+    }
+
     pub fn search(&self, query: &str) -> anyhow::Result<SearchResults> {
         let mut all = SearchResults::default();
         for root in &self.0 {

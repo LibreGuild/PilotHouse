@@ -124,9 +124,13 @@ impl PullView {
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Leave a comment (Markdown)")
-                .rows(3)
+                .auto_grow(3, 12)
         });
-        let reply_box = cx.new(|cx| TextareaState::new(window, cx).placeholder("Reply").rows(2));
+        let reply_box = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Reply")
+                .auto_grow(2, 8)
+        });
         let ask_box = cx
             .new(|cx| InputState::new(window, cx).placeholder("12-30: why is this retried twice?"));
         let findings =

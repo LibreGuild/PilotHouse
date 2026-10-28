@@ -118,8 +118,8 @@ impl WorkspaceScreen {
             .into_any_element()
     }
 
-    /// Buttons in a pane's title bar: Files searches the workspace and
-    /// adds folders.
+    /// Buttons in a pane's title bar: Files searches the workspace, makes
+    /// files and folders, and has a menu for the rest.
     pub(super) fn pane_buttons(
         &mut self,
         pane: Pane,
@@ -148,19 +148,53 @@ impl WorkspaceScreen {
                     "Search in workspace (⌘⇧F)"
                 })
                 .accessibility_label("Search in workspace")
-                .on_click(move |_, window, cx| {
-                    files.update(cx, |files, cx| {
-                        if files.is_searching() {
-                            files.show_tree(cx)
-                        } else {
-                            files.find_in_project(window, cx)
-                        }
-                    })
+                .on_click({
+                    let files = files.clone();
+                    move |_, window, cx| {
+                        files.update(cx, |files, cx| {
+                            if files.is_searching() {
+                                files.show_tree(cx)
+                            } else {
+                                files.find_in_project(window, cx)
+                            }
+                        })
+                    }
                 }),
-            Button::new("files-add-folder")
+            Button::new("files-new-file")
+                .ghost()
+                .small()
+                .icon(Icons::FilePlus)
+                .tooltip("New file")
+                .accessibility_label("New file")
+                .on_click({
+                    let files = files.clone();
+                    move |_, window, cx| {
+                        files.update(cx, |files, cx| files.new_in_selection(false, window, cx))
+                    }
+                }),
+            Button::new("files-new-folder")
                 .ghost()
                 .small()
                 .icon(Icons::FolderPlus)
+                .tooltip("New folder")
+                .accessibility_label("New folder")
+                .on_click({
+                    let files = files.clone();
+                    move |_, window, cx| {
+                        files.update(cx, |files, cx| files.new_in_selection(true, window, cx))
+                    }
+                }),
+            Button::new("files-collapse")
+                .ghost()
+                .small()
+                .icon(Icons::ChevronsDownUp)
+                .tooltip("Collapse all folders")
+                .accessibility_label("Collapse all folders")
+                .on_click(move |_, _, cx| files.update(cx, |files, cx| files.collapse_all(cx))),
+            Button::new("files-add-folder")
+                .ghost()
+                .small()
+                .icon(Icons::FolderInput)
                 .tooltip("Add a folder to this workspace")
                 .accessibility_label("Add folder")
                 .on_click(|_, window, cx| {
@@ -410,6 +444,8 @@ impl Render for WorkspaceScreen {
         if std::mem::take(&mut self.reveal_pending) {
             self.panes.show(Pane::Chat, window, cx);
         }
+        // The panes sit on a rounded card between the sidebar and the tool
+        // rail, set off from the window's chrome.
         h_flex()
             .size_full()
             .pr_1()
@@ -420,7 +456,7 @@ impl Render for WorkspaceScreen {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .child(self.panes.area.clone()),
+                    .child(ph_ui::Surface::new().child(self.panes.area.clone())),
             )
             .child(self.render_tool_rail(cx))
     }

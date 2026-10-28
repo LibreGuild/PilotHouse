@@ -70,6 +70,11 @@ impl DirTree {
         }
     }
 
+    /// Folds every folder.
+    pub fn collapse_all(&mut self) {
+        self.expanded.clear();
+    }
+
     pub fn is_placeholder(id: &str) -> bool {
         id.ends_with(PLACEHOLDER)
     }

@@ -467,6 +467,7 @@ impl WorkspaceScreen {
         };
         let roots = self.roots();
         let mut changes = std::collections::HashMap::new();
+        let mut staged = std::collections::HashSet::new();
         for repo in self.repos.values() {
             let repo = repo.read(cx);
             let Some(status) = repo.status() else {
@@ -477,8 +478,14 @@ impl WorkspaceScreen {
                     changes.insert(id, *change);
                 }
             }
+            staged.extend(
+                status
+                    .staged
+                    .iter()
+                    .filter_map(|path| roots.path_of(&repo.root().join(path))),
+            );
         }
-        files.update(cx, |files, cx| files.set_changes(changes, cx));
+        files.update(cx, |files, cx| files.set_changes(changes, staged, cx));
     }
 
     pub fn repo_model(&self) -> Option<&Entity<Repo>> {
@@ -548,6 +555,13 @@ impl WorkspaceScreen {
         self.context_tab = tab;
         self.panes.show(Pane::Tool(tab), window, cx);
         self.save_layout(cx);
+        cx.notify();
+    }
+
+    /// Back to the starting layout: the chat and the editor as tabs, the
+    /// tool in view docked on the right.
+    pub fn reset_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.panes.set_default(self.context_tab, true, window, cx);
         cx.notify();
     }
 
@@ -639,8 +653,24 @@ impl WorkspaceScreen {
         self.unsaved_files(cx) == 0 && !self.chat.read(cx).has_draft(cx)
     }
 
-    /// Puts the keyboard in the chat's composer.
+    /// Gives the keyboard to what is in front: the chat's composer, or the
+    /// open file when the editor is on screen and the chat is not (they
+    /// may share a tab group). The layout stays as it is.
     pub fn focus_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.shown.contains(&Pane::Chat)
+            && self.shown.contains(&Pane::Editor)
+            && let Some(files) = self.files.clone()
+        {
+            files.update(cx, |files, cx| files.focus_active(window, cx));
+            return;
+        }
+        self.chat
+            .update(cx, |chat, cx| chat.focus_composer(window, cx));
+    }
+
+    /// Brings the chat forward and puts the keyboard in its composer.
+    pub fn show_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reveal_chat(cx);
         self.chat
             .update(cx, |chat, cx| chat.focus_composer(window, cx));
     }
@@ -731,6 +761,7 @@ impl WorkspaceScreen {
             window,
             |this, _, event: &FilesPanelEvent, window, cx| match event {
                 FilesPanelEvent::OpenFilesChanged => this.save_layout(cx),
+                FilesPanelEvent::Opened => this.panes.show(Pane::Editor, window, cx),
                 FilesPanelEvent::Ask(ask) => this.ask_about_code(ask.clone(), window, cx),
                 FilesPanelEvent::MakePrimary(path) => {
                     cx.emit(WorkspaceScreenEvent::MakePrimary(path.clone()))
@@ -738,6 +769,7 @@ impl WorkspaceScreen {
                 FilesPanelEvent::RemoveFolder(path) => {
                     cx.emit(WorkspaceScreenEvent::RemoveFolder(path.clone()))
                 }
+                event => this.on_file_menu(event, window, cx),
             },
         ));
         // The editor column comes and goes with the open files.
@@ -904,8 +936,8 @@ impl WorkspaceScreen {
         cx: &mut Context<Self>,
     ) {
         let files = self.files(window, cx);
+        // The panel says it opened the file, and the editor comes into view.
         files.update(cx, |files, cx| files.open_file(relative, line, window, cx));
-        self.panes.show(Pane::Editor, window, cx);
     }
 
     /// Shows chat `session` scrolled to `message` (a search result).

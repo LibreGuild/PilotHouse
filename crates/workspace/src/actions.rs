@@ -50,6 +50,8 @@ actions!(
         ToggleContextPanel,
         /// Let the context panel fill the window (and back).
         ToggleZoom,
+        /// Put the panes back where a new workspace has them.
+        ResetLayout,
         ShowFiles,
         ShowChanges,
         ShowBoard,

@@ -271,6 +271,12 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         ToggleZoom,
         &["zoom", "full"],
     ));
+    general.push(Entry::action(
+        "Reset layout",
+        Icons::LayoutGrid,
+        ResetLayout,
+        &["panes", "dock", "default", "restore", "arrange"],
+    ));
     groups.push(("General", general));
 
     if workspace.active_space().is_some() {

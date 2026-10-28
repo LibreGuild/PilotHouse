@@ -162,11 +162,12 @@ fn command_palette_runs_a_command(cx: &mut TestAppContext) {
     cx.update(|cx| assert!(workspace.read(cx).is_sidebar_collapsed()));
 }
 
-/// A file opens beside the chat (the editor column shows only then), the
+/// A file opens in the editor, which shares the chat's tab group and comes
+/// to the front (the Editor tab shows only while a file is open); the
 /// sidebar lists the chats, and hiding the sidebar moves the chat list
 /// into the chat's history menu.
 #[gpui_kit::test]
-fn files_open_beside_the_chat(cx: &mut TestAppContext) {
+fn files_open_in_front_of_the_chat(cx: &mut TestAppContext) {
     let (window, workspace) = open_workspace(cx);
     let folder = temp_project("editor");
     // Plain text: no language server starts (its threads would make the
@@ -194,10 +195,12 @@ fn files_open_beside_the_chat(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert!(
             window.try_find_by_label("Close file").is_some(),
-            "the editor column"
+            "the editor is in front"
         );
         assert!(window.try_find("chat-history").is_none());
         window.press("secondary-b", cx);
+        let space = workspace.read(cx).active_space().unwrap().clone();
+        space.update(cx, |space, cx| space.show_chat(window, cx));
     })
     .unwrap();
     cx.run_until_parked();

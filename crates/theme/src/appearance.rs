@@ -91,5 +91,8 @@ mod tests {
             .collect();
         assert!(names.contains(&LIGHT_THEME_NAME));
         assert!(names.contains(&DARK_THEME_NAME));
+        for dark in crate::preferences::DarkTheme::ALL {
+            assert!(names.contains(&dark.theme_name()), "{}", dark.theme_name());
+        }
     }
 }

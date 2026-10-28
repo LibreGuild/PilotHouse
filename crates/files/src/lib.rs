@@ -12,14 +12,17 @@ mod blame_view;
 mod code_intel;
 mod dir_tree;
 mod file_index;
+pub mod file_ops;
 mod file_view;
 mod files_panel;
 pub mod fuzzy;
 pub mod large;
+mod name_dialog;
 mod quick_open;
 pub mod roots;
 mod search;
 pub mod symbols;
+mod tree_menu;
 pub mod unsaved;
 mod watcher;
 
@@ -57,8 +60,47 @@ actions!(
         FindBugsInSelection,
         /// Ask the agent to write tests for the selected code.
         WriteTestsForSelection,
+        /// A new file in the selected folder of the tree.
+        NewFile,
+        /// A new folder in the selected folder of the tree.
+        NewFolder,
+        /// Rename the selected file or folder (F2).
+        RenameEntry,
+        /// Move the selected file or folder to the trash.
+        TrashEntry,
+        /// Pick the selected file or folder to paste elsewhere.
+        CopyEntry,
+        /// Pick the selected file or folder to move elsewhere.
+        CutEntry,
+        /// Paste what was copied or cut into the selected folder.
+        PasteEntry,
+        /// Copy the selected file or folder beside itself.
+        DuplicateEntry,
+        /// Show the selected file or folder in the system's file manager.
+        RevealEntry,
+        /// Copy the selected file's full path.
+        CopyEntryPath,
+        /// Copy the selected file's path within its folder.
+        CopyRelativePath,
+        /// Copy the selected code fenced as Markdown, with where it is from.
+        CopyAsMarkdown,
+        /// Copy where the selected lines are (`src/app.rs:10-14`).
+        CopyReference,
+        /// Copy a link to the selected lines on the repository's host.
+        CopyLinkToLines,
+        /// Copy the open file's full path.
+        CopyFilePath,
+        /// Copy the open file's path within its folder.
+        CopyFileRelativePath,
+        /// Show the open file in the system's file manager.
+        RevealFile,
+        /// Select the open file in the Files tree.
+        RevealInFiles,
     ]
 );
+
+/// The key context of the Files tree, where its keys act on the selection.
+pub const FILE_TREE_CONTEXT: &str = "FileTree";
 
 /// Registers the file actions' key bindings. `QuickOpen` and `FindInProject`
 /// are bound in the workspace context so they work from anywhere.
@@ -89,5 +131,22 @@ pub fn init(cx: &mut App, workspace_context: &'static str) {
             CloseFile,
             Some(files_panel::FILES_PANEL_CONTEXT),
         ),
+    ]);
+    let tree = Some(FILE_TREE_CONTEXT);
+    let trash = if cfg!(target_os = "macos") {
+        "secondary-backspace"
+    } else {
+        "delete"
+    };
+    cx.bind_keys([
+        KeyBinding::new("f2", RenameEntry, tree),
+        KeyBinding::new(trash, TrashEntry, tree),
+        KeyBinding::new("secondary-c", CopyEntry, tree),
+        KeyBinding::new("secondary-x", CutEntry, tree),
+        KeyBinding::new("secondary-v", PasteEntry, tree),
+        KeyBinding::new("secondary-d", DuplicateEntry, tree),
+        KeyBinding::new("alt-secondary-r", RevealEntry, tree),
+        KeyBinding::new("alt-secondary-c", CopyEntryPath, tree),
+        KeyBinding::new("alt-shift-secondary-c", CopyRelativePath, tree),
     ]);
 }

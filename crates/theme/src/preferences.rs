@@ -24,6 +24,8 @@ pub struct Preferences {
     /// How opaque panels are when the window is translucent (0.55–1.0).
     pub opacity: f32,
     pub editor: EditorPreferences,
+    /// Which palette dark mode uses.
+    pub dark_theme: DarkTheme,
     pub chat_width: ChatWidth,
     /// Names under the tool icons on the right, not only in tooltips.
     pub tool_labels: bool,
@@ -63,6 +65,7 @@ impl Default for Preferences {
             window: WindowStyle::Solid,
             opacity: 0.86,
             editor: EditorPreferences::default(),
+            dark_theme: DarkTheme::default(),
             chat_width: ChatWidth::Comfortable,
             tool_labels: false,
             sizes_version: SIZES_VERSION,
@@ -134,6 +137,35 @@ pub fn accent_fill(dark: bool) -> Hsla {
         s: accent.s * 0.85,
         l: accent.l.min(0.42),
         ..accent
+    }
+}
+
+/// The palette of dark mode: cool graphite, or a warm dark brown that is
+/// softer on the eyes.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DarkTheme {
+    #[default]
+    Classic,
+    Warm,
+}
+
+impl DarkTheme {
+    pub const ALL: [DarkTheme; 2] = [DarkTheme::Classic, DarkTheme::Warm];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DarkTheme::Classic => "Graphite",
+            DarkTheme::Warm => "Warm",
+        }
+    }
+
+    /// Its theme's name in `themes/pilothouse.json`.
+    pub fn theme_name(self) -> &'static str {
+        match self {
+            DarkTheme::Classic => "PilotHouse Dark",
+            DarkTheme::Warm => "PilotHouse Warm",
+        }
     }
 }
 
@@ -310,7 +342,14 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
     // alphas, and on top of an earlier pass they would compound (more
     // transparent with each change, never solid again). A pass of its own,
     // so the edits below register as changes and reach the theme's tokens.
+    let dark_theme = gpui_kit::component::ThemeRegistry::global(cx)
+        .themes()
+        .get(preferences.dark_theme.theme_name())
+        .cloned();
     Theme::update(cx, |theme| {
+        if let Some(dark_theme) = dark_theme {
+            theme.dark_theme = dark_theme;
+        }
         let config = if theme.mode.is_dark() {
             theme.dark_theme.clone()
         } else {

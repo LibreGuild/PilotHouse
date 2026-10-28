@@ -2,9 +2,16 @@
 //! tracks unsaved edits and saves on ⌘S. A toolbar shows where the file is
 //! and toggles blame; a footer shows the cursor position and who last
 //! changed the cursor's line.
+//!
+//! Files with more to show than their text get a viewer from `ph-preview`:
+//! a text kind (Markdown, JSON, CSV…) switches between its source, its
+//! preview and both side by side; media, documents and binaries are shown
+//! by their viewer alone.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui_kit::component::input::{
     Editor, EditorState, InputEvent, Position, RopeExt as _, TabSize, TextDecoration,
@@ -27,8 +34,9 @@ use crate::blame_view::{self, Blamed};
 use crate::code_intel::{self, OpenLocation};
 use crate::large::LargeFileView;
 use crate::{
-    AskAboutSelection, ExplainSelection, FindBugsInSelection, FindReferences, RenameSymbol,
-    ShowOutline, WriteTestsForSelection,
+    AskAboutSelection, CopyAsMarkdown, CopyFilePath, CopyFileRelativePath, CopyLinkToLines,
+    CopyReference, ExplainSelection, FindBugsInSelection, FindReferences, RenameSymbol, RevealFile,
+    RevealInFiles, ShowOutline, WriteTestsForSelection,
 };
 
 /// What the user wants to know about selected code.
@@ -127,10 +135,23 @@ impl Ask {
 #[derive(Debug, Clone)]
 pub enum FileViewEvent {
     Ask(Ask),
+    /// Show this HTML file in the workspace's browser.
+    OpenInBrowser(PathBuf),
+    /// Select this file in the Files tree.
+    RevealInTree,
 }
+
+/// The view last picked for each kind of file, so the next one opens the
+/// same way (for this run of the app).
+static LAST_VIEWS: LazyLock<Mutex<HashMap<Kind, View>>> = LazyLock::new(Mutex::default);
+
+/// How long the preview waits after typing stops before it follows.
+const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 
 impl gpui_kit::EventEmitter<FileViewEvent> for FileView {}
 use ph_lsp::{Binding, LspEvent, LspManager};
+use ph_preview::rich::RichEditor;
+use ph_preview::{FilePreview, Kind, PreviewEvent, TextPreview, View};
 
 use crate::SaveFile;
 
@@ -150,6 +171,8 @@ enum Content {
     /// Over the editor's limit: shown by the large-file viewer.
     TooLarge(u64),
     Large(Entity<LargeFileView>),
+    /// Shown by its viewer: media, documents, binaries.
+    Media(Entity<FilePreview>),
     Failed(SharedString),
 }
 
@@ -192,6 +215,16 @@ pub struct FileView {
     /// Shown in a project: there is a chat to ask about code, Git for blame,
     /// and a path worth a breadcrumb. A lone file's window has none of them.
     asks: bool,
+    /// What the file is, and how a text kind is shown now.
+    kind: Kind,
+    view: View,
+    /// The rendered side of a text kind, made when first shown.
+    preview: Option<Entity<TextPreview>>,
+    _preview_sync: Option<Task<()>>,
+    _preview_events: Option<Subscription>,
+    /// Markdown edited as formatted text (the Rich view).
+    rich: Option<Entity<RichEditor>>,
+    _rich_events: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -205,6 +238,13 @@ impl FileView {
         cx: &mut Context<Self>,
     ) -> Self {
         let language = language_for(relative);
+        let kind = Kind::of(std::path::Path::new(relative));
+        let view = LAST_VIEWS
+            .lock()
+            .ok()
+            .and_then(|views| views.get(&kind).copied())
+            .or_else(|| kind.views().first().copied())
+            .unwrap_or(View::Source);
         let options = ph_theme::preferences::preferences(cx).editor;
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
@@ -246,6 +286,7 @@ impl FileView {
                 }
                 this.schedule_sync(cx);
                 this.schedule_keep(cx);
+                this.schedule_preview(cx);
             }
         });
         // The footer follows the cursor.
@@ -267,6 +308,13 @@ impl FileView {
             _keep: None,
             pending_line: None,
             asks: true,
+            kind,
+            view,
+            preview: None,
+            _preview_sync: None,
+            _preview_events: None,
+            rich: None,
+            _rich_events: None,
             label: SharedString::default(),
             _subscriptions: vec![subscription, preferences, cursor],
             lsp: None,
@@ -482,32 +530,104 @@ impl FileView {
         if !self.asks {
             return;
         }
+        let Some((code, lines)) = self.selection(cx) else {
+            return;
+        };
+        cx.emit(FileViewEvent::Ask(Ask {
+            relative: self.relative_path().to_string(),
+            lines,
+            code,
+            language: language_for(&self.relative),
+            intent,
+        }));
+    }
+
+    /// The selected text and its lines (1-based), or the cursor's line
+    /// without a selection; `None` when that is blank.
+    fn selection(&self, cx: &gpui_kit::App) -> Option<(String, (u32, u32))> {
         let editor = self.editor.read(cx);
         let text = editor.value();
         let mut range = editor.selected_range();
         let rope = gpui_kit::component::input::Rope::from(text.as_ref());
         if range.is_empty() {
-            // No selection: the cursor's line.
             let line = rope.offset_to_position(range.start).line as usize;
             range = rope.line_start_offset(line)..rope.line_end_offset(line);
         }
         let range = range.start.min(text.len())..range.end.min(text.len());
         let code = text[range.clone()].to_string();
         if code.trim().is_empty() {
-            return;
+            return None;
         }
         let start = rope.offset_to_position(range.start).line + 1;
         let end = rope
             .offset_to_position(range.end.saturating_sub(1).max(range.start))
             .line
             + 1;
-        cx.emit(FileViewEvent::Ask(Ask {
-            relative: self.relative_path().to_string(),
-            lines: (start, end),
-            code,
-            language: language_for(&self.relative),
-            intent,
-        }));
+        Some((code, (start, end)))
+    }
+
+    /// `src/app.rs:10-14` for the selected lines.
+    fn reference(&self, cx: &gpui_kit::App) -> Option<String> {
+        let (_, (start, end)) = self.selection(cx)?;
+        let path = self.relative_path();
+        Some(if start == end {
+            format!("{path}:{start}")
+        } else {
+            format!("{path}:{start}-{end}")
+        })
+    }
+
+    fn copy_as_markdown(&mut self, _: &CopyAsMarkdown, _: &mut Window, cx: &mut Context<Self>) {
+        let (Some((code, _)), Some(reference)) = (self.selection(cx), self.reference(cx)) else {
+            return;
+        };
+        let text = format!(
+            "`{reference}`\n```{}\n{}\n```\n",
+            language_for(&self.relative),
+            code.trim_end_matches('\n')
+        );
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+    }
+
+    fn copy_reference(&mut self, _: &CopyReference, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(reference) = self.reference(cx) {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(reference));
+        }
+    }
+
+    /// A link to the selected lines on GitHub (or GitLab), at the commit
+    /// checked out.
+    fn copy_link_to_lines(
+        &mut self,
+        _: &CopyLinkToLines,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_kit::component::WindowExt as _;
+        use gpui_kit::component::notification::Notification;
+        let Some((_, (start, end))) = self.selection(cx) else {
+            return;
+        };
+        let (root, relative) = (self.root.clone(), self.relative.to_string());
+        let find = cx.background_spawn(async move {
+            let repo = ph_git::remote::hosted_repo(&root)?;
+            // The folder may sit below the repository's top.
+            let prefix = ph_git::git(&root, &["rev-parse", "--show-prefix"]).ok()?;
+            let commit = ph_git::git(&root, &["rev-parse", "HEAD"]).ok()?;
+            let path = format!("{}{relative}", prefix.trim());
+            Some(line_link(&repo, commit.trim(), &path, start, end))
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            let link = find.await;
+            _ = cx.update(|window, cx| match link {
+                Some(link) => cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(link)),
+                None => window.push_notification(
+                    Notification::info("This file is not in a repository on GitHub or GitLab."),
+                    cx,
+                ),
+            });
+        })
+        .detach();
     }
 
     fn find_references(&mut self, _: &FindReferences, window: &mut Window, cx: &mut Context<Self>) {
@@ -719,6 +839,15 @@ impl FileView {
             view.update(cx, |view, cx| view.refresh(cx));
             return;
         }
+        // A viewer reads the file itself.
+        if let Content::Media(view) = &self.content {
+            view.update(cx, |view, cx| view.reload(window, cx));
+            return;
+        }
+        if !self.kind.is_text() {
+            self.show_media(self.kind, window, cx);
+            return;
+        }
         // The file changed on disk: blame is out of date.
         self.blame = None;
         if self.show_blame {
@@ -751,7 +880,10 @@ impl FileView {
                         if let Some(line) = this.pending_line.take() {
                             this.go_to_line(line, window, cx);
                         }
+                        this.update_preview(window, cx);
                     }
+                    // A file named like text that is not: its bytes.
+                    Err(Content::Binary) => this.show_media(Kind::Text, window, cx),
                     Err(Content::TooLarge(_)) => {
                         let path = this.absolute.clone();
                         let view = cx.new(|cx| LargeFileView::new(path, window, cx));
@@ -763,6 +895,183 @@ impl FileView {
             });
         })
         .detach();
+    }
+
+    /// Shows the file with its viewer (`Kind::Text`: as bytes).
+    fn show_media(&mut self, kind: Kind, window: &mut Window, cx: &mut Context<Self>) {
+        let path = self.absolute.clone();
+        let view = cx.new(|cx| FilePreview::new(kind, path, window, cx));
+        self.content = Content::Media(view);
+        cx.notify();
+    }
+
+    /// How the file is shown: one of its kind's views.
+    pub fn set_view(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.kind.views().contains(&view) {
+            return;
+        }
+        // Leaving the rich editor, its last keystrokes go to the text first.
+        if self.view == View::Rich
+            && view != View::Rich
+            && let Some(rich) = self.rich.clone()
+        {
+            let text = rich.update(cx, |rich, cx| rich.text(cx));
+            self.replace_text(text, window, cx);
+        }
+        self.view = view;
+        if let Ok(mut views) = LAST_VIEWS.lock() {
+            views.insert(self.kind, view);
+        }
+        self.update_preview(window, cx);
+        cx.notify();
+    }
+
+    /// Whether the file's text is on screen to type into.
+    pub fn takes_keys(&self) -> bool {
+        self.content == Content::Text && self.shows_editor()
+    }
+
+    /// Whether the code editor is on screen.
+    fn shows_editor(&self) -> bool {
+        !self.shows_preview() || self.view == View::Split
+    }
+
+    /// Whether the rendered side is on screen.
+    fn shows_preview(&self) -> bool {
+        self.content == Content::Text && self.view != View::Source && !self.kind.views().is_empty()
+    }
+
+    /// Hands the preview the editor's text now (made when first needed).
+    fn update_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.shows_preview() {
+            return;
+        }
+        if self.view == View::Rich {
+            let rich = match &self.rich {
+                Some(rich) => rich.clone(),
+                None => {
+                    let path = self.absolute.clone();
+                    let rich = cx.new(|cx| RichEditor::new(path, cx));
+                    self._rich_events = Some(cx.subscribe_in(
+                        &rich,
+                        window,
+                        |this, _, event: &PreviewEvent, window, cx| {
+                            this.on_preview(event, window, cx)
+                        },
+                    ));
+                    self.rich = Some(rich.clone());
+                    rich
+                }
+            };
+            let text = self.editor.read(cx).value().to_string();
+            rich.update(cx, |rich, cx| rich.set_text(&text, cx));
+            return;
+        }
+        let preview = match &self.preview {
+            Some(preview) => preview.clone(),
+            None => {
+                let (kind, path) = (self.kind, self.absolute.clone());
+                let preview = cx.new(|cx| TextPreview::new(kind, path, window, cx));
+                self._preview_events = Some(cx.subscribe_in(
+                    &preview,
+                    window,
+                    |this, _, event: &PreviewEvent, window, cx| this.on_preview(event, window, cx),
+                ));
+                self.preview = Some(preview.clone());
+                preview
+            }
+        };
+        let text: Arc<str> = self.editor.read(cx).value().as_ref().into();
+        preview.update(cx, |preview, cx| preview.set_text(text, cx));
+    }
+
+    /// Follows typing, once it pauses.
+    fn schedule_preview(&mut self, cx: &mut Context<Self>) {
+        if !self.shows_preview() {
+            return;
+        }
+        self._preview_sync = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PREVIEW_DELAY).await;
+            _ = this.update(cx, |this, cx| {
+                let (Some(preview), true) = (
+                    this.preview.clone(),
+                    this.shows_preview() && this.view != View::Rich,
+                ) else {
+                    return;
+                };
+                let text: Arc<str> = this.editor.read(cx).value().as_ref().into();
+                preview.update(cx, |preview, cx| preview.set_text(text, cx));
+            });
+        }));
+    }
+
+    fn on_preview(&mut self, event: &PreviewEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            PreviewEvent::OpenPath(path, line) => {
+                // After this update: opening reads the open files, this one
+                // among them.
+                if let Some(open) = self.open_location.clone() {
+                    let (path, line) = (path.clone(), line.unwrap_or(0));
+                    window.defer(cx, move |window, cx| open(path, line, window, cx));
+                }
+            }
+            PreviewEvent::ReplaceText(text) => self.replace_text(text.clone(), window, cx),
+        }
+    }
+
+    /// Replaces the whole text as an edit (unsaved until ⌘S), keeping the
+    /// cursor's line.
+    pub fn replace_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.content != Content::Text || self.not_utf8 {
+            return;
+        }
+        if self.editor.read(cx).value().as_ref() == text.as_str() {
+            return;
+        }
+        let line = self.editor.read(cx).cursor_position().line;
+        // Placing the cursor also focuses the editor: only when it is on
+        // screen, or the hidden editor would take the keys from the view
+        // that made the change.
+        let shown = self.shows_editor();
+        self.editor.update(cx, |editor, cx| {
+            editor.set_value(text, window, cx);
+            if shown {
+                editor.set_cursor_position(Position { line, character: 0 }, window, cx);
+            }
+        });
+        self.dirty = true;
+        self.schedule_sync(cx);
+        self.schedule_keep(cx);
+        self.update_preview(window, cx);
+        cx.notify();
+    }
+
+    /// Formats (`indent`) or minifies (`None`) a JSON file's text.
+    fn reformat_json(
+        &mut self,
+        indent: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_kit::component::WindowExt as _;
+        use gpui_kit::component::notification::Notification;
+        let text = self.editor.read(cx).value().to_string();
+        let result = match indent {
+            Some(indent) => ph_preview::json::format(&text, indent),
+            None => ph_preview::json::minify(&text),
+        };
+        match result {
+            Ok(text) => self.replace_text(text, window, cx),
+            Err(err) => window
+                .push_notification(Notification::warning(format!("Not valid JSON: {err}")), cx),
+        }
+    }
+
+    /// Stops a playing video or sound (its tab went to the back).
+    pub fn pause_media(&mut self, cx: &mut Context<Self>) {
+        if let Content::Media(view) = &self.content {
+            view.update(cx, |view, cx| view.pause(cx));
+        }
     }
 
     /// Keeps the unsaved text on disk a second after the last change, so a
@@ -797,9 +1106,14 @@ impl FileView {
         self.load(window, cx);
     }
 
-    fn save(&mut self, _: &SaveFile, _: &mut Window, cx: &mut Context<Self>) {
+    fn save(&mut self, _: &SaveFile, window: &mut Window, cx: &mut Context<Self>) {
         if self.content != Content::Text || self.not_utf8 {
             return;
+        }
+        // The rich editor's last keystrokes, before its timer.
+        if let (Some(rich), View::Rich) = (self.rich.clone(), self.view) {
+            let text = rich.update(cx, |rich, cx| rich.text(cx));
+            self.replace_text(text, window, cx);
         }
         let text = self.editor.read(cx).value().to_string();
         let path = self.absolute.clone();
@@ -877,6 +1191,35 @@ impl Focusable for FileView {
 /// The editor's right-click menu: asking the agent first (when there is a
 /// chat), then code navigation (with a language server), then the usual
 /// editing items.
+/// A link to lines `start`–`end` of `path` at `commit` on the host.
+fn line_link(
+    repo: &ph_git::remote::HostedRepo,
+    commit: &str,
+    path: &str,
+    start: u32,
+    end: u32,
+) -> String {
+    let lines = if start == end {
+        format!("L{start}")
+    } else if repo.host.contains("gitlab") {
+        format!("L{start}-{end}")
+    } else {
+        format!("L{start}-L{end}")
+    };
+    let blob = if repo.host.contains("gitlab") {
+        "-/blob"
+    } else {
+        "blob"
+    };
+    format!(
+        "https://{}/{}/{}/{blob}/{commit}/{}#{lines}",
+        repo.host,
+        repo.owner,
+        repo.name,
+        ph_ui::platform::url_path(path)
+    )
+}
+
 fn editor_menu(
     mut menu: gpui_kit::component::native_menu::NativeMenu,
     asks: bool,
@@ -885,48 +1228,84 @@ fn editor_menu(
     use gpui_kit::component::input as edit;
     if asks {
         menu = menu
+            .menu("Add to Chat", Box::new(AskAboutSelection))
             .menu("Explain", Box::new(ExplainSelection))
             .menu("Find Bugs", Box::new(FindBugsInSelection))
             .menu("Write Tests", Box::new(WriteTestsForSelection))
-            .menu("Ask About Selection…", Box::new(AskAboutSelection))
             .separator();
     }
-    menu.menu_with_disabled(
-        "Go to Definition",
-        !navigates,
-        Box::new(edit::GoToDefinition),
-    )
-    .menu_with_disabled("Find References", !navigates, Box::new(FindReferences))
-    .menu_with_disabled("Rename Symbol", !navigates, Box::new(RenameSymbol))
-    .separator()
-    .menu("Cut", Box::new(edit::Cut))
-    .menu("Copy", Box::new(edit::Copy))
-    .menu("Paste", Box::new(edit::Paste))
-    .separator()
-    .menu("Select All", Box::new(edit::SelectAll))
+    menu = menu
+        .menu_with_disabled(
+            "Go to Definition",
+            !navigates,
+            Box::new(edit::GoToDefinition),
+        )
+        .menu_with_disabled("Find References", !navigates, Box::new(FindReferences))
+        .menu_with_disabled("Rename Symbol", !navigates, Box::new(RenameSymbol))
+        .menu_with_disabled(
+            "Code Actions",
+            !navigates,
+            Box::new(edit::ToggleCodeActions),
+        )
+        .separator()
+        .menu("Undo", Box::new(edit::Undo))
+        .menu("Redo", Box::new(edit::Redo))
+        .separator()
+        .menu("Cut", Box::new(edit::Cut))
+        .menu("Copy", Box::new(edit::Copy))
+        .menu("Paste", Box::new(edit::Paste))
+        .menu("Copy as Markdown", Box::new(CopyAsMarkdown))
+        .menu("Copy Reference (path:lines)", Box::new(CopyReference));
+    if asks {
+        menu = menu.menu("Copy Link to Lines", Box::new(CopyLinkToLines));
+    }
+    menu = menu
+        .separator()
+        .menu("Find…", Box::new(edit::Search))
+        .menu("Replace…", Box::new(edit::Replace))
+        .menu("Select All", Box::new(edit::SelectAll));
+    if asks {
+        menu = menu
+            .separator()
+            .menu("Copy Path", Box::new(CopyFilePath))
+            .menu("Copy Relative Path", Box::new(CopyFileRelativePath))
+            .menu(ph_ui::platform::reveal_label(), Box::new(RevealFile))
+            .menu("Reveal in Files", Box::new(RevealInFiles));
+    }
+    menu
 }
 
 impl Render for FileView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.content {
-            Content::Text => Editor::new(&self.editor)
-                .readonly(self.not_utf8)
-                .bordered(false)
-                .size_full()
-                .context_menu({
-                    let asks = self.asks;
-                    let navigates = self
-                        .lsp
-                        .as_ref()
-                        .is_some_and(|lsp| lsp.read(cx).is_open(&self.absolute));
-                    move |menu, _, _| editor_menu(menu, asks, navigates)
-                })
-                .into_any_element(),
-            Content::Loading => div().size_full().into_any_element(),
+            Content::Text
+                if self.view == View::Rich && self.shows_preview() && self.rich.is_some() =>
+            {
+                self.rich
+                    .clone()
+                    .map(|rich| rich.into_any_element())
+                    .unwrap_or_else(|| div().into_any_element())
+            }
+            Content::Text if self.shows_preview() && self.preview.is_some() => {
+                let preview = self.preview.clone().map(|p| p.into_any_element());
+                let editor = self.render_editor(cx);
+                match self.view {
+                    View::Split => h_flex()
+                        .size_full()
+                        .child(div().flex_1().min_w_0().h_full().child(editor))
+                        .child(div().w_px().h_full().bg(cx.theme().border))
+                        .child(div().flex_1().min_w_0().h_full().children(preview))
+                        .into_any_element(),
+                    _ => div().size_full().children(preview).into_any_element(),
+                }
+            }
+            Content::Text => self.render_editor(cx),
+            Content::Media(view) => view.clone().into_any_element(),
             Content::Binary => EmptyState::new("Binary file")
                 .icon(Icons::File)
                 .description("This file is not text, so it is not shown here.")
                 .into_any_element(),
+            Content::Loading => div().size_full().into_any_element(),
             Content::Large(view) => view.clone().into_any_element(),
             // Briefly, until the viewer is made.
             Content::TooLarge(_) => div().size_full().into_any_element(),
@@ -936,10 +1315,13 @@ impl Render for FileView {
                 .into_any_element(),
         };
         let body = match (&self.blame, self.show_blame, &self.content) {
-            (Some(blamed), true, Content::Text) => blame_view::render(blamed.clone(), cx),
+            (Some(blamed), true, Content::Text) if !self.shows_preview() => {
+                blame_view::render(blamed.clone(), cx)
+            }
             _ => body,
         };
-        let is_text = self.content == Content::Text;
+        // The cursor's line and blame belong to the editor.
+        let is_text = self.content == Content::Text && self.shows_editor();
         v_flex()
             .key_context(FILE_VIEW_CONTEXT)
             .on_action(cx.listener(Self::save))
@@ -950,10 +1332,99 @@ impl Render for FileView {
             .on_action(cx.listener(Self::explain_selection))
             .on_action(cx.listener(Self::find_bugs_in_selection))
             .on_action(cx.listener(Self::write_tests_for_selection))
+            .on_action(cx.listener(Self::copy_as_markdown))
+            .on_action(cx.listener(Self::copy_reference))
+            .on_action(cx.listener(Self::copy_link_to_lines))
+            .on_action(cx.listener(|this, _: &CopyFilePath, _, cx| {
+                let path = this.absolute.to_string_lossy().into_owned();
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path));
+            }))
+            .on_action(cx.listener(|this, _: &CopyFileRelativePath, _, cx| {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                    this.relative.to_string(),
+                ));
+            }))
+            .on_action(cx.listener(|this, _: &RevealFile, _, cx| cx.reveal_path(&this.absolute)))
+            .on_action(
+                cx.listener(|_, _: &RevealInFiles, _, cx| cx.emit(FileViewEvent::RevealInTree)),
+            )
             .size_full()
             .when(self.asks, |this| this.child(self.render_toolbar(cx)))
             .child(div().flex_1().min_h_0().child(body))
             .when(is_text, |this| this.child(self.render_footer(cx)))
+    }
+}
+
+impl FileView {
+    /// The code editor.
+    fn render_editor(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let markdown = self.kind == Kind::Markdown;
+        match &self.content {
+            Content::Text => div()
+                .size_full()
+                .when(markdown, |this| {
+                    this.capture_key_down(cx.listener(Self::continue_markdown_list))
+                })
+                .child(
+                    Editor::new(&self.editor)
+                        .readonly(self.not_utf8)
+                        .bordered(false)
+                        .size_full()
+                        .context_menu({
+                            let asks = self.asks;
+                            let navigates = self
+                                .lsp
+                                .as_ref()
+                                .is_some_and(|lsp| lsp.read(cx).is_open(&self.absolute));
+                            move |menu, _, _| editor_menu(menu, asks, navigates)
+                        }),
+                )
+                .into_any_element(),
+            _ => div().into_any_element(),
+        }
+    }
+
+    /// Enter in a Markdown list item starts the next item; in an empty one,
+    /// ends the list.
+    fn continue_markdown_list(
+        &mut self,
+        event: &gpui_kit::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keystroke = &event.keystroke;
+        if keystroke.key != "enter" || keystroke.modifiers.modified() || self.not_utf8 {
+            return;
+        }
+        // Not the find bar's Enter, only the text's.
+        if !self.editor.read(cx).focus_handle(cx).is_focused(window) {
+            return;
+        }
+        let editor = self.editor.read(cx);
+        let range = editor.selected_range();
+        if !range.is_empty() {
+            return;
+        }
+        let text = editor.value();
+        let cursor = range.start.min(text.len());
+        let line_start = text[..cursor].rfind('\n').map_or(0, |at| at + 1);
+        // Only at the end of the line.
+        if !text[cursor..].starts_with('\n') && cursor != text.len() {
+            return;
+        }
+        let Some(next) = ph_preview::rich::blocks::continue_list(&text[line_start..cursor]) else {
+            return;
+        };
+        self.editor.update(cx, |editor, cx| match next {
+            ph_preview::rich::blocks::Continue::Item(prefix) => {
+                editor.insert(format!("\n{prefix}"), window, cx);
+            }
+            ph_preview::rich::blocks::Continue::End => {
+                editor.set_selected_range(line_start..cursor, cx);
+                editor.insert("", window, cx);
+            }
+        });
+        cx.stop_propagation();
     }
 }
 
@@ -996,6 +1467,8 @@ impl FileView {
             .when_some(self.blame_error.clone(), |this, error| {
                 this.child(div().min_w_0().truncate().child(error))
             })
+            .children(self.render_kind_actions(cx))
+            .children(self.render_view_switch(cx))
             .when(
                 self.lsp
                     .as_ref()
@@ -1026,56 +1499,154 @@ impl FileView {
                 },
             )
             // Asking and blame work on the editor's text.
-            .when(self.content == Content::Text, |this| {
-                this.when(self.asks, |this| {
-                    this.child(
-                        Button::new("ask-about-selection")
-                            .ghost()
-                            .xsmall()
-                            .icon(ph_ui::Icons::Sparkles)
-                            .label("Ask")
-                            .tooltip("Ask the agent about the selected code (⌘L)")
-                            .menu(gpui_kit::Anchor::TopRight, {
-                                let view = cx.weak_entity();
-                                move |menu, _, _| {
-                                    AskIntent::ALL.iter().fold(menu, |menu, intent| {
-                                        let (view, intent) = (view.clone(), *intent);
-                                        menu.item(
-                                            gpui_kit::component::menu::PopupMenuItem::new(
-                                                intent.label(),
-                                            )
-                                            .on_click(
-                                                move |_, _, cx| {
+            .when(
+                self.content == Content::Text && self.shows_editor(),
+                |this| {
+                    this.when(self.asks, |this| {
+                        this.child(
+                            Button::new("ask-about-selection")
+                                .ghost()
+                                .xsmall()
+                                .icon(ph_ui::Icons::Sparkles)
+                                .label("Ask")
+                                .tooltip("Ask the agent about the selected code (⌘L)")
+                                .menu(gpui_kit::Anchor::TopRight, {
+                                    let view = cx.weak_entity();
+                                    move |menu, _, _| {
+                                        AskIntent::ALL.iter().fold(menu, |menu, intent| {
+                                            let (view, intent) = (view.clone(), *intent);
+                                            menu.item(
+                                                gpui_kit::component::menu::PopupMenuItem::new(
+                                                    intent.label(),
+                                                )
+                                                .on_click(move |_, _, cx| {
                                                     _ = view.update(cx, |view, cx| {
                                                         view.ask(intent, cx)
                                                     });
-                                                },
-                                            ),
-                                        )
-                                    })
-                                }
-                            }),
+                                                }),
+                                            )
+                                        })
+                                    }
+                                }),
+                        )
+                    })
+                    .child(
+                        Button::new("toggle-blame")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icons::GitBranch)
+                            .label(if self.show_blame {
+                                "Hide blame"
+                            } else {
+                                "Blame"
+                            })
+                            .selected(self.show_blame)
+                            .tooltip(if self.show_blame {
+                                "Hide blame"
+                            } else {
+                                "Blame: who last changed each line"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_blame(cx))),
                     )
-                })
-                .child(
-                    Button::new("toggle-blame")
+                },
+            )
+    }
+
+    /// Source, preview, both (or rich, for Markdown): a segmented switch.
+    fn render_view_switch(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let views = self.kind.views();
+        if self.content != Content::Text || views.len() < 2 {
+            return None;
+        }
+        let theme = cx.theme();
+        Some(
+            h_flex()
+                .flex_none()
+                .p_0p5()
+                .gap_0p5()
+                .rounded(theme.radius)
+                .bg(theme.secondary)
+                .children(views.iter().map(|view| {
+                    let (view, current) = (*view, *view == self.view);
+                    Button::new(SharedString::from(format!("view-{}", view.key())))
                         .ghost()
                         .xsmall()
-                        .icon(Icons::GitBranch)
-                        .label(if self.show_blame {
-                            "Hide blame"
-                        } else {
-                            "Blame"
+                        .label(view.label())
+                        .selected(current)
+                        .tooltip(match view {
+                            View::Source => "The file's text",
+                            View::Preview => "The file rendered",
+                            View::Split => "The text and the rendering side by side",
+                            View::Rich => "Edit the document as formatted text",
                         })
-                        .selected(self.show_blame)
-                        .tooltip(if self.show_blame {
-                            "Hide blame"
-                        } else {
-                            "Blame: who last changed each line"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_blame(cx))),
-                )
-            })
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.set_view(view, window, cx)),
+                        )
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// What the kind of file offers: formatting JSON, opening HTML in the
+    /// browser, a media file in its own app.
+    fn render_kind_actions(&self, cx: &mut Context<Self>) -> Vec<gpui_kit::AnyElement> {
+        let mut actions = Vec::new();
+        let text = self.content == Content::Text;
+        if text && self.kind == Kind::Json && self.view != View::Preview && !self.not_utf8 {
+            actions.push(
+                Button::new("json-format")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icons::Braces)
+                    .label("Format")
+                    .tooltip("Indent the JSON two spaces a level")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.reformat_json(Some(2), window, cx)),
+                    )
+                    .into_any_element(),
+            );
+            actions.push(
+                Button::new("json-minify")
+                    .ghost()
+                    .xsmall()
+                    .label("Minify")
+                    .tooltip("Put the JSON on one line")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.reformat_json(None, window, cx)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if text && self.kind == Kind::Html {
+            let path = self.absolute.clone();
+            actions.push(
+                Button::new("html-browser")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icons::Globe)
+                    .label("Open in Browser")
+                    .tooltip("Show the page in the workspace's browser")
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(FileViewEvent::OpenInBrowser(path.clone()))
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if matches!(self.content, Content::Media(_))
+            && ph_ui::platform::opens_safely(&self.absolute)
+        {
+            let path = self.absolute.clone();
+            actions.push(
+                Button::new("open-default-app")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::ExternalLink)
+                    .label("Open in Default App")
+                    .on_click(move |_, _, cx| cx.open_with_system(&path))
+                    .into_any_element(),
+            );
+        }
+        actions
     }
 
     /// Cursor position, and the cursor line's last change when known.
@@ -1212,6 +1783,24 @@ fn word_at(text: &str, offset: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn links_to_lines_on_the_host() {
+        let repo = |host: &str| ph_git::remote::HostedRepo {
+            remote: "origin".into(),
+            host: host.into(),
+            owner: "acme".into(),
+            name: "app".into(),
+        };
+        assert_eq!(
+            line_link(&repo("github.com"), "abc", "docs/My #1 Notes.md", 3, 5),
+            "https://github.com/acme/app/blob/abc/docs/My%20%231%20Notes.md#L3-L5"
+        );
+        assert_eq!(
+            line_link(&repo("gitlab.com"), "abc", "a.rs", 7, 7),
+            "https://gitlab.com/acme/app/-/blob/abc/a.rs#L7"
+        );
+    }
 
     #[test]
     fn finds_the_word_at_the_cursor() {

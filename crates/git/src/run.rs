@@ -13,6 +13,11 @@ use anyhow::{Context as _, Result, bail};
 /// execute code from it.
 const SAFE_CONFIG: &[&str] = &["-c", "core.fsmonitor=false", "-c", "diff.external="];
 
+/// Put first in the arguments of a call naming one file: the path is that
+/// name, never a pattern (discarding a file named `*.rs` touches only it).
+/// Not for every call: `git stash pop` fails with it.
+pub(crate) const LITERAL: &str = "--literal-pathspecs";
+
 /// Runs `git args…` in `root` and returns stdout.
 pub fn git(root: &Path, args: &[&str]) -> Result<String> {
     let mut command = command(root);

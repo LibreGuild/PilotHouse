@@ -204,12 +204,16 @@ impl Panel for DockPane {
     ) -> gpui_kit::component::menu::PopupMenu {
         use gpui_kit::component::menu::PopupMenuItem;
         let (pane, screen) = (self.pane, self.screen.clone());
-        let here = screen
+        let (here, with_chat) = screen
             .upgrade()
-            .and_then(|screen| screen.read(cx).panes.placement(pane, cx));
-        MoveTo::ALL
+            .map(|screen| {
+                let panes = &screen.read(cx).panes;
+                (panes.placement(pane, cx), panes.is_with_chat(pane, cx))
+            })
+            .unwrap_or_default();
+        let menu = MoveTo::ALL
             .into_iter()
-            .filter(|to| to.applies(pane, here))
+            .filter(|to| to.applies(pane, here, with_chat))
             .fold(menu.separator(), |menu, to| {
                 let screen = screen.clone();
                 menu.item(
@@ -217,7 +221,12 @@ impl Panel for DockPane {
                         _ = screen.update(cx, |screen, cx| screen.move_pane(pane, to, window, cx));
                     }),
                 )
-            })
+            });
+        menu.separator().item(
+            PopupMenuItem::new("Reset layout").on_click(move |_, window, cx| {
+                _ = screen.update(cx, |screen, cx| screen.reset_layout(window, cx));
+            }),
+        )
     }
 
     /// Zoom sits in the pane's ⋯ menu (and ⌘⇧J), not as a button on
@@ -237,12 +246,15 @@ pub(crate) enum MoveTo {
     Left,
     Right,
     Bottom,
+    /// Into the chat's tab group.
+    WithChat,
     BesideChat,
     BelowChat,
 }
 
 impl MoveTo {
-    const ALL: [MoveTo; 5] = [
+    const ALL: [MoveTo; 6] = [
+        MoveTo::WithChat,
         MoveTo::BesideChat,
         MoveTo::BelowChat,
         MoveTo::Left,
@@ -255,6 +267,7 @@ impl MoveTo {
             MoveTo::Left => "Move to the left side",
             MoveTo::Right => "Move to the right side",
             MoveTo::Bottom => "Move to the bottom",
+            MoveTo::WithChat => "Move into the chat's tabs",
             MoveTo::BesideChat => "Move beside the chat",
             MoveTo::BelowChat => "Move below the chat",
         }
@@ -265,16 +278,17 @@ impl MoveTo {
             MoveTo::Left => Some(DockPlacement::Left),
             MoveTo::Right => Some(DockPlacement::Right),
             MoveTo::Bottom => Some(DockPlacement::Bottom),
-            MoveTo::BesideChat | MoveTo::BelowChat => None,
+            MoveTo::WithChat | MoveTo::BesideChat | MoveTo::BelowChat => None,
         }
     }
 
-    /// Offered for `pane` docked at `here`: not where it already is, and
-    /// the chat is not moved next to itself.
-    fn applies(self, pane: Pane, here: Option<DockPlacement>) -> bool {
+    /// Offered for `pane` docked at `here` (`with_chat`: in the chat's tab
+    /// group): not where it already is, and the chat is not moved next to
+    /// itself.
+    fn applies(self, pane: Pane, here: Option<DockPlacement>, with_chat: bool) -> bool {
         match self.dock() {
             Some(dock) => here != Some(dock),
-            None => pane != Pane::Chat,
+            None => pane != Pane::Chat && !(self == MoveTo::WithChat && with_chat),
         }
     }
 }
@@ -368,6 +382,15 @@ impl Panes {
         })
     }
 
+    /// Whether `pane` is a tab of the chat's group.
+    pub(super) fn is_with_chat(&self, pane: Pane, cx: &App) -> bool {
+        let Some(tree) = self.area.read(cx).layout(DockPlacement::Center) else {
+            return false;
+        };
+        let chat = tree.find_panel_node(self.id(Pane::Chat));
+        chat.is_some() && chat == tree.find_panel_node(self.id(pane))
+    }
+
     /// Whether `pane` is on screen: docked, in an open dock.
     pub(super) fn is_docked_open(&self, pane: Pane, cx: &App) -> bool {
         match self.placement(pane, cx) {
@@ -377,8 +400,10 @@ impl Panes {
         }
     }
 
-    /// The layout a workspace starts with: the editor and the chat side by
-    /// side, the tool in view docked on the right.
+    /// The layout a workspace starts with: the chat and the editor as tabs
+    /// of one group (opening a file brings the editor forward), the tool in
+    /// view docked on the right. Also what *Reset layout* goes back to, so
+    /// any other dock goes away.
     pub(super) fn set_default(
         &self,
         tool: ContextTab,
@@ -386,21 +411,22 @@ impl Panes {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let center = DockLayout::h_split()
-            .child(
-                DockLayout::tabs().panel_view(self.handle(Pane::Editor), cx),
-                None,
-            )
-            .child(
-                DockLayout::tabs().panel_view(self.handle(Pane::Chat), cx),
-                None,
-            );
+        let center = DockLayout::tabs()
+            .panel_view(self.handle(Pane::Chat), cx)
+            .panel_view(self.handle(Pane::Editor), cx);
         let right = DockLayout::tabs().panel_view(self.handle(Pane::Tool(tool)), cx);
         self.area.update(cx, |area, cx| {
+            if area.is_zoomed() {
+                area.set_zoomed_out(window, cx);
+            }
+            for placement in [DockPlacement::Left, DockPlacement::Bottom] {
+                area.remove_dock(placement, window, cx);
+            }
             area.set_center(center, window, cx);
             area.set_dock(DockPlacement::Right, right, window, cx);
             area.set_dock_size(DockPlacement::Right, dock_size(window), window, cx);
-            if !open {
+            // A replaced dock keeps its open state.
+            if area.is_dock_open(DockPlacement::Right) != open {
                 area.toggle_dock(DockPlacement::Right, window, cx);
             }
         });
@@ -489,21 +515,24 @@ impl Panes {
                     else {
                         return;
                     };
-                    let placement = if to == MoveTo::BesideChat {
-                        gpui_kit::component::Placement::Right
-                    } else {
-                        gpui_kit::component::Placement::Bottom
-                    };
-                    area.move_panel(
-                        id,
-                        InsertTarget::Split {
+                    let target = match to {
+                        MoveTo::WithChat => InsertTarget::Tabs {
                             node,
-                            placement,
+                            ix: None,
+                            activate: true,
+                        },
+                        MoveTo::BesideChat => InsertTarget::Split {
+                            node,
+                            placement: gpui_kit::component::Placement::Right,
                             size: None,
                         },
-                        window,
-                        cx,
-                    );
+                        _ => InsertTarget::Split {
+                            node,
+                            placement: gpui_kit::component::Placement::Bottom,
+                            size: None,
+                        },
+                    };
+                    area.move_panel(id, target, window, cx);
                 }
                 Some(dock) => {
                     // Into the dock's first group, or a new dock.

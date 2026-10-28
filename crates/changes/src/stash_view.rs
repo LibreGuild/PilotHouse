@@ -16,8 +16,8 @@ use ph_git::stash::{self, Stash};
 use ph_git::{FileChange, parse_diff};
 
 use crate::branch_picker::ago;
-use crate::diff_view;
 use crate::repo::Repo;
+use ph_preview::diff as diff_view;
 
 pub struct StashView {
     repo: Entity<Repo>,

@@ -216,16 +216,10 @@ impl ChatPanel {
         let mode = crate::view_mode::ViewMode::current(cx);
         thread.update(cx, |thread, cx| thread.set_view_mode(mode, cx));
         let scroller = thread.read(cx).scroller().clone();
-        // Rows space themselves by what they follow (see `entry_view`), so
-        // the list adds no gap of its own.
-        let mut row_style = gpui_kit::StyleRefinement::default();
-        row_style.padding.bottom = Some(px(0.).into());
-        MessageScroller::new("chat-transcript", scroller, move |ix, _, cx| {
+        TranscriptList::new("chat-transcript", scroller, move |ix, _, cx| {
             thread.update(cx, |thread, cx| thread.prepare_entry(ix, cx));
             render_entry(&thread, ix, cx)
         })
-        .with_row_style(row_style)
-        .size_full()
         .into_any_element()
     }
 
@@ -251,10 +245,18 @@ impl ChatPanel {
                 context.title.clone().into(),
                 context.subtitle.clone().into(),
             ),
-            None => (
-                "What are we building?".into(),
-                format!("{} in {}", agent.name, self.project.name).into(),
-            ),
+            None => ("What are we building?".into(), {
+                // A chat started in one of the workspace's folders says
+                // which.
+                let folder = self.active.read(cx).folder();
+                let place = match folder.file_name() {
+                    Some(name) if folder != self.project.path.as_path() => {
+                        format!("{} › {}", self.project.name, name.to_string_lossy())
+                    }
+                    _ => self.project.name.clone(),
+                };
+                format!("{} in {place}", agent.name).into()
+            }),
         };
         let panel = cx.weak_entity();
         if !setup::ready(&checks) {

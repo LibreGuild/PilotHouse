@@ -29,10 +29,10 @@ use ph_git::{self as git, ApplyMode, FileChange, WorkingChanges};
 
 use crate::commit_box::{CommitBox, Writer};
 use crate::conflict_view::{ConflictEvent, ConflictView};
-use crate::diff_view;
 use crate::history_view::HistoryView;
 use crate::repo::Repo;
 use crate::stash_view::StashView;
+use ph_preview::diff as diff_view;
 /// How many discards can be undone.
 const UNDO_DEPTH: usize = 20;
 

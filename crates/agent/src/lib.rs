@@ -43,6 +43,7 @@ pub mod skills;
 mod thread;
 pub mod tools_view;
 mod transcript;
+mod transcript_scroll;
 pub mod usage_meter;
 pub mod view_mode;
 

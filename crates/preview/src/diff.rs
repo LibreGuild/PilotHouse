@@ -1,5 +1,5 @@
-//! Read-only diff rendering shared by the review list, commit details and
-//! stashes: lines tinted by kind, long hunks cut short.
+//! Read-only diffs, shared by `.diff` files, the Git tab's review list,
+//! commit details and stashes: lines tinted by kind, long hunks cut short.
 
 use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -97,4 +97,42 @@ pub fn file_diff(file: &FileChange, cx: &App) -> AnyElement {
                 .children(hunk_lines(hunk, cx))
         }))
         .into_any_element()
+}
+
+/// A `.diff` or `.patch` file: each file's changes, tinted.
+#[derive(Default)]
+pub struct DiffPreview {
+    files: Vec<FileChange>,
+}
+
+impl DiffPreview {
+    pub fn set_text(&mut self, text: &str, cx: &mut gpui_kit::Context<Self>) {
+        self.files = ph_git::parse_diff(text);
+        cx.notify();
+    }
+}
+
+impl gpui_kit::Render for DiffPreview {
+    fn render(
+        &mut self,
+        _: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::Context<Self>,
+    ) -> impl IntoElement {
+        use gpui_kit::{InteractiveElement as _, StatefulInteractiveElement as _};
+        if self.files.is_empty() {
+            return crate::notice("No changes in this patch.", cx);
+        }
+        div()
+            .id("diff-preview")
+            .size_full()
+            .overflow_y_scroll()
+            .bg(cx.theme().background)
+            .p_3()
+            .child(
+                v_flex()
+                    .gap_3()
+                    .children(self.files.iter().map(|file| file_diff(file, cx))),
+            )
+            .into_any_element()
+    }
 }
