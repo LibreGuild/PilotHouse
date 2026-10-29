@@ -19,11 +19,12 @@ The look is a calm graphite, cool rather than warm: near-black with a faint blue
 | Hairlines | `border` | every divider and outline | emphasis |
 | Text | `foreground`, `muted_foreground` | text; secondary text, captions, paths | |
 | The one action | `primary` | the single affirmative button of a surface (Send, Commit, Save): near-white on dark, near-black on light | decoration, secondary actions |
-| Accent | `ring`, `selection`, `caret`, `link`, `info`: signal magenta (`#ff5aa8` dark, `#c2186e` light), the icon's colour; not a setting | focus, text selection, links, "working" spinners, progress | backgrounds, icons for decoration, selected tabs |
+| Accent | `ring`, `selection`, `info`, filled info buttons: a plain blue as in VS Code (`#0078d4` dark, `#005fb8` light); `link` is `#4daafc` on dark; not a setting. The logo's violet is the logo's only, never the UI's (focus and links stay the accent blue) | focus, text selection, links, "working" spinners, progress | backgrounds, icons for decoration, selected tabs |
 | State | `success`, `warning`, `danger` | done / needs you / failed, git added / modified / deleted, errors | anything that is not state |
 
 - A workspace's colour is a small mark beside its name, never a wash over chrome.
 - Agents' brand marks identify the agent, at 14–18 px, and nowhere else.
+- **The mark**: a white mast and pennant, the pennant the P's bowl (a signal flag: someone is steering), on a violet glass tile (`#A78BFA` → `#6D28D9` → `#3B0FA8`, a soft pink glow at the top right). Sources in `crates/app/assets/icon/` (`PilotHouse.svg` on Apple's icon grid, `PilotHouse-tile.svg` edge to edge). The title bar shows the tile at 20 px.
 - To tint, mix an existing token (`token.opacity(0.12)`), never a new hex.
 
 ## 2. Type

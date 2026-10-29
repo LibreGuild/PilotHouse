@@ -54,6 +54,8 @@ pub struct Shared {
     pub evidence: String,
     #[serde(rename = "x", default, skip_serializing_if = "String::is_empty")]
     pub suggestion: String,
+    #[serde(rename = "sc", default, skip_serializing_if = "String::is_empty")]
+    pub suggested_code: String,
     #[serde(rename = "st")]
     pub status: String,
     #[serde(rename = "by", default, skip_serializing_if = "String::is_empty")]
@@ -102,6 +104,7 @@ impl Shared {
             body: finding.body.clone(),
             evidence: cut(&finding.evidence, 1_200),
             suggestion: cut(&finding.suggestion, 1_200),
+            suggested_code: cut(unfenced(&finding.suggested_code), 1_200),
             status: finding.status.clone(),
             status_by: finding.status_by.clone(),
             reason: finding.reason.clone(),
@@ -128,6 +131,7 @@ impl Shared {
             body: self.body.clone(),
             evidence: self.evidence.clone(),
             suggestion: self.suggestion.clone(),
+            suggested_code: self.suggested_code.clone(),
             status: self.status.clone(),
             status_by: self.status_by.clone(),
             reason: self.reason.clone(),
@@ -141,6 +145,57 @@ impl Shared {
             ..Finding::default()
         }
     }
+}
+
+/// A finding's fix as Markdown: what to do (a paragraph of its own when it
+/// runs over several lines), then the replacement code, fenced, with `kind`
+/// after the fence (`suggestion` makes it GitHub's one-click suggestion).
+pub fn fix_markdown(finding: &Finding, kind: &str) -> String {
+    let mut md = String::new();
+    let text = finding.suggestion.trim();
+    if text.contains('\n') {
+        md.push_str(&format!("**Fix:**\n\n{text}"));
+    } else if !text.is_empty() {
+        md.push_str(&format!("**Fix:** {text}"));
+    }
+    let code = unfenced(&finding.suggested_code);
+    if !code.trim().is_empty() {
+        let fence = fence_for(code);
+        if !md.is_empty() {
+            md.push_str("\n\n");
+        }
+        md.push_str(&format!("{fence}{kind}\n{}\n{fence}", code.trim_end()));
+    }
+    md
+}
+
+/// `code` without the Markdown fence an agent may have put around it (the
+/// replacement goes in a fence of ours: one inside it would become code).
+pub fn unfenced(code: &str) -> &str {
+    let lines = code.trim_matches(|c| c == '\n' || c == '\r');
+    let trimmed = lines.trim();
+    for fence in ["```", "~~~"] {
+        if trimmed.starts_with(fence)
+            && trimmed.ends_with(fence)
+            && let Some(newline) = trimmed.find('\n')
+            && newline < trimmed.len() - fence.len()
+        {
+            return trimmed[newline + 1..trimmed.len() - fence.len()].trim_end();
+        }
+    }
+    lines
+}
+
+/// A code fence longer than any run of backticks in `code`.
+fn fence_for(code: &str) -> String {
+    let longest = code.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    "`".repeat((longest + 1).max(3))
+}
+
+/// `text` with every line after the first indented by `indent`, to stay in
+/// a list item.
+fn indented(text: &str, indent: &str) -> String {
+    text.replace('\n', &format!("\n{indent}"))
 }
 
 fn cut(text: &str, max: usize) -> String {
@@ -308,9 +363,16 @@ fn render_open(finding: &Finding, summary: &Summary, brief: bool) -> String {
             "Details on the line: [comment]({}/pull/{}#discussion_r{comment}).\n\n",
             summary.repo_url, summary.number
         ));
-    } else if !brief && !finding.body.trim().is_empty() {
-        md.push_str(&cut(finding.body.trim(), 1_500));
-        md.push_str("\n\n");
+    } else if !brief {
+        if !finding.body.trim().is_empty() {
+            md.push_str(&cut(finding.body.trim(), 1_500));
+            md.push_str("\n\n");
+        }
+        let fix = fix_markdown(finding, "");
+        if !fix.is_empty() {
+            md.push_str(&cut(&fix, 2_500));
+            md.push_str("\n\n");
+        }
     }
     if !finding.note.is_empty() && summary.round > 1 {
         md.push_str(&format!("*{}*\n\n", finding.note.trim()));
@@ -354,13 +416,13 @@ fn data_block(summary: &Summary, shown: &str) -> String {
             finding.body.clear();
             finding.evidence.clear();
             finding.suggestion.clear();
-        } else if let Some(finding) = shared
-            .findings
-            .iter_mut()
-            .find(|f| !f.evidence.is_empty() || !f.suggestion.is_empty())
-        {
+            finding.suggested_code.clear();
+        } else if let Some(finding) = shared.findings.iter_mut().find(|f| {
+            !f.evidence.is_empty() || !f.suggestion.is_empty() || !f.suggested_code.is_empty()
+        }) {
             finding.evidence.clear();
             finding.suggestion.clear();
+            finding.suggested_code.clear();
         } else if shared.findings.iter().any(|f| f.status != "open") {
             let at = shared
                 .findings
@@ -473,8 +535,9 @@ pub fn markdown(title: &str, summary: &str, findings: &[Finding]) -> String {
                 finding.body.trim().replace('\n', "\n  ")
             ));
         }
-        if !finding.suggestion.trim().is_empty() {
-            md.push_str(&format!("  **Fix:** {}\n", finding.suggestion.trim()));
+        let fix = fix_markdown(finding, "");
+        if !fix.is_empty() {
+            md.push_str(&format!("\n  {}\n", indented(&fix, "  ")));
         }
     }
     md
@@ -522,6 +585,43 @@ mod tests {
             first_round: 1,
             ..Finding::default()
         }
+    }
+
+    #[test]
+    fn the_fix_is_posted_with_its_code_and_keeps_lists_whole() {
+        let mut open = finding("F1", "major", "open");
+        open.suggestion = "Check the index first.\nThen return early.".into();
+        open.suggested_code = "```rust\n    if i >= n {\n        return;\n    }\n```".into();
+        // An agent's own fence is dropped; the indentation stays.
+        assert_eq!(
+            unfenced(&open.suggested_code),
+            "    if i >= n {\n        return;\n    }"
+        );
+        assert_eq!(unfenced("\nlet a = 1;\n"), "let a = 1;");
+        let fix = fix_markdown(&open, "suggestion");
+        assert!(fix.starts_with("**Fix:**\n\nCheck the index first.\nThen return early."));
+        assert!(fix.ends_with("```suggestion\n    if i >= n {\n        return;\n    }\n```"));
+        // A finding not on a line shows its fix in the summary.
+        let md = render(&Summary {
+            round: 1,
+            sha: "0123456789abcdef",
+            verdict: "request_changes",
+            summary: "",
+            reviewer: "ada",
+            agents: "Claude Code",
+            repo_url: "https://github.com/acme/app",
+            number: 7,
+            findings: std::slice::from_ref(&open),
+        });
+        assert!(md.contains("Then return early."), "{md}");
+        assert!(md.contains("\n```\n    if i >= n {"), "{md}");
+        // In the plain list, every line of the fix stays in its item.
+        let list = markdown("Review", "", std::slice::from_ref(&open));
+        assert!(list.contains("\n  Then return early."), "{list}");
+        assert!(list.contains("\n  ```\n      if i >= n {"), "{list}");
+        // The hidden block carries the code for other people's PilotHouse.
+        let shared = read_shared(&md).unwrap();
+        assert!(shared.findings[0].suggested_code.contains("return;"));
     }
 
     #[test]

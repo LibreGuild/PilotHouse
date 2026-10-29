@@ -91,6 +91,8 @@ pub enum FilesPanelEvent {
     OpenInBrowser(PathBuf),
     /// A file was selected in the tree from its tab: show the Files tool.
     RevealInTree,
+    /// Add a folder to the workspace (the folder picker).
+    AddFolder,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +131,11 @@ pub struct FilesPanel {
     pub(crate) search_scope: Option<String>,
     pub(crate) open_files: Vec<Entity<FileView>>,
     pub(crate) active: Option<usize>,
+    /// The Changes tab (after the files' tabs), and whether it is in front.
+    diff: Option<Entity<crate::diff_tab::DiffTab>>,
+    pub(crate) diff_active: bool,
+    /// The tab strip's scroll, to bring the tab in front into view.
+    tabs_scroll: gpui_kit::ScrollHandle,
     /// What Copy or Cut picked, for Paste.
     pub(crate) clipboard: Option<crate::tree_menu::Clipboard>,
     /// The file picked with Select for Compare.
@@ -220,6 +227,9 @@ impl FilesPanel {
             search: Search::default(),
             search_scope: None,
             open_files: Vec::new(),
+            diff: None,
+            diff_active: false,
+            tabs_scroll: gpui_kit::ScrollHandle::new(),
             active: None,
             clipboard: None,
             compare: None,
@@ -263,7 +273,7 @@ impl FilesPanel {
             self.open_file(relative, None, window, cx);
         }
         if let Some(ix) = active.and_then(|active| self.index_of(active, cx)) {
-            self.active = Some(ix);
+            self.activate(ix, cx);
         }
         cx.notify();
     }
@@ -392,13 +402,17 @@ impl FilesPanel {
     }
 
     /// Brings tab `ix` forward; a video or sound in the tab going back stops.
-    fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
+    pub(crate) fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
         if let Some(previous) = self.active.filter(|previous| *previous != ix)
             && let Some(file) = self.open_files.get(previous)
         {
             file.update(cx, |file, cx| file.pause_media(cx));
         }
         self.active = Some(ix);
+        self.diff_active = false;
+        // The Changes tab, when open, is the strip's first.
+        self.tabs_scroll
+            .scroll_to_item(ix + usize::from(self.diff.is_some()));
     }
 
     /// Opens an absolute path at a 0-based line, if it is in the project.
@@ -485,9 +499,10 @@ impl FilesPanel {
             .count()
     }
 
-    /// Some file is open (the editor column shows only then).
+    /// Some file, or the Changes tab, is open (the editor column shows
+    /// only then).
     pub fn has_open_files(&self) -> bool {
-        !self.open_files.is_empty()
+        !self.open_files.is_empty() || self.diff.is_some()
     }
 
     /// Opens the file selected in the tree (folders fold with the arrows).
@@ -506,9 +521,80 @@ impl FilesPanel {
     /// The tree or the search results, for [`FileTree`].
     fn render_browser(&self, cx: &mut Context<Self>) -> AnyElement {
         match self.browse {
-            Browse::Tree => self.render_tree(cx),
+            Browse::Tree => v_flex()
+                .size_full()
+                .child(self.render_tree_toolbar(cx))
+                .child(div().flex_1().min_h_0().child(self.render_tree(cx)))
+                .into_any_element(),
             Browse::Search => self.render_search(cx),
         }
+    }
+
+    /// The tree's first row: a search field that opens workspace search,
+    /// and buttons to make files and folders.
+    fn render_tree_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let button = |id: &'static str, icon: Icons, tip: &'static str| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .icon(icon)
+                .tooltip(tip)
+                .accessibility_label(tip)
+        };
+        h_flex()
+            .flex_none()
+            .px_2()
+            .pt_2()
+            .pb_1()
+            .gap_0p5()
+            .child(
+                h_flex()
+                    .id("files-search")
+                    .role(gpui_kit::accesskit::Role::Button)
+                    .aria_label("Search in workspace")
+                    .flex_1()
+                    .min_w_0()
+                    .h_6()
+                    .px_2()
+                    .gap_1p5()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().input)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .cursor_text()
+                    .hover(|style| style.border_color(cx.theme().ring))
+                    .on_click(cx.listener(|this, _, window, cx| this.find_in_project(window, cx)))
+                    .child(Icon::new(IconName::Search).xsmall())
+                    .child(div().min_w_0().truncate().child("Search files")),
+            )
+            .child(
+                button("files-new-file", Icons::FilePlus, "New file").on_click(
+                    cx.listener(|this, _, window, cx| this.new_in_selection(false, window, cx)),
+                ),
+            )
+            .child(
+                button("files-new-folder", Icons::FolderPlus, "New folder").on_click(
+                    cx.listener(|this, _, window, cx| this.new_in_selection(true, window, cx)),
+                ),
+            )
+            .child(
+                button(
+                    "files-collapse",
+                    Icons::ChevronsDownUp,
+                    "Collapse all folders",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx))),
+            )
+            .child(
+                button(
+                    "files-add-folder",
+                    Icons::FolderInput,
+                    "Add a folder to this workspace",
+                )
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(FilesPanelEvent::AddFolder))),
+            )
+            .into_any_element()
     }
 
     pub(crate) fn index_of(&self, relative: &str, cx: &gpui_kit::App) -> Option<usize> {
@@ -901,7 +987,34 @@ impl FilesPanel {
         });
         v_flex()
             .size_full()
-            .child(div().p_2().child(Input::new(&self.search_input).small()))
+            .child(
+                h_flex()
+                    .p_2()
+                    .gap_1()
+                    .child(
+                        Button::new("search-back")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::ArrowLeft)
+                            .tooltip("Back to the files (Esc)")
+                            .accessibility_label("Back to the files")
+                            .on_click(cx.listener(|this, _, _, cx| this.show_tree(cx))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            // Escape in the field goes back to the files.
+                            .on_key_down(cx.listener(
+                                |this, event: &gpui_kit::KeyDownEvent, _, cx| {
+                                    if event.keystroke.key == "escape" {
+                                        this.show_tree(cx);
+                                    }
+                                },
+                            ))
+                            .child(Input::new(&self.search_input).small()),
+                    ),
+            )
             .children(scope)
             .when_some(status, |this, status| {
                 this.child(
@@ -925,8 +1038,56 @@ impl FilesPanel {
             .into_any_element()
     }
 
+    /// Shows changes (a patch `load` reads) in the Changes tab, made the
+    /// first time, and brings it to the front.
+    pub fn show_diff(
+        &mut self,
+        title: impl Into<SharedString>,
+        load: crate::diff_tab::LoadDiff,
+        cx: &mut Context<Self>,
+    ) {
+        let title = title.into();
+        match &self.diff {
+            Some(tab) => tab.update(cx, |tab, cx| tab.show(title, load, cx)),
+            None => self.diff = Some(cx.new(|cx| crate::diff_tab::DiffTab::new(title, load, cx))),
+        }
+        self.diff_active = true;
+        self.tabs_scroll.scroll_to_item(0);
+        cx.emit(FilesPanelEvent::Opened);
+        cx.notify();
+    }
+
+    fn close_diff(&mut self, cx: &mut Context<Self>) {
+        self.diff = None;
+        self.diff_active = false;
+        cx.emit(FilesPanelEvent::OpenFilesChanged);
+        cx.notify();
+    }
+
     fn render_viewer(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(active) = self.active.and_then(|ix| self.open_files.get(ix)) else {
+        let diff_tab = self.diff.as_ref().map(|diff| {
+            let title = diff.read(cx).title();
+            Tab::new()
+                .prefix(div().pl_2().child(Icon::new(Icons::GitCompare).xsmall()))
+                .child(
+                    div()
+                        .id("diff-tab-label")
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .child(title),
+                )
+                .suffix(
+                    Button::new("close-diff")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .accessibility_label("Close the changes")
+                        .on_click(cx.listener(|this, _, _, cx| this.close_diff(cx))),
+                )
+        });
+        let showing_diff = self.diff_active && self.diff.is_some();
+        let active = self.active.and_then(|ix| self.open_files.get(ix));
+        if active.is_none() && self.diff.is_none() {
             return EmptyState::new("No file open")
                 .icon(Icons::File)
                 .description(format!(
@@ -934,7 +1095,7 @@ impl FilesPanel {
                     ph_ui::platform::shortcut("secondary-p")
                 ))
                 .into_any_element();
-        };
+        }
 
         let tabs = self.open_files.iter().enumerate().map(|(ix, file)| {
             let file = file.read(cx);
@@ -971,21 +1132,39 @@ impl FilesPanel {
                 )
         });
 
+        // The Changes tab comes first, where it is seen however many files
+        // are open; the files' tabs follow it.
+        let offset = usize::from(self.diff.is_some());
+        let body = match (showing_diff, &self.diff, active) {
+            (true, Some(diff), _) | (false, Some(diff), None) => diff.clone().into_any_element(),
+            (_, _, Some(active)) => active.clone().into_any_element(),
+            _ => div().into_any_element(),
+        };
         v_flex()
             .size_full()
             .child(
                 TabBar::new("open-files")
+                    .track_scroll(&self.tabs_scroll)
                     .underline()
                     .small()
-                    .selected_index(self.active.unwrap_or_default())
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.activate(*ix, cx);
+                    .selected_index(if showing_diff || active.is_none() {
+                        0
+                    } else {
+                        self.active.unwrap_or_default() + offset
+                    })
+                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                        if offset == 1 && *ix == 0 {
+                            this.diff_active = true;
+                        } else {
+                            this.activate(*ix - offset, cx);
+                        }
                         cx.emit(FilesPanelEvent::OpenFilesChanged);
                         cx.notify();
                     }))
+                    .children(diff_tab)
                     .children(tabs),
             )
-            .child(div().flex_1().min_h_0().child(active.clone()))
+            .child(div().flex_1().min_h_0().child(body))
             .into_any_element()
     }
 }
@@ -997,7 +1176,9 @@ impl Render for FilesPanel {
         div()
             .key_context(FILES_PANEL_CONTEXT)
             .on_action(cx.listener(|this, _: &CloseFile, _, cx| {
-                if let Some(ix) = this.active {
+                if this.diff_active && this.diff.is_some() {
+                    this.close_diff(cx);
+                } else if let Some(ix) = this.active {
                     this.close_file(ix, cx);
                 }
             }))

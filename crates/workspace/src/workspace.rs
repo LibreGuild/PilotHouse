@@ -9,6 +9,7 @@
 //!   reviews and the repositories' chats, apart from any workspace.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, TitleBar, WindowExt as _, h_flex, v_flex};
@@ -37,8 +38,6 @@ const UNLOAD_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60
 pub enum View {
     #[default]
     Workspaces,
-    /// Every chat at work, waiting or with news, across workspaces.
-    Agents,
     GitHub,
 }
 
@@ -77,6 +76,8 @@ pub struct Workspace {
     /// The workspace shown before the one in front (Ctrl+Tab goes back).
     previous_project: Option<ProjectId>,
     sidebar_collapsed: bool,
+    /// The Agents popup (title bar) is open.
+    pub(crate) agents_open: bool,
     /// What each workspace is doing, read again every second.
     statuses: HashMap<ProjectId, WorkspaceStatus>,
     /// When each loaded but hidden workspace was last shown.
@@ -161,6 +162,7 @@ impl Workspace {
             active_project: None,
             previous_project: None,
             sidebar_collapsed,
+            agents_open: false,
             statuses: HashMap::new(),
             hidden_since: HashMap::new(),
             // Status comes from chats and test runs outside this window; a
@@ -243,6 +245,12 @@ impl Workspace {
             });
         }
         self.focus_front(window, cx);
+        cx.notify();
+    }
+
+    /// Opens or closes the Agents popup.
+    pub(crate) fn set_agents_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.agents_open = open;
         cx.notify();
     }
 
@@ -598,13 +606,6 @@ impl Workspace {
     /// Gives the keyboard to the chat in front (the workspace's, or the
     /// GitHub view's), else the window.
     pub(crate) fn focus_front(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The board has no input: the window keeps the keyboard, so its
-        // shortcuts and menus still reach the workspace (a chat of a
-        // workspace not shown would take them nowhere).
-        if self.view == View::Agents {
-            self.focus_handle.focus(window, cx);
-            return;
-        }
         if self.view == View::GitHub {
             let focused = self.github.clone().is_some_and(|github| {
                 github.update(cx, |github, cx| github.focus_chat(window, cx))
@@ -1208,9 +1209,6 @@ impl Workspace {
     }
 
     fn new_session(&mut self, _: &NewSession, window: &mut Window, cx: &mut Context<Self>) {
-        if self.view == View::Agents {
-            self.set_view(View::Workspaces, window, cx);
-        }
         if self.view == View::GitHub {
             if let Some(github) = self.github.clone() {
                 github.update(cx, |github, cx| github.new_chat(window, cx));
@@ -1253,7 +1251,7 @@ impl Workspace {
             move |name, window, cx| {
                 let (root, workspace, parent_name) =
                     (root.clone(), workspace.clone(), parent_name.clone());
-                let worktrees = ph_store::paths::data_dir().join("tasks");
+                let worktrees = ph_store::paths::copies_dir().join("tasks");
                 let made = {
                     let (root, name) = (root.clone(), name.clone());
                     cx.background_spawn(
@@ -1295,43 +1293,28 @@ impl Workspace {
             ph_pulls::AgentRequest::Address { pull } => (pull, None),
             _ => return,
         };
-        let wanted = (
-            hosting.account.host.to_ascii_lowercase(),
-            hosting.repo.owner.to_ascii_lowercase(),
-            hosting.repo.name.to_ascii_lowercase(),
-        );
-        let local = self.projects.iter().find_map(|project| {
-            project.folders().into_iter().find_map(|folder| {
-                let hosted = ph_git::remote::hosted_repo(&folder)?;
-                let same = (
-                    hosted.host.to_ascii_lowercase(),
-                    hosted.owner.to_ascii_lowercase(),
-                    hosted.name.to_ascii_lowercase(),
-                ) == wanted;
-                same.then(|| (folder, project.name.clone()))
+        // Which folder holds the repository is asked of Git, folder by
+        // folder: in the background, as Git is slow to start on Windows.
+        let folders: Vec<(PathBuf, String)> = self
+            .projects
+            .iter()
+            .flat_map(|project| {
+                project
+                    .folders()
+                    .into_iter()
+                    .map(|folder| (folder, project.name.clone()))
             })
-        });
-        let clone = ph_pulls::clones::RepoId::of(&hosting).clone_dir();
-        let (root, parent_name) = match local {
-            Some(found) => found,
-            None if clone.join(".git").exists() => (clone, hosting.repo.name.clone()),
-            None => {
-                window.push_notification(
-                    Notification::warning(
-                        "Open the repository in a workspace (or review the pull request first) to fix it in a task.",
-                    ),
-                    cx,
-                );
-                return;
-            }
-        };
+            .collect();
         let number = pull.number;
         let name = format!("PR {number} fix");
         let work = {
-            let (root, store) = (root.clone(), store.clone());
+            let store = store.clone();
             cx.background_spawn(async move {
+                let (root, parent_name) = anyhow::Context::context(pull_checkout(&hosting, folders),
+                    "Open the repository in a workspace (or review the pull request first) to fix it in a task.",
+                )?;
                 let sha = ph_pulls::hosting::fetch_head(&root, &hosting, number)?;
-                let worktrees = ph_store::paths::data_dir().join("tasks");
+                let worktrees = ph_store::paths::copies_dir().join("tasks");
                 let made = crate::tasks::create_for_pull(&root, number, &sha, &worktrees)?;
                 // Someone else's settings must not act on the agent.
                 let theirs = !pull.user.login.eq_ignore_ascii_case(&hosting.account.login);
@@ -1391,7 +1374,7 @@ impl Workspace {
                         removed.join(", ")
                     )
                 };
-                anyhow::Ok((made, prompt, display))
+                anyhow::Ok((root, parent_name, made, prompt, display))
             })
         };
         let workspace = cx.entity().downgrade();
@@ -1399,7 +1382,7 @@ impl Workspace {
             .spawn(cx, async move |cx| {
                 let result = work.await;
                 _ = workspace.update_in(cx, |workspace, window, cx| match result {
-                    Ok((made, prompt, display)) => {
+                    Ok((root, parent_name, made, prompt, display)) => {
                         let path = made.path.clone();
                         workspace.open_task(&root, &parent_name, &name, made, window, cx);
                         let space = workspace
@@ -1662,7 +1645,31 @@ impl Workspace {
         let project = self
             .active_space()
             .map(|space| space.read(cx).project().path.clone());
-        settings_dialog::open(project, window, cx);
+        settings_dialog::open(project, settings_dialog::Page::First, window, cx);
+    }
+
+    fn open_storage_settings(
+        &mut self,
+        _: &OpenStorageSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let project = self
+            .active_space()
+            .map(|space| space.read(cx).project().path.clone());
+        settings_dialog::open(project, settings_dialog::Page::Storage, window, cx);
+    }
+
+    fn open_github_settings(
+        &mut self,
+        _: &OpenGitHubSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let project = self
+            .active_space()
+            .map(|space| space.read(cx).project().path.clone());
+        settings_dialog::open(project, settings_dialog::Page::GitHub, window, cx);
     }
 
     fn set_appearance(
@@ -1687,12 +1694,6 @@ impl Render for Workspace {
             .then(|| self.github.clone())
             .flatten();
         let content = match (&github, self.active_space()) {
-            _ if self.view == View::Agents => div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .child(crate::agents_board::render(self, cx))
-                .into_any_element(),
             (Some(github), _) => div()
                 .flex_1()
                 .min_w_0()
@@ -1740,8 +1741,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowGitHubView, window, cx| {
                 this.set_view(View::GitHub, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &ShowAgentsView, window, cx| {
-                this.set_view(View::Agents, window, cx)
+            .on_action(cx.listener(|this, _: &ShowAgentsView, _, cx| {
+                this.set_agents_open(!this.agents_open, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowChanges, window, cx| {
                 this.show_tab(ContextTab::Changes, window, cx)
@@ -1773,6 +1774,8 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::open_github_settings))
+            .on_action(cx.listener(Self::open_storage_settings))
             .on_action(cx.listener(|this, _: &UseSystemAppearance, window, cx| {
                 this.set_appearance(Appearance::System, window, cx)
             }))
@@ -1845,14 +1848,59 @@ impl Render for Workspace {
                     .items_stretch()
                     .flex_1()
                     .min_h_0()
+                    // Dragging a sidebar's edge (this one's or the GitHub
+                    // view's, which share the width) resizes it.
+                    .on_drag_move(cx.listener(
+                        |_, event: &gpui_kit::DragMoveEvent<sidebar::SidebarEdge>, _, cx| {
+                            sidebar::drag_width(event.event.position.x - event.bounds.left(), cx);
+                        },
+                    ))
                     // The GitHub view draws its own sidebar.
                     .when(!self.sidebar_collapsed && github.is_none(), |this| {
-                        this.child(sidebar::render(self, cx))
+                        this.child(
+                            div()
+                                .relative()
+                                .flex_none()
+                                .h_full()
+                                .child(sidebar::render(self, cx))
+                                .child(sidebar::resize_edge(cx)),
+                        )
                     })
                     .child(content),
             )
             .child(status_bar::render(self, cx))
     }
+}
+
+/// Where to make a task for `hosting`'s pull requests: the first of
+/// `folders` (with its workspace's name) whose Git remote is the
+/// repository, else the GitHub view's clone of it. Runs Git: off the UI
+/// thread.
+fn pull_checkout(
+    hosting: &ph_pulls::Hosting,
+    folders: Vec<(PathBuf, String)>,
+) -> Option<(PathBuf, String)> {
+    let wanted = (
+        hosting.account.host.to_ascii_lowercase(),
+        hosting.repo.owner.to_ascii_lowercase(),
+        hosting.repo.name.to_ascii_lowercase(),
+    );
+    let local = folders.into_iter().find(|(folder, _)| {
+        ph_git::remote::hosted_repo(folder).is_some_and(|hosted| {
+            (
+                hosted.host.to_ascii_lowercase(),
+                hosted.owner.to_ascii_lowercase(),
+                hosted.name.to_ascii_lowercase(),
+            ) == wanted
+        })
+    });
+    let clone = ph_pulls::clones::RepoId::of(hosting).clone_dir();
+    local.or_else(|| {
+        clone
+            .join(".git")
+            .exists()
+            .then(|| (clone, hosting.repo.name.clone()))
+    })
 }
 
 /// The workspaces in the store, newest first: an order that stays put as

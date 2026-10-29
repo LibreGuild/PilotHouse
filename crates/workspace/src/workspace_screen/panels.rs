@@ -4,6 +4,9 @@
 
 use super::*;
 
+/// How sharp phones stream (`ph_devices::StreamQuality`), app-wide.
+const STREAM_QUALITY: &str = "devices.stream_quality";
+
 impl WorkspaceScreen {
     /// The changes panel, created on first use.
     pub fn changes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<ChangesPanel> {
@@ -35,6 +38,16 @@ impl WorkspaceScreen {
                         .and_then(|root| roots.path_of(&root.path.join(path)))
                         .unwrap_or_else(|| path.clone());
                     this.open_file(&path, Some(*line), window, cx);
+                }
+                ChangesPanelEvent::OpenDiff(path) => {
+                    let root = this
+                        .roots()
+                        .list()
+                        .get(this.git_folder)
+                        .map(|root| root.path.clone());
+                    if let Some(root) = root {
+                        this.open_diff(root, path.clone(), false, window, cx);
+                    }
                 }
                 ChangesPanelEvent::ReviewChanges => this.review_changes(window, cx),
                 ChangesPanelEvent::SendNotes(text) => {
@@ -108,11 +121,23 @@ impl WorkspaceScreen {
         if let Some(devices) = &self.devices {
             return devices.clone();
         }
-        let devices = cx.new(|cx| DevicesPanel::new(window, cx));
+        let quality: String = AppState::store(cx).setting(STREAM_QUALITY);
+        let devices = cx.new(|cx| {
+            let mut devices = DevicesPanel::new(window, cx);
+            devices.set_stream_quality(ph_devices::StreamQuality::from_key(&quality), cx);
+            devices
+        });
         self._subscriptions.push(cx.subscribe_in(
             &devices,
             window,
             |this, _, event: &ToChat, window, cx| this.receive_to_chat(event, window, cx),
+        ));
+        // The choice holds for every workspace's devices, and the next run.
+        self._subscriptions.push(cx.subscribe(
+            &devices,
+            |_, _, ph_devices::StreamQualityChanged(quality), cx| {
+                let _ = AppState::store(cx).set_setting(STREAM_QUALITY, &quality.key());
+            },
         ));
         self.devices = Some(devices.clone());
         devices
@@ -199,7 +224,7 @@ impl WorkspaceScreen {
             window,
             |_, _, event: &PullsPanelEvent, window, cx| match event {
                 PullsPanelEvent::OpenSettings => {
-                    window.dispatch_action(Box::new(crate::actions::OpenSettings), cx)
+                    window.dispatch_action(Box::new(crate::actions::OpenGitHubSettings), cx)
                 }
                 // Reviews run in the GitHub view, on its own clone.
                 PullsPanelEvent::Agent { hosting, request } => {

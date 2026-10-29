@@ -786,7 +786,7 @@ impl FilesPanel {
             active.and_then(|active| moved_path(&active, old, new).or(Some(active)))
             && let Some(ix) = self.index_of(&active, cx)
         {
-            self.active = Some(ix);
+            self.activate(ix, cx);
         }
         if let Some(picked) = self
             .compare

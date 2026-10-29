@@ -19,19 +19,17 @@ pub struct WorkingChanges {
     pub staged_files: usize,
 }
 
-/// Whether `root` is in a Git working tree. On a mapped network drive the
-/// drive is looked at instead of asking the server, so a server that cannot
-/// be reached reads as that (Git fails with why), not as "no repository".
+/// Whether `root` is in a Git working tree: it or a folder above it holds
+/// a `.git` (a folder, or a file in a linked worktree or submodule). The
+/// file system is looked at rather than asking `git`, which takes long to
+/// start on Windows: this is asked while the UI draws. On a mapped network
+/// drive the search stops at the drive, so a server that cannot be reached
+/// reads as that (Git fails with why), not as "no repository".
 pub fn is_repository(root: &Path) -> bool {
-    if ph_remote::remote_of(root).is_some() {
-        // Not above the drive: a repository of this computer's there is not
-        // the server's.
-        return root
-            .ancestors()
-            .take_while(|dir| ph_remote::remote_of(dir).is_some())
-            .any(|dir| dir.join(".git").exists());
-    }
-    git(root, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true")
+    let local = ph_remote::remote_of(root).is_none();
+    root.ancestors()
+        .take_while(|dir| local || ph_remote::remote_of(dir).is_some())
+        .any(|dir| dir.join(".git").exists())
 }
 
 pub fn current_branch(root: &Path) -> Option<String> {
@@ -270,6 +268,41 @@ pub fn staged_diff(root: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use crate::testing::temp_repo;
+
+    #[test]
+    fn a_repository_is_found_from_its_folders_and_worktrees() {
+        let root = temp_repo("is-repo");
+        let nested = root.join("src/deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(is_repository(&root));
+        assert!(is_repository(&nested));
+        // A linked worktree has a `.git` file, not a folder.
+        let linked = root.with_file_name(format!("ph-git-is-repo-linked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&linked);
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                linked.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        assert!(linked.join(".git").is_file());
+        assert!(is_repository(&linked));
+        let plain = root.with_file_name(format!("ph-git-not-repo-{}", std::process::id()));
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(!is_repository(&plain));
+        let _ = git(
+            &root,
+            &["worktree", "remove", "--force", linked.to_str().unwrap()],
+        );
+        for dir in [&root, &linked, &plain] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 
     #[test]
     fn parses_porcelain_status() {

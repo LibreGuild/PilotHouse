@@ -22,7 +22,7 @@ static LOGOS: LazyLock<HashMap<&'static str, Arc<Image>>> = LazyLock::new(|| {
     ])
 });
 
-/// PilotHouse's own icon (the helm), `size` across, for the title bar.
+/// PilotHouse's app icon, `size` across.
 pub fn app_icon(size: Pixels) -> AnyElement {
     static ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
         Arc::new(Image::from_bytes(
@@ -31,6 +31,21 @@ pub fn app_icon(size: Pixels) -> AnyElement {
         ))
     });
     img(ICON.clone()).flex_none().size(size).into_any_element()
+}
+
+/// PilotHouse's mark for the title bar, `height` square: the app icon's
+/// tile (a white mast and pennant, the pennant the P's bowl, on violet).
+pub fn logo_mark(height: Pixels) -> AnyElement {
+    static MARK: LazyLock<Arc<Image>> = LazyLock::new(|| {
+        Arc::new(Image::from_bytes(
+            ImageFormat::Png,
+            include_bytes!("../assets/logo-mark.png").to_vec(),
+        ))
+    });
+    img(MARK.clone())
+        .flex_none()
+        .size(height)
+        .into_any_element()
 }
 
 /// The mark of the agent named `logo` (`claude`, `codex`, `gemini`,

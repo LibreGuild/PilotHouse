@@ -37,7 +37,7 @@ pub mod status;
 mod testing;
 pub mod worktree;
 
-pub use diff::{FileChange, Hunk, parse_diff};
+pub use diff::{ChangeKind, FileChange, Hunk, parse_diff};
 pub use run::{git, git_env};
 pub(crate) use run::{local_path, null_device};
 pub use status::{

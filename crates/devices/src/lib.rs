@@ -23,6 +23,8 @@ mod control;
 mod devices_panel;
 pub mod emulator;
 mod grpc;
+pub mod h264;
+mod input_shell;
 pub mod logcat;
 mod logcat_view;
 mod manager;
@@ -31,9 +33,9 @@ pub mod sdk;
 pub mod ui_tree;
 
 pub use android_run::{AndroidRun, AndroidRunEvent};
-pub use devices_panel::DevicesPanel;
+pub use devices_panel::{DevicesPanel, StreamQualityChanged};
 pub use manager::{DeviceManager, DevicesChanged};
-pub use screen::{DeviceScreen, ScreenEvent, SystemKey};
+pub use screen::{DeviceScreen, ScreenEvent, StreamQuality, SystemKey};
 
 /// Registers the control methods. Call once at startup.
 pub fn init(cx: &mut gpui_kit::App) {

@@ -40,6 +40,8 @@ const UNDO_DEPTH: usize = 20;
 pub enum ChangesPanelEvent {
     /// Open this project-relative file in the editor at a 0-based line.
     OpenFile { path: String, line: u32 },
+    /// Show this file's changes (`None`: every file's) in the editor.
+    OpenDiff(Option<String>),
     /// Give the review notes (as one message) to the chat in front.
     SendNotes(String),
     /// Have an agent review the changes before they are pushed; its
@@ -100,7 +102,9 @@ pub struct ChangesPanel {
     /// The file whose conflicts are being resolved.
     conflict: Option<Entity<ConflictView>>,
     writer: Option<Writer>,
-    collapsed: HashSet<String>,
+    /// Files unfolded to show their hunks here (the rest are one line:
+    /// clicked, their diff opens in the editor).
+    expanded: HashSet<String>,
     /// Patches that were discarded, newest last.
     undo: Vec<String>,
     /// A refresh was asked for while one was running.
@@ -155,7 +159,7 @@ impl ChangesPanel {
             stashes: None,
             conflict: None,
             writer: None,
-            collapsed: HashSet::new(),
+            expanded: HashSet::new(),
             undo: Vec::new(),
             refresh_again: false,
             notes: Vec::new(),
@@ -591,6 +595,17 @@ impl ChangesPanel {
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             .child(div().flex_1().truncate().child(summary))
+            .when(matches!(&self.state, State::Loaded(changes) if !changes.files.is_empty()), |this| {
+                this.child(
+                    Button::new("all-changes")
+                        .ghost()
+                        .xsmall()
+                        .icon(ph_ui::Icons::GitCompare)
+                        .label("All changes")
+                        .tooltip("Every changed file in one diff, in the editor")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesPanelEvent::OpenDiff(None)))),
+                )
+            })
             .when(matches!(&self.state, State::Loaded(changes) if !changes.files.is_empty() || !changes.untracked.is_empty()), |this| {
                 this.child(
                     Button::new("review-changes")
@@ -624,8 +639,10 @@ impl ChangesPanel {
     }
 
     fn render_file(&self, ix: usize, file: &FileChange, cx: &mut Context<Self>) -> AnyElement {
-        let collapsed = self.collapsed.contains(&file.path);
+        let collapsed = !self.expanded.contains(&file.path);
         let path = file.path.clone();
+        let diff_path = file.path.clone();
+        let kind = file.kind();
         let open_path = file.path.clone();
         let (dir, name) = match file.path.rsplit_once('/') {
             Some((dir, name)) => (format!("{dir}/"), name.to_string()),
@@ -645,21 +662,35 @@ impl ChangesPanel {
                     .rounded(cx.theme().radius)
                     .cursor_pointer()
                     .hover(|style| style.bg(cx.theme().list_hover))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.collapsed.remove(&path) {
-                            this.collapsed.insert(path.clone());
-                        }
-                        this.toggled_file(ix);
-                        cx.notify();
+                    // The row opens the file's diff in the editor; the
+                    // chevron unfolds its hunks here, to keep or discard.
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(ChangesPanelEvent::OpenDiff(Some(diff_path.clone())))
                     }))
                     .child(
-                        Icon::new(if collapsed {
-                            IconName::ChevronRight
-                        } else {
-                            IconName::ChevronDown
-                        })
-                        .xsmall()
-                        .text_color(cx.theme().muted_foreground),
+                        div()
+                            .id(("fold-file", ix))
+                            .flex_none()
+                            .p_0p5()
+                            .rounded(cx.theme().radius)
+                            .hover(|style| style.bg(cx.theme().secondary_hover))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if !this.expanded.remove(&path) {
+                                    this.expanded.insert(path.clone());
+                                }
+                                this.toggled_file(ix);
+                                cx.notify();
+                            }))
+                            .child(
+                                Icon::new(if collapsed {
+                                    IconName::ChevronRight
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .xsmall()
+                                .text_color(cx.theme().muted_foreground),
+                            ),
                     )
                     .child({
                         h_flex()
@@ -668,7 +699,14 @@ impl ChangesPanel {
                             .gap_1p5()
                             .text_sm()
                             .child(ph_ui::file_icon_element(&name, gpui_kit::px(14.)))
-                            .child(div().flex_none().child(name))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .when(kind == git::ChangeKind::Deleted, |this| {
+                                        this.line_through()
+                                    })
+                                    .child(name),
+                            )
                             .child(
                                 div()
                                     .text_xs()
@@ -678,12 +716,26 @@ impl ChangesPanel {
                             )
                     })
                     .child(change_counts(file.added(), file.removed(), cx))
+                    .child(kind_badge(kind, cx))
                     // Acting on a file is for the row under the pointer.
                     .child(
                         h_flex()
                             .gap_0p5()
                             .invisible()
                             .group_hover(group, |style| style.visible())
+                            .child({
+                                let path = file.path.clone();
+                                Button::new(("diff-changed-file", ix))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(ph_ui::Icons::GitCompare)
+                                    .tooltip("Open the changes in the editor")
+                                    .accessibility_label("Open the changes")
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        cx.emit(ChangesPanelEvent::OpenDiff(Some(path.clone())));
+                                    }))
+                            })
                             .child(
                                 Button::new(("open-changed-file", ix))
                                     .ghost()
@@ -946,7 +998,7 @@ impl ChangesPanel {
         let mut rows = vec![Row::Top];
         for (ix, file) in changes.files.iter().enumerate() {
             rows.push(Row::File(ix));
-            if self.collapsed.contains(&file.path) {
+            if !self.expanded.contains(&file.path) {
                 continue;
             }
             if file.binary {
@@ -1350,4 +1402,23 @@ fn ask_note(
             })
     });
     focus.update(cx, |input, cx| input.focus(window, cx));
+}
+
+/// A letter for what happened to a file: A(dded), D(eleted), R(enamed),
+/// M(odified), coloured as Git tools do.
+fn kind_badge(kind: git::ChangeKind, cx: &gpui_kit::App) -> impl IntoElement {
+    let (letter, color) = match kind {
+        git::ChangeKind::New => ("A", cx.theme().success),
+        git::ChangeKind::Deleted => ("D", cx.theme().danger),
+        git::ChangeKind::Renamed => ("R", cx.theme().info),
+        git::ChangeKind::Changed => ("M", cx.theme().warning),
+    };
+    div()
+        .flex_none()
+        .w_4()
+        .text_xs()
+        .font_weight(gpui_kit::FontWeight::BOLD)
+        .text_color(color)
+        .text_center()
+        .child(letter)
 }

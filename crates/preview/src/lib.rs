@@ -291,6 +291,13 @@ pub(crate) fn notice(text: impl Into<gpui_kit::SharedString>, cx: &App) -> AnyEl
         .p_6()
         .text_sm()
         .text_color(cx.theme().muted_foreground)
-        .child(text.into())
+        // Wraps rather than running out of a narrow window.
+        .child(
+            div()
+                .w_full()
+                .max_w(gpui_kit::px(560.))
+                .text_center()
+                .child(text.into()),
+        )
         .into_any_element()
 }

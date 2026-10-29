@@ -24,6 +24,18 @@ pub struct TableData {
 }
 
 const ROW_HEIGHT: f32 = 26.;
+
+/// A cell on its row's one line: line breaks inside it (a spreadsheet's
+/// wrapped text) show as `⏎` rather than spilling over the rows below.
+fn one_line(cell: &SharedString) -> SharedString {
+    if cell.contains(['\n', '\r']) {
+        cell.replace("\r\n", " ⏎ ")
+            .replace(['\n', '\r'], " ⏎ ")
+            .into()
+    } else {
+        cell.clone()
+    }
+}
 const MIN_WIDTH: f32 = 64.;
 const MAX_WIDTH: f32 = 360.;
 /// The row-number column.
@@ -263,7 +275,7 @@ impl Render for TableGrid {
                                 .truncate()
                                 .border_l_1()
                                 .border_color(theme.border.opacity(0.35))
-                                .children(row.get(column).cloned())
+                                .children(row.get(column).map(one_line))
                         }))
                         .into_any_element()
                 })

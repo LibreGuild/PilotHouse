@@ -16,11 +16,14 @@
 //! keeps its exact text, so editing here changes only what was edited.
 
 pub mod blocks;
+mod copy;
+mod table;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -37,6 +40,32 @@ use gpui_kit::{
 use crate::PreviewEvent;
 use crate::markdown::{READING_WIDTH, markdown_view};
 use blocks::{Block, Document, Kind};
+use table::Table;
+
+gpui_kit::actions!(
+    rich,
+    [
+        /// The next table cell (Tab).
+        NextCell,
+        /// The table cell before (Shift+Tab).
+        PreviousCell,
+        /// Stops editing the table cell (Escape).
+        EndCell,
+    ]
+);
+
+/// The key context of a table cell being edited: its Tab moves along the
+/// table (bindings come before key handlers, and Tab moves the focus).
+const CELL_CONTEXT: &str = "RichCell";
+
+/// Registers the rich editor's key bindings.
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        gpui_kit::KeyBinding::new("tab", NextCell, Some(CELL_CONTEXT)),
+        gpui_kit::KeyBinding::new("shift-tab", PreviousCell, Some(CELL_CONTEXT)),
+        gpui_kit::KeyBinding::new("escape", EndCell, Some(CELL_CONTEXT)),
+    ]);
+}
 
 /// How long after the last edit the file's text is updated.
 const SAVE_DELAY: Duration = Duration::from_millis(250);
@@ -51,6 +80,27 @@ struct Active {
     /// The text when editing began (an unchanged block undoes as a whole).
     started: String,
     _subscription: Subscription,
+}
+
+/// The table cell being edited.
+struct ActiveCell {
+    block: u64,
+    row: usize,
+    col: usize,
+    /// A text area (as blocks use), so Tab is the table's, not focus's.
+    input: Entity<TextareaState>,
+    _subscription: Subscription,
+}
+
+/// A change to a table's shape, from its cells' menu or handles.
+#[derive(Debug, Clone, Copy)]
+enum TableOp {
+    RowAbove(usize),
+    RowBelow(usize),
+    ColumnLeft(usize),
+    ColumnRight(usize),
+    RemoveRow(usize),
+    RemoveColumn(usize),
 }
 
 /// A kind of block the slash menu and toolbar make.
@@ -203,13 +253,20 @@ pub struct RichEditor {
     /// The text last read or written, to tell our own edits coming back.
     text: String,
     active: Option<Active>,
+    /// The table cell being edited, if any (then no block is).
+    cell: Option<ActiveCell>,
     /// The slash menu: its highlighted row.
     menu: Option<usize>,
     undo: Vec<String>,
     redo: Vec<String>,
     scroll: ScrollHandle,
     focus: FocusHandle,
+    /// The last press in its window was in this view (so a ⌘C there copied
+    /// its text), and that window.
+    pressed_here: bool,
+    window: Option<gpui_kit::AnyWindowHandle>,
     _save: Option<Task<()>>,
+    _copy: Subscription,
 }
 
 impl EventEmitter<PreviewEvent> for RichEditor {}
@@ -222,17 +279,44 @@ impl Focusable for RichEditor {
 
 impl RichEditor {
     pub fn new(path: PathBuf, cx: &mut Context<Self>) -> Self {
+        // After ⌘C has copied the selection's text (key bindings come
+        // first), the Markdown it shows replaces it.
+        let copy = cx.observe_keystrokes(|this, event, window, cx| {
+            let keystroke = &event.keystroke;
+            let modifiers = keystroke.modifiers;
+            if keystroke.key == "c" && modifiers.secondary() && !modifiers.shift && !modifiers.alt {
+                this.copy_as_markdown(window, cx);
+            }
+        });
         Self {
             path,
             document: Document::default(),
             text: String::new(),
             active: None,
+            cell: None,
             menu: None,
             undo: Vec::new(),
             redo: Vec::new(),
             scroll: ScrollHandle::new(),
             focus: cx.focus_handle(),
+            pressed_here: false,
+            window: None,
             _save: None,
+            _copy: copy,
+        }
+    }
+
+    /// Text just copied from this view becomes the Markdown it shows.
+    fn copy_as_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let here = self.pressed_here && self.window == Some(window.window_handle());
+        if !here || self.active.is_some() || self.cell.is_some() {
+            return;
+        }
+        let Some(copied) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        if let Some(markdown) = copy::as_markdown(&self.document.text(), &copied) {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(markdown));
         }
     }
 
@@ -244,6 +328,7 @@ impl RichEditor {
         self.text = text.to_string();
         self.document = Document::parse(text);
         self.active = None;
+        self.cell = None;
         self.menu = None;
         cx.notify();
     }
@@ -251,6 +336,7 @@ impl RichEditor {
     /// The document as it is now (for saving before the timer).
     pub fn text(&mut self, cx: &mut Context<Self>) -> String {
         self.take_input(cx);
+        self.take_cell(cx);
         self.document.text()
     }
 
@@ -278,6 +364,7 @@ impl RichEditor {
 
     fn write(&mut self, cx: &mut Context<Self>) {
         self.take_input(cx);
+        self.take_cell(cx);
         let text = self.document.text();
         if text != self.text {
             self.text = text.clone();
@@ -312,6 +399,7 @@ impl RichEditor {
         to.push(current);
         self.document = Document::parse(&text);
         self.active = None;
+        self.cell = None;
         self.menu = None;
         window.focus(&self.focus, cx);
         self.changed(cx);
@@ -329,6 +417,7 @@ impl RichEditor {
         if self.active.as_ref().is_some_and(|active| active.id == id) {
             return;
         }
+        self.finish_cell(cx);
         self.take_input(cx);
         self.menu = None;
         let Some(ix) = self.document.index_of(id) else {
@@ -707,6 +796,10 @@ impl RichEditor {
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
         let key = keystroke.key.as_str();
+        // A table cell's typing undoes itself (its keys: `CELL_CONTEXT`).
+        if self.cell.is_some() && modifiers.secondary() && key == "z" {
+            return;
+        }
         if modifiers.secondary() && !modifiers.alt {
             let handled = match (key, modifiers.shift) {
                 ("z", shift) => {
@@ -909,6 +1002,362 @@ impl RichEditor {
 // ---- Rendering --------------------------------------------------------------
 
 impl RichEditor {
+    // ---- Tables ------------------------------------------------------------------
+
+    /// Starts editing cell `(row, col)` (row 0: the header) of table `block`.
+    fn start_cell(
+        &mut self,
+        block: u64,
+        row: usize,
+        col: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.finish_cell(cx);
+        if self.active.is_some() {
+            self.take_input(cx);
+            self.active = None;
+            self.menu = None;
+        }
+        let Some(ix) = self.document.index_of(block) else {
+            return;
+        };
+        let Some(text) = Table::parse(&self.document.blocks[ix].body)
+            .and_then(|table| table.cell(row, col).map(str::to_string))
+        else {
+            return;
+        };
+        let input = cx.new(|cx| {
+            let mut input = TextareaState::new(window, cx)
+                .auto_grow(1, 6)
+                .submit_on_enter(true);
+            input.set_value(text.clone(), window, cx);
+            input.set_selected_range(0..text.len(), cx);
+            input
+        });
+        let subscription = cx.subscribe_in(&input, window, Self::on_cell_input);
+        // Focused now and again once drawn (it is not on screen yet).
+        input.update(cx, |input, cx| input.focus(window, cx));
+        let later = input.downgrade();
+        window.defer(cx, move |window, cx| {
+            _ = later.update(cx, |input, cx| input.focus(window, cx));
+        });
+        self.cell = Some(ActiveCell {
+            block,
+            row,
+            col,
+            input,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn on_cell_input(
+        &mut self,
+        input: &Entity<TextareaState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            // Enter goes down a row, as in a spreadsheet.
+            InputEvent::PressEnter { .. } => cx.defer_in(window, move |this, window, cx| {
+                this.move_cell(0, 1, window, cx)
+            }),
+            // Clicking elsewhere keeps what was typed (not when the cell
+            // only gave way to the next one).
+            // A double-click's selection takes the focus for a moment as
+            // the cell opens; it is given back, and then the cell stays.
+            InputEvent::Blur => {
+                let input = input.clone();
+                cx.defer_in(window, move |this, window, cx| {
+                    let still = this
+                        .cell
+                        .as_ref()
+                        .is_some_and(|cell| cell.input.entity_id() == input.entity_id());
+                    if still && !input.read(cx).focus_handle(cx).is_focused(window) {
+                        this.finish_cell(cx);
+                    }
+                });
+            }
+            InputEvent::Change | InputEvent::Focus => {}
+        }
+    }
+
+    /// Writes the cell being edited into its table; the cell stays open.
+    fn take_cell(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(cell) = &self.cell else {
+            return false;
+        };
+        let value = cell.input.read(cx).value().to_string();
+        let (block, row, col) = (cell.block, cell.row, cell.col);
+        self.update_table(block, cx, |table| {
+            if table.cell(row, col) == Some(value.trim()) {
+                return false;
+            }
+            table.set_cell(row, col, &value);
+            true
+        })
+    }
+
+    /// Ends editing the cell, keeping what was typed.
+    fn finish_cell(&mut self, cx: &mut Context<Self>) {
+        if self.cell.is_some() {
+            self.take_cell(cx);
+            self.cell = None;
+            cx.notify();
+        }
+    }
+
+    /// Moves the cell being edited by `dx` columns (wrapping to the next or
+    /// previous row) or `dy` rows; past the table's end it stops editing.
+    fn move_cell(&mut self, dx: isize, dy: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cell) = &self.cell else {
+            return;
+        };
+        let (block, row, col) = (cell.block, cell.row, cell.col);
+        self.take_cell(cx);
+        let Some(table) = self
+            .document
+            .index_of(block)
+            .and_then(|ix| Table::parse(&self.document.blocks[ix].body))
+        else {
+            return;
+        };
+        let (rows, cols) = (table.rows.len() as isize, table.columns() as isize);
+        let at = row as isize * cols + col as isize + dx + dy * cols;
+        if at < 0 || at >= rows * cols {
+            self.cell = None;
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
+        let (row, col) = ((at / cols) as usize, (at % cols) as usize);
+        self.cell = None;
+        self.start_cell(block, row, col, window, cx);
+    }
+
+    /// Changes table `block` with `edit` (which says whether it changed it),
+    /// as one step to undo.
+    fn update_table(
+        &mut self,
+        block: u64,
+        cx: &mut Context<Self>,
+        edit: impl FnOnce(&mut Table) -> bool,
+    ) -> bool {
+        let Some(ix) = self.document.index_of(block) else {
+            return false;
+        };
+        let Some(mut table) = Table::parse(&self.document.blocks[ix].body) else {
+            return false;
+        };
+        if !edit(&mut table) {
+            return false;
+        }
+        self.checkpoint(cx);
+        if let Some(ix) = self.document.index_of(block) {
+            self.document.blocks[ix].set_body(table.to_markdown());
+        }
+        self.changed(cx);
+        true
+    }
+
+    fn table_op(&mut self, block: u64, op: TableOp, cx: &mut Context<Self>) {
+        self.finish_cell(cx);
+        self.update_table(block, cx, |table| {
+            match op {
+                TableOp::RowAbove(row) => table.insert_row(row.max(1)),
+                TableOp::RowBelow(row) => table.insert_row(row + 1),
+                TableOp::ColumnLeft(col) => table.insert_column(col),
+                TableOp::ColumnRight(col) => table.insert_column(col + 1),
+                TableOp::RemoveRow(row) => return table.remove_row(row),
+                TableOp::RemoveColumn(col) => return table.remove_column(col),
+            }
+            true
+        });
+    }
+
+    /// A table drawn as a grid: double-click a cell to change it, the
+    /// handles add a row or a column, and a cell's menu inserts and
+    /// removes them.
+    fn render_table(&self, id: u64, table: &Table, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (dark, border, header_bg, radius, editing_bg) = (
+            theme.is_dark(),
+            theme.border,
+            theme.secondary,
+            theme.radius,
+            theme.list_hover,
+        );
+        // Typing looks like the text it changes.
+        let text_size = theme.font_size;
+        let editing = self.cell.as_ref().filter(|cell| cell.block == id);
+        let columns = table.columns();
+        let mut rows = Vec::with_capacity(table.rows.len());
+        for (r, row) in table.rows.iter().enumerate() {
+            let cells = row.iter().enumerate().map(|(c, text)| {
+                let content: AnyElement =
+                    match editing.filter(|cell| cell.row == r && cell.col == c) {
+                        Some(cell) => div()
+                            .key_context(CELL_CONTEXT)
+                            .on_action(cx.listener(|this, _: &NextCell, window, cx| {
+                                this.move_cell(1, 0, window, cx)
+                            }))
+                            .on_action(cx.listener(|this, _: &PreviousCell, window, cx| {
+                                this.move_cell(-1, 0, window, cx)
+                            }))
+                            .on_action(cx.listener(|this, _: &EndCell, window, cx| {
+                                this.finish_cell(cx);
+                                window.focus(&this.focus, cx);
+                            }))
+                            .child(
+                                Textarea::new(&cell.input)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .xsmall()
+                                    .text_size(text_size)
+                                    .p_0(),
+                            )
+                            .into_any_element(),
+                        None if text.is_empty() => div().h(px(20.)).into_any_element(),
+                        None => markdown_view(
+                            SharedString::from(format!("rich-cell-text-{id}-{r}-{c}")),
+                            text.clone().into(),
+                            &self.path,
+                            dark,
+                            crate::markdown::opener(cx.weak_entity()),
+                        )
+                        .into_any_element(),
+                    };
+                let weak = cx.weak_entity();
+                let align = table.align.get(c).copied();
+                let is_editing = editing.is_some_and(|cell| cell.row == r && cell.col == c);
+                div()
+                    .id(SharedString::from(format!("rich-cell-{id}-{r}-{c}")))
+                    .flex_1()
+                    .min_w(px(72.))
+                    .px_2()
+                    .py_1()
+                    .border_r_1()
+                    .border_color(border)
+                    .when(r == 0, |this| {
+                        this.font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    })
+                    .when(is_editing, |this| this.bg(editing_bg))
+                    .when(matches!(align, Some(table::Align::Center)), |this| {
+                        this.flex().justify_center()
+                    })
+                    .when(matches!(align, Some(table::Align::Right)), |this| {
+                        this.flex().justify_end()
+                    })
+                    .cursor_text()
+                    .child(content)
+                    .on_click(
+                        cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
+                            if event.click_count() >= 2 {
+                                this.start_cell(id, r, c, window, cx);
+                            }
+                        }),
+                    )
+                    .context_menu(move |menu, _, _| {
+                        let item = |label: &'static str, op: TableOp, enabled: bool| {
+                            let weak = weak.clone();
+                            PopupMenuItem::new(label).disabled(!enabled).on_click(
+                                move |_, _, cx| {
+                                    _ = weak.update(cx, |this, cx| this.table_op(id, op, cx));
+                                },
+                            )
+                        };
+                        let edit = weak.clone();
+                        menu.item(item("Insert row above", TableOp::RowAbove(r), r > 0))
+                            .item(item("Insert row below", TableOp::RowBelow(r), true))
+                            .separator()
+                            .item(item("Insert column left", TableOp::ColumnLeft(c), true))
+                            .item(item("Insert column right", TableOp::ColumnRight(c), true))
+                            .separator()
+                            .item(item("Delete row", TableOp::RemoveRow(r), r > 0))
+                            .item(item("Delete column", TableOp::RemoveColumn(c), columns > 1))
+                            .separator()
+                            .item(PopupMenuItem::new("Edit as Markdown").on_click(
+                                move |_, window, cx| {
+                                    _ = edit.update(cx, |this, cx| {
+                                        this.finish_cell(cx);
+                                        this.activate(id, None, window, cx)
+                                    });
+                                },
+                            ))
+                    })
+            });
+            let cells: Vec<_> = cells.collect();
+            rows.push(
+                h_flex()
+                    .w_full()
+                    .items_stretch()
+                    .border_b_1()
+                    .border_color(border)
+                    .when(r == 0, |this| this.bg(header_bg))
+                    .children(cells),
+            );
+        }
+        let add = |id_name: &'static str, tip: &'static str, op: TableOp| {
+            Button::new((id_name, id))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Plus)
+                .tooltip(tip)
+                .accessibility_label(tip)
+                .on_click(cx.listener(move |this, _, _, cx| this.table_op(id, op, cx)))
+        };
+        let last_row = table.rows.len().saturating_sub(1);
+        let last_col = columns.saturating_sub(1);
+        v_flex()
+            .id(("rich-table", id))
+            .group("rich-table")
+            .w_full()
+            .py_1()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_stretch()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .rounded(radius)
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(border)
+                            .children(rows),
+                    )
+                    // Add a column: on the right edge, while the pointer
+                    // is over the table.
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .pl_0p5()
+                            .invisible()
+                            .group_hover("rich-table", |this| this.visible())
+                            .child(add(
+                                "rich-add-column",
+                                "Add a column",
+                                TableOp::ColumnRight(last_col),
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .invisible()
+                    .group_hover("rich-table", |this| this.visible())
+                    .child(add(
+                        "rich-add-row",
+                        "Add a row",
+                        TableOp::RowBelow(last_row),
+                    )),
+            )
+            .into_any_element()
+    }
+
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let border = cx.theme().border;
         let inline = |id: &'static str,
@@ -1160,6 +1609,10 @@ impl RichEditor {
                         .into_any_element(),
                 }
             }
+            Kind::Raw if let Some(table) = Table::parse(&block.body) => {
+                // A table edits cell by cell, never as Markdown here.
+                return self.render_table(id, &table, cx);
+            }
             kind if kind.is_list() && block.body.trim().is_empty() => {
                 div().h(px(22.)).into_any_element()
             }
@@ -1179,13 +1632,22 @@ impl RichEditor {
             }
         };
         let _ = window;
+        // A double-click edits: a click or a drag only selects, to copy.
+        // An empty block has nothing to select, so a click will do.
+        let empty = block.body.trim().is_empty();
         div()
             .id(("rich-shown", id))
             .w_full()
             .min_h(px(22.))
             .cursor_text()
             .child(shown)
-            .on_click(cx.listener(move |this, _, window, cx| this.activate(id, None, window, cx)))
+            .on_click(
+                cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
+                    if empty || event.click_count() >= 2 {
+                        this.activate(id, None, window, cx)
+                    }
+                }),
+            )
             .into_any_element()
     }
 
@@ -1210,21 +1672,23 @@ impl RichEditor {
     fn render_input(&self, block: &Block, active: &Active, cx: &mut Context<Self>) -> AnyElement {
         let menu = self.menu.map(|highlight| self.render_menu(highlight, cx));
         let theme = cx.theme();
+        // The text keeps the block's look while it is edited: the field
+        // sets its own size, so a heading's goes on the field itself.
         let input = Textarea::new(&active.input)
             .appearance(false)
             .bordered(false);
+        let input = match &block.kind {
+            Kind::Heading(level) => input
+                .font_weight(gpui_kit::FontWeight::BOLD)
+                .text_size(px(heading_size(*level))),
+            Kind::Code { .. } | Kind::Raw => {
+                input.font_family(theme.mono_font_family.clone()).text_sm()
+            }
+            _ => input,
+        };
         let editor = div().w_full().child(input);
         let editor = match &block.kind {
-            Kind::Heading(level) => {
-                editor
-                    .font_weight(gpui_kit::FontWeight::BOLD)
-                    .text_size(px(match level {
-                        1 => 28.,
-                        2 => 22.,
-                        3 => 18.,
-                        _ => 16.,
-                    }))
-            }
+            Kind::Heading(_) => editor,
             Kind::Quote => editor
                 .pl_3()
                 .border_l_2()
@@ -1361,6 +1825,14 @@ impl Render for RichEditor {
             .key_context("RichEditor")
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::on_key))
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, window, _| {
+                    this.pressed_here = true;
+                    this.window = Some(window.window_handle());
+                }),
+            )
+            .on_mouse_down_out(cx.listener(|this, _, _, _| this.pressed_here = false))
             .size_full()
             .bg(theme.background)
             .child(toolbar)
@@ -1402,5 +1874,15 @@ impl Render for RichEditor {
                             ),
                     ),
             )
+    }
+}
+
+/// A heading's text size, by level (as the Markdown view draws it).
+fn heading_size(level: u8) -> f32 {
+    match level {
+        1 => 28.,
+        2 => 22.,
+        3 => 18.,
+        _ => 16.,
     }
 }

@@ -17,6 +17,63 @@ pub fn data_dir() -> PathBuf {
         .join("PilotHouse")
 }
 
+/// Names, in the data folder, the folder chosen for copies (see
+/// [`copies_dir`]).
+const COPIES_FILE: &str = "copies-location";
+
+/// The folder chosen for copies, read once and kept.
+static COPIES: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Where copies made for agents go: GitHub clones and pull request copies,
+/// tasks' and reviews' worktrees. The data folder, unless another was
+/// chosen (Settings → Storage), for one on a bigger disk.
+pub fn copies_dir() -> PathBuf {
+    if let Ok(known) = COPIES.read()
+        && let Some(dir) = known.as_ref()
+    {
+        return dir.clone();
+    }
+    let chosen = std::fs::read_to_string(data_dir().join(COPIES_FILE))
+        .ok()
+        .map(|text| PathBuf::from(text.trim()))
+        .filter(|dir| dir.is_absolute());
+    let dir = chosen.unwrap_or_else(data_dir);
+    if let Ok(mut known) = COPIES.write() {
+        *known = Some(dir.clone());
+    }
+    dir
+}
+
+/// Chooses the folder for copies made from now on (`None`: the data
+/// folder). Copies already made stay where they are.
+pub fn set_copies_dir(dir: Option<&Path>) -> std::io::Result<()> {
+    let file = data_dir().join(COPIES_FILE);
+    match dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir)?;
+            std::fs::write(&file, dir.to_string_lossy().as_bytes())?;
+        }
+        None => match std::fs::remove_file(&file) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+            _ => {}
+        },
+    }
+    if let Ok(mut known) = COPIES.write() {
+        *known = Some(dir.map(Path::to_path_buf).unwrap_or_else(data_dir));
+    }
+    Ok(())
+}
+
+/// The folders copies can be in: the chosen one and the data folder.
+pub fn copies_dirs() -> Vec<PathBuf> {
+    let (chosen, data) = (copies_dir(), data_dir());
+    if chosen == data {
+        vec![data]
+    } else {
+        vec![chosen, data]
+    }
+}
+
 /// The absolute, symlink-free form of `path`. Unlike `fs::canonicalize`, it
 /// gives `C:\\work\\app` on Windows, not `\\\\?\\C:\\work\\app`, which many
 /// programs refuse as a working directory. A path on a mapped network drive

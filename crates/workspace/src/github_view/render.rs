@@ -105,7 +105,7 @@ impl GithubView {
         v_flex()
             .id("github-sidebar")
             .flex_none()
-            .w(layout::SIDEBAR_WIDTH)
+            .w(crate::sidebar::width(cx))
             .h_full()
             .pl_2()
             .pb_2()
@@ -150,6 +150,36 @@ impl GithubView {
                     )
                 },
             )
+            // What the clones take on disk, and where to clean them up.
+            .when_some(self.clones_size.filter(|size| *size > 0), |this, size| {
+                this.child(div().flex_1().min_h_4()).child(
+                    h_flex()
+                        .mt_2()
+                        .px_2()
+                        .gap_1p5()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(Icon::new(Icons::HardDrive).xsmall())
+                        .child(
+                            div().flex_1().child(format!(
+                                "Clones use {}",
+                                ph_files::large::format_size(size)
+                            )),
+                        )
+                        .child(
+                            Button::new("github-storage")
+                                .ghost()
+                                .xsmall()
+                                .label("Manage")
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(crate::actions::OpenStorageSettings),
+                                        cx,
+                                    )
+                                }),
+                        ),
+                )
+            })
             .test_support()
             .into_any_element()
     }
@@ -335,7 +365,7 @@ impl GithubView {
                                 .label("Open Settings")
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(
-                                        Box::new(crate::actions::OpenSettings),
+                                        Box::new(crate::actions::OpenGitHubSettings),
                                         cx,
                                     )
                                 }),
@@ -356,7 +386,7 @@ impl GithubView {
 impl Render for GithubView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = if self.sidebar_shown {
-            layout::SIDEBAR_WIDTH
+            crate::sidebar::width(cx)
         } else {
             px(0.)
         };
@@ -384,8 +414,16 @@ impl Render for GithubView {
             .id("github-view")
             .size_full()
             .items_stretch()
+            // The workspace window resizes it as it does its own sidebar.
             .when(self.sidebar_shown, |this| {
-                this.child(self.render_sidebar(cx))
+                this.child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .h_full()
+                        .child(self.render_sidebar(cx))
+                        .child(crate::sidebar::resize_edge(cx)),
+                )
             })
             .child(div().flex_1().min_w_0().h_full().pr_2().pb_2().child(body))
     }

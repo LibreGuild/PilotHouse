@@ -452,3 +452,140 @@ mod tests {
         );
     }
 }
+
+/// Go to definition without a language server: the name under the cursor
+/// is looked up in the workspace's symbol index ([`crate::symbols`]),
+/// read in the background the first time and kept a minute. It finds
+/// functions, classes and types by their declarations; a language server,
+/// once there, does better and takes over.
+pub struct SymbolDefinitions {
+    root: PathBuf,
+    here: PathBuf,
+    index: std::sync::Arc<std::sync::Mutex<Option<ReadIndex>>>,
+}
+
+/// The symbol index, and when it was read.
+type ReadIndex = (
+    std::time::Instant,
+    std::sync::Arc<Vec<crate::symbols::Symbol>>,
+);
+
+impl SymbolDefinitions {
+    pub fn new(root: PathBuf, here: PathBuf) -> Self {
+        Self {
+            root,
+            here,
+            index: Default::default(),
+        }
+    }
+}
+
+impl gpui_kit::component::input::DefinitionProvider for SymbolDefinitions {
+    fn definitions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> gpui_kit::Task<Result<Vec<lsp_types::LocationLink>>> {
+        let source = text.to_string();
+        let Some((word, range)) = word_at(&source, offset) else {
+            return gpui_kit::Task::ready(Ok(Vec::new()));
+        };
+        let origin = lsp_types::Range {
+            start: text.offset_to_position(range.start),
+            end: text.offset_to_position(range.end),
+        };
+        let (root, here, index) = (self.root.clone(), self.here.clone(), self.index.clone());
+        let line_here = text.offset_to_position(offset).line as usize + 1;
+        cx.background_spawn(async move {
+            let symbols = {
+                let cached = index.lock().ok().and_then(|cached| {
+                    cached
+                        .as_ref()
+                        .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(60))
+                        .map(|(_, symbols)| symbols.clone())
+                });
+                match cached {
+                    Some(symbols) => symbols,
+                    None => {
+                        let roots = crate::roots::Roots::new(&[(root.clone(), None)]);
+                        let files = roots.index();
+                        let symbols = std::sync::Arc::new(crate::symbols::index(&roots, &files));
+                        if let Ok(mut cached) = index.lock() {
+                            *cached = Some((std::time::Instant::now(), symbols.clone()));
+                        }
+                        symbols
+                    }
+                }
+            };
+            let mut found: Vec<(PathBuf, usize)> = symbols
+                .iter()
+                .filter(|symbol| symbol.name == word)
+                .map(|symbol| (root.join(symbol.path.as_ref()), symbol.line))
+                // Not the declaration the cursor is on.
+                .filter(|(path, line)| !(*path == here && *line == line_here))
+                .collect();
+            // This file's first, then nearer folders.
+            found.sort_by_key(|(path, _)| (path != &here, path.components().count()));
+            Ok(found
+                .into_iter()
+                .take(10)
+                .filter_map(|(path, line)| {
+                    let at = lsp_types::Position::new(line.saturating_sub(1) as u32, 0);
+                    Some(lsp_types::LocationLink {
+                        origin_selection_range: Some(origin),
+                        target_uri: ph_lsp::uri::from_path(&path)?,
+                        target_range: lsp_types::Range::new(at, at),
+                        target_selection_range: lsp_types::Range::new(at, at),
+                    })
+                })
+                .collect())
+        })
+    }
+}
+
+/// The identifier around byte `offset` of `text`, and its byte range.
+fn word_at(text: &str, offset: usize) -> Option<(String, std::ops::Range<usize>)> {
+    let offset = offset.min(text.len());
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let start = text[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_word(*c))
+        .last()
+        .map_or(offset, |(at, _)| at);
+    let end = text[offset..]
+        .char_indices()
+        .find(|(_, c)| !is_word(*c))
+        .map_or(text.len(), |(at, _)| offset + at);
+    let word = &text[start..end];
+    (!word.is_empty() && !word.starts_with(|c: char| c.is_ascii_digit()))
+        .then(|| (word.to_string(), start..end))
+}
+
+#[cfg(test)]
+mod word_tests {
+    use super::word_at;
+
+    #[test]
+    fn the_name_under_the_cursor() {
+        let text = "val user = loadUser(id)";
+        assert_eq!(
+            word_at(text, 13).map(|(word, _)| word).as_deref(),
+            Some("loadUser")
+        );
+        assert_eq!(
+            word_at(text, 11),
+            Some(("loadUser".to_string(), 11..19)),
+            "at its start"
+        );
+        assert_eq!(
+            word_at(text, 19).map(|(word, _)| word).as_deref(),
+            Some("loadUser"),
+            "at its end"
+        );
+        assert_eq!(word_at("a + 42", 5), None, "numbers are not names");
+        assert_eq!(word_at("a  b", 2), None);
+    }
+}

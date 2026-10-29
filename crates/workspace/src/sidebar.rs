@@ -27,8 +27,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, div, px,
+    AnyElement, App, AppContext as _, Context, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    WeakEntity, Window, div, px,
 };
 use jiff::{ToSpan as _, Zoned};
 use ph_agent::ChatState;
@@ -51,6 +52,85 @@ const CHATS: &str = "chats";
 const WORKSPACES: &str = "workspaces";
 const PINNED: &str = "pinned";
 
+/// The sidebar's width, as the user last dragged it (the workspace's and
+/// the GitHub view's sidebars share it).
+#[derive(Clone, Copy)]
+struct SidebarWidth {
+    width: Pixels,
+    /// Bumped by each drag step: only the last one is saved.
+    edit: u64,
+}
+
+impl gpui_kit::Global for SidebarWidth {}
+
+/// Reads the saved width (at startup).
+pub(crate) fn load_width(cx: &mut App) {
+    let saved: f32 = crate::AppState::store(cx).setting(crate::app_state::keys::SIDEBAR_WIDTH);
+    let width = if saved > 0. {
+        px(saved).clamp(layout::SIDEBAR_MIN, layout::SIDEBAR_MAX)
+    } else {
+        layout::SIDEBAR_WIDTH
+    };
+    cx.set_global(SidebarWidth { width, edit: 0 });
+}
+
+pub(crate) fn width(cx: &App) -> Pixels {
+    cx.try_global::<SidebarWidth>()
+        .map_or(layout::SIDEBAR_WIDTH, |sidebar| sidebar.width)
+}
+
+/// What is dragged when the sidebar's edge is.
+pub(crate) struct SidebarEdge;
+
+impl Render for SidebarEdge {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui_kit::Empty
+    }
+}
+
+/// The grip on the sidebar's right edge; the sidebar's container passes
+/// the drag to [`drag_width`].
+pub(crate) fn resize_edge(cx: &App) -> impl IntoElement {
+    let hover = cx.theme().border;
+    div()
+        .id("sidebar-resize")
+        .absolute()
+        .top_0()
+        .right(px(-3.))
+        .w(px(6.))
+        .h_full()
+        .cursor_col_resize()
+        .hover(move |style| style.bg(hover))
+        .on_drag(SidebarEdge, |_, _, _, cx| cx.new(|_| SidebarEdge))
+}
+
+/// The edge was dragged to `width`: the sidebars follow, and the width is
+/// saved once the drag rests.
+pub(crate) fn drag_width(width: Pixels, cx: &mut App) {
+    let width = width.clamp(layout::SIDEBAR_MIN, layout::SIDEBAR_MAX);
+    let edit = cx
+        .try_global::<SidebarWidth>()
+        .map_or(0, |sidebar| sidebar.edit)
+        + 1;
+    cx.set_global(SidebarWidth { width, edit });
+    cx.refresh_windows();
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(400))
+            .await;
+        cx.update(|cx| {
+            if cx
+                .try_global::<SidebarWidth>()
+                .is_some_and(|sidebar| sidebar.edit == edit)
+            {
+                _ = crate::AppState::store(cx)
+                    .set_setting(crate::app_state::keys::SIDEBAR_WIDTH, &f32::from(width));
+            }
+        });
+    })
+    .detach();
+}
+
 pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let mut rows: Vec<AnyElement> = Vec::new();
     if !workspace.pinned.is_empty() {
@@ -72,14 +152,25 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
         for (ix, project) in workspace.projects().iter().enumerate() {
             rows.push(workspace_row(workspace, project, ix, cx));
             if workspace.expanded.contains(&project.id) {
-                rows.extend(chat_rows(workspace, project.id, Some(NEWEST), cx));
+                // A workspace's chats hang from it on a guide line, so they
+                // read as its own and not as the next section.
+                rows.push(
+                    v_flex()
+                        .ml(px(11.))
+                        .pl(px(6.))
+                        .mb_1()
+                        .border_l_1()
+                        .border_color(cx.theme().sidebar_border)
+                        .children(chat_rows(workspace, project.id, Some(NEWEST), cx))
+                        .into_any_element(),
+                );
             }
         }
     }
     v_flex()
         .id("workspace-sidebar")
         .flex_none()
-        .w(layout::SIDEBAR_WIDTH)
+        .w(width(cx))
         .h_full()
         .pl_2()
         .pb_2()
@@ -133,9 +224,11 @@ fn top(cx: &App) -> impl IntoElement {
     };
     v_flex()
         .flex_none()
-        .pr_1()
+        .mr_1()
         .pt_1()
         .pb_1()
+        .border_b_1()
+        .border_color(cx.theme().sidebar_border)
         .child(
             row(
                 "sidebar-new-chat",
@@ -190,7 +283,6 @@ fn pinned_rows(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyEle
             session,
             active,
             ChatRow {
-                nested: false,
                 pinned: true,
                 settled: workspace.is_settled(session.id),
                 place,
@@ -294,9 +386,10 @@ fn workspace_row(
         .rounded(cx.theme().radius)
         .cursor_pointer()
         .text_sm()
+        // Heavier than the chats under it.
+        .font_weight(gpui_kit::FontWeight::MEDIUM)
         .when(active, |this| {
-            this.font_weight(gpui_kit::FontWeight::MEDIUM)
-                .bg(cx.theme().sidebar_accent.opacity(0.35))
+            this.bg(cx.theme().sidebar_accent.opacity(0.35))
         })
         .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.6)))
         .tooltip(move |window, cx| {
@@ -482,20 +575,40 @@ fn chat_rows(
     let today = Zoned::now();
     let mut rows = Vec::new();
     if own.is_empty() && runs.is_empty() && done.is_empty() {
-        rows.push(
+        let start = entity.clone();
+        rows.push(if nested {
+            h_flex()
+                .id(SharedString::from(format!("sidebar-first-chat-{project}")))
+                .h_6()
+                .pl(px(6.))
+                .pr_2()
+                .gap_1p5()
+                .rounded(cx.theme().radius)
+                .cursor_pointer()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .hover(|style| {
+                    style
+                        .bg(cx.theme().sidebar_accent)
+                        .text_color(cx.theme().foreground)
+                })
+                .child(Icon::new(Icons::Plus).xsmall())
+                .child("New chat")
+                .on_click(move |_, window, cx| {
+                    _ = start.update(cx, |workspace, cx| {
+                        workspace.new_chat_in(project, window, cx)
+                    });
+                })
+                .into_any_element()
+        } else {
             div()
-                .when(nested, |this| this.pl_6())
-                .when(!nested, |this| this.px_2())
+                .px_2()
                 .py_1()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(if nested {
-                    "No chats yet."
-                } else {
-                    "Chats here need no folder."
-                })
-                .into_any_element(),
-        );
+                .child("Chats that need no folder.")
+                .into_any_element()
+        });
     }
     let mut group = None;
     for session in own.iter().take(shown) {
@@ -513,7 +626,6 @@ fn chat_rows(
             session,
             active,
             ChatRow {
-                nested,
                 pinned: workspace.is_pinned(session.id),
                 settled: workspace.is_settled(session.id),
                 place: None,
@@ -583,7 +695,6 @@ fn chat_rows(
                     session,
                     active,
                     ChatRow {
-                        nested,
                         pinned: workspace.is_pinned(session.id),
                         settled: workspace.is_settled(session.id),
                         place: None,
@@ -630,7 +741,6 @@ fn chat_rows(
                     session,
                     active,
                     ChatRow {
-                        nested,
                         pinned: workspace.is_pinned(session.id),
                         settled: workspace.is_settled(session.id),
                         place: None,
@@ -646,8 +756,6 @@ fn chat_rows(
 
 /// How a chat row shows.
 struct ChatRow {
-    /// Under its workspace (indented).
-    nested: bool,
     pinned: bool,
     /// The workspace it belongs to, shown in the Pinned list.
     place: Option<String>,
@@ -692,7 +800,7 @@ fn chat_row(
     };
     let open = workspace.clone();
     let group = SharedString::from(format!("chat-row-{id}"));
-    let indent = if row.nested { px(22.) } else { px(6.) };
+    let indent = px(6.);
     v_flex()
         .id(SharedString::from(format!("chat-{id}")))
         .group(group.clone())
@@ -934,7 +1042,7 @@ fn section(
         .group(group.clone())
         .flex_none()
         .h_8()
-        .mt_1()
+        .mt_2()
         .px_1()
         .gap_1()
         .text_xs()
@@ -994,7 +1102,7 @@ fn link(
     h_flex()
         .id(id)
         .h_6()
-        .when(nested, |this| this.pl_6())
+        .when(nested, |this| this.pl(px(6.)))
         .when(!nested, |this| this.pl_2())
         .pr_2()
         .gap_1()

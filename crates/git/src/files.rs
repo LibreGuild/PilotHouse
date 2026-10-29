@@ -68,6 +68,68 @@ pub fn diff_with_head(root: &Path, path: &str) -> Result<Vec<FileChange>> {
     Ok(parse_diff(&out))
 }
 
+/// The working tree's changes as `git diff` prints them: of `path`, or of
+/// every file, against the index (or `HEAD` when `against_head`). Every
+/// file's also has the new files Git does not follow yet, as added.
+pub fn patch(root: &Path, path: Option<&str>, against_head: bool) -> Result<String> {
+    let mut args = vec![
+        LITERAL,
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+    ];
+    if against_head {
+        args.push("HEAD");
+    }
+    args.push("--");
+    args.extend(path);
+    let mut patch = git(root, &args)?;
+    if path.is_none() {
+        let untracked = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+        for file in untracked
+            .split('\0')
+            .filter(|file| !file.is_empty())
+            .take(NEW_FILES_SHOWN)
+        {
+            if let Some(added) = new_file_patch(root, file) {
+                patch.push_str(&added);
+            }
+        }
+    }
+    Ok(patch)
+}
+
+/// New files shown in every file's changes, at most (each is read whole).
+const NEW_FILES_SHOWN: usize = 100;
+
+/// A new file's patch: all its lines added. None for a binary or very
+/// large file.
+fn new_file_patch(root: &Path, file: &str) -> Option<String> {
+    const LARGEST: u64 = 512 * 1024;
+    let full = root.join(file);
+    if std::fs::metadata(&full).ok()?.len() > LARGEST {
+        return None;
+    }
+    let text = String::from_utf8(std::fs::read(&full).ok()?).ok()?;
+    if text.contains('\0') {
+        return None;
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let mut patch = format!(
+        "diff --git a/{file} b/{file}\nnew file mode 100644\n--- /dev/null\n+++ b/{file}\n"
+    );
+    if !lines.is_empty() {
+        patch.push_str(&format!("@@ -0,0 +1,{} @@\n", lines.len()));
+        for line in lines {
+            patch.push('+');
+            patch.push_str(line);
+            patch.push('\n');
+        }
+    }
+    Some(patch)
+}
+
 /// The differences between two files anywhere on disk.
 pub fn diff_files(a: &Path, b: &Path) -> Result<Vec<FileChange>> {
     let dir = a.parent().unwrap_or(Path::new("."));
@@ -180,6 +242,30 @@ mod tests {
             std::fs::read_to_string(root.join("a.txt")).unwrap(),
             "one\ntwo\n"
         );
+    }
+
+    #[test]
+    fn every_changes_patch_has_the_new_files() {
+        let root = temp_repo("file-patch");
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        commit(&root, "first");
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(root.join("new.txt"), "fresh\nlines\n").unwrap();
+        std::fs::write(root.join("blob.bin"), [0u8, 1, 2]).unwrap();
+        let files = parse_diff(&patch(&root, None, false).unwrap());
+        let summary: Vec<_> = files
+            .iter()
+            .map(|file| (file.path.as_str(), file.added(), file.kind()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("a.txt", 1, crate::ChangeKind::Changed),
+                ("new.txt", 2, crate::ChangeKind::New)
+            ]
+        );
+        let one = parse_diff(&patch(&root, Some("a.txt"), true).unwrap());
+        assert_eq!(one.len(), 1);
     }
 
     #[test]

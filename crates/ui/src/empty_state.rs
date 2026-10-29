@@ -64,14 +64,25 @@ impl RenderOnce for EmptyState {
                 )
             })
             .child(
+                // Full width up to the cap, so a long message (an error
+                // with a path in it) wraps instead of running out of view.
                 v_flex()
                     .items_center()
                     .gap_1()
+                    .w_full()
                     .max_w_80()
-                    .child(div().text_base().font_medium().child(self.title))
+                    .child(
+                        div()
+                            .w_full()
+                            .text_center()
+                            .text_base()
+                            .font_medium()
+                            .child(self.title),
+                    )
                     .when_some(self.description, |this, description| {
                         this.child(
                             div()
+                                .w_full()
                                 .text_sm()
                                 .text_center()
                                 .text_color(cx.theme().muted_foreground)

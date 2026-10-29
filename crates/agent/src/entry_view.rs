@@ -250,13 +250,11 @@ fn turn_footer(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> Optio
     let user = entries[..ix]
         .iter()
         .rposition(|entry| matches!(entry, Entry::User { .. }));
-    let files = transcript::turn_changes(&entries[user.map_or(0, |user| user + 1)..=ix]);
-    if files.is_empty() {
+    let start = user.map_or(0, |user| user + 1);
+    let (count, added, removed) = transcript::turn_change_counts(&entries[start..=ix]);
+    if count == 0 {
         return None;
     }
-    let (added, removed) = files
-        .iter()
-        .fold((0, 0), |(a, r), file| (a + file.added, r + file.removed));
     let undo = user.and_then(|user| match &entries[user] {
         Entry::User {
             text,
@@ -266,28 +264,17 @@ fn turn_footer(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> Optio
         _ => None,
     });
     let can_restore = thread.can_restore();
-    let count = files.len();
     let title = format!("Changed {count} file{}", if count == 1 { "" } else { "s" });
     let review = {
-        let (files, title) = (files.clone(), title.clone());
+        let (thread, title) = (thread_entity.clone(), title.clone());
         move |_: &gpui_kit::ClickEvent, window: &mut gpui_kit::Window, cx: &mut App| {
-            let (files, title) = (files.clone(), title.clone());
-            window.open_dialog(cx, move |dialog, _, cx| {
-                dialog.title(title.clone()).w(px(860.)).child(
-                    v_flex()
-                        .id("turn-changes")
-                        .max_h(px(600.))
-                        .overflow_y_scroll()
-                        .gap_2()
-                        .children(files.iter().map(|file| {
-                            div()
-                                .rounded(cx.theme().radius)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .overflow_hidden()
-                                .child(render_diff(file, cx))
-                        })),
-                )
+            // The diffs are put together once, when asked for; the list
+            // draws only the files in view, so thousands open at once.
+            let files = transcript::turn_changes(&thread.read(cx).entries()[start..=ix]);
+            let view = gpui_kit::AppContext::new(cx, |_| TurnChanges::new(files));
+            let title = title.clone();
+            window.open_dialog(cx, move |dialog, _, _| {
+                dialog.title(title.clone()).w(px(860.)).child(view.clone())
             });
         }
     };
@@ -338,6 +325,56 @@ fn turn_footer(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> Optio
             })
             .into_any_element(),
     )
+}
+
+/// A turn's changes, file by file, in a list that draws only what shows.
+struct TurnChanges {
+    files: Rc<Vec<FileDiff>>,
+    list: gpui_kit::ListState,
+}
+
+impl TurnChanges {
+    fn new(files: Vec<FileDiff>) -> Self {
+        Self {
+            list: gpui_kit::ListState::new(files.len(), gpui_kit::ListAlignment::Top, px(600.)),
+            files: Rc::new(files),
+        }
+    }
+}
+
+impl gpui_kit::Render for TurnChanges {
+    fn render(
+        &mut self,
+        _: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) -> impl IntoElement {
+        use gpui_kit::component::scroll::ScrollableElement as _;
+        let files = self.files.clone();
+        div()
+            .id("turn-changes")
+            .relative()
+            .h(px(600.))
+            .child(
+                gpui_kit::list(self.list.clone(), move |ix, _, cx| {
+                    let Some(file) = files.get(ix) else {
+                        return div().into_any_element();
+                    };
+                    div()
+                        .pb_2()
+                        .child(
+                            div()
+                                .rounded(cx.theme().radius)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .overflow_hidden()
+                                .child(render_diff(file, cx)),
+                        )
+                        .into_any_element()
+                })
+                .size_full(),
+            )
+            .vertical_scrollbar(&self.list)
+    }
 }
 
 /// Room above an entry, from what is above it: a new message stands apart,

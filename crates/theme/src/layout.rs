@@ -13,8 +13,10 @@ pub const TITLE_BAR_HEIGHT: Pixels = px(40.);
 /// Where macOS draws the window buttons, centred in [`TITLE_BAR_HEIGHT`].
 pub const TRAFFIC_LIGHTS: (Pixels, Pixels) = (px(14.), px(13.));
 
-/// Left rail: projects and sessions.
+/// Left rail: projects and sessions (dragging its edge sets the width).
 pub const SIDEBAR_WIDTH: Pixels = px(248.);
+pub const SIDEBAR_MIN: Pixels = px(180.);
+pub const SIDEBAR_MAX: Pixels = px(520.);
 
 /// Right context panel (files, changes, board, terminal).
 pub const CONTEXT_PANEL_DEFAULT: Pixels = px(560.);

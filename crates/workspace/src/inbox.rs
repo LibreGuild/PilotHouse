@@ -36,6 +36,7 @@ use ph_store::todos::{Todo, TodoId};
 
 use crate::AppState;
 use crate::workspace::Workspace;
+use ph_ui::{Icons, MenuButton as _};
 
 /// When the user last cleared the inbox's finished runs (milliseconds).
 const SEEN_KEY: &str = "inbox.seen_at";
@@ -48,16 +49,18 @@ enum Tab {
 
 /// When a new to-do reminds.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Remind {
+pub(crate) enum Remind {
     Never,
+    InTenMinutes,
     InAnHour,
     Tonight,
     Tomorrow,
 }
 
 impl Remind {
-    const ALL: [Remind; 4] = [
+    const ALL: [Remind; 5] = [
         Remind::Never,
+        Remind::InTenMinutes,
         Remind::InAnHour,
         Remind::Tonight,
         Remind::Tomorrow,
@@ -66,6 +69,7 @@ impl Remind {
     fn label(self) -> &'static str {
         match self {
             Remind::Never => "No reminder",
+            Remind::InTenMinutes => "In 10 min",
             Remind::InAnHour => "In 1 h",
             Remind::Tonight => "18:00",
             Remind::Tomorrow => "Tomorrow 09:00",
@@ -73,7 +77,7 @@ impl Remind {
     }
 
     /// The time, in milliseconds; "18:00" already past means tomorrow's.
-    fn at(self) -> Option<i64> {
+    pub(crate) fn at(self) -> Option<i64> {
         let now = Zoned::now();
         let at = |days: i64, hour: i8| {
             now.checked_add(days.days())
@@ -88,6 +92,7 @@ impl Remind {
         };
         let time = match self {
             Remind::Never => return None,
+            Remind::InTenMinutes => now.checked_add(10.minutes()).ok()?,
             Remind::InAnHour => now.checked_add(1.hour()).ok()?,
             Remind::Tonight => at(0, 18).filter(|time| *time > now).or_else(|| at(1, 18))?,
             Remind::Tomorrow => at(1, 9)?,
@@ -108,9 +113,13 @@ pub struct InboxView {
     todos: Vec<Todo>,
     new_todo: Entity<InputState>,
     remind: Remind,
+    /// An exact reminder time typed by the user (`14:30`, `tomorrow 9am`,
+    /// `fri 10:00`, `in 20 min`, `2026-11-02 10:00`); it wins over the
+    /// choices when set.
+    remind_text: Entity<InputState>,
     /// The new to-do is for every workspace, not just this one.
     shared: bool,
-    _input: Subscription,
+    _inputs: Vec<Subscription>,
 }
 
 impl InboxView {
@@ -121,6 +130,10 @@ impl InboxView {
     ) -> Self {
         let new_todo = cx
             .new(|cx| InputState::new(window, cx).placeholder("Something to do… (Enter adds it)"));
+        let remind_text = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Or a time: 14:30, tomorrow 9am, fri 10:00, in 20 min")
+        });
         let input = cx.subscribe_in(
             &new_todo,
             window,
@@ -139,8 +152,10 @@ impl InboxView {
             todos: Vec::new(),
             new_todo,
             remind: Remind::Never,
+            remind_text: remind_text.clone(),
             shared: false,
-            _input: input,
+            // The typed time is read back as it is typed.
+            _inputs: vec![input, cx.observe(&remind_text, |_, _, cx| cx.notify())],
         };
         view.refresh(cx);
         view
@@ -169,12 +184,35 @@ impl InboxView {
         cx.notify();
     }
 
+    /// The new to-do's reminder: the typed time if any (`Err` when it
+    /// cannot be read), else the choice.
+    fn new_reminder(&self, cx: &App) -> Result<Option<i64>, ()> {
+        let typed = self.remind_text.read(cx).value().trim().to_string();
+        if typed.is_empty() {
+            return Ok(self.remind.at());
+        }
+        parse_when(&typed, &Zoned::now())
+            .map(|at| Some(at.timestamp().as_millisecond()))
+            .ok_or(())
+    }
+
     fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.new_todo.read(cx).value().to_string();
         let project = if self.shared { None } else { self.project_id };
-        match AppState::store(cx).add_todo(project, &text, self.remind.at()) {
+        let Ok(remind_at) = self.new_reminder(cx) else {
+            window.push_notification(
+                Notification::warning(
+                    "That reminder time cannot be read; try 14:30 or tomorrow 9am.",
+                ),
+                cx,
+            );
+            return;
+        };
+        match AppState::store(cx).add_todo(project, &text, remind_at) {
             Ok(_) => {
                 self.new_todo
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.remind_text
                     .update(cx, |input, cx| input.set_value("", window, cx));
                 self.remind = Remind::Never;
             }
@@ -189,7 +227,12 @@ impl InboxView {
     }
 
     fn snooze(&mut self, id: TodoId, cx: &mut Context<Self>) {
-        let _ = AppState::store(cx).set_todo_reminder(id, Remind::InAnHour.at());
+        self.remind_again(id, Remind::InAnHour, cx);
+    }
+
+    /// Moves a to-do's reminder (`Never` takes it away).
+    fn remind_again(&mut self, id: TodoId, remind: Remind, cx: &mut Context<Self>) {
+        let _ = AppState::store(cx).set_todo_reminder(id, remind.at());
         self.refresh(cx);
     }
 
@@ -346,43 +389,90 @@ impl InboxView {
 
     fn render_todos(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        let now = now_millis();
         let rows = self.todos.iter().enumerate().map(|(ix, todo)| {
-            let (toggle, remove, done) = (todo.id, todo.id, todo.done);
+            let (id, done) = (todo.id, todo.done);
+            let due = todo.is_due(now);
             let when = todo
                 .remind_at
                 .filter(|_| !todo.done)
-                .map(|at| reminder_label(at, now_millis()));
+                .map(|at| reminder_label(at, now));
+            let view = cx.entity().downgrade();
+            // The reminder, as a pill that moves it.
+            let pill = Button::new(("todo-when", ix))
+                .xsmall()
+                .ghost()
+                .icon(if when.is_some() {
+                    Icons::BellRing
+                } else {
+                    Icons::Bell
+                })
+                .when_some(when.clone(), |this, when| this.label(when))
+                .when(due, |this| this.text_color(cx.theme().warning))
+                .tooltip(if when.is_some() {
+                    "Move or clear the reminder"
+                } else {
+                    "Remind me"
+                })
+                .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                    Remind::ALL.iter().fold(menu, |menu, remind| {
+                        let (view, remind) = (view.clone(), *remind);
+                        let label = match remind {
+                            Remind::Never => "Clear the reminder",
+                            other => other.label(),
+                        };
+                        menu.item(
+                            gpui_kit::component::menu::PopupMenuItem::new(label).on_click(
+                                move |_, _, cx| {
+                                    _ = view
+                                        .update(cx, |this, cx| this.remind_again(id, remind, cx));
+                                },
+                            ),
+                        )
+                    })
+                });
             h_flex()
+                .id(("todo", ix))
+                .group("todo")
                 .gap_2()
-                .py_0p5()
+                .px_2()
+                .py_1()
+                .rounded(cx.theme().radius)
+                .hover(|style| style.bg(cx.theme().list_hover))
+                .when(due, |this| this.bg(cx.theme().warning.opacity(0.1)))
                 .child(
                     Checkbox::new(("todo-done", ix))
                         .checked(todo.done)
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.set_done(toggle, !done, cx)),
-                        ),
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_done(id, !done, cx))),
                 )
                 .child(
-                    div()
+                    v_flex()
                         .flex_1()
                         .min_w_0()
-                        .text_sm()
-                        .when(todo.done, |this| this.line_through().text_color(muted))
-                        .child(todo.text.clone()),
+                        .child(
+                            div()
+                                .text_sm()
+                                .when(todo.done, |this| this.line_through().text_color(muted))
+                                .child(todo.text.clone()),
+                        )
+                        .when(todo.project_id.is_none(), |this| {
+                            this.child(div().text_xs().text_color(muted).child("All workspaces"))
+                        }),
                 )
-                .when(todo.project_id.is_none(), |this| {
-                    this.child(div().text_xs().text_color(muted).child("all"))
-                })
-                .when_some(when, |this, when| {
-                    this.child(div().text_xs().text_color(muted).child(when))
-                })
+                .when(!todo.done, |this| this.child(pill))
                 .child(
-                    Button::new(("todo-delete", ix))
-                        .xsmall()
-                        .ghost()
-                        .icon(IconName::Close)
-                        .accessibility_label("Delete to-do")
-                        .on_click(cx.listener(move |this, _, _, cx| this.delete(remove, cx))),
+                    div()
+                        .invisible()
+                        .group_hover("todo", |style| style.visible())
+                        .child(
+                            Button::new(("todo-delete", ix))
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::Close)
+                                .tooltip("Delete")
+                                .accessibility_label("Delete to-do")
+                                .on_click(cx.listener(move |this, _, _, cx| this.delete(id, cx))),
+                        ),
                 )
         });
         let choice = |id: SharedString, text: &'static str, on: bool| {
@@ -392,6 +482,12 @@ impl InboxView {
                 .when(!on, |this| this.ghost())
                 .label(text)
         };
+        let typed = self.remind_text.read(cx).value().trim().to_string();
+        let preview: Option<(String, bool)> =
+            (!typed.is_empty()).then(|| match parse_when(&typed, &Zoned::now()) {
+                Some(at) => (at.strftime("Reminds %a %-d %b, %H:%M").to_string(), true),
+                None => ("Cannot read that time.".to_string(), false),
+            });
         v_flex()
             .gap_2()
             .child(Input::new(&self.new_todo).small())
@@ -403,23 +499,41 @@ impl InboxView {
                         choice(
                             SharedString::from(format!("remind-{}", remind.label())),
                             remind.label(),
-                            self.remind == remind,
+                            typed.is_empty() && self.remind == remind,
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             this.remind = remind;
+                            this.remind_text
+                                .update(cx, |input, cx| input.set_value("", window, cx));
                             cx.notify();
                         }))
-                    }))
-                    .child(div().flex_1())
+                    })),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&self.remind_text).small()))
                     .child(
-                        choice("todo-shared".into(), "All workspaces", self.shared).on_click(cx.listener(
-                            |this, _, _, cx| {
+                        choice("todo-shared".into(), "All workspaces", self.shared).on_click(
+                            cx.listener(|this, _, _, cx| {
                                 this.shared = !this.shared;
                                 cx.notify();
-                            },
-                        )),
+                            }),
+                        ),
                     ),
             )
+            .when_some(preview, |this, (text, ok)| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(if ok {
+                            cx.theme().muted_foreground
+                        } else {
+                            cx.theme().danger
+                        })
+                        .child(text),
+                )
+            })
             .when(self.todos.is_empty(), |this| {
                 this.child(div().text_xs().text_color(muted).child(
                     "Nothing to do yet. Add what you must not forget; give it a reminder to be told when.",
@@ -525,6 +639,114 @@ fn reminder_label(at: i64, now: i64) -> String {
     }
 }
 
+/// A reminder time as people type it, after `now`: `14:30`, `9am`,
+/// `9:30 pm`, `today 18:00`, `tomorrow 9am`, `fri 10:00` (the next Friday),
+/// `2026-11-02 10:00`, `in 20 min`, `in 2 h`, `in 3 days`. A time of day
+/// already past today means tomorrow's.
+pub(crate) fn parse_when(text: &str, now: &Zoned) -> Option<Zoned> {
+    let text = text.trim().to_lowercase();
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.first() == Some(&"in") {
+        let (count, unit) = match words.as_slice() {
+            [_, count, unit] => (count.parse::<i64>().ok()?, *unit),
+            [_, joined] => {
+                let split = joined.find(|c: char| !c.is_ascii_digit())?;
+                (joined[..split].parse().ok()?, &joined[split..])
+            }
+            _ => return None,
+        };
+        let span = match unit {
+            "m" | "min" | "mins" | "minute" | "minutes" => count.minutes(),
+            "h" | "hr" | "hrs" | "hour" | "hours" => count.hours(),
+            "d" | "day" | "days" => count.days(),
+            _ => return None,
+        };
+        return now.checked_add(span).ok();
+    }
+    // The day, then the time of day.
+    let (day, time) = match words.as_slice() {
+        [time] => (None, *time),
+        [time, meridiem @ ("am" | "pm")] => {
+            return parse_when(&format!("{time}{meridiem}"), now);
+        }
+        [day, time] => (Some(*day), *time),
+        [day, time, meridiem @ ("am" | "pm")] => {
+            return parse_when(&format!("{day} {time}{meridiem}"), now);
+        }
+        _ => return None,
+    };
+    let (hour, minute) = time_of_day(time)?;
+    let at = |date: jiff::civil::Date| {
+        date.at(hour, minute, 0, 0)
+            .to_zoned(now.time_zone().clone())
+            .ok()
+    };
+    let today = now.date();
+    match day {
+        None | Some("today") => {
+            let time = at(today)?;
+            if day.is_none() && time <= *now {
+                at(today.tomorrow().ok()?)
+            } else {
+                Some(time)
+            }
+        }
+        Some("tomorrow" | "tmr" | "tom") => at(today.tomorrow().ok()?),
+        Some(day) if day.len() == 10 && day.as_bytes()[4] == b'-' => {
+            at(day.parse::<jiff::civil::Date>().ok()?)
+        }
+        Some(day) => {
+            let weekday = weekday(day)?;
+            let mut date = today.tomorrow().ok()?;
+            while date.weekday() != weekday {
+                date = date.tomorrow().ok()?;
+            }
+            at(date)
+        }
+    }
+}
+
+/// `14:30`, `9`, `9am`, `9:30pm`: hour and minute.
+fn time_of_day(text: &str) -> Option<(i8, i8)> {
+    let (text, offset) = if let Some(rest) = text.strip_suffix("am") {
+        (rest, Some(0))
+    } else if let Some(rest) = text.strip_suffix("pm") {
+        (rest, Some(12))
+    } else {
+        (text, None)
+    };
+    let (hour, minute) = match text.split_once([':', '.']) {
+        Some((hour, minute)) => (hour.parse::<i8>().ok()?, minute.parse::<i8>().ok()?),
+        None => (text.parse::<i8>().ok()?, 0),
+    };
+    let hour = match offset {
+        Some(offset) if (1..=12).contains(&hour) => hour % 12 + offset,
+        Some(_) => return None,
+        None => hour,
+    };
+    ((0..24).contains(&hour) && (0..60).contains(&minute)).then_some((hour, minute))
+}
+
+fn weekday(text: &str) -> Option<jiff::civil::Weekday> {
+    use jiff::civil::Weekday::*;
+    let days = [
+        ("monday", Monday),
+        ("tuesday", Tuesday),
+        ("wednesday", Wednesday),
+        ("thursday", Thursday),
+        ("friday", Friday),
+        ("saturday", Saturday),
+        ("sunday", Sunday),
+    ];
+    (text.len() >= 3)
+        .then(|| {
+            days.iter()
+                .find(|(name, _)| name.starts_with(text))
+                .map(|(_, day)| *day)
+        })
+        .flatten()
+}
+
 fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -535,6 +757,43 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_reminder_times_are_read() {
+        // Thursday 29 October 2026, 13:00.
+        let now: Zoned = "2026-10-29T13:00:00[UTC]".parse().unwrap();
+        let read = |text: &str| {
+            parse_when(text, &now).map(|at| at.strftime("%a %Y-%m-%d %H:%M").to_string())
+        };
+        assert_eq!(read("14:30").as_deref(), Some("Thu 2026-10-29 14:30"));
+        assert_eq!(
+            read("9am").as_deref(),
+            Some("Fri 2026-10-30 09:00"),
+            "past: tomorrow"
+        );
+        assert_eq!(read("9:30 pm").as_deref(), Some("Thu 2026-10-29 21:30"));
+        assert_eq!(read("12am").as_deref(), Some("Fri 2026-10-30 00:00"));
+        assert_eq!(
+            read("tomorrow 9am").as_deref(),
+            Some("Fri 2026-10-30 09:00")
+        );
+        assert_eq!(read("Fri 10:00").as_deref(), Some("Fri 2026-10-30 10:00"));
+        assert_eq!(
+            read("thursday 8").as_deref(),
+            Some("Thu 2026-11-05 08:00"),
+            "next week's"
+        );
+        assert_eq!(
+            read("2026-11-02 10:00").as_deref(),
+            Some("Mon 2026-11-02 10:00")
+        );
+        assert_eq!(read("in 20 min").as_deref(), Some("Thu 2026-10-29 13:20"));
+        assert_eq!(read("in 2h").as_deref(), Some("Thu 2026-10-29 15:00"));
+        assert_eq!(read("in 3 days").as_deref(), Some("Sun 2026-11-01 13:00"));
+        for bad in ["", "soon", "25:00", "13pm", "in a bit", "xyz 10:00"] {
+            assert_eq!(read(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn reminders_read_as_times() {

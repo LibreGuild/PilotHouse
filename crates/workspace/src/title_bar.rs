@@ -1,6 +1,7 @@
-//! Contents of the window title bar: the app icon, the two views
-//! (Workspaces and GitHub), the command palette trigger, and window-level
-//! toggles. The bar is quiet chrome: plain, so attention stays on the work.
+//! Contents of the window title bar: the app's mark, the two views
+//! (Workspaces and GitHub), the command palette trigger in the middle, and
+//! window-level buttons (inbox, agents, appearance, settings, the side
+//! panels). The bar is quiet chrome: plain, so attention stays on the work.
 //! Workspaces are picked in the sidebar.
 //!
 //! On Windows the whole bar is a caption (drag) area for the system, so a
@@ -34,30 +35,24 @@ pub(crate) fn render(
     let dark = cx.theme().is_dark();
     let palette_hint =
         Kbd::binding_for_action(&ToggleCommandPalette, Some(WORKSPACE_CONTEXT), window);
-
+    // The search sits in the middle of the window, not of the space left
+    // between the window's buttons: the side with less of the window's own
+    // chrome gets that much more room (macOS's buttons are on the left,
+    // Windows' and Linux's on the right).
+    let (left_bias, right_bias) = chrome_bias(window);
     h_flex()
         .w_full()
         .h_full()
         .pr_2p5()
         .gap_1()
-        .child(app_icon(cx))
         .child(
-            Button::new("toggle-sidebar")
-                .occlude()
-                .ghost()
-                .small()
-                .icon(if workspace.is_sidebar_collapsed() {
-                    IconName::PanelLeftOpen
-                } else {
-                    IconName::PanelLeftClose
-                })
-                .tooltip("Toggle sidebar (⌘B)")
-                .accessibility_label("Toggle sidebar")
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleSidebar), cx)),
+            h_flex()
+                .flex_1()
+                .flex_basis(left_bias)
+                .gap_1()
+                .child(app_icon(cx))
+                .child(view_toggle(workspace, cx)),
         )
-        .child(view_toggle(workspace, cx))
-        .child(div().flex_1())
-        // Command palette trigger, centred feel without stealing the drag area.
         .child(
             h_flex()
                 .id("open-command-palette")
@@ -65,8 +60,9 @@ pub(crate) fn render(
                 .aria_label("Search or run a command")
                 .occlude()
                 .w_96()
-                .max_w_1_2()
+                .min_w(px(160.))
                 .h_7()
+                .mx_2()
                 .px_2p5()
                 .gap_2()
                 .rounded(cx.theme().radius)
@@ -84,57 +80,178 @@ pub(crate) fn render(
                     }),
                 )
                 .child(Icon::new(IconName::Search).small())
-                .child(div().flex_1().child("Search or run a command"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child("Search or run a command"),
+                )
                 .when_some(palette_hint, |this, hint| this.child(hint)),
         )
-        .child(div().flex_1())
-        .children(update_item(cx))
         .child(
-            div()
-                .id("inbox-button")
-                .occlude()
-                .child(crate::inbox::button(&workspace.inbox, cx)),
+            h_flex()
+                .flex_1()
+                .flex_basis(right_bias)
+                .justify_end()
+                .gap_1()
+                .children(update_item(cx))
+                .child(
+                    div()
+                        .id("inbox-button")
+                        .occlude()
+                        .child(crate::inbox::button(&workspace.inbox, cx)),
+                )
+                .child(
+                    div()
+                        .id("agents-button")
+                        .occlude()
+                        .child(agents_button(workspace, cx)),
+                )
+                .child(
+                    Button::new("toggle-appearance")
+                        .occlude()
+                        .ghost()
+                        .small()
+                        .icon(if dark { IconName::Sun } else { IconName::Moon })
+                        .tooltip(if dark {
+                            "Use light appearance"
+                        } else {
+                            "Use dark appearance"
+                        })
+                        .accessibility_label("Toggle appearance")
+                        .on_click(move |_, window, cx| {
+                            if dark {
+                                window.dispatch_action(Box::new(UseLightAppearance), cx);
+                            } else {
+                                window.dispatch_action(Box::new(UseDarkAppearance), cx);
+                            }
+                        }),
+                )
+                .child(
+                    Button::new("open-settings")
+                        .occlude()
+                        .ghost()
+                        .small()
+                        .icon(Icons::Settings)
+                        .tooltip("Settings")
+                        .accessibility_label("Settings")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(OpenSettings), cx)
+                        }),
+                )
+                // The two side panels' switches side by side, as in VS Code.
+                .child(div().w_px().h_4().mx_1().bg(cx.theme().border))
+                .child(
+                    Button::new("toggle-sidebar")
+                        .occlude()
+                        .ghost()
+                        .small()
+                        .icon(if workspace.is_sidebar_collapsed() {
+                            IconName::PanelLeftOpen
+                        } else {
+                            IconName::PanelLeftClose
+                        })
+                        .tooltip("Toggle sidebar (⌘B)")
+                        .accessibility_label("Toggle sidebar")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleSidebar), cx)
+                        }),
+                )
+                .child(
+                    Button::new("toggle-context-panel")
+                        .occlude()
+                        .ghost()
+                        .small()
+                        .icon(IconName::PanelRight)
+                        .tooltip("Toggle tools (⌘J)")
+                        .accessibility_label("Toggle panel")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleContextPanel), cx)
+                        }),
+                ),
         )
-        .child(
-            Button::new("toggle-appearance")
-                .occlude()
-                .ghost()
-                .small()
-                .icon(if dark { IconName::Sun } else { IconName::Moon })
-                .tooltip(if dark {
-                    "Use light appearance"
-                } else {
-                    "Use dark appearance"
-                })
-                .accessibility_label("Toggle appearance")
-                .on_click(move |_, window, cx| {
-                    if dark {
-                        window.dispatch_action(Box::new(UseLightAppearance), cx);
-                    } else {
-                        window.dispatch_action(Box::new(UseDarkAppearance), cx);
-                    }
-                }),
-        )
-        .child(
-            Button::new("toggle-context-panel")
-                .occlude()
-                .ghost()
-                .small()
-                .icon(IconName::PanelRight)
-                .tooltip("Toggle tools (⌘J)")
-                .accessibility_label("Toggle panel")
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleContextPanel), cx)),
-        )
-        .child(
-            Button::new("open-settings")
-                .occlude()
-                .ghost()
-                .small()
-                .icon(Icons::Settings)
-                .tooltip("Settings")
-                .accessibility_label("Settings")
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)),
-        )
+}
+
+/// How much more room each side of the bar gets, so its middle is the
+/// window's: the width of the window's own buttons on the other side.
+fn chrome_bias(window: &Window) -> (gpui_kit::Pixels, gpui_kit::Pixels) {
+    // gpui-component's title bar: 80 px for macOS's buttons on the left, 12
+    // elsewhere; Windows and client-decorated Linux draw three 34 px
+    // buttons on the right.
+    if cfg!(target_os = "macos") {
+        return (px(0.), px(80.));
+    }
+    let controls = cfg!(windows)
+        || matches!(
+            window.window_decorations(),
+            gpui_kit::Decorations::Client { .. }
+        );
+    if controls {
+        (px(102. - 12.), px(0.))
+    } else {
+        (px(0.), px(12.))
+    }
+}
+
+/// The Agents button: how many chats need the user (amber) or are at work,
+/// and the popup listing them all.
+fn agents_button(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    use gpui_kit::component::popover::Popover;
+    let (needs_you, working) = crate::agents_board::counts(workspace, cx);
+    let hint = if cfg!(target_os = "macos") {
+        "⌘⇧A"
+    } else {
+        "Ctrl+Shift+A"
+    };
+    let trigger = Button::new("agents")
+        .ghost()
+        .small()
+        .icon(Icons::Bot)
+        .tooltip(format!("Agents ({hint})"))
+        .accessibility_label("Agents")
+        .when(needs_you > 0, |this| {
+            this.child(
+                div()
+                    .px_1p5()
+                    .rounded_full()
+                    .bg(cx.theme().warning.opacity(0.2))
+                    .text_color(cx.theme().warning)
+                    .text_xs()
+                    .child(needs_you.to_string()),
+            )
+        })
+        .when(needs_you == 0 && working > 0, |this| {
+            this.child(
+                gpui_kit::component::spinner::Spinner::new()
+                    .xsmall()
+                    .color(cx.theme().info),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(working.to_string()),
+            )
+        });
+    let this = cx.entity().downgrade();
+    Popover::new("agents-popover")
+        .offset(ph_ui::POPUP_GAP)
+        .anchor(gpui_kit::Anchor::TopRight)
+        .open(workspace.agents_open)
+        .on_open_change({
+            let this = this.clone();
+            move |open, _, cx| {
+                _ = this.update(cx, |workspace, cx| workspace.set_agents_open(*open, cx));
+            }
+        })
+        .trigger(trigger)
+        .content(move |_, _, cx| {
+            let Some(workspace) = this.upgrade() else {
+                return div().into_any_element();
+            };
+            crate::agents_board::popup(workspace.read(cx), this.clone(), cx)
+        })
 }
 
 /// An update, only once there is one: ready to install, waiting to be
@@ -162,12 +279,10 @@ fn update_item(cx: &App) -> Option<AnyElement> {
     Some(item.into_any_element())
 }
 
-/// The app's name, in its own script (no icon: the Dock and taskbar show
-/// that). Off macOS, where there is no menu bar, it opens the app's menu.
-fn app_icon(cx: &App) -> AnyElement {
-    let mark = ph_ui::wordmark(px(17.))
-        .mx_1()
-        .text_color(cx.theme().foreground);
+/// The app's mark, its icon in small. Off macOS, where there is no menu
+/// bar, it opens the app's menu.
+fn app_icon(_: &App) -> AnyElement {
+    let mark = div().mx_1().child(ph_ui::logo_mark(px(20.)));
     if cfg!(target_os = "macos") {
         return mark.into_any_element();
     }
@@ -198,8 +313,8 @@ fn app_icon(cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// The three views, side by side: Workspaces, Agents (how many chats need
-/// the user) and GitHub (how many pull requests wait for the user's review).
+/// The two views, side by side: Workspaces and GitHub (how many pull
+/// requests wait for the user's review).
 fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let current = workspace.view();
     let waiting = workspace
@@ -278,32 +393,10 @@ fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             .children(badge)
             .test_support()
     };
-    let (workspaces_hint, agents_hint, github_hint) = if cfg!(target_os = "macos") {
-        ("⌘⇧E", "⌘⇧A", "⌘⇧G")
+    let (workspaces_hint, github_hint) = if cfg!(target_os = "macos") {
+        ("⌘⇧E", "⌘⇧G")
     } else {
-        ("Ctrl+Shift+E", "Ctrl+Shift+A", "Ctrl+Shift+G")
-    };
-    // Agents: how many need the user (amber), else how many work.
-    let (needs_you, working) = crate::agents_board::counts(workspace, cx);
-    let agents_badge = if needs_you > 0 {
-        Some(
-            div()
-                .px_1p5()
-                .rounded_full()
-                .bg(cx.theme().warning.opacity(0.2))
-                .text_color(cx.theme().warning)
-                .text_xs()
-                .child(needs_you.to_string())
-                .into_any_element(),
-        )
-    } else {
-        (working > 0).then(|| {
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(working.to_string())
-                .into_any_element()
-        })
+        ("Ctrl+Shift+E", "Ctrl+Shift+G")
     };
     let dot = news_color.map(|color| {
         div()
@@ -340,15 +433,6 @@ fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             Icons::LayoutGrid,
             workspaces_hint,
             dot,
-            cx,
-        ))
-        .child(item(
-            View::Agents,
-            "view-agents",
-            "Agents",
-            Icons::Bot,
-            agents_hint,
-            agents_badge,
             cx,
         ))
         .child(item(

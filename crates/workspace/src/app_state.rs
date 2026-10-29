@@ -9,6 +9,8 @@ pub(crate) mod keys {
     pub const APPEARANCE: &str = "appearance";
     pub const LAST_PROJECT: &str = "workspace.last_project";
     pub const SIDEBAR_COLLAPSED: &str = "workspace.sidebar_collapsed";
+    /// The sidebar's width as dragged, in pixels (0 for the default).
+    pub const SIDEBAR_WIDTH: &str = "workspace.sidebar_width";
     /// The workspaces unfolded in the sidebar (their chats listed).
     pub const SIDEBAR_EXPANDED: &str = "workspace.sidebar_expanded";
     /// Chats pinned to the top of the sidebar, in pin order.

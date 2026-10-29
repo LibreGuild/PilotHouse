@@ -17,15 +17,28 @@ use ph_github::{Account, accounts};
 use ph_store::Store;
 use ph_ui::Icons;
 
+/// Whether an account's token still works, as last checked.
+#[derive(Clone)]
+enum Health {
+    Checking,
+    Working,
+    Failing(SharedString),
+}
+
 pub struct AccountsView {
     store: Store,
     host: Entity<InputState>,
     token: Entity<InputState>,
     api_url: Entity<InputState>,
     accounts: Vec<Account>,
+    /// Each account's check, by id.
+    health: std::collections::HashMap<String, Health>,
+    /// The account just added, to confirm it.
+    added: Option<SharedString>,
     adding: bool,
     error: Option<SharedString>,
     _task: Option<Task<()>>,
+    _checks: Option<Task<()>>,
 }
 
 impl AccountsView {
@@ -41,16 +54,64 @@ impl AccountsView {
         let api_url = cx.new(|cx| {
             InputState::new(window, cx).placeholder("API URL (optional, e.g. https://host/api/v3)")
         });
-        Self {
+        let mut view = Self {
             accounts: accounts::accounts(&store),
             store,
             host,
             token,
             api_url,
+            health: Default::default(),
+            added: None,
             adding: false,
             error: None,
             _task: None,
-        }
+            _checks: None,
+        };
+        view.check(cx);
+        view
+    }
+
+    /// Asks each account's host who its token belongs to: a tick when it
+    /// answers, why not when it does not.
+    fn check(&mut self, cx: &mut Context<Self>) {
+        let accounts = self.accounts.clone();
+        self.health = accounts
+            .iter()
+            .map(|account| (account.id.clone(), Health::Checking))
+            .collect();
+        let work = cx.background_spawn(async move {
+            std::thread::scope(|scope| {
+                accounts
+                    .iter()
+                    .map(|account| {
+                        let id = account.id.clone();
+                        let check = scope.spawn(move || {
+                            account
+                                .client()
+                                .and_then(|client| ph_github::pulls::me(&client))
+                        });
+                        (id, check)
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|(id, check)| {
+                        let health = match check.join() {
+                            Ok(Ok(_)) => Health::Working,
+                            Ok(Err(err)) => Health::Failing(format!("{err:#}").into()),
+                            Err(_) => Health::Failing("The check failed.".into()),
+                        };
+                        (id, health)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
+        self._checks = Some(cx.spawn(async move |this, cx| {
+            let checked = work.await;
+            _ = this.update(cx, |this, cx| {
+                this.health.extend(checked);
+                cx.notify();
+            });
+        }));
     }
 
     fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -74,7 +135,11 @@ impl AccountsView {
             _ = this.update_in(cx, |this, window, cx| {
                 this.adding = false;
                 match result {
-                    Ok(_) => {
+                    Ok(account) => {
+                        this.added = Some(
+                            format!("Connected to {} as {}.", account.host, account.login).into(),
+                        );
+                        this.health.insert(account.id.clone(), Health::Working);
                         this.accounts = accounts::accounts(&this.store);
                         for input in [&this.host, &this.token, &this.api_url] {
                             input.update(cx, |input, cx| input.set_value("", window, cx));
@@ -88,6 +153,7 @@ impl AccountsView {
     }
 
     fn remove(&mut self, id: String, cx: &mut Context<Self>) {
+        self.added = None;
         if let Err(err) = accounts::remove(&self.store, &id) {
             self.error = Some(format!("{err:#}").into());
         }
@@ -117,6 +183,7 @@ impl Render for AccountsView {
                     .gap_1()
                     .children(self.accounts.iter().map(|account| {
                         let id = account.id.clone();
+                        let health = self.health.get(&account.id).cloned();
                         h_flex()
                             .gap_2()
                             .px_3()
@@ -134,8 +201,23 @@ impl Render for AccountsView {
                                             .text_xs()
                                             .text_color(cx.theme().muted_foreground)
                                             .child(format!("Signed in as {} · token in the system keychain", account.login)),
+                                    )
+                                    .when_some(
+                                        match &health {
+                                            Some(Health::Failing(why)) => Some(why.clone()),
+                                            _ => None,
+                                        },
+                                        |this, why| {
+                                            this.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().danger)
+                                                    .child(why),
+                                            )
+                                        },
                                     ),
                             )
+                            .child(health_mark(health.as_ref(), cx))
                             .child(
                                 Button::new(SharedString::from(format!("remove-{}", account.id)))
                                     .small()
@@ -185,6 +267,16 @@ impl Render for AccountsView {
                                     .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
                             ),
                     )
+                    .when_some(self.added.clone(), |this, added| {
+                        this.child(
+                            h_flex()
+                                .gap_1p5()
+                                .text_xs()
+                                .text_color(cx.theme().success)
+                                .child(Icon::new(IconName::CircleCheck).xsmall())
+                                .child(added),
+                        )
+                    })
                     .when_some(self.error.clone(), |this, error| {
                         this.child(div().text_xs().text_color(cx.theme().danger).child(error))
                     })
@@ -195,5 +287,25 @@ impl Render for AccountsView {
                             .child("PilotHouse checks the token with the host, then keeps it in the system keychain. It talks only to the hosts you add."),
                     ),
             )
+    }
+}
+
+/// A tick when the token works, a warning when it does not, a spinner
+/// while it is being checked.
+fn health_mark(health: Option<&Health>, cx: &gpui_kit::App) -> gpui_kit::AnyElement {
+    use gpui_kit::IntoElement as _;
+    match health {
+        Some(Health::Working) => Icon::new(IconName::CircleCheck)
+            .small()
+            .text_color(cx.theme().success)
+            .into_any_element(),
+        Some(Health::Failing(_)) => Icon::new(IconName::TriangleAlert)
+            .small()
+            .text_color(cx.theme().danger)
+            .into_any_element(),
+        Some(Health::Checking) => gpui_kit::component::spinner::Spinner::new()
+            .xsmall()
+            .into_any_element(),
+        None => div().into_any_element(),
     }
 }

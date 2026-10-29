@@ -71,14 +71,7 @@ impl WorkspaceScreen {
                     .update(cx, |chat, cx| chat.new_chat_in(folder.clone(), window, cx));
             }
             FilesPanelEvent::CompareWithHead(root, path) => {
-                let (root, path) = (root.clone(), path.clone());
-                let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-                ph_changes::file_dialogs::load_diff(
-                    format!("{name} since the last commit"),
-                    move || ph_changes::git::files::diff_with_head(&root, &path),
-                    window,
-                    cx,
-                );
+                self.open_diff(root.clone(), Some(path.clone()), true, window, cx)
             }
             FilesPanelEvent::CompareFiles(first, second) => {
                 let (first, second) = (first.clone(), second.clone());
@@ -108,6 +101,9 @@ impl WorkspaceScreen {
                     .update(cx, |browser, cx| browser.open(&url, cx));
             }
             FilesPanelEvent::RevealInTree => self.show_tab(ContextTab::Files, window, cx),
+            FilesPanelEvent::AddFolder => {
+                window.dispatch_action(Box::new(crate::actions::AddFolderToWorkspace), cx)
+            }
             FilesPanelEvent::OpenFilesChanged
             | FilesPanelEvent::Opened
             | FilesPanelEvent::Ask(_)

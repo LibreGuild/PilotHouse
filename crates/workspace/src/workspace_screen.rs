@@ -280,6 +280,7 @@ impl WorkspaceScreen {
                 }
             },
         );
+        let rounds = ph_agent::review_rounds::ReviewRounds::global(cx);
         let mut space = Self {
             context_tab: saved
                 .context_tab
@@ -315,7 +316,21 @@ impl WorkspaceScreen {
             sidebar_shown: true,
             signals: Default::default(),
             _signals: crate::signals::watch(store.clone(), cx),
-            _subscriptions: vec![chat_subscription, chats_subscription, dock_subscription],
+            _subscriptions: vec![
+                chat_subscription,
+                chats_subscription,
+                dock_subscription,
+                // A review's round may end in a chat elsewhere: the PRs
+                // tool shows its findings at once.
+                cx.subscribe(
+                    &rounds,
+                    |this, _, _: &ph_agent::review_rounds::RoundRecorded, cx| {
+                        for panel in this.pulls.values() {
+                            panel.update(cx, |panel, cx| panel.review_changed(cx));
+                        }
+                    },
+                ),
+            ],
         };
         space.git_folder = space.first_repo_folder();
         let saved_dock = store.setting::<Option<gpui_kit::component::dock::DockAreaState>>(
@@ -928,6 +943,34 @@ impl WorkspaceScreen {
 
     /// Opens `relative` in the editor beside the chat, optionally at a
     /// 0-based line.
+    /// Shows the changes in `root` (one file's, else every file's, against
+    /// the index) in the editor's Changes tab.
+    pub(crate) fn open_diff(
+        &mut self,
+        root: std::path::PathBuf,
+        path: Option<String>,
+        against_head: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = match &path {
+            Some(path) => {
+                let name = path.rsplit('/').next().unwrap_or(path);
+                if against_head {
+                    format!("{name} since the last commit")
+                } else {
+                    format!("{name} (changes)")
+                }
+            }
+            None => "All changes".to_string(),
+        };
+        let load: ph_files::diff_tab::LoadDiff =
+            std::sync::Arc::new(move || ph_git::files::patch(&root, path.as_deref(), against_head));
+        let files = self.files(window, cx);
+        // The panel says it opened something, and the editor comes into view.
+        files.update(cx, |files, cx| files.show_diff(title, load, cx));
+    }
+
     pub fn open_file(
         &mut self,
         relative: &str,

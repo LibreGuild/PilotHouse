@@ -35,6 +35,7 @@ Agents and terminals use your **login shell's** environment (`ph-env`), so tools
 - **The composer grows** with what you type, from two lines to six, then scrolls.
 - **Jump to latest.** Scrolled up, a ↓ button brings the newest message back. Within about two lines of the end counts as the end: the button hides, and new text keeps the view on the newest reply, unless you are scrolling (`transcript_scroll.rs`). The transcript keeps some room under the last message.
 - **Who wrote what.** Each reply starts with the agent's mark and name (Claude's orange burst, Codex, Gemini, Antigravity). The chat header shows the agent's mark with a dot for its state (the words are in its tooltip), and the picker shows each agent's mark.
+- **Where it works.** Before the title, the chat header names the place the agent works in: the workspace with its colour (and the subfolder, `name › sub`, when the chat runs in one), **Chats** for a chat outside any workspace (the agent gets a folder of its own), or the repository for a GitHub copy.
 - **Diagrams.** A ```` ```mermaid ```` block in a reply is drawn as a picture once its closing fence arrives (flowcharts, sequence, class, state and ER diagrams, timelines, Gantt and more; `reply.rs`, drawn to SVG without a browser by `mermaid-rs-renderer`, in the theme's light or dark). One that does not parse stays code, with the reason; hovering a diagram offers to copy its source. The marks are bundled from Lobe Icons (MIT); see `crates/ui/assets/agents/`.
 - **Mode** (permission mode) has its own pill; anything else the agent offers is under **⋯**. ⇧Tab in the composer switches to the next mode (Manual, Accept edits, Plan, Auto), as in Claude Code, but never to one that skips permissions.
 - **Warm start.** Focusing the composer starts the agent and its session in the background, so the pickers fill in and the first reply comes sooner. Nothing is stored until the first message.
@@ -48,6 +49,7 @@ Agents and terminals use your **login shell's** environment (`ph-env`), so tools
 ## Mentions
 
 - `@src/main.rs` attaches that file as a resource link the agent can read.
+- `@src/` (a folder, offered with a trailing slash) attaches what the folder holds, folders first, up to 200 entries, so the agent sees its shape and reads what it needs.
 - `#12` attaches board card 12 (title, description, acceptance criteria).
 - `@screenshot` and `@log` attach the browser or device screen and recent logs ([live-panes.md](live-panes.md)); `@test-run` (or `@tests`) attaches how each UI test last went, with the first failing step's screen ([tests.md](tests.md)).
 - Typing `@` and a name offers definitions (functions, types, classes in Rust, TypeScript/JavaScript, Python, Go, Kotlin/Java/Swift/C#, C/C++; found by reading the files, `ph_files::symbols`); one inserts `@path:line`, which attaches the code from that line to the end of the definition. Any `@path:line` works the same.

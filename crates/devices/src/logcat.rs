@@ -96,7 +96,11 @@ pub struct LogLine {
 
 impl LogLine {
     /// Parses a line; one in another shape is kept whole as an Info message.
+    /// Terminal colour codes and other control characters (some devices'
+    /// logcat and some adb setups add them) are dropped first.
     pub fn parse(text: &str) -> Self {
+        let cleaned = plain(text);
+        let text = cleaned.as_str();
         Self::parse_threadtime(text).unwrap_or_else(|| Self {
             time: String::new(),
             pid: 0,
@@ -137,6 +141,35 @@ impl LogLine {
             message_lower: message.to_lowercase(),
         })
     }
+}
+
+/// `text` without ANSI escape sequences (`ESC [ … letter`), a byte-order
+/// mark or other control characters (tabs become spaces).
+fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => {
+                // CSI: ESC [ parameters final-letter; other escapes: one char.
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if c.is_ascii_alphabetic() || c == '~' {
+                            break;
+                        }
+                    }
+                } else {
+                    chars.next();
+                }
+            }
+            '\t' => out.push(' '),
+            '\u{feff}' => {}
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The priority of a `threadtime` line.
@@ -220,6 +253,8 @@ pub struct Logcat {
     serial: String,
     child: Option<Child>,
     _reader: Option<Task<()>>,
+    /// Ends `adb logcat` when PilotHouse quits (views are not dropped then).
+    _quit: Option<gpui_kit::Subscription>,
 }
 
 impl Drop for Logcat {
@@ -243,7 +278,15 @@ impl Logcat {
             serial: serial.to_string(),
             child: None,
             _reader: None,
+            _quit: None,
         };
+        logcat._quit = Some(cx.on_app_quit(|logcat, _| {
+            if let Some(mut child) = logcat.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            async {}
+        }));
         let child = adb
             .command(Some(serial))
             .args(["logcat", "-v", "threadtime", "-T", BACKLOG])
@@ -467,6 +510,16 @@ pub fn filter_dump(dump: &str, filter: Option<&str>, errors_only: bool, limit: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colour_codes_and_control_characters_are_dropped() {
+        let line = LogLine::parse(
+            "\u{feff}\u{1b}[38;5;196m10-24 10:00:00.123  1234  1250 E Tag: boom\u{1b}[0m\r",
+        );
+        assert_eq!(line.time, "10:00:00.123");
+        assert_eq!(line.tag, "Tag");
+        assert_eq!(line.message, "boom");
+    }
 
     #[test]
     fn reads_priorities_and_filters() {

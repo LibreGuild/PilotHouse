@@ -18,6 +18,14 @@ use crate::review_card::ReviewCard;
 
 /// Diff lines shown before "… N more lines" in a tool card.
 const MAX_DIFF_LINES: usize = 80;
+/// A tool's output is kept to its first lines (the card shows about 20): a
+/// long agent run reads thousands of files, and keeping each whole held
+/// hundreds of MB for text no one sees.
+const OUTPUT_LINES: usize = 60;
+const OUTPUT_BYTES: usize = 8_000;
+/// Plans and other calls whose text is the point (a plan to approve, a
+/// subagent's answer) keep up to this much.
+const WHOLE_OUTPUT_BYTES: usize = 64_000;
 
 pub enum Entry {
     User {
@@ -343,29 +351,62 @@ impl ToolEntry {
     }
 
     fn set_content(&mut self, content: &[ToolCallContent]) {
-        let mut output = String::new();
-        let mut diffs = Vec::new();
-        for item in content {
-            match item {
-                ToolCallContent::Content(content) => {
-                    if let Some(text) = block_text(&content.content) {
-                        if !output.is_empty() {
-                            output.push('\n');
-                        }
-                        output.push_str(&text);
-                    }
-                }
-                ToolCallContent::Diff(diff) => diffs.push(FileDiff::new(
+        // Reads, searches and commands are what grows: keep their start.
+        let bulky = !matches!(self.kind, ToolKindLabel::Think | ToolKindLabel::Other);
+        self.output = if bulky {
+            head(&content_text(content), OUTPUT_LINES, OUTPUT_BYTES)
+        } else {
+            head(&content_text(content), usize::MAX, WHOLE_OUTPUT_BYTES)
+        };
+        self.diffs = content
+            .iter()
+            .filter_map(|item| match item {
+                ToolCallContent::Diff(diff) => Some(FileDiff::new(
                     &diff.path.to_string_lossy(),
                     diff.old_text.as_deref().unwrap_or_default(),
                     &diff.new_text,
                 )),
-                _ => {}
-            }
-        }
-        self.output = output;
-        self.diffs = diffs;
+                _ => None,
+            })
+            .collect();
     }
+}
+
+/// The text parts of a tool's content, whole.
+pub fn content_text(content: &[ToolCallContent]) -> String {
+    let mut output = String::new();
+    for item in content {
+        if let ToolCallContent::Content(content) = item
+            && let Some(text) = block_text(&content.content)
+        {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&text);
+        }
+    }
+    output
+}
+
+/// The start of `output`, at most `lines` lines and `bytes`, with a note of
+/// what was left out.
+fn head(output: &str, lines: usize, bytes: usize) -> String {
+    let mut end = output
+        .match_indices('\n')
+        .nth(lines.saturating_sub(1))
+        .map_or(output.len(), |(at, _)| at)
+        .min(bytes);
+    if end == output.len() {
+        return output.to_string();
+    }
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    let left = output[end..]
+        .lines()
+        .filter(|line| !line.is_empty())
+        .count();
+    format!("{}\n… {left} more lines", output[..end].trim_end())
 }
 
 impl FileDiff {
@@ -516,27 +557,49 @@ pub fn run_summary(tools: &[&ToolEntry]) -> (String, usize) {
 /// subagents' calls), merged by path, with the lines added and removed.
 pub fn turn_changes(entries: &[Entry]) -> Vec<FileDiff> {
     let mut files: Vec<FileDiff> = Vec::new();
-    let mut take = |diff: &FileDiff| match files.iter_mut().find(|file| file.path == diff.path) {
-        Some(file) => {
-            file.added += diff.added;
-            file.removed += diff.removed;
-            file.lines.extend(diff.lines.iter().cloned());
-            file.hidden_lines += diff.hidden_lines;
-        }
-        None => files.push(diff.clone()),
-    };
-    for entry in entries {
-        if let Entry::Tool(tool) = entry {
-            for diff in tool
-                .diffs
-                .iter()
-                .chain(tool.children.iter().flat_map(|child| child.diffs.iter()))
-            {
-                take(diff);
+    // By path, so a turn editing thousands of files stays linear.
+    let mut index: std::collections::HashMap<String, usize> = Default::default();
+    for diff in turn_diffs(entries) {
+        match index.get(&diff.path) {
+            Some(&ix) => {
+                let file = &mut files[ix];
+                file.added += diff.added;
+                file.removed += diff.removed;
+                file.lines.extend(diff.lines.iter().cloned());
+                file.hidden_lines += diff.hidden_lines;
+            }
+            None => {
+                index.insert(diff.path.clone(), files.len());
+                files.push(diff.clone());
             }
         }
     }
     files
+}
+
+/// How many files a turn changed, and the lines added and removed: what
+/// [`turn_changes`] adds up, without copying any diff (it is shown under
+/// every turn, every frame).
+pub fn turn_change_counts(entries: &[Entry]) -> (usize, usize, usize) {
+    let mut paths = std::collections::HashSet::new();
+    let (mut added, mut removed) = (0, 0);
+    for diff in turn_diffs(entries) {
+        paths.insert(diff.path.as_str());
+        added += diff.added;
+        removed += diff.removed;
+    }
+    (paths.len(), added, removed)
+}
+
+fn turn_diffs(entries: &[Entry]) -> impl Iterator<Item = &FileDiff> {
+    entries.iter().flat_map(|entry| match entry {
+        Entry::Tool(tool) => tool
+            .diffs
+            .iter()
+            .chain(tool.children.iter().flat_map(|child| child.diffs.iter()))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    })
 }
 
 // ---- Persistence ------------------------------------------------------------
@@ -710,6 +773,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_long_output_keeps_its_start() {
+        let long: String = (0..500).map(|i| format!("line {i}\n")).collect();
+        let kept = head(&long, OUTPUT_LINES, OUTPUT_BYTES);
+        assert!(kept.starts_with("line 0\nline 1\n"));
+        assert!(
+            kept.ends_with("… 440 more lines"),
+            "{}",
+            &kept[kept.len() - 40..]
+        );
+        assert_eq!(head("short\n", OUTPUT_LINES, OUTPUT_BYTES), "short\n");
+        // A byte cap that lands inside a character backs off to its start.
+        let wide = "é".repeat(5_000);
+        assert!(head(&wide, OUTPUT_LINES, OUTPUT_BYTES).len() <= OUTPUT_BYTES + 32);
+    }
+
+    #[test]
     fn diff_counts_and_caps_lines() {
         let old = "a\nb\nc\n";
         let new = "a\nB\nc\nd\n";
@@ -799,6 +878,8 @@ mod tests {
         let files = turn_changes(&entries);
         assert_eq!(files.len(), 2);
         assert_eq!((files[0].added, files[0].removed), (2, 1));
+        // The footer's count agrees, without copying the diffs.
+        assert_eq!(turn_change_counts(&entries), (2, 3, 1));
     }
 
     #[test]

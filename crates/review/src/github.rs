@@ -347,11 +347,9 @@ pub fn issue_draft(finding: &Finding, review: &PrReview) -> (String, String) {
     if !finding.body.trim().is_empty() {
         body.push_str(&format!("\n**What's wrong:** {}\n", finding.body.trim()));
     }
-    if !finding.suggestion.trim().is_empty() {
-        body.push_str(&format!(
-            "\n**How to fix:** {}\n",
-            finding.suggestion.trim()
-        ));
+    let fix = crate::comment::fix_markdown(finding, "");
+    if !fix.is_empty() {
+        body.push_str(&format!("\n{fix}\n"));
     }
     if !finding.reason.trim().is_empty() {
         body.push_str(&format!(

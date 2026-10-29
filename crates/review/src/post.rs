@@ -97,20 +97,9 @@ pub fn finding_markdown(finding: &Finding, exact: bool) -> String {
     if !finding.body.trim().is_empty() {
         text.push_str(&format!("\n\n{}", finding.body.trim()));
     }
-    if !finding.suggestion.trim().is_empty() {
-        text.push_str(&format!("\n\n**Fix:** {}", finding.suggestion.trim()));
-    }
-    if !finding.suggested_code.trim().is_empty() {
-        let fence = if finding.suggested_code.contains("```") {
-            "````"
-        } else {
-            "```"
-        };
-        let kind = if exact { "suggestion" } else { "" };
-        text.push_str(&format!(
-            "\n\n{fence}{kind}\n{}\n{fence}",
-            finding.suggested_code.trim_end()
-        ));
+    let fix = crate::comment::fix_markdown(finding, if exact { "suggestion" } else { "" });
+    if !fix.is_empty() {
+        text.push_str(&format!("\n\n{fix}"));
     }
     text.push_str(
         "\n\n<sub>Reply starting with *Fixed*, *Not a problem* or *Won't fix* (and why).</sub>",

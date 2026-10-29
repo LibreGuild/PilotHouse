@@ -9,6 +9,9 @@ icon_assets!(
     ExtraIcons,
     [
         MousePointer2,
+        BellRing,
+        MessagesSquare,
+        MessageCircleQuestionMark,
         Square,
         MapPin,
         Pin,

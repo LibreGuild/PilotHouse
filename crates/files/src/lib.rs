@@ -10,6 +10,7 @@
 
 mod blame_view;
 mod code_intel;
+pub mod diff_tab;
 mod dir_tree;
 mod file_index;
 pub mod file_ops;
@@ -105,6 +106,7 @@ pub const FILE_TREE_CONTEXT: &str = "FileTree";
 /// Registers the file actions' key bindings. `QuickOpen` and `FindInProject`
 /// are bound in the workspace context so they work from anywhere.
 pub fn init(cx: &mut App, workspace_context: &'static str) {
+    ph_preview::rich::init(cx);
     cx.bind_keys([
         KeyBinding::new("secondary-p", QuickOpen, Some(workspace_context)),
         KeyBinding::new("enter", OpenSelected, Some("Tree")),

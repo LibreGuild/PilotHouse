@@ -1,7 +1,8 @@
 //! The Logcat drawer: lines in columns (time, level, tag, message) with
 //! colours per level and tag, a minimum level, a filter box (see
 //! [`crate::logcat`] for its words), an app picker, follow mode and a detail
-//! strip for the selected line.
+//! strip for the selected line. Several lines are selected by dragging over
+//! them or Shift-clicking, then copied or sent to chat together.
 
 use std::rc::Rc;
 
@@ -26,8 +27,10 @@ use ph_ui::MenuButton as _;
 
 use crate::logcat::{LogLine, Logcat, Priority, Query};
 
-/// Lines sent to chat at most.
+/// Lines sent to chat at most (the shown ones).
 const SEND_LINES: usize = 80;
+/// Selected lines sent or copied at most.
+const SELECTED_LINES: usize = 500;
 /// One row of the list.
 const ROW_HEIGHT: f32 = 20.0;
 
@@ -39,7 +42,11 @@ pub struct LogcatView {
     min: Priority,
     /// Keep the newest line in view.
     follow: bool,
-    selected: Option<Rc<LogLine>>,
+    /// Where the selection started, and the line it reaches to (the same
+    /// for one line).
+    selected: Option<(Rc<LogLine>, Rc<LogLine>)>,
+    /// The mouse is down, selecting.
+    selecting: bool,
     scroll: UniformListScrollHandle,
     _subscriptions: Vec<Subscription>,
     _logcat_subscription: Option<Subscription>,
@@ -61,6 +68,7 @@ impl LogcatView {
             min: Priority::Verbose,
             follow: true,
             selected: None,
+            selecting: false,
             scroll: UniformListScrollHandle::new(),
             _subscriptions: vec![cx.observe(&filter, |_, _, cx| cx.notify())],
             _logcat_subscription: None,
@@ -131,6 +139,44 @@ impl LogcatView {
                 lines.join("\n")
             ),
         });
+    }
+
+    /// The positions in `shown` of the selection's first and last lines.
+    fn selected_range(&self, shown: &[Rc<LogLine>]) -> Option<std::ops::RangeInclusive<usize>> {
+        let (anchor, end) = self.selected.as_ref()?;
+        let at = |line: &Rc<LogLine>| shown.iter().position(|shown| Rc::ptr_eq(shown, line));
+        let (a, b) = match (at(anchor), at(end)) {
+            (Some(a), Some(b)) => (a, b),
+            (Some(a), None) | (None, Some(a)) => (a, a),
+            (None, None) => return None,
+        };
+        Some(a.min(b)..=a.max(b))
+    }
+
+    /// The selected lines' text, oldest first.
+    fn selected_text(&self, cx: &mut Context<Self>) -> Vec<String> {
+        let shown = self.shown(cx);
+        let Some(range) = self.selected_range(&shown) else {
+            return Vec::new();
+        };
+        let lines = &shown[range];
+        lines[lines.len().saturating_sub(SELECTED_LINES)..]
+            .iter()
+            .map(|line| line.text.clone())
+            .collect()
+    }
+
+    /// A press on line `line`: Shift extends the selection to it, otherwise
+    /// it starts there (and a drag carries it on).
+    fn press(&mut self, line: Rc<LogLine>, extend: bool, cx: &mut Context<Self>) {
+        self.selected = match self.selected.take() {
+            Some((anchor, _)) if extend => Some((anchor, line)),
+            _ => Some((line.clone(), line)),
+        };
+        self.selecting = true;
+        // Reading lines: new ones must not scroll them away.
+        self.follow = false;
+        cx.notify();
     }
 
     fn send_shown(&mut self, cx: &mut Context<Self>) {
@@ -284,6 +330,57 @@ impl LogcatView {
             )
     }
 
+    /// The strip for several selected lines: how many, copy, send.
+    fn render_selection(&self, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .flex_none()
+            .mx_2()
+            .mb_1()
+            .px_2()
+            .py_1()
+            .gap_2()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .text_xs()
+            .child(div().flex_1().child(format!("{count} lines selected")))
+            .child(
+                Button::new("logcat-copy-lines")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Copy)
+                    .label("Copy")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let text = this.selected_text(cx).join("\n");
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    })),
+            )
+            .child(
+                Button::new("logcat-send-lines")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icons::SendHorizontal)
+                    .label("Send to chat")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let lines = this.selected_text(cx);
+                        this.send(lines, cx);
+                    })),
+            )
+            .child(
+                Button::new("logcat-clear-selection")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("Clear the selection")
+                    .accessibility_label("Clear the selection")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.selected = None;
+                        cx.notify();
+                    })),
+            )
+    }
+
     fn render_detail(&self, line: &LogLine, cx: &mut Context<Self>) -> impl IntoElement {
         let text = line.text.clone();
         let message = line.message.clone();
@@ -349,9 +446,8 @@ impl LogcatView {
                     .tooltip("Send this line to chat")
                     .accessibility_label("Send this line to chat")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(line) = this.selected.clone() {
-                            this.send(vec![line.text.clone()], cx);
-                        }
+                        let lines = this.selected_text(cx);
+                        this.send(lines, cx);
                     })),
             )
             .child(
@@ -377,7 +473,7 @@ impl Render for LogcatView {
                 .scroll_to_item(lines.len() - 1, ScrollStrategy::Bottom);
         }
         let words: Rc<Vec<String>> = Rc::new(self.query(cx).words);
-        let selected = self.selected.clone();
+        let range = self.selected_range(&lines);
         let list: AnyElement = if lines.is_empty() {
             div()
                 .flex_1()
@@ -393,23 +489,41 @@ impl Render for LogcatView {
                 .into_any_element()
         } else {
             let view = cx.entity().downgrade();
-            uniform_list("logcat-rows", lines.len(), move |range, _, cx| {
-                range
-                    .map(|ix| {
-                        let line = lines[ix].clone();
-                        let chosen = selected
-                            .as_ref()
-                            .is_some_and(|picked| Rc::ptr_eq(picked, &line));
-                        let view = view.clone();
-                        log_row(ix, &line, &words, chosen, cx).on_click(move |_, _, cx| {
-                            let line = line.clone();
-                            _ = view.update(cx, |view, cx| {
-                                view.selected = Some(line);
-                                cx.notify();
+            let lines = lines.clone();
+            let selected = range.clone();
+            uniform_list("logcat-rows", lines.len(), move |rows, _, cx| {
+                rows.map(|ix| {
+                    let line = lines[ix].clone();
+                    let chosen = selected.as_ref().is_some_and(|range| range.contains(&ix));
+                    let (press, over) = (view.clone(), view.clone());
+                    let (pressed, entered) = (line.clone(), line.clone());
+                    log_row(ix, &line, &words, chosen, cx)
+                        .on_mouse_down(
+                            gpui_kit::MouseButton::Left,
+                            move |event: &gpui_kit::MouseDownEvent, _, cx| {
+                                let line = pressed.clone();
+                                let extend = event.modifiers.shift;
+                                _ = press.update(cx, |view, cx| view.press(line, extend, cx));
+                            },
+                        )
+                        // Dragging over lines selects them.
+                        .on_mouse_move(move |event: &gpui_kit::MouseMoveEvent, _, cx| {
+                            if event.pressed_button != Some(gpui_kit::MouseButton::Left) {
+                                return;
+                            }
+                            let line = entered.clone();
+                            _ = over.update(cx, |view, cx| {
+                                if let Some((_, end)) = view.selected.as_mut()
+                                    && view.selecting
+                                    && !Rc::ptr_eq(end, &line)
+                                {
+                                    *end = line;
+                                    cx.notify();
+                                }
                             });
                         })
-                    })
-                    .collect()
+                })
+                .collect()
             })
             .track_scroll(&self.scroll)
             .flex_1()
@@ -431,12 +545,26 @@ impl Render for LogcatView {
             )
             .into_any_element()
         };
+        let detail = match range.as_ref().map(|range| range.end() - range.start() + 1) {
+            Some(1) => Some(
+                self.render_detail(&lines[*range.unwrap().start()], cx)
+                    .into_any_element(),
+            ),
+            Some(count) => Some(self.render_selection(count, cx).into_any_element()),
+            None => None,
+        };
         v_flex()
             .size_full()
+            .on_mouse_up(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, _, _| this.selecting = false),
+            )
+            .on_mouse_up_out(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, _, _| this.selecting = false),
+            )
             .child(self.render_toolbar(cx))
-            .when_some(self.selected.clone(), |this, line| {
-                this.child(self.render_detail(&line, cx))
-            })
+            .children(detail)
             .child(
                 div()
                     .flex_1()
