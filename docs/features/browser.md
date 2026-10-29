@@ -14,7 +14,7 @@ Which browser: the one chosen in the pane (setting `browser.chrome_path`), else 
 6. **One page.** Links and `window.open` stay in the pane, and any other page a site opens is closed.
 7. **Dialogs.** `confirm()`, `prompt()` and "leave page" dialogs appear as a card in the pane for you to answer. With the pane hidden they are cancelled (alerts are acknowledged), so an agent never confirms one by itself. Every dialog is logged.
 
-On-device only: Chrome's sync, component updates, metrics and other Google services are switched off with launch flags, and the address bar never searches. Text that is not a URL is opened as `https://…`, and local hosts as `http://…`.
+Chrome's sync, component updates, metrics and other Google services are switched off with launch flags. A new pane opens Google's home page. In the address bar, an address (a dotted host such as `example.com`, or a local one) opens as `https://…`, local hosts as `http://…`; anything else (words, a single name such as `gpui`) is searched for on Google.
 
 ## The pane
 

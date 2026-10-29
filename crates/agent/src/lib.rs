@@ -36,6 +36,7 @@ pub mod rate_limits;
 mod reply;
 pub mod review_card;
 mod review_policy;
+pub mod review_rounds;
 pub mod rpc;
 pub mod setup;
 pub mod setup_view;

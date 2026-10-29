@@ -29,6 +29,8 @@ const STALE: Duration = Duration::from_secs(10);
 pub struct BranchPicker {
     repo: Entity<Repo>,
     search: Entity<InputState>,
+    /// The remote branches are listed, not the local ones.
+    show_remote: bool,
     branches: Vec<Branch>,
     loaded_at: Option<Instant>,
     _load: Option<Task<()>>,
@@ -54,6 +56,7 @@ impl BranchPicker {
         Self {
             repo,
             search,
+            show_remote: false,
             branches: Vec::new(),
             loaded_at: None,
             _load: None,
@@ -337,17 +340,56 @@ impl Render for BranchPicker {
             .collect();
         let exact = self.branches.iter().any(|branch| branch.name == query);
         let can_create = !query.is_empty() && !exact && self.repo.read(cx).busy().is_none();
-        let local: Vec<_> = matching.iter().filter(|(_, b)| !b.remote).collect();
-        let remote: Vec<_> = matching.iter().filter(|(_, b)| b.remote).collect();
-        let section = |title: &'static str, cx: &Context<Self>| {
-            div()
-                .px_2()
-                .pt_2()
-                .pb_1()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(title)
+        let local_count = matching.iter().filter(|(_, b)| !b.remote).count();
+        let remote_count = matching.len() - local_count;
+        // Long lists of either kind: one at a time, chosen by the tabs.
+        let shown: Vec<_> = matching
+            .iter()
+            .filter(|(_, branch)| branch.remote == self.show_remote)
+            .collect();
+        let tab = |id: &'static str, label: String, remote: bool, cx: &mut Context<Self>| {
+            let selected = self.show_remote == remote;
+            h_flex()
+                .id(id)
+                .flex_1()
+                .justify_center()
+                .h_7()
+                .rounded(cx.theme().radius)
+                .text_sm()
+                .cursor_pointer()
+                .text_color(if selected {
+                    cx.theme().foreground
+                } else {
+                    cx.theme().muted_foreground
+                })
+                .when(selected, |this| {
+                    this.bg(cx.theme().background)
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.show_remote = remote;
+                    cx.notify();
+                }))
+                .child(label)
         };
+        let tabs = h_flex()
+            .mx_2()
+            .p_0p5()
+            .gap_0p5()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().muted)
+            .child(tab(
+                "branches-local",
+                format!("Local {local_count}"),
+                false,
+                cx,
+            ))
+            .child(tab(
+                "branches-remote",
+                format!("Remote {remote_count}"),
+                true,
+                cx,
+            ));
         v_flex()
             .w(px(400.))
             .max_h(px(520.))
@@ -359,6 +401,7 @@ impl Render for BranchPicker {
                         .prefix(Icon::new(IconName::Search).xsmall()),
                 ),
             )
+            .child(tabs)
             .when(can_create, |this| {
                 let name = query.clone();
                 this.child(
@@ -389,25 +432,24 @@ impl Render for BranchPicker {
                     .overflow_y_scroll()
                     .px_1()
                     .pb_2()
-                    .when(!local.is_empty(), |this| this.child(section("Local", cx)))
+                    .pt_1()
                     .children(
-                        local
-                            .into_iter()
+                        shown
+                            .iter()
                             .map(|(ix, branch)| self.render_row(*ix, branch, cx)),
                     )
-                    .when(!remote.is_empty(), |this| this.child(section("Remote", cx)))
-                    .children(
-                        remote
-                            .into_iter()
-                            .map(|(ix, branch)| self.render_row(*ix, branch, cx)),
-                    )
-                    .when(matching.is_empty() && self.loaded_at.is_some(), |this| {
+                    .when(shown.is_empty() && self.loaded_at.is_some(), |this| {
                         this.child(
                             div()
                                 .p_3()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("No branches match."),
+                                .child(match (self.show_remote, local_count, remote_count) {
+                                    (false, 0, other) | (true, other, 0) if other > 0 => {
+                                        format!("None here; {other} in the other tab.")
+                                    }
+                                    _ => "No branches match.".to_string(),
+                                }),
                         )
                     }),
             )

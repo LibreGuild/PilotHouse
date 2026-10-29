@@ -14,7 +14,7 @@ Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 ```
 
 - **`Workspace`** (`workspace.rs`) is a window's root: the title bar, the sidebar, the workspace in front and the status bar. It keeps one `WorkspaceScreen` per workspace opened in the window, and the window's [GitHub view](pulls.md#the-github-view) once shown.
-- **Three views**, picked in the title bar: **Workspaces** (⌘⇧E), **Agents** (⌘⇧A) and **GitHub** (⌘⇧G). The Agents view is a board of the chats at work across every workspace (below). The GitHub view shows pull requests across repositories and their agent reviews, apart from any workspace; it has its own sidebar.
+- **Two views**, picked in the title bar: **Workspaces** (⌘⇧E) and **GitHub** (⌘⇧G). The GitHub view shows pull requests across repositories and their agent reviews, apart from any workspace; it has its own sidebar. **Agents** (⌘⇧A) is a pop-up from the title bar listing the chats at work across every workspace (below).
 - The look follows [the style guide](../styleguide.md): quiet graphite chrome, colour only for state, focus and selection.
 - **`WorkspaceScreen`** (`workspace_screen.rs`) is a workspace's screen: the chat, the editor (only while a file is open) and the tools, each a pane of a dockable layout (`workspace_screen/dock.rs`, on gpui-component's `DockArea`), and the icon bar on the right that shows a tool. The drawing above is the layout a workspace starts with. Panels are made the first time they are shown. Its state is saved per workspace: the dock layout (`workspace.dock.<id>`), the tool shown last, chat, open files, sidebar folds.
 - **Running work outlives the screen.** Chats (`ph_agent::chats`), shells (`ph_terminal::TerminalHub`), test runs (`ph_uitest::runner`) and schedules (`schedules::Automation`) belong to the workspace or the app, not to a window. A screen can be closed and rebuilt (another window, folders changed, idle) without stopping anything.
@@ -22,27 +22,29 @@ Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 
 ## Title bar
 
-- The app icon sits beside the window buttons (off macOS, it opens the app menu).
-- The **view toggle**: *Workspaces* carries a dot when a workspace other than the one in front wants you (amber: an agent waits for an answer; green: news not seen); *Agents* shows how many chats wait for an answer (amber), else how many work; *GitHub* shows how many pull requests wait for your review (once the view has been opened).
+- On the left, the app's mark (its icon in small) beside the window buttons (off macOS, it opens the app menu), then the **view toggle**: *Workspaces* carries a dot when a workspace other than the one in front wants you (amber: an agent waits for an answer; green: news not seen); *GitHub* shows how many pull requests wait for your review (once the view has been opened).
+- In the middle, search and commands (⌘K).
+- On the right: updates, the inbox (bell), **Agents** (its icon shows how many chats wait for an answer, amber, else how many work), light or dark, settings, and the sidebar and tool-panel toggles side by side.
 - The bar is plain chrome; a workspace's colour (`ph_ui::WORKSPACE_COLORS`, a chosen one saved in `projects.color`) marks its rows, not the bar.
 
 ## Sidebar
 
 Everything at once, so nothing needs switching to be seen (`sidebar.rs`):
 
-- **New chat** (⌘N) for the workspace in front, and **Search chats** (⌘⇧K), each a plain row with its shortcut.
+- **New chat** (⌘N) for the workspace in front, and **Search chats** (⌘⇧K), each a plain row with its shortcut, above a hairline.
+- Drag the sidebar's right edge to resize it (180–520 px; kept in `workspace.sidebar_width`). The GitHub view's sidebar and the docks follow the same width.
 - **Pinned**: chats pinned from any workspace (each chat's ⋯ menu: *Pin to top*), with the workspace each belongs to. Kept in `workspace.sidebar_pinned`.
 - **Chats**: the Chats space, for chats that need no folder (thinking something through, the browser, the board). A first start opens straight into a chat there. Its chats are grouped *Today*, *Yesterday*, *This week*, *Older*; **+** starts one.
-- **Workspaces**, newest first (an order that stays put as they are used): each with its colour dot and, in a word, what it is doing (*needs you* in amber, *failing* in red, *2 working*; a green dot for something finished and not seen; the tooltip says more, with the ⌃1–⌃9 shortcut). The chevron unfolds a workspace to list its five newest chats (*Show all* for the rest); opening a workspace unfolds it. Picking a chat opens its workspace at that chat. On hover, a row offers a new chat there and its menu: *Add a folder…*, *Rename…*, *Open in new window*, *Colour*, *Remove from PilotHouse*. The section's **+** opens a folder as a workspace or makes one without folders.
+- **Workspaces**, newest first (an order that stays put as they are used): each with its colour dot and, in a word, what it is doing (*needs you* in amber, *failing* in red, *2 working*; a green dot for something finished and not seen; the tooltip says more, with the ⌃1–⌃9 shortcut). Workspace names are a weight heavier than chat titles. The chevron unfolds a workspace to list its five newest chats (*Show all* for the rest) on an indent guide under it, or **+ New chat** when it has none; opening a workspace unfolds it. Picking a chat opens its workspace at that chat. On hover, a row offers a new chat there and its menu: *Add a folder…*, *Rename…*, *Open in new window*, *Colour*, *Remove from PilotHouse*. The section's **+** opens a folder as a workspace or makes one without folders.
 - **Chat rows are small cards**: a state glyph (a spinner while working, an amber **?** when it waits for an answer, red when its last turn failed, green when it finished and you have not looked yet), the title and how long ago (*now*, *5m*, *3h*, *Tue*); under it, for chats loaded in this run, the agent's mark and what it is doing, the question it asks, or the start of its last reply. A finished turn counts as read once the chat is on screen (`WorkspaceChats::summary`, `set_viewing`). Chats PilotHouse started (schedules, test recording and repair) fold into *Runs*.
-- Each chat's ⋯ menu (on hover) pins or unpins it, **marks it done**, renames it, or deletes it with its transcript after asking (not while its agent works or waits for an answer). Chats marked done (`workspace.sidebar_settled`) fold into *Done · N* under their workspace and leave the Agents board; one that works or asks again comes back on its own.
+- Each chat's ⋯ menu (on hover) pins or unpins it, **marks it done**, renames it, or deletes it with its transcript after asking (not while its agent works or waits for an answer). Chats marked done (`workspace.sidebar_settled`) fold into *Done · N* under their workspace and leave the Agents list; one that works or asks again comes back on its own.
 - Every section (*Pinned*, *Chats*, *Workspaces*) folds from its header; a folded one shows how many it hides. Folded sections are kept (`workspace.sidebar_folded`).
 - Which workspaces are unfolded is kept (`workspace.sidebar_expanded`). The chats of a workspace whose screen is closed are read from the store each second, so a schedule's new chat shows up.
 - ⌘B hides the sidebar, and the chat header then offers the chat list.
 
-## Agents view
+## Agents
 
-`agents_board.rs`: every chat loaded in this run of PilotHouse, from every workspace and the Chats space, in four columns: **Needs you**, **Working**, **Finished** (news not seen, or a failed turn) and **Recent** (the newest eight others). A card shows the state glyph, title and age; the workspace (its colour dot) and the agent; and what the agent is doing, asks, or said last. Waiting cards have an amber edge. A card opens its chat in its workspace.
+`agents_board.rs`: the title bar's **Agents** pop-up (⌘⇧A) lists every chat loaded in this run of PilotHouse, from every workspace and the Chats space, in sections: **Needs you**, **Working**, **Finished** (news not seen, or a failed turn) and **Recent** (the newest eight others). A row shows the state glyph, title and age; the workspace (its colour dot) and the agent; and what the agent is doing, asks, or said last. A row opens its chat in its workspace.
 
 ## Notifications
 
@@ -50,7 +52,7 @@ Everything at once, so nothing needs switching to be seen (`sidebar.rs`):
 
 ## Tasks
 
-A **task** is a branch in its own worktree, opened as a workspace, so an agent can work on it while the main checkout stays as it is (`tasks.rs`). *New task…* (a workspace's menu, or ⌘K *New task in a worktree…*) asks for a name; PilotHouse makes branch `task/<name>` from the folder's HEAD in a worktree under the data folder's `tasks/`, opens it as *Repo · Name*, and runs its setup in a terminal named *Setup*. The repository can say how in a checked-in `pilothouse.toml`:
+A **task** is a branch in its own worktree, opened as a workspace, so an agent can work on it while the main checkout stays as it is (`tasks.rs`). *New task…* (a workspace's menu, or ⌘K *New task in a worktree…*) asks for a name; PilotHouse makes branch `task/<name>` from the folder's HEAD in a worktree under `tasks/` in the folder for copies (the data folder, unless another was chosen in Settings → Storage), opens it as *Repo · Name*, and runs its setup in a terminal named *Setup*. The repository can say how in a checked-in `pilothouse.toml`:
 
 ```toml
 [worktree]

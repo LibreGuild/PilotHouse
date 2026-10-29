@@ -104,9 +104,18 @@ impl RepoId {
     }
 }
 
-/// Where every clone goes.
+/// Where new clones go (see [`ph_store::paths::copies_dir`]).
 pub fn root() -> PathBuf {
-    ph_store::paths::data_dir().join("github")
+    ph_store::paths::copies_dir().join("github")
+}
+
+/// Every folder clones can be in (one made before another folder was
+/// chosen stays where it is).
+pub fn roots() -> Vec<PathBuf> {
+    ph_store::paths::copies_dirs()
+        .into_iter()
+        .map(|dir| dir.join("github"))
+        .collect()
 }
 
 /// Git's settings for one call that authenticate it to `host`.
@@ -342,13 +351,12 @@ pub fn team_rules(clone: &Path, base: &str) -> Option<String> {
 /// Whether `path` is an existing file or folder inside the clones (links
 /// and `..` resolved, so nothing outside passes).
 pub fn is_managed(path: &Path) -> bool {
-    match (
-        ph_store::paths::canonical(&root()),
-        ph_store::paths::canonical(path),
-    ) {
-        (Ok(root), Ok(path)) => path.starts_with(root),
-        _ => false,
-    }
+    let Ok(path) = ph_store::paths::canonical(path) else {
+        return false;
+    };
+    roots()
+        .iter()
+        .any(|root| ph_store::paths::canonical(root).is_ok_and(|root| path.starts_with(root)))
 }
 
 /// Standard base64, for the header.

@@ -21,6 +21,30 @@ use gpui_kit::{
 use ph_files::{FileView, FilesChanged, ProjectWatcher};
 use ph_theme::layout;
 
+/// ⌘W closes a lone-file window, as it closes a tab in the main one. The
+/// binding has no context: a viewer that takes no keyboard focus (a PDF, a
+/// sheet) leaves no element of the window to receive it, so the app-wide
+/// handler closes the active window if it is a lone file's. In the main
+/// window the Files panel's own ⌘W comes first.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([gpui_kit::KeyBinding::new(
+        "secondary-w",
+        ph_files::CloseFile,
+        None,
+    )]);
+    cx.on_action(|_: &ph_files::CloseFile, cx| {
+        let Some(active) = cx.active_window() else {
+            return;
+        };
+        let lone = cx
+            .try_global::<LoneFiles>()
+            .is_some_and(|open| open.0.values().any(|window| *window == active));
+        if lone {
+            _ = active.update(cx, |_, window, _| window.remove_window());
+        }
+    });
+}
+
 /// Open lone-file windows, by file.
 #[derive(Default)]
 struct LoneFiles(HashMap<PathBuf, AnyWindowHandle>);
@@ -127,8 +151,9 @@ fn file_name(path: &std::path::Path) -> String {
 impl Render for LoneFile {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let name = file_name(&self.path);
-        // The title bar does not shrink its content, so only the folder's
-        // name is shown; the whole path is in its tooltip.
+        // Only the folder's name is shown (the whole path is in its
+        // tooltip), and long names are cut short: the window's own buttons
+        // must stay in sight however narrow the window.
         let parent = self.path.parent();
         let folder = parent
             .and_then(|folder| folder.file_name())
@@ -148,11 +173,14 @@ impl Render for LoneFile {
                         .min_w_0()
                         .pr_3()
                         .gap_2()
-                        .child(Icon::new(icon).small().text_color(tint))
-                        .child(div().flex_none().text_sm().child(name))
+                        .child(Icon::new(icon).small().text_color(tint).flex_none())
+                        .child(div().min_w_0().truncate().text_sm().child(name))
                         .child(
                             div()
                                 .id("lone-file-folder")
+                                .min_w_0()
+                                .flex_shrink(2.)
+                                .truncate()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(format!("in {folder}"))
@@ -160,7 +188,7 @@ impl Render for LoneFile {
                                     gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx)
                                 }),
                         )
-                        .child(div().flex_1())
+                        .child(div().flex_1().min_w_2())
                         .child(
                             Button::new("open-folder-as-project")
                                 // Windows treats the bar as a drag area otherwise.

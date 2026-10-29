@@ -47,6 +47,8 @@ const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(180);
 /// Pull requests of each inbox list assessed for triage (each costs a few
 /// requests).
 const TRIAGED: usize = 15;
+/// Pull requests assessed at the same time (each is three GitHub calls).
+const ASSESSED_AT_ONCE: usize = 8;
 /// Settings key: the inbox sorted for review (not by date).
 const REVIEW_FIRST_KEY: &str = "github.inbox.review_first";
 
@@ -107,8 +109,14 @@ pub struct GithubView {
     /// The "add a repository" box, while open.
     pub(crate) adding: Option<(Entity<InputState>, Subscription)>,
     pub(crate) sidebar_shown: bool,
+    /// What GitHub clones and their copies take on disk, as last measured.
+    pub(crate) clones_size: Option<u64>,
+    /// When the clones were measured (it walks every file: not often).
+    clones_measured: Option<std::time::Instant>,
+    _measure: Option<Task<()>>,
     _load: Option<Task<()>>,
     _work: Vec<Task<()>>,
+    _rounds: Subscription,
 }
 
 impl GithubView {
@@ -120,6 +128,7 @@ impl GithubView {
         cx: &mut Context<Self>,
     ) -> Self {
         let store = AppState::store(cx).clone();
+        let rounds = ph_agent::review_rounds::ReviewRounds::global(cx);
         let mut view = Self {
             accounts: ph_github::accounts::accounts(&store),
             store,
@@ -138,8 +147,21 @@ impl GithubView {
             review_first: store_flag(AppState::store(cx), REVIEW_FIRST_KEY),
             adding: None,
             sidebar_shown: true,
+            clones_size: None,
+            clones_measured: None,
+            _measure: None,
             _load: None,
             _work: Vec::new(),
+            // A review's round may end in any chat: every open pull
+            // request shows its findings and walkthrough at once.
+            _rounds: cx.subscribe(
+                &rounds,
+                |this, _, _: &ph_agent::review_rounds::RoundRecorded, cx| {
+                    for (panel, ..) in this.panels.values() {
+                        panel.update(cx, |panel, cx| panel.review_changed(cx));
+                    }
+                },
+            ),
         };
         view.refresh(cx);
         view.watch(cx);
@@ -269,6 +291,20 @@ impl GithubView {
     /// Reads the inbox lists from every account and finds the workspaces'
     /// repositories again, off the UI thread.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        let stale = self
+            .clones_measured
+            .is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(10 * 60));
+        if stale {
+            self.clones_measured = Some(std::time::Instant::now());
+            let measure = cx.background_spawn(async { crate::storage::clones_size() });
+            self._measure = Some(cx.spawn(async move |this, cx| {
+                let size = measure.await;
+                _ = this.update(cx, |this, cx| {
+                    this.clones_size = Some(size);
+                    cx.notify();
+                });
+            }));
+        }
         self.accounts = ph_github::accounts::accounts(&self.store);
         let accounts = self.accounts.clone();
         let folders = self.folders.clone();
@@ -289,16 +325,39 @@ impl GithubView {
                         continue;
                     }
                 };
-                for kind in Inbox::ALL {
+                // The searches at once, then the pull requests not looked
+                // at yet (or changed since), a few at a time: the inbox
+                // waits for the slowest call, not their sum.
+                let searches: Vec<_> = std::thread::scope(|scope| {
+                    let client = &client;
+                    Inbox::ALL
+                        .map(|kind| {
+                            (
+                                kind,
+                                scope.spawn(move || ph_github::search::pulls(client, kind)),
+                            )
+                        })
+                        .into_iter()
+                        .map(|(kind, handle)| {
+                            let found = handle.join().unwrap_or_else(|_| {
+                                Err(anyhow::anyhow!("searching GitHub failed"))
+                            });
+                            (kind, found)
+                        })
+                        .collect()
+                });
+                let mut fresh: Vec<(PullKey, String)> = Vec::new();
+                for (kind, found) in searches {
                     let list = inbox.entry(kind).or_default();
-                    match ph_github::search::pulls(&client, kind) {
+                    match found {
                         Ok(found) => {
                             for pull in found.iter().take(TRIAGED) {
                                 let Some((owner, name)) = pull.repo() else {
                                     continue;
                                 };
                                 let key = (account.host.clone(), owner, name, pull.number);
-                                if triage.contains_key(&key) {
+                                if triage.contains_key(&key) || fresh.iter().any(|(k, _)| *k == key)
+                                {
                                     continue;
                                 }
                                 let known = assessed
@@ -309,15 +368,34 @@ impl GithubView {
                                             .clone()
                                             .with_review(reviewed_at(&store, &key).as_deref())
                                     });
-                                if let Some(found) = known.or_else(|| assess(&store, &client, &key))
-                                {
-                                    triage.insert(key, (pull.updated_at.clone(), found));
+                                match known {
+                                    Some(known) => {
+                                        triage.insert(key, (pull.updated_at.clone(), known));
+                                    }
+                                    None => fresh.push((key, pull.updated_at.clone())),
                                 }
                             }
                             list.items
                                 .extend(found.into_iter().map(|pull| (account.host.clone(), pull)))
                         }
                         Err(err) => list.error = Some(format!("{}: {err:#}", account.host)),
+                    }
+                }
+                for batch in fresh.chunks(ASSESSED_AT_ONCE) {
+                    let assessed: Vec<_> = std::thread::scope(|scope| {
+                        let (store, client) = (&store, &client);
+                        batch
+                            .iter()
+                            .map(|(key, _)| scope.spawn(move || assess(store, client, key)))
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .map(|handle| handle.join().ok().flatten())
+                            .collect()
+                    });
+                    for ((key, updated), found) in batch.iter().zip(assessed) {
+                        if let Some(found) = found {
+                            triage.insert(key.clone(), (updated.clone(), found));
+                        }
                     }
                 }
             }
@@ -421,7 +499,7 @@ impl GithubView {
             window,
             |this, _, event: &PullsPanelEvent, window, cx| match event {
                 PullsPanelEvent::OpenSettings => {
-                    window.dispatch_action(Box::new(crate::actions::OpenSettings), cx)
+                    window.dispatch_action(Box::new(crate::actions::OpenGitHubSettings), cx)
                 }
                 PullsPanelEvent::Agent { hosting, request } => {
                     this.agent((**hosting).clone(), request.clone(), window, cx)
@@ -916,9 +994,16 @@ fn assess(
 ) -> Option<ph_review::triage::Triage> {
     let (_, owner, name, number) = key;
     let repo = ph_github::Repo::new(owner, name).ok()?;
-    let pull = ph_github::pulls::get(client, &repo, *number).ok()?;
-    let files = ph_github::pulls::files(client, &repo, *number).unwrap_or_default();
-    let checks = ph_github::pulls::checks(client, &repo, &pull.head.sha).unwrap_or_default();
+    let repo = &repo;
+    let (pull, files, checks) = std::thread::scope(|scope| {
+        let files = scope.spawn(move || ph_github::pulls::files(client, repo, *number));
+        let pull = ph_github::pulls::get(client, repo, *number).ok();
+        let checks = pull
+            .as_ref()
+            .map(|pull| ph_github::pulls::checks(client, repo, &pull.head.sha).unwrap_or_default());
+        let files = files.join().ok().and_then(Result::ok).unwrap_or_default();
+        Some((pull?, files, checks.unwrap_or_default()))
+    })?;
     Some(ph_review::triage::assess(
         &pull,
         &files,

@@ -4,7 +4,67 @@
 use super::*;
 
 impl ChatPanel {
+    /// Where the chat's agent works, before its title: a workspace (in its
+    /// colour, and the folder when not the main one), a repository, or
+    /// the Chats space, which has no folder.
+    fn render_place(&self, cx: &App) -> AnyElement {
+        let project = &self.project;
+        let folder = self.active.read(cx).folder().to_path_buf();
+        let (icon, color, label, tip): (Option<Icons>, Option<gpui_kit::Hsla>, String, String) =
+            if project.read_only {
+                (
+                    Some(Icons::Github),
+                    None,
+                    project.name.clone(),
+                    format!("Reads {} in PilotHouse's own copy", project.name),
+                )
+            } else if project.empty {
+                (
+                    Some(Icons::MessagesSquare),
+                    None,
+                    "Chats".into(),
+                    "No workspace: the agent works in a folder of its own".into(),
+                )
+            } else {
+                let sub = (folder != project.path)
+                    .then(|| {
+                        folder
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                    })
+                    .flatten();
+                (
+                    None,
+                    Some(ph_ui::workspace_color(project.shade, cx.theme().is_dark())),
+                    match sub {
+                        Some(sub) => format!("{} › {sub}", project.name),
+                        None => project.name.clone(),
+                    },
+                    format!("Works in {}", ph_ui::platform::display_path(&folder)),
+                )
+            };
+        h_flex()
+            .id("chat-place")
+            .flex_none()
+            .max_w(px(220.))
+            .h_6()
+            .px_2()
+            .gap_1p5()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().muted)
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            })
+            .children(icon.map(|icon| Icon::new(icon).xsmall()))
+            .children(color.map(|color| div().flex_none().size(px(8.)).rounded_full().bg(color)))
+            .child(div().min_w_0().truncate().child(label))
+            .into_any_element()
+    }
+
     pub(super) fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let place = self.render_place(cx);
         let thread = self.active.read(cx);
         let (dot, label) = match thread.status() {
             ThreadStatus::Working => (cx.theme().success, "Working"),
@@ -36,6 +96,7 @@ impl ChatPanel {
                         })),
                 )
             })
+            .child(place)
             .child(
                 div()
                     .flex_1()
@@ -447,6 +508,9 @@ impl ChatPanel {
                 .icon(IconName::Close)
                 .accessibility_label("Remove attachment")
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    // Only the button's: the chip under it opens the
+                    // preview on a click.
+                    cx.stop_propagation();
                     if ix < this.attachments.len() {
                         this.attachments.remove(ix);
                         cx.notify();

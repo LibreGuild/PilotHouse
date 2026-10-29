@@ -416,11 +416,14 @@ impl Browser {
         if self.screencast {
             self.start_screencast();
         }
-        // Return to where this project's browser was last time.
-        if !self.url.is_empty() && self.url != "about:blank" {
-            let url = self.url.clone();
-            cdp.fire("Page.navigate", json!({ "url": url }));
-        }
+        // Return to where this project's browser was last time; a new one
+        // opens at the home page.
+        let url = if !self.url.is_empty() && self.url != "about:blank" {
+            self.url.clone()
+        } else {
+            HOME_PAGE.to_string()
+        };
+        cdp.fire("Page.navigate", json!({ "url": url }));
         cx.notify();
         cx.emit(BrowserEvent::Changed);
     }
@@ -1190,8 +1193,11 @@ fn port_key(project_id: i64) -> String {
     format!("browser.{project_id}.devtools_port")
 }
 
-/// Address-bar input to a URL. Local addresses get `http`, the rest `https`.
-/// There is no web search: PilotHouse sends nothing to a search engine.
+/// The page a browser opens with when it has been nowhere yet.
+pub const HOME_PAGE: &str = "https://www.google.com/";
+
+/// Address-bar input to a URL. Local addresses get `http`, the rest `https`;
+/// words that are not an address are searched for on Google.
 pub fn normalize_url(input: &str) -> String {
     let input = input.trim();
     if input.contains("://") || input.starts_with("about:") || input.starts_with("data:") {
@@ -1202,6 +1208,18 @@ pub fn normalize_url(input: &str) -> String {
         || host.ends_with(".localhost")
         || host.ends_with(".test")
         || host.parse::<std::net::IpAddr>().is_ok();
+    // An address has no spaces and a dotted host (`example.com`); anything
+    // else (`rust borrow checker`, `gpui`) is a search.
+    let address = local
+        || input.starts_with(':')
+        || (!input.contains(char::is_whitespace)
+            && host.contains('.')
+            && !host.starts_with('.')
+            && !host.ends_with('.'));
+    if !address {
+        let query: String = form_urlencoded(input);
+        return format!("https://www.google.com/search?q={query}");
+    }
     if local || input.starts_with(':') {
         let input = if input.starts_with(':') {
             format!("localhost{input}")
@@ -1212,6 +1230,21 @@ pub fn normalize_url(input: &str) -> String {
     } else {
         format!("https://{input}")
     }
+}
+
+/// `text` as a query-string value (`application/x-www-form-urlencoded`).
+fn form_urlencoded(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'*' => {
+                out.push(byte as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1225,6 +1258,18 @@ mod tests {
         assert_eq!(normalize_url("127.0.0.1:8080"), "http://127.0.0.1:8080");
         assert_eq!(normalize_url("example.com"), "https://example.com");
         assert_eq!(normalize_url("http://x.dev"), "http://x.dev");
+        assert_eq!(
+            normalize_url("rust borrow checker"),
+            "https://www.google.com/search?q=rust+borrow+checker"
+        );
+        assert_eq!(
+            normalize_url("gpui"),
+            "https://www.google.com/search?q=gpui"
+        );
+        assert_eq!(
+            normalize_url("c++ & you?"),
+            "https://www.google.com/search?q=c%2B%2B+%26+you%3F"
+        );
     }
 
     #[test]

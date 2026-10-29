@@ -355,25 +355,34 @@ impl FileView {
     }
 
     /// Opens the file on its language server and hooks up hover, go to
-    /// definition and completion.
+    /// definition and completion. Without one, go to definition still
+    /// works from the workspace's symbol index.
     fn attach_lsp(&mut self, text: &str, cx: &mut Context<Self>) {
-        let Some(lsp) = self.lsp.clone() else { return };
-        lsp.update(cx, |lsp, cx| lsp.open(&self.absolute, text, cx));
-        if !lsp.read(cx).is_open(&self.absolute) {
-            return;
-        }
-        let binding = Rc::new(Binding {
-            manager: lsp.downgrade(),
-            path: self.absolute.clone(),
+        let lsp = self.lsp.clone().filter(|lsp| {
+            lsp.update(cx, |lsp, cx| lsp.open(&self.absolute, text, cx));
+            lsp.read(cx).is_open(&self.absolute)
         });
         let (here, open) = (self.absolute.clone(), self.open_location.clone());
+        let fallback = Rc::new(crate::code_intel::SymbolDefinitions::new(
+            self.root.clone(),
+            self.absolute.clone(),
+        ));
         self.editor.update(cx, |editor, cx| {
-            let lsp = editor.lsp_mut();
-            lsp.hover_provider = Some(binding.clone());
-            lsp.definition_provider = Some(binding.clone());
-            lsp.completion_provider = Some(binding);
+            let hooks = editor.lsp_mut();
+            match lsp {
+                Some(lsp) => {
+                    let binding = Rc::new(Binding {
+                        manager: lsp.downgrade(),
+                        path: here.clone(),
+                    });
+                    hooks.hover_provider = Some(binding.clone());
+                    hooks.definition_provider = Some(binding.clone());
+                    hooks.completion_provider = Some(binding);
+                }
+                None => hooks.definition_provider = Some(fallback),
+            }
             // A definition in another file opens it there.
-            lsp.show_document = Some(Rc::new(move |params, window, cx| {
+            hooks.show_document = Some(Rc::new(move |params, window, cx| {
                 let Some(path) = ph_lsp::uri::to_path(&params.uri) else {
                     return false;
                 };
@@ -1220,57 +1229,77 @@ fn line_link(
     )
 }
 
+/// One line of the editor's menu: a label, whether it can be chosen, and
+/// its action; `None` is a separator.
+type MenuLine = Option<(SharedString, bool, Box<dyn gpui_kit::Action>)>;
+
+/// The editor's right-click menu, as lines (see [`editor_menu`]).
+fn editor_menu_lines(asks: bool, navigates: bool) -> Vec<MenuLine> {
+    use gpui_kit::component::input as edit;
+    let item = |label: &str, action: Box<dyn gpui_kit::Action>| {
+        Some((SharedString::from(label.to_string()), true, action))
+    };
+    let navigation = |label: &str, action: Box<dyn gpui_kit::Action>| {
+        Some((SharedString::from(label.to_string()), navigates, action))
+    };
+    let mut lines = Vec::new();
+    if asks {
+        lines.extend([
+            item("Add to Chat", Box::new(AskAboutSelection)),
+            item("Explain", Box::new(ExplainSelection)),
+            item("Find Bugs", Box::new(FindBugsInSelection)),
+            item("Write Tests", Box::new(WriteTestsForSelection)),
+            None,
+        ]);
+    }
+    lines.extend([
+        // Without a language server it still finds declarations by name.
+        item("Go to Definition", Box::new(edit::GoToDefinition)),
+        navigation("Find References", Box::new(FindReferences)),
+        navigation("Rename Symbol", Box::new(RenameSymbol)),
+        navigation("Code Actions", Box::new(edit::ToggleCodeActions)),
+        None,
+        item("Undo", Box::new(edit::Undo)),
+        item("Redo", Box::new(edit::Redo)),
+        None,
+        item("Cut", Box::new(edit::Cut)),
+        item("Copy", Box::new(edit::Copy)),
+        item("Paste", Box::new(edit::Paste)),
+        item("Copy as Markdown", Box::new(CopyAsMarkdown)),
+        item("Copy Reference (path:lines)", Box::new(CopyReference)),
+    ]);
+    if asks {
+        lines.push(item("Copy Link to Lines", Box::new(CopyLinkToLines)));
+    }
+    lines.extend([
+        None,
+        item("Find…", Box::new(edit::Search)),
+        item("Replace…", Box::new(edit::Replace)),
+        item("Select All", Box::new(edit::SelectAll)),
+    ]);
+    if asks {
+        lines.extend([
+            None,
+            item("Copy Path", Box::new(CopyFilePath)),
+            item("Copy Relative Path", Box::new(CopyFileRelativePath)),
+            item(ph_ui::platform::reveal_label(), Box::new(RevealFile)),
+            item("Reveal in Files", Box::new(RevealInFiles)),
+        ]);
+    }
+    lines
+}
+
+/// The editor's right-click menu, as the system draws it.
 fn editor_menu(
     mut menu: gpui_kit::component::native_menu::NativeMenu,
     asks: bool,
     navigates: bool,
 ) -> gpui_kit::component::native_menu::NativeMenu {
-    use gpui_kit::component::input as edit;
-    if asks {
-        menu = menu
-            .menu("Add to Chat", Box::new(AskAboutSelection))
-            .menu("Explain", Box::new(ExplainSelection))
-            .menu("Find Bugs", Box::new(FindBugsInSelection))
-            .menu("Write Tests", Box::new(WriteTestsForSelection))
-            .separator();
-    }
-    menu = menu
-        .menu_with_disabled(
-            "Go to Definition",
-            !navigates,
-            Box::new(edit::GoToDefinition),
-        )
-        .menu_with_disabled("Find References", !navigates, Box::new(FindReferences))
-        .menu_with_disabled("Rename Symbol", !navigates, Box::new(RenameSymbol))
-        .menu_with_disabled(
-            "Code Actions",
-            !navigates,
-            Box::new(edit::ToggleCodeActions),
-        )
-        .separator()
-        .menu("Undo", Box::new(edit::Undo))
-        .menu("Redo", Box::new(edit::Redo))
-        .separator()
-        .menu("Cut", Box::new(edit::Cut))
-        .menu("Copy", Box::new(edit::Copy))
-        .menu("Paste", Box::new(edit::Paste))
-        .menu("Copy as Markdown", Box::new(CopyAsMarkdown))
-        .menu("Copy Reference (path:lines)", Box::new(CopyReference));
-    if asks {
-        menu = menu.menu("Copy Link to Lines", Box::new(CopyLinkToLines));
-    }
-    menu = menu
-        .separator()
-        .menu("Find…", Box::new(edit::Search))
-        .menu("Replace…", Box::new(edit::Replace))
-        .menu("Select All", Box::new(edit::SelectAll));
-    if asks {
-        menu = menu
-            .separator()
-            .menu("Copy Path", Box::new(CopyFilePath))
-            .menu("Copy Relative Path", Box::new(CopyFileRelativePath))
-            .menu(ph_ui::platform::reveal_label(), Box::new(RevealFile))
-            .menu("Reveal in Files", Box::new(RevealInFiles));
+    for line in editor_menu_lines(asks, navigates) {
+        menu = match line {
+            Some((label, enabled, action)) => menu.menu_with_disabled(label, !enabled, action),
+            None => menu.separator(),
+        };
     }
     menu
 }
@@ -1365,20 +1394,23 @@ impl FileView {
                 .when(markdown, |this| {
                     this.capture_key_down(cx.listener(Self::continue_markdown_list))
                 })
-                .child(
-                    Editor::new(&self.editor)
+                .child({
+                    let asks = self.asks;
+                    let navigates = self
+                        .lsp
+                        .as_ref()
+                        .is_some_and(|lsp| lsp.read(cx).is_open(&self.absolute));
+                    // No fill of its own: the code sits on the pane's
+                    // colour, the same the theme gives the line-number
+                    // gutter (opaque, so scrolled code never shows under it).
+                    let editor = Editor::new(&self.editor)
                         .readonly(self.not_utf8)
-                        .bordered(false)
-                        .size_full()
-                        .context_menu({
-                            let asks = self.asks;
-                            let navigates = self
-                                .lsp
-                                .as_ref()
-                                .is_some_and(|lsp| lsp.read(cx).is_open(&self.absolute));
-                            move |menu, _, _| editor_menu(menu, asks, navigates)
-                        }),
-                )
+                        .appearance(false)
+                        .size_full();
+                    editor
+                        .context_menu(move |menu, _, _| editor_menu(menu, asks, navigates))
+                        .into_any_element()
+                })
                 .into_any_element(),
             _ => div().into_any_element(),
         }

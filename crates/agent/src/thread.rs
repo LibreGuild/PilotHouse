@@ -33,6 +33,10 @@ use crate::permission::{ApprovalInbox, PermissionChoice, PermissionRequest};
 use crate::review_card::ReviewCardEvent;
 use crate::transcript::{AttachmentSummary, Entry, PlanItem, ToolEntry, ToolKindLabel, block_text};
 
+/// Replies that keep their drawn view (those in sight are drawn every
+/// frame, so they stay among the newest).
+const KEPT_VIEWS: usize = 48;
+
 /// How much earlier conversation is replayed to a fresh agent session.
 const HISTORY_PREAMBLE_CHARS: usize = 8_000;
 /// Work the agent starts on its own (Claude Code following up on a
@@ -78,6 +82,8 @@ pub struct ThreadProject {
     /// A GitHub repository's chat (the GitHub view): it reads and explains
     /// pull requests in PilotHouse's own copy, and never changes files.
     pub read_only: bool,
+    /// The workspace's colour, as a place in [`ph_ui::WORKSPACE_COLORS`].
+    pub shade: usize,
 }
 
 impl ThreadProject {
@@ -89,6 +95,7 @@ impl ThreadProject {
             extra_dirs: project.extra_folders.clone(),
             empty: project.empty,
             read_only: project.kind == ph_store::projects::ProjectKind::GitHub,
+            shade: project.shade(ph_ui::WORKSPACE_COLORS.len()),
         }
     }
 
@@ -183,6 +190,9 @@ pub struct ChatThread {
     /// Whether the running agent accepts images.
     accepts_images: bool,
     entries: Vec<Entry>,
+    /// Replies whose drawn view is kept, most recently drawn last (see
+    /// [`KEPT_VIEWS`]).
+    views: VecDeque<usize>,
     /// `entries[..saved]` are in the store.
     saved: usize,
     status: ThreadStatus,
@@ -266,6 +276,7 @@ impl ChatThread {
             importing: false,
             accepts_images: true,
             entries: Vec::new(),
+            views: VecDeque::new(),
             saved: 0,
             status: ThreadStatus::Idle,
             scroller,
@@ -452,6 +463,7 @@ impl ChatThread {
                         let entry = Entry::review(review_id, cx);
                         this.watch_card(&entry, cx);
                         this.push(entry, cx);
+                        crate::review_rounds::ReviewRounds::recorded(review_id, cx);
                     }
                     Ok(None) => this.push(
                         Entry::Notice {
@@ -559,6 +571,31 @@ impl ChatThread {
     pub fn prepare_entry(&mut self, ix: usize, cx: &mut App) {
         if let Some(entry) = self.entries.get_mut(ix) {
             entry.prepare(cx);
+            self.keep_view(ix);
+        }
+    }
+
+    /// Notes that reply `ix` has its view, dropping the views of the
+    /// replies drawn longest ago: each holds its parsed Markdown and laid
+    /// out text, and a long run's thousands of replies held hundreds of MB.
+    /// A dropped view is made again when its reply scrolls into sight.
+    fn keep_view(&mut self, ix: usize) {
+        if !matches!(
+            self.entries.get(ix),
+            Some(Entry::Agent { view: Some(_), .. })
+        ) || self.views.back() == Some(&ix)
+        {
+            return;
+        }
+        self.views.retain(|&kept| kept != ix);
+        self.views.push_back(ix);
+        while self.views.len() > KEPT_VIEWS {
+            let Some(old) = self.views.pop_front() else {
+                break;
+            };
+            if let Some(Entry::Agent { view, .. }) = self.entries.get_mut(old) {
+                *view = None;
+            }
         }
     }
 
@@ -1036,6 +1073,14 @@ impl ChatThread {
 
     /// Asks the agent to stop the current turn (or its own background work).
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
+        // The prompt has not reached the agent yet (it or its session is
+        // still starting): the turn ends here and the agent never gets it.
+        // The session keeps starting, for the next message.
+        if self.status == ThreadStatus::Connecting {
+            self._turn = None;
+            self.finish_turn(Ok(StopReason::Cancelled), cx);
+            return;
+        }
         // Background work has no turn of ours to end: it stops here. As
         // after a stopped turn, the queue waits unless "send now" asked.
         let background = self.background;
@@ -1225,6 +1270,7 @@ impl ChatThread {
                 } else {
                     let entry = Entry::agent(text, cx);
                     self.push(entry, cx);
+                    self.keep_view(self.entries.len() - 1);
                 }
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {

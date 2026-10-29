@@ -38,6 +38,7 @@ mod sidebar;
 mod signals;
 mod status;
 mod status_bar;
+mod storage;
 mod tasks;
 mod terminal_agents;
 mod title_bar;
@@ -70,7 +71,9 @@ pub fn init(cx: &mut App) {
     updates::install(cx);
     actions::bind_keys(cx);
     network_drives::install(cx);
+    sidebar::load_width(cx);
     ph_files::init(cx, WORKSPACE_CONTEXT);
+    file_window::bind_keys(cx);
     ph_terminal::init(cx);
     ph_terminal::TerminalHub::keep_between_runs(ph_store::paths::data_dir().join("terminals"), cx);
 }

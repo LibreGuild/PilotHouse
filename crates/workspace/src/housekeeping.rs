@@ -175,7 +175,7 @@ fn remove(folder: &Path, root: Option<&Path>, path: &PathBuf) -> bool {
 
 /// The repository's folder for the worktree at `copy`
 /// (`<repo>/.git/worktrees/<name>`), when it names `copy` back.
-fn admin_entry(copy: &Path) -> Option<PathBuf> {
+pub(crate) fn admin_entry(copy: &Path) -> Option<PathBuf> {
     let link = std::fs::read_to_string(copy.join(".git")).ok()?;
     let entry = copy.join(link.trim().strip_prefix("gitdir:")?.trim());
     let entry = ph_store::paths::canonical(&entry).ok()?;

@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/pilothouse.png" alt="PilotHouse: a workspace with its chats in the sidebar, a Claude Code chat in the middle and the Git changes beside it" width="900">
+  <img src="docs/images/pilothouse.png" alt="PilotHouse: three workspaces in the sidebar (one agent finished, one waiting for approval, one working), a finished agent turn with its plan in the chat, and the Git changes beside it" width="900">
 </p>
 
 ## Why

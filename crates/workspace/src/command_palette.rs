@@ -319,7 +319,7 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
                 &["view", "sidebar", "chats"],
             ),
             Entry::action(
-                "Show the Agents view",
+                "Show the agents at work",
                 ph_ui::Icons::Bot,
                 ShowAgentsView,
                 &["agents", "board", "working", "needs", "waiting"],

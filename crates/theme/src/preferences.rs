@@ -120,28 +120,25 @@ impl Default for EditorPreferences {
     }
 }
 
-/// PilotHouse's colour: signal magenta, the colour of its icon. It marks
-/// focus, selections, links and progress, and is the same for everyone
-/// (there is no setting): it stays apart from the status colours (green,
-/// amber, red), so a dot never reads as the brand.
+/// The highlight colour: a plain blue, as in VS Code. It marks focus,
+/// selections and progress, and stays apart from the status colours
+/// (green, amber, red). The brand's magenta is kept to the logo.
 pub fn accent(dark: bool) -> Hsla {
-    // Lighter on dark backgrounds, deeper on light ones (for contrast).
-    rgb(if dark { 0xff5aa8 } else { 0xc2186e }).into()
+    rgb(if dark { 0x0078d4 } else { 0x005fb8 }).into()
 }
 
-/// The accent as a fill behind white text (an `info` button): a deeper,
-/// calmer shade of [`accent`].
+/// Links: the accent, lighter on dark backgrounds so it reads on them.
+pub fn link(dark: bool) -> Hsla {
+    rgb(if dark { 0x4daafc } else { 0x005fb8 }).into()
+}
+
+/// The accent as a fill behind white text (an `info` button).
 pub fn accent_fill(dark: bool) -> Hsla {
-    let accent = accent(dark);
-    Hsla {
-        s: accent.s * 0.85,
-        l: accent.l.min(0.42),
-        ..accent
-    }
+    accent(dark)
 }
 
-/// The palette of dark mode: cool graphite, or a warm dark brown that is
-/// softer on the eyes.
+/// The palette of dark mode: VS Code's Dark Modern greys, or a warm dark
+/// brown that is softer on the eyes.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DarkTheme {
@@ -155,7 +152,7 @@ impl DarkTheme {
 
     pub fn label(self) -> &'static str {
         match self {
-            DarkTheme::Classic => "Graphite",
+            DarkTheme::Classic => "Modern",
             DarkTheme::Warm => "Warm",
         }
     }
@@ -361,6 +358,7 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
         let dark = theme.mode.is_dark();
         let accent = accent(dark);
         let fill = accent_fill(dark);
+        let link = link(dark);
         let white = hsla(0., 0., 1., 1.);
         theme.font_family = ui_font.into();
         theme.font_size = px(preferences.ui_font_size.clamp(11.0, MAX_UI_FONT_SIZE));
@@ -375,13 +373,12 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
         let colors = &mut theme.colors;
         colors.ring = accent;
         colors.info = accent;
-        colors.link = accent;
-        colors.link_hover = accent.opacity(0.85);
-        colors.link_active = accent;
-        colors.selection = accent.opacity(0.25);
+        colors.link = link;
+        colors.link_hover = link.opacity(0.85);
+        colors.link_active = link;
+        colors.selection = accent.opacity(if dark { 0.4 } else { 0.25 });
         colors.drag_border = accent;
         colors.drop_target = accent.opacity(0.12);
-        colors.caret = accent;
         colors.slider_bar = accent;
         colors.progress_bar = accent;
         colors.button_info = fill;

@@ -39,7 +39,11 @@ tracing-subscriber.workspace = true
 url.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_System_Console",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
 
 [build-dependencies]
 embed-resource = "3"

@@ -17,6 +17,7 @@
 mod cli;
 mod control_handlers;
 mod logs;
+mod memory;
 mod menus;
 
 use anyhow::Result;
@@ -65,7 +66,6 @@ fn run_app(open: Vec<std::path::PathBuf>) -> Result<()> {
     });
     app.run(move |cx| {
         gpui_kit::init(cx);
-        ph_ui::init(cx);
         ph_theme::init(cx);
         ph_browser::init(store.clone(), cx);
         ph_devices::init(cx);
@@ -91,6 +91,7 @@ fn run_app(open: Vec<std::path::PathBuf>) -> Result<()> {
             return;
         }
         control_handlers::register(cx);
+        memory::start(cx);
         if !open.is_empty()
             && let Err(err) = ph_workspace::open_paths(&open, cx)
         {

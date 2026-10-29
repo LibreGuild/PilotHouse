@@ -56,6 +56,43 @@ impl FileChange {
     pub fn removed(&self) -> usize {
         self.hunks.iter().map(Hunk::removed).sum()
     }
+
+    /// The whole file's patch, as `git diff` printed it.
+    pub fn patch(&self) -> String {
+        let mut patch = self.header.clone();
+        for hunk in &self.hunks {
+            patch.push_str(&hunk.header);
+            patch.push('\n');
+            for line in &hunk.lines {
+                patch.push_str(line);
+                patch.push('\n');
+            }
+        }
+        patch
+    }
+
+    /// What happened to the file: `New`, `Deleted`, `Renamed` or `Changed`.
+    pub fn kind(&self) -> ChangeKind {
+        let has = |prefix: &str| self.header.lines().any(|line| line.starts_with(prefix));
+        if has("new file mode") {
+            ChangeKind::New
+        } else if has("deleted file mode") {
+            ChangeKind::Deleted
+        } else if has("rename from ") {
+            ChangeKind::Renamed
+        } else {
+            ChangeKind::Changed
+        }
+    }
+}
+
+/// What a change did to its file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    New,
+    Deleted,
+    Renamed,
+    Changed,
 }
 
 /// Splits `git diff` output into files and hunks.
@@ -110,6 +147,16 @@ fn path_from_header(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_files_patch_and_kind_come_back() {
+        let diff = "diff --git a/new.rs b/new.rs\nnew file mode 100644\nindex 0000000..e69de29\n--- /dev/null\n+++ b/new.rs\n@@ -0,0 +1,2 @@\n+fn a() {}\n+fn b() {}\ndiff --git a/old.rs b/old.rs\nindex 1..2 100644\n--- a/old.rs\n+++ b/old.rs\n@@ -1 +1 @@\n-x\n+y\n";
+        let files = parse_diff(diff);
+        assert_eq!(files[0].kind(), ChangeKind::New);
+        assert_eq!(files[1].kind(), ChangeKind::Changed);
+        let joined: String = files.iter().map(FileChange::patch).collect();
+        assert_eq!(joined, diff);
+    }
 
     const DIFF: &str = "\
 diff --git a/src/lib.rs b/src/lib.rs

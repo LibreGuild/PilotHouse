@@ -26,7 +26,7 @@ use crate::adb::{Adb, RemoteFile};
 use crate::logcat::Logcat;
 use crate::logcat_view::LogcatView;
 use crate::manager::{DeviceManager, DevicesChanged};
-use crate::screen::{DeviceScreen, ScreenEvent, SystemKey};
+use crate::screen::{DeviceScreen, ScreenEvent, StreamQuality, SystemKey};
 use crate::ui_tree::{self, UiNode};
 
 /// Rows shown in the UI and Files drawers.
@@ -59,6 +59,8 @@ enum Drawer {
 pub struct DevicesPanel {
     manager: Entity<DeviceManager>,
     screen: Option<Entity<DeviceScreen>>,
+    /// How sharp a phone streams (Settings key `devices.stream_quality`).
+    quality: StreamQuality,
     logcat: Option<Entity<Logcat>>,
     surface: Entity<SurfaceView>,
     tools: Entity<LiveTools>,
@@ -66,6 +68,9 @@ pub struct DevicesPanel {
     drawer_height: Pixels,
     logcat_view: Entity<LogcatView>,
     ui_nodes: Vec<UiNode>,
+    /// The Layout row outlined on the screen (by its bounds): clicked
+    /// again, its outline goes.
+    outlined: Option<(i32, i32, i32, i32)>,
     files_dir: String,
     files: Vec<RemoteFile>,
     packages: Vec<String>,
@@ -78,6 +83,11 @@ pub struct DevicesPanel {
 }
 
 impl EventEmitter<ToChat> for DevicesPanel {}
+
+/// The user chose how sharp a phone streams; the app keeps the choice.
+pub struct StreamQualityChanged(pub StreamQuality);
+
+impl EventEmitter<StreamQualityChanged> for DevicesPanel {}
 
 impl DevicesPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -101,6 +111,7 @@ impl DevicesPanel {
         Self {
             manager,
             screen: None,
+            quality: StreamQuality::default(),
             logcat: None,
             surface,
             tools,
@@ -108,6 +119,7 @@ impl DevicesPanel {
             drawer_height: px(DRAWER_HEIGHT),
             logcat_view,
             ui_nodes: Vec::new(),
+            outlined: None,
             files_dir: "/sdcard".into(),
             files: Vec::new(),
             packages: Vec::new(),
@@ -117,6 +129,18 @@ impl DevicesPanel {
             _subscriptions: subscriptions,
             _screen_subscription: None,
         }
+    }
+
+    /// Streams phones this sharp, the open one again at once.
+    pub fn set_stream_quality(&mut self, quality: StreamQuality, cx: &mut Context<Self>) {
+        if self.quality == quality {
+            return;
+        }
+        self.quality = quality;
+        if self.screen.take().is_some() {
+            self.sync_session(cx);
+        }
+        cx.notify();
     }
 
     /// Shown or hidden: the screen streams (and logcat runs) only while shown.
@@ -177,6 +201,7 @@ impl DevicesPanel {
         self._screen_subscription = None;
         self.screen_error = None;
         self.ui_nodes.clear();
+        self.outlined = None;
         self.files.clear();
         let (Some(serial), Some(adb)) = (wanted, self.adb(cx)) else {
             cx.notify();
@@ -189,7 +214,8 @@ impl DevicesPanel {
             .map(|device| device.display_name())
             .unwrap_or_else(|| serial.clone());
         self.tools.update(cx, |tools, _| tools.set_source(name));
-        let screen = cx.new(|cx| DeviceScreen::new(serial.clone(), adb.clone(), cx));
+        let quality = self.quality;
+        let screen = cx.new(|cx| DeviceScreen::new(serial.clone(), adb.clone(), quality, cx));
         self._screen_subscription = Some(cx.subscribe(
             &screen,
             |this, _, event: &ScreenEvent, cx| match event {
@@ -342,14 +368,25 @@ impl DevicesPanel {
         .detach();
     }
 
-    fn outline(&self, node: &UiNode, scale: f32, cx: &mut Context<Self>) {
-        let (l, t, r, b) = node.bounds;
-        let shape = Shape::Rect {
-            from: (l as f32 * scale, t as f32 * scale),
-            to: (r as f32 * scale, b as f32 * scale),
-        };
-        self.surface
-            .update(cx, |surface, cx| surface.add_annotation(shape, cx));
+    /// Outlines `node` on the screen, in place of the one outlined before;
+    /// the outlined one again takes its outline away.
+    fn outline(&mut self, node: &UiNode, scale: f32, cx: &mut Context<Self>) {
+        let again = self.outlined == Some(node.bounds);
+        if self.outlined.take().is_some() {
+            self.surface
+                .update(cx, |surface, cx| surface.undo_annotation(cx));
+        }
+        if !again {
+            let (l, t, r, b) = node.bounds;
+            let shape = Shape::Rect {
+                from: (l as f32 * scale, t as f32 * scale),
+                to: (r as f32 * scale, b as f32 * scale),
+            };
+            self.surface
+                .update(cx, |surface, cx| surface.add_annotation(shape, cx));
+            self.outlined = Some(node.bounds);
+        }
+        cx.notify();
     }
 
     fn refresh_ui(&mut self, cx: &mut Context<Self>) {
@@ -599,6 +636,47 @@ impl DevicesPanel {
                         ),
                 )
                 .child(div().w_px().h_4().mx_1().bg(cx.theme().border))
+                // An emulator streams over its own channel at one size.
+                .when(
+                    !self
+                        .screen
+                        .as_ref()
+                        .is_some_and(|screen| screen.read(cx).is_emulator_stream()),
+                    |this| {
+                        let current = self.quality;
+                        let panel = panel.clone();
+                        this.child(
+                            icon_button(
+                                "device-quality",
+                                Icon::new(Icons::Gauge),
+                                "Stream quality",
+                            )
+                            .menu(
+                                gpui_kit::Anchor::TopLeft,
+                                move |menu, _, _| {
+                                    StreamQuality::ALL.into_iter().fold(
+                                        menu.label(
+                                            "Stream quality: lower is smoother on a slow phone",
+                                        ),
+                                        |menu, quality| {
+                                            let panel = panel.clone();
+                                            menu.item(
+                                                PopupMenuItem::new(quality.label())
+                                                    .checked(quality == current)
+                                                    .on_click(move |_, _, cx| {
+                                                        _ = panel.update(cx, |this, cx| {
+                                                            this.set_stream_quality(quality, cx);
+                                                            cx.emit(StreamQualityChanged(quality));
+                                                        });
+                                                    }),
+                                            )
+                                        },
+                                    )
+                                },
+                            ),
+                        )
+                    },
+                )
                 .child(
                     icon_button(
                         "device-install",
@@ -853,6 +931,8 @@ impl DevicesPanel {
             .cloned()
             .collect();
         v_flex()
+            .size_full()
+            .min_h_0()
             .child(
                 h_flex()
                     .px_2()
@@ -864,7 +944,7 @@ impl DevicesPanel {
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(format!(
-                                "{} elements · click one to outline it",
+                                "{} elements · click one to outline it, again to clear",
                                 nodes.len()
                             )),
                     )
@@ -911,6 +991,7 @@ impl DevicesPanel {
                                     .next()
                                     .unwrap_or_default()
                                     .to_string();
+                                let picked = self.outlined == Some(node.bounds);
                                 h_flex()
                                     .id(("ui-node", ix))
                                     .h_6()
@@ -918,6 +999,7 @@ impl DevicesPanel {
                                     .gap_2()
                                     .rounded(cx.theme().radius)
                                     .cursor_pointer()
+                                    .when(picked, |this| this.bg(cx.theme().list_active))
                                     .hover(|style| style.bg(cx.theme().list_hover))
                                     .child(
                                         div()
@@ -970,6 +1052,8 @@ impl DevicesPanel {
             }
         });
         v_flex()
+            .size_full()
+            .min_h_0()
             .child(
                 h_flex()
                     .px_2()
@@ -1165,8 +1249,8 @@ pub(crate) fn device_menu(
     }
     let connector = manager.clone();
     menu = menu.separator().item(
-        PopupMenuItem::new("Connect over Wi-Fi…")
-            .icon(Icons::Wifi)
+        PopupMenuItem::new("Connect a device…")
+            .icon(Icons::Smartphone)
             .on_click(move |_, window, cx| {
                 crate::connect_dialog::open(connector.clone(), window, cx)
             }),

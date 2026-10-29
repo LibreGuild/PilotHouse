@@ -41,7 +41,10 @@ Opened with their viewer; **Open in Default App** in the toolbar hands the file 
 
 ## The rich Markdown editor
 
-Markdown opens in **Rich**: the document as formatted text, edited a block at a time, like Notion (`rich/`). Every block shows formatted until clicked; the block being edited shows its text in the block's own look (a heading stays large, code stays code), and a Mermaid block draws its diagram under the text as it is typed.
+Markdown opens in **Rich**: the document as formatted text, edited a block at a time, like Notion (`rich/`). Every block shows formatted until **double-clicked** (an empty one opens with a click): a click or a drag only selects, so text can be read and copied without editing it. The block being edited shows its text in the block's own look (a heading stays large and bold, code stays code), and a Mermaid block draws its diagram under the text as it is typed.
+
+- **Copying** selected text gives the Markdown it shows (`rich/copy.rs`): `Some **bold** words`, not "Some bold words". Formatting the selection cuts through (half a bold run, part of a link) comes whole; a whole heading, list item or quote brings its marker; a selection across table cells copies the table.
+- **Tables** are a grid (`rich/table.rs`). Double-click a cell to change it; Tab and Shift+Tab move along the row, Enter goes down, Escape ends. The **+** on the table's right edge adds a column, the one under it a row; a cell's right-click menu inserts rows and columns either side, deletes them, or opens the table as Markdown. A changed table is written back neatly: columns padded to line up, `|` in a cell escaped, each column's alignment kept.
 
 - **Enter** starts a new block (the next item, in a list; an empty item leaves the list); **Shift+Enter** a new line in the block. **Backspace** at the start turns a heading, item or quote back into text, or joins a paragraph to the one above. **↑/↓** at the edges move between blocks. **Esc** stops editing.
 - **Markdown shortcuts** at the start of a paragraph make their block: `# `, `## `, `### `, `- `, `1. `, `[] `, `> `, ```` ``` ```` and `---`.
@@ -52,7 +55,7 @@ Markdown opens in **Rich**: the document as formatted text, edited a block at a 
 - **Paste an image** (⌘V) to save it beside the document, in `images/`, and show it in a block below.
 - **Undo** (⌘Z) undoes typing in the block first, then changes to the blocks themselves (⌘⇧Z redoes).
 
-The Markdown text stays the truth (`rich/blocks.rs`): a block keeps the exact text it was read from until it is edited, and the whitespace between blocks is kept too, so editing one paragraph changes only that paragraph in the file. Tables, HTML, front matter and other Markdown without a block of its own are edited as Markdown, in place. Edits reach the file's text a quarter of a second after typing pauses, and at once on ⌘S.
+The Markdown text stays the truth (`rich/blocks.rs`): a block keeps the exact text it was read from until it is edited, and the whitespace between blocks is kept too, so editing one paragraph changes only that paragraph in the file. HTML, front matter and other Markdown without a block of its own are edited as Markdown, in place. Edits reach the file's text a quarter of a second after typing pauses, and at once on ⌘S.
 
 In the **Source** view, Enter at the end of a list item starts the next one (`- `, `3. `, `- [ ] `), and in an empty one ends the list.
 

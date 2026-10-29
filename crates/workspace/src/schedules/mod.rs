@@ -178,6 +178,64 @@ impl Automation {
     }
 }
 
+/// Identifies reminder notices (one per to-do).
+struct ReminderNotice;
+
+/// A due reminder in the window: it stays until it is answered (done, or
+/// again in ten minutes) or closed.
+fn reminder_notice(id: ph_store::todos::TodoId, text: String) -> Notification {
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use gpui_kit::component::{Sizable as _, h_flex, v_flex};
+    use gpui_kit::{IntoElement as _, ParentElement as _, Styled as _, div};
+    Notification::new()
+        .id1::<ReminderNotice>(id.to_string())
+        .title("Reminder")
+        .icon(ph_ui::Icons::BellRing)
+        .autohide(false)
+        .content(move |_, _, cx| {
+            let (done, later) = (cx.entity(), cx.entity());
+            v_flex()
+                .gap_2()
+                .child(div().text_sm().child(text.clone()))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new("reminder-done")
+                                .xsmall()
+                                .primary()
+                                .label("Done")
+                                .on_click(move |_, window, cx| {
+                                    let _ = AppState::store(cx).set_todo_done(id, true);
+                                    refresh_inbox(cx);
+                                    done.update(cx, |notice, cx| notice.dismiss(window, cx));
+                                }),
+                        )
+                        .child(
+                            Button::new("reminder-later")
+                                .xsmall()
+                                .ghost()
+                                .label("In 10 min")
+                                .on_click(move |_, window, cx| {
+                                    let at = crate::inbox::Remind::InTenMinutes.at();
+                                    let _ = AppState::store(cx).set_todo_reminder(id, at);
+                                    refresh_inbox(cx);
+                                    later.update(cx, |notice, cx| notice.dismiss(window, cx));
+                                }),
+                        ),
+                )
+                .into_any_element()
+        })
+}
+
+/// The bell's inbox reads its lists again (after a change from elsewhere).
+fn refresh_inbox(cx: &mut App) {
+    if let Some((_, workspace)) = crate::main_workspace(cx) {
+        let inbox = workspace.read(cx).inbox.clone();
+        inbox.update(cx, |inbox, cx| inbox.refresh(cx));
+    }
+}
+
 /// Announces to-do reminders that came due and were not announced yet.
 fn announce_reminders(cx: &mut App) {
     let store = AppState::store(cx).clone();
@@ -188,7 +246,7 @@ fn announce_reminders(cx: &mut App) {
         let _ = store.todo_reminded(todo.id);
         toast(
             todo.project_id,
-            Notification::info(format!("Reminder: {}", todo.text)),
+            reminder_notice(todo.id, todo.text.clone()),
             cx,
         );
         cx.show_system_notification(SystemNotification {

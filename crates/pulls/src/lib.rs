@@ -31,3 +31,13 @@ pub use pull_view::{PullView, PullViewEvent, short_date};
 pub use pulls_panel::{PullsPanel, PullsPanelEvent};
 pub use request::AgentRequest;
 pub use templates_view::TemplatesView;
+
+/// The result of a GitHub call made on a scoped thread, so several can run
+/// at once.
+pub(crate) fn joined<T>(
+    handle: std::thread::ScopedJoinHandle<'_, anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    handle
+        .join()
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("reading from GitHub failed")))
+}

@@ -1,6 +1,6 @@
 //! Completing mentions in the composer: `@` offers the live sources
 //! (`@screenshot`, `@log`, `@test-run`), definitions (`@path:line`), pull
-//! requests (`@pr:12`) and files; `#` offers board cards; `/` at the start
+//! requests (`@pr:12`), files and folders; `#` offers board cards; `/` at the start
 //! of a message offers the agent's commands (`/review`, `/compact`…). What is
 //! inserted is the plain text the composer and the agent already understand
 //! (see [`crate::attachments::mentions`]).
@@ -217,10 +217,17 @@ pub fn suggestions(
             // Better match first; then the shorter path.
             matched.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())));
             out.extend(matched.into_iter().take(LIMIT).map(|(_, path)| {
-                let (folder, name) = path.rsplit_once('/').unwrap_or(("", path));
+                // A folder (`src/app/`) shows as `app/` in `src`.
+                let trimmed = path.trim_end_matches('/');
+                let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
+                let name = if path.ends_with('/') {
+                    format!("{name}/")
+                } else {
+                    name.to_string()
+                };
                 Suggestion {
-                    label: name.to_string(),
-                    detail: folder.to_string(),
+                    label: name,
+                    detail: parent.to_string(),
                     insert: format!("@{path} "),
                 }
             }));
@@ -250,6 +257,21 @@ mod tests {
             typing_at("héllo @x", 9).unwrap().range,
             7..9,
             "byte offsets"
+        );
+    }
+
+    #[test]
+    fn folders_are_offered_with_a_slash() {
+        let entries = ["src/", "src/app/", "src/app/mod.rs"];
+        let typing = typing_at("@app", 4).unwrap();
+        let found = suggestions(&typing, &entries, &[], &Extra::default());
+        let folder = found
+            .iter()
+            .find(|item| item.insert == "@src/app/ ")
+            .expect("the folder");
+        assert_eq!(
+            (folder.label.as_str(), folder.detail.as_str()),
+            ("app/", "src")
         );
     }
 

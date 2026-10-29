@@ -309,25 +309,48 @@ impl PullView {
             self.number,
         );
         let load = cx.background_spawn(async move {
-            let pull = pulls::get(&client, &repo, number)?;
-            let files = pulls::files(&client, &repo, number)?;
-            let commits = pulls::commits(&client, &repo, number)?;
-            let conversation = pulls::conversation(&client, &repo, number)?;
-            let line_comments = pulls::line_comments(&client, &repo, number)?;
-            let reviews = pulls::reviews(&client, &repo, number)?;
-            // Checks are nice to have; a token without that scope still works.
-            let checks = pulls::checks(&client, &repo, &pull.head.sha).unwrap_or_default();
-            let changes = files.iter().map(file_change).collect();
-            anyhow::Ok(Loaded {
-                pull,
-                changes,
-                files,
-                commits,
-                conversation,
-                line_comments,
-                reviews,
-                checks,
+            // The calls are independent: made at once, the page waits for
+            // the slowest instead of the sum of all.
+            let (client, repo) = (&client, &repo);
+            std::thread::scope(|scope| {
+                let files = scope.spawn(|| pulls::files(client, repo, number));
+                let commits = scope.spawn(|| pulls::commits(client, repo, number));
+                let conversation = scope.spawn(|| pulls::conversation(client, repo, number));
+                let line_comments = scope.spawn(|| pulls::line_comments(client, repo, number));
+                let reviews = scope.spawn(|| pulls::reviews(client, repo, number));
+                let pull = pulls::get(client, repo, number)?;
+                // Checks are nice to have; a token without that scope still works.
+                let checks = pulls::checks(client, repo, &pull.head.sha).unwrap_or_default();
+                let files = crate::joined(files)?;
+                let commits = crate::joined(commits)?;
+                let conversation = crate::joined(conversation)?;
+                let line_comments = crate::joined(line_comments)?;
+                let reviews = crate::joined(reviews)?;
+                anyhow::Ok((
+                    pull,
+                    files,
+                    commits,
+                    conversation,
+                    line_comments,
+                    reviews,
+                    checks,
+                ))
             })
+            .map(
+                |(pull, files, commits, conversation, line_comments, reviews, checks)| {
+                    let changes = files.iter().map(file_change).collect();
+                    Loaded {
+                        pull,
+                        changes,
+                        files,
+                        commits,
+                        conversation,
+                        line_comments,
+                        reviews,
+                        checks,
+                    }
+                },
+            )
         });
         self._load = Some(cx.spawn(async move |this, cx| {
             let result = load.await;

@@ -151,21 +151,31 @@ impl PullsPanel {
                 Ok(root) => hosting::resolve(&root, &store)?,
                 Err(id) => hosting::for_repo(&store, &id)?,
             };
-            let me = pulls::me(&hosting.client).ok().map(|user| user.login);
-            let list = pulls::list(&hosting.client, &hosting.repo);
-            let checks: HashMap<u64, Vec<Check>> = list
-                .as_ref()
-                .map(|list| {
-                    list.iter()
-                        .take(CHECKS_FOR)
-                        .filter_map(|pull| {
-                            pulls::checks(&hosting.client, &hosting.repo, &pull.head.sha)
-                                .ok()
-                                .map(|checks| (pull.number, checks))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let (client, repo) = (&hosting.client, &hosting.repo);
+            let (me, list, checks) = std::thread::scope(|scope| {
+                let me = scope.spawn(|| pulls::me(client));
+                let list = pulls::list(client, repo);
+                // Each pull request's checks at once: the list waits for
+                // the slowest, not their sum.
+                let checks: Vec<_> = list
+                    .iter()
+                    .flatten()
+                    .take(CHECKS_FOR)
+                    .map(|pull| {
+                        let (number, sha) = (pull.number, pull.head.sha.clone());
+                        (
+                            number,
+                            scope.spawn(move || pulls::checks(client, repo, &sha)),
+                        )
+                    })
+                    .collect();
+                let checks: HashMap<u64, Vec<Check>> = checks
+                    .into_iter()
+                    .filter_map(|(number, handle)| Some((number, crate::joined(handle).ok()?)))
+                    .collect();
+                let me = crate::joined(me).ok().map(|user| user.login);
+                (me, list, checks)
+            });
             Ok((hosting, me, list, checks))
         });
         self._load = Some(cx.spawn(async move |this, cx| {

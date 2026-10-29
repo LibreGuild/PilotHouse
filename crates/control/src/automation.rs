@@ -48,6 +48,13 @@ pub fn register(cx: &mut App) {
                 }
                 cx.default_global::<TargetWindow>().0 = Some(index);
             }
+            // `size: [w, h]` resizes the target window (screenshots of one size).
+            if let Some(size) = point_param(&params, "size") {
+                with_window(cx, |window, _| {
+                    window.resize(gpui_kit::size(size.x, size.y));
+                    Ok(Value::Null)
+                })?;
+            }
             Ok(
                 json!({ "windows": count, "target": cx.default_global::<TargetWindow>().0.unwrap_or(0) }),
             )
@@ -213,19 +220,64 @@ fn resolve(params: Value, window: &mut Window) -> Result<ElementSnapshot> {
 }
 
 fn click(params: Value, button: MouseButton, window: &mut Window, cx: &mut App) -> Result<Value> {
+    // `count: 2` double-clicks (3 for a triple click).
+    let count = params
+        .get("count")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .clamp(1, 3) as usize;
     // `at: [x, y]` clicks a window point, e.g. inside a live browser pane.
     if let Some(at) = point_param(&params, "at") {
         window.pointer_move(at, None, cx);
-        window.pointer_down(at, button, cx);
-        window.pointer_up(at, button, cx);
+        press(at, button, count, window, cx);
         return Ok(json!({ "clicked": [f32::from(at.x), f32::from(at.y)] }));
     }
     let target = resolve(params, window)?;
     let center = target.bounds().center();
     window.pointer_move(center, None, cx);
-    window.pointer_down(center, button, cx);
-    window.pointer_up(center, button, cx);
+    press(center, button, count, window, cx);
     Ok(json!({ "clicked": describe(&target) }))
+}
+
+/// `count` presses and releases in a row, each knowing its place in the
+/// series as the system's double-clicks do.
+fn press(
+    at: gpui_kit::Point<gpui_kit::Pixels>,
+    button: MouseButton,
+    count: usize,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use gpui_kit::InputEvent as _;
+    if count == 1 {
+        window.pointer_down(at, button, cx);
+        window.pointer_up(at, button, cx);
+        return;
+    }
+    for click_count in 1..=count {
+        let modifiers = window.modifiers();
+        window.dispatch_event(
+            gpui_kit::MouseDownEvent {
+                button,
+                position: at,
+                modifiers,
+                click_count,
+                first_mouse: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(
+            gpui_kit::MouseUpEvent {
+                button,
+                position: at,
+                modifiers,
+                click_count,
+            }
+            .to_platform_input(),
+            cx,
+        );
+    }
 }
 
 /// Moves the pointer over a point or element (hover cards, tooltips).

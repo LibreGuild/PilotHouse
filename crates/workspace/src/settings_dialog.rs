@@ -21,9 +21,33 @@ use ph_ui::Icons;
 use crate::app_state::AppState;
 use crate::context_panel::ContextTab;
 
-/// Opens Settings over the window; `project` is the one in front (for its
-/// skills and MCP servers).
-pub(crate) fn open(project: Option<std::path::PathBuf>, window: &mut Window, cx: &mut App) {
+/// A page Settings can open at.
+#[derive(Clone, Copy)]
+pub(crate) enum Page {
+    First,
+    GitHub,
+    Storage,
+}
+
+impl Page {
+    /// Its place in the list of pages (see [`open`]).
+    fn index(self) -> usize {
+        match self {
+            Page::First => 0,
+            Page::GitHub => 6,
+            Page::Storage => 9,
+        }
+    }
+}
+
+/// Opens Settings over the window at `page`; `project` is the one in front
+/// (for its skills and MCP servers).
+pub(crate) fn open(
+    project: Option<std::path::PathBuf>,
+    page: Page,
+    window: &mut Window,
+    cx: &mut App,
+) {
     // Listing fonts touches the OS font database: do it once per opening.
     let fonts = font_options(cx);
     let store = AppState::store(cx).clone();
@@ -40,6 +64,7 @@ pub(crate) fn open(project: Option<std::path::PathBuf>, window: &mut Window, cx:
     });
     let tools =
         cx.new(|cx| ph_agent::tools_view::ToolsView::new(store, project, open_file, window, cx));
+    let storage = cx.new(crate::storage::StorageView::new);
     let viewport = window.viewport_size();
     let width = (viewport.width - px(80.)).clamp(px(560.), px(960.));
     let height = (viewport.height - px(120.)).clamp(px(420.), px(680.));
@@ -50,22 +75,32 @@ pub(crate) fn open(project: Option<std::path::PathBuf>, window: &mut Window, cx:
             .p_0()
             .close_button(true)
             .title(div().px_4().pt_3().child("Settings"))
-            .child(div().h(height).border_t_1().child(
-                Settings::new("settings").sidebar_width(px(210.)).pages([
-                    appearance_page(&fonts),
-                    editor_page(&fonts),
-                    terminal_page(),
-                    chat_page(),
-                    agents_page(),
-                    tools_page(tools.clone()),
-                    github_page(accounts.clone()),
-                    templates_page(templates.clone()),
-                    drives_page(drives.clone()),
-                    features_page(),
-                    shortcuts_page(),
-                    about_page(),
-                ]),
-            ))
+            .child(
+                div().h(height).border_t_1().child(
+                    Settings::new("settings")
+                        .sidebar_width(px(210.))
+                        .default_selected_index(gpui_kit::component::setting::SelectIndex {
+                            page_ix: page.index(),
+                            group_ix: None,
+                        })
+                        .pages([
+                            // In this order: see `Page::index`.
+                            appearance_page(&fonts),
+                            editor_page(&fonts),
+                            terminal_page(),
+                            chat_page(),
+                            agents_page(),
+                            tools_page(tools.clone()),
+                            github_page(accounts.clone()),
+                            templates_page(templates.clone()),
+                            drives_page(drives.clone()),
+                            storage_page(storage.clone()),
+                            features_page(),
+                            shortcuts_page(),
+                            about_page(),
+                        ]),
+                ),
+            )
     });
 }
 
@@ -180,7 +215,7 @@ fn appearance_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {
                         "Dark theme",
                         choice(&DarkTheme::ALL, DarkTheme::label, |p| p.dark_theme, |p, v| p.dark_theme = v),
                     )
-                    .description("Graphite is cool and deep. Warm is a soft dark brown, easier on the eyes.")
+                    .description("Modern is the greys of VS Code's dark theme. Warm is a soft dark brown, easier on the eyes.")
                     .keywords(["dark", "warm", "brown", "theme", "palette", "colors"]),
                 )
                 .item(
@@ -380,6 +415,25 @@ fn templates_page(view: gpui_kit::Entity<ph_pulls::TemplatesView>) -> SettingPag
         )
 }
 
+/// Settings → Storage (see [`crate::storage`]).
+fn storage_page(view: gpui_kit::Entity<crate::storage::StorageView>) -> SettingPage {
+    SettingPage::new("Storage")
+        .icon(Icon::new(Icons::HardDrive))
+        .group(SettingGroup::new().item(
+            SettingItem::render(move |_, _, _| div().w_full().py_1().child(view.clone())).keywords(
+                [
+                    "disk",
+                    "space",
+                    "clean",
+                    "clones",
+                    "worktrees",
+                    "tasks",
+                    "storage",
+                ],
+            ),
+        ))
+}
+
 fn drives_page(view: gpui_kit::Entity<crate::network_drives::NetworkDrivesView>) -> SettingPage {
     SettingPage::new("Network drives")
         .icon(Icon::new(Icons::HardDrive))
@@ -502,7 +556,7 @@ fn shortcuts_page() -> SettingPage {
                     div()
                         .w_full()
                         .py_1()
-                        .child(crate::shortcuts::render(window, cx))
+                        .child(crate::shortcuts::render(true, window, cx))
                 })
                 .keywords(["shortcut", "keyboard", "key"]),
             ),

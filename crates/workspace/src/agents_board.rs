@@ -1,6 +1,7 @@
-//! The Agents view: every chat that is working, waiting for the user or
-//! has news, across all workspaces, as a board. It answers "what needs me?"
-//! without visiting each workspace; a card opens its chat.
+//! The Agents popup (its button is in the title bar): every chat that is
+//! working, waiting for the user or has news, across all workspaces. It
+//! answers "what needs me?" without leaving what is on screen; a card
+//! opens its chat.
 //!
 //! It reads the chats each workspace keeps loaded ([`ph_agent::ChatHub`]),
 //! so it shows what is live in this run of PilotHouse, not old history.
@@ -8,8 +9,8 @@
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, spinner::Spinner, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
+    AnyElement, App, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, div, px,
 };
 use ph_agent::{ChatState, ChatSummary};
 use ph_store::projects::ProjectId;
@@ -214,18 +215,17 @@ pub(crate) fn counts(workspace: &Workspace, cx: &App) -> (usize, usize) {
     counts
 }
 
-pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+/// The Agents popup under its title bar button: every chat at work,
+/// waiting for the user or with news, most urgent first. A card opens its
+/// chat (and closes the popup); the rest of the window stays as it was.
+pub(crate) fn popup(workspace: &Workspace, entity: WeakEntity<Workspace>, cx: &App) -> AnyElement {
     let cards = cards(workspace, cx);
     let busy = cards
         .iter()
         .any(|card| card.summary.state != ChatState::Idle);
-    if cards.is_empty() || !busy && cards.len() < 2 {
-        return div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(cx.theme().background)
+    let body = if cards.is_empty() || !busy && cards.len() < 2 {
+        div()
+            .h(px(200.))
             .child(
                 EmptyState::new("No agents at work")
                     .icon(Icons::Bot)
@@ -233,96 +233,74 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyE
                         "Chats that are working, waiting for you or have finished show here, from every workspace.",
                     ),
             )
-            .into_any_element();
-    }
-    let entity = cx.entity().downgrade();
-    let columns = Column::ALL.into_iter().map(|column| {
-        let mut items: Vec<&Card> = cards
-            .iter()
-            .filter(|card| Column::of(card.summary.state) == column)
-            .collect();
-        if column == Column::Recent {
-            items.truncate(RECENT);
-        }
-        let count = items.len();
-        v_flex()
-            .flex_1()
-            .flex_basis(px(0.))
-            .min_w_0()
-            .h_full()
-            .gap_2()
-            .child(
-                h_flex()
-                    .h_7()
-                    .gap_2()
-                    .text_xs()
-                    .font_weight(gpui_kit::FontWeight::MEDIUM)
-                    .text_color(cx.theme().muted_foreground)
-                    .child(column.title())
-                    .child(div().child(count.to_string())),
-            )
-            .child(
+            .into_any_element()
+    } else {
+        let sections = Column::ALL.into_iter().filter_map(|column| {
+            let mut items: Vec<&Card> = cards
+                .iter()
+                .filter(|card| Column::of(card.summary.state) == column)
+                .collect();
+            if column == Column::Recent {
+                items.truncate(RECENT);
+            }
+            if items.is_empty() {
+                return None;
+            }
+            let count = items.len();
+            Some(
                 v_flex()
-                    .id(SharedString::from(format!(
-                        "agents-column-{}",
-                        column.title()
-                    )))
-                    .flex_1()
-                    .min_h_0()
-                    .gap_2()
-                    .overflow_y_scroll()
-                    .when(items.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .h_16()
-                                .rounded(cx.theme().radius)
-                                .border_1()
-                                .border_dashed()
-                                .border_color(cx.theme().border),
-                        )
-                    })
+                    .gap_1p5()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .text_xs()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(column.title())
+                            .child(div().child(count.to_string())),
+                    )
                     .children(items.into_iter().map(|card| {
                         let (project, target, github) =
                             (card.project, card.target.clone(), card.github);
                         let entity = entity.clone();
                         card_view(card, cx).on_click(move |_, window, cx| {
-                            _ = entity.update(cx, |workspace, cx| match &target {
-                                Target::Chat(session) if github => {
-                                    workspace.show_session(*session, window, cx)
-                                }
-                                Target::Chat(session) => {
-                                    workspace.open_chat(project, *session, window, cx)
-                                }
-                                Target::Terminal(pane) => {
-                                    workspace.open_terminal_agent(project, pane, window, cx)
+                            _ = entity.update(cx, |workspace, cx| {
+                                workspace.set_agents_open(false, cx);
+                                match &target {
+                                    Target::Chat(session) if github => {
+                                        workspace.show_session(*session, window, cx)
+                                    }
+                                    Target::Chat(session) => {
+                                        workspace.open_chat(project, *session, window, cx)
+                                    }
+                                    Target::Terminal(pane) => {
+                                        workspace.open_terminal_agent(project, pane, window, cx)
+                                    }
                                 }
                             });
                         })
                     })),
             )
-    });
+        });
+        v_flex()
+            .id("agents-popup-list")
+            .gap_4()
+            .overflow_y_scroll()
+            .children(sections)
+            .into_any_element()
+    };
     v_flex()
-        .id("agents-board")
-        .size_full()
-        .bg(cx.theme().background)
-        .px_6()
-        .pt_5()
-        .pb_4()
-        .gap_4()
+        .id("agents-popup")
+        .w(px(400.))
+        .max_h(px(560.))
+        .gap_3()
         .child(
             div()
-                .text_base()
+                .text_sm()
                 .font_weight(gpui_kit::FontWeight::MEDIUM)
                 .child("Agents"),
         )
-        .child(
-            h_flex()
-                .flex_1()
-                .min_h_0()
-                .items_start()
-                .gap_4()
-                .children(columns),
-        )
+        .child(div().flex_1().min_h_0().child(body))
         .into_any_element()
 }
 

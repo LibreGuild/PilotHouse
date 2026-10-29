@@ -64,6 +64,10 @@ actions!(
         /// Send a screenshot of the visible browser or device (with its marks) to chat.
         CaptureToChat,
         OpenSettings,
+        /// Settings, at its GitHub page (accounts and tokens).
+        OpenGitHubSettings,
+        /// Settings, at its Storage page (what is on disk, and cleaning up).
+        OpenStorageSettings,
         UseSystemAppearance,
         UseLightAppearance,
         UseDarkAppearance,
@@ -79,7 +83,7 @@ actions!(
         ShowWorkspacesView,
         /// The GitHub view: pull requests across repositories, reviews (⌘⇧G).
         ShowGitHubView,
-        /// The Agents view: chats at work or waiting, across workspaces (⌘⇧A).
+        /// The Agents pop-up: chats at work or waiting, across workspaces (⌘⇧A).
         ShowAgentsView,
         /// Move the workspace in front to a window of its own.
         OpenInNewWindow,

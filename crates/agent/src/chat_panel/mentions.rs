@@ -26,7 +26,18 @@ impl ChatPanel {
                     .background_spawn(async move {
                         let files = roots.index();
                         let symbols = ph_files::symbols::index(&roots, &files);
-                        (files, symbols)
+                        // Folders can be mentioned too: each file's folders,
+                        // with a slash to tell them apart.
+                        let folders: std::collections::BTreeSet<&str> = files
+                            .iter()
+                            .flat_map(|path| {
+                                path.match_indices('/').map(move |(at, _)| &path[..=at])
+                            })
+                            .collect();
+                        let mut entries: Vec<std::sync::Arc<str>> =
+                            folders.into_iter().map(std::sync::Arc::from).collect();
+                        entries.extend(files.iter().cloned());
+                        (std::sync::Arc::new(entries), symbols)
                     })
                     .await;
                 _ = this.update(cx, |this, cx| {

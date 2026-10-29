@@ -183,17 +183,6 @@ impl Panel for DockPane {
             .child(self.pane.label())
     }
 
-    fn toolbar_buttons(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Vec<gpui_kit::component::button::Button>> {
-        let pane = self.pane;
-        let screen = self.screen.upgrade()?;
-        let buttons = screen.update(cx, |screen, cx| screen.pane_buttons(pane, window, cx));
-        (!buttons.is_empty()).then_some(buttons)
-    }
-
     /// The pane's ⋯ menu moves it anywhere, even where a drag cannot (the
     /// last pane of a dock never drags out of it).
     fn dropdown_menu(
@@ -424,7 +413,8 @@ impl Panes {
             }
             area.set_center(center, window, cx);
             area.set_dock(DockPlacement::Right, right, window, cx);
-            area.set_dock_size(DockPlacement::Right, dock_size(window), window, cx);
+            let size = dock_size(window, cx);
+            area.set_dock_size(DockPlacement::Right, size, window, cx);
             // A replaced dock keeps its open state.
             if area.is_dock_open(DockPlacement::Right) != open {
                 area.toggle_dock(DockPlacement::Right, window, cx);
@@ -483,7 +473,8 @@ impl Panes {
                             window,
                             cx,
                         );
-                        area.set_dock_size(placement, dock_size(window), window, cx);
+                        let size = dock_size(window, cx);
+                        area.set_dock_size(placement, size, window, cx);
                     }
                     placement
                 }
@@ -559,7 +550,8 @@ impl Panes {
                                 window,
                                 cx,
                             );
-                            area.set_dock_size(dock, dock_size(window), window, cx);
+                            let size = dock_size(window, cx);
+                            area.set_dock_size(dock, size, window, cx);
                         }
                     }
                     if !area.is_dock_open(dock) {
@@ -599,10 +591,10 @@ impl Panes {
 
 /// A new dock's width: the usual tool width, less when the window leaves
 /// the chat too little room.
-fn dock_size(window: &Window) -> gpui_kit::Pixels {
+fn dock_size(window: &Window, cx: &gpui_kit::App) -> gpui_kit::Pixels {
     use ph_theme::layout;
     let rail = gpui_kit::px(58.);
-    let available = window.viewport_size().width - layout::SIDEBAR_WIDTH - rail;
+    let available = window.viewport_size().width - crate::sidebar::width(cx) - rail;
     (available - layout::CHAT_MIN)
         .min(layout::CONTEXT_PANEL_DEFAULT)
         .max(layout::CONTEXT_PANEL_MIN)

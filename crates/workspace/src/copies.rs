@@ -20,7 +20,7 @@ pub fn folder(store: &Store, root: &Path) -> Result<PathBuf> {
         }
         return Ok(home);
     }
-    let folder = ph_store::paths::data_dir().join("worktrees");
+    let folder = ph_store::paths::copies_dir().join("worktrees");
     ph_store::paths::ensure_private_dir(&folder)?;
     Ok(folder)
 }
@@ -28,7 +28,9 @@ pub fn folder(store: &Store, root: &Path) -> Result<PathBuf> {
 /// Every folder copies of this install can be in.
 pub fn all_folders(store: &Store) -> Vec<PathBuf> {
     let owner = store.install_id();
-    std::iter::once(ph_store::paths::data_dir().join("worktrees"))
+    ph_store::paths::copies_dirs()
+        .into_iter()
+        .map(|dir| dir.join("worktrees"))
         .chain(
             ph_remote::mappings()
                 .iter()

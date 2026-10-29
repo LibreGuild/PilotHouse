@@ -201,6 +201,35 @@ impl Adb {
         Ok(output.trim().to_string())
     }
 
+    /// Moves a USB phone to Wi-Fi, as Android Studio's ADB Wi-Fi does: adb on
+    /// the phone listens on TCP port `port`, then this computer connects to
+    /// the phone's address on its Wi-Fi network. Returns the address.
+    pub fn switch_to_wifi(&self, serial: &str, port: u16) -> Result<String> {
+        let ip = self
+            .wifi_ip(serial)
+            .context("The phone is not on Wi-Fi (no address on its wireless network)")?;
+        self.text(Some(serial), &["tcpip", &port.to_string()])?;
+        // adbd restarts on the phone before it listens.
+        let address = format!("{ip}:{port}");
+        let mut last = None;
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(500));
+            match self.connect(&address) {
+                Ok(_) => return Ok(address),
+                Err(err) => last = Some(err),
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("could not connect to {address}")))
+    }
+
+    /// The phone's IPv4 address on its Wi-Fi network.
+    pub fn wifi_ip(&self, serial: &str) -> Option<String> {
+        let inet = self.shell(serial, "ip -f inet addr show wlan0").ok();
+        inet.as_deref()
+            .and_then(parse_inet)
+            .or_else(|| parse_route_src(&self.shell(serial, "ip route").ok()?))
+    }
+
     pub fn disconnect(&self, address: &str) -> Result<()> {
         self.text(None, &["disconnect", address]).map(drop)
     }
@@ -300,6 +329,33 @@ fn parse_devices(text: &str) -> Vec<DeviceInfo> {
             })
         })
         .collect()
+}
+
+/// The address in `ip addr` output: `inet 192.168.1.23/24 brd …`.
+fn parse_inet(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .skip_while(|word| *word != "inet")
+        .nth(1)
+        .and_then(|cidr| {
+            let ip = cidr.split('/').next()?;
+            ip.parse::<std::net::Ipv4Addr>()
+                .ok()
+                .map(|ip| ip.to_string())
+        })
+}
+
+/// The Wi-Fi source address in `ip route` output: `… dev wlan0 … src 192.168.1.23`.
+fn parse_route_src(output: &str) -> Option<String> {
+    output
+        .lines()
+        .filter(|line| line.contains("wlan"))
+        .find_map(|line| {
+            let mut words = line.split_whitespace().skip_while(|word| *word != "src");
+            words.next()?;
+            words.next()?.parse::<std::net::Ipv4Addr>().ok()
+        })
+        .map(|ip| ip.to_string())
 }
 
 /// `screencap` without `-p`: width, height and format as little-endian u32,
@@ -423,6 +479,15 @@ mod tests {
         assert!(is_wireless("adb-R5CT1234._adb-tls-connect._tcp"));
         assert!(!is_wireless("emulator-5554"));
         assert!(!is_wireless("R5CT1234ABC"));
+    }
+
+    #[test]
+    fn reads_the_phones_wifi_address() {
+        let addr = "30: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500\n    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0\n";
+        assert_eq!(parse_inet(addr).as_deref(), Some("192.168.1.23"));
+        assert_eq!(parse_inet("Device \"wlan0\" does not exist."), None);
+        let route = "192.168.1.0/24 dev wlan0 proto kernel scope link src 192.168.1.23\n";
+        assert_eq!(parse_route_src(route).as_deref(), Some("192.168.1.23"));
     }
 
     #[test]

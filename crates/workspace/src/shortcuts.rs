@@ -3,8 +3,8 @@
 
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, kbd::Kbd, v_flex};
 use gpui_kit::{
-    Action, App, IntoElement, Keystroke, ParentElement as _, SharedString, Styled as _, Window,
-    div, px,
+    Action, AnyElement, App, IntoElement, Keystroke, ParentElement as _, SharedString, Styled as _,
+    Window, div, px,
 };
 
 use crate::actions::*;
@@ -15,7 +15,7 @@ pub fn open(window: &mut Window, cx: &mut App) {
         dialog
             .title("Keyboard shortcuts")
             .w(px(640.))
-            .child(render(window, cx))
+            .child(render(false, window, cx))
     });
 }
 
@@ -59,7 +59,7 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
             "Workspaces and layout",
             vec![
                 ("Workspaces view", action(Box::new(ShowWorkspacesView))),
-                ("Agents view", action(Box::new(ShowAgentsView))),
+                ("Agents", action(Box::new(ShowAgentsView))),
                 ("GitHub view", action(Box::new(ShowGitHubView))),
                 ("Workspace 1 to 9", Keys::Text(workspace_keys.into())),
                 ("Previous workspace", action(Box::new(PreviousWorkspace))),
@@ -110,7 +110,9 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
     ]
 }
 
-pub(crate) fn render(window: &mut Window, cx: &mut App) -> impl IntoElement {
+/// The sheet: in two columns, or in one (Settings, whose page is narrow
+/// and scrolls down).
+pub(crate) fn render(one_column: bool, window: &mut Window, cx: &mut App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let columns = groups().into_iter().map(|(title, rows)| {
         v_flex()
@@ -153,16 +155,23 @@ pub(crate) fn render(window: &mut Window, cx: &mut App) -> impl IntoElement {
                     .justify_between()
                     .gap_3()
                     .text_sm()
-                    .child(div().truncate().child(label))
+                    .child(div().min_w_0().truncate().child(label))
                     .child(div().flex_none().child(keys))
             }))
     });
-    // Two columns of groups.
     let mut columns: Vec<_> = columns.collect();
+    if one_column {
+        return v_flex()
+            .w_full()
+            .gap_5()
+            .children(columns)
+            .into_any_element();
+    }
     let right = columns.split_off(2);
     h_flex()
         .items_start()
         .gap_6()
-        .child(v_flex().flex_1().gap_4().children(columns))
-        .child(v_flex().flex_1().gap_4().children(right))
+        .child(v_flex().flex_1().min_w_0().gap_4().children(columns))
+        .child(v_flex().flex_1().min_w_0().gap_4().children(right))
+        .into_any_element()
 }

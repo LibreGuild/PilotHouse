@@ -106,7 +106,6 @@ fn app_state(cx: &mut App) -> Result<Value> {
         "chats_space": workspace.chats_space().map(|chats| chats.id),
         "view": match workspace.view() {
             ph_workspace::View::Workspaces => "workspaces",
-            ph_workspace::View::Agents => "agents",
             ph_workspace::View::GitHub => "github",
         },
         "sidebar_collapsed": workspace.is_sidebar_collapsed(),

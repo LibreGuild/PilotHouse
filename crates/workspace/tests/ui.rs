@@ -23,7 +23,6 @@ fn open_workspace(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Workspace
     });
     cx.update(|cx| {
         gpui_kit::init(cx);
-        ph_ui::init(cx);
         ph_theme::init(cx);
         AppState::install(Store::open_in_memory().unwrap(), cx);
         ph_workspace::init(cx);

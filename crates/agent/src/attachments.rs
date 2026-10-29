@@ -246,6 +246,8 @@ pub fn mentions(text: &str, roots: &Roots) -> Vec<Attachment> {
         if let Some(path) = token.strip_prefix('@') {
             if !path.is_empty() && inside(roots, path) {
                 found.push(Attachment::File(path.to_string()));
+            } else if let Some(folder) = folder_at(roots, path) {
+                found.push(folder);
             } else if let Some(code) = code_at(roots, path) {
                 found.push(code);
             }
@@ -255,6 +257,50 @@ pub fn mentions(text: &str, roots: &Roots) -> Vec<Attachment> {
     }
     found.dedup();
     found
+}
+
+/// Entries listed for a mentioned folder at most.
+const FOLDER_ENTRIES: usize = 200;
+
+/// `@folder/`: what the folder holds (folders first, with a slash), so the
+/// agent sees its shape and reads what it needs.
+fn folder_at(roots: &Roots, mention: &str) -> Option<Attachment> {
+    let path = mention.trim_end_matches('/');
+    if path.is_empty() {
+        return None;
+    }
+    let (root, _) = roots.split(path)?;
+    let (root, folder) = (
+        ph_store::paths::canonical(&root.path).ok()?,
+        ph_store::paths::canonical(&roots.absolute(path)?).ok()?,
+    );
+    if !folder.starts_with(&root) || !folder.is_dir() {
+        return None;
+    }
+    let mut entries: Vec<(bool, String)> = std::fs::read_dir(&folder)
+        .ok()?
+        .flatten()
+        .map(|entry| {
+            let dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+            (!dir, entry.file_name().to_string_lossy().into_owned())
+        })
+        .filter(|(_, name)| name != ".git")
+        .collect();
+    entries.sort();
+    let total = entries.len();
+    let mut listing: Vec<String> = entries
+        .into_iter()
+        .take(FOLDER_ENTRIES)
+        .map(|(file, name)| if file { name } else { format!("{name}/") })
+        .collect();
+    if total > FOLDER_ENTRIES {
+        listing.push(format!("… and {} more", total - FOLDER_ENTRIES));
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    Some(Attachment::Text {
+        label: format!("{name}/"),
+        text: format!("The folder {path}/ holds:\n{}", listing.join("\n")),
+    })
 }
 
 /// `@path:line`: the code starting at that line (a definition, to its end
