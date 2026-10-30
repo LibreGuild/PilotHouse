@@ -390,6 +390,14 @@ impl BrowserPanel {
                                         }),
                                 )
                             })
+                            .separator()
+                            .item(
+                                PopupMenuItem::new("Open PilotHouse Chrome (for agents)")
+                                    .icon(IconName::Globe)
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(crate::OpenAgentChrome), cx)
+                                    }),
+                            )
                             .item(
                                 PopupMenuItem::new(if running {
                                     "Stop the browser"

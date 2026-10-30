@@ -39,20 +39,33 @@ impl Transport {
         let pending: Pending = Arc::default();
         let (sender, notifications) = smol::channel::unbounded();
 
+        // The server's last words, to say why it stopped.
+        let last_words: Arc<Mutex<Option<String>>> = Arc::default();
         let (reader_pending, reader_stdin) = (pending.clone(), stdin.clone());
+        let words = last_words.clone();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             while let Some(message) = read_message(&mut reader) {
                 route(message, &reader_pending, &reader_stdin, &sender);
             }
+            // Its error output usually ends a moment after its output.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let reason = match words.lock().unwrap().clone() {
+                Some(line) => format!("the language server stopped: {line}"),
+                None => "the language server stopped".to_string(),
+            };
             // The server is gone: fail what is still waiting.
             for (_, waiter) in reader_pending.lock().unwrap().drain() {
-                let _ = waiter.try_send(Err(anyhow!("the language server stopped")));
+                let _ = waiter.try_send(Err(anyhow!(reason.clone())));
             }
         });
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 tracing::debug!("language server: {line}");
+                let line = line.trim();
+                if !line.is_empty() {
+                    *last_words.lock().unwrap() = Some(line.chars().take(300).collect());
+                }
             }
         });
         Ok(Arc::new(Self {

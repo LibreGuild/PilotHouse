@@ -85,6 +85,12 @@ pub fn ask(spec: &AgentSpec, prompt: &str, cwd: &Path) -> Result<String> {
         "antigravity" => (vec![format!("-p={prompt}")], None),
         other => bail!("{other} cannot run one-off jobs"),
     };
+    if !cwd.is_dir() {
+        bail!(
+            "the folder it works in, {}, no longer exists",
+            cwd.display()
+        );
+    }
     let mut child = ph_env::command(&program)
         .args(&args)
         .current_dir(cwd)

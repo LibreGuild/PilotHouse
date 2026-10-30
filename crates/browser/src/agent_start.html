@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>PilotHouse Chrome</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%236D28D9'/%3E%3Crect x='30' y='14' width='12' height='72' rx='6' fill='white'/%3E%3Cpath d='M38 16 Q62 19 80 32 Q62 45 38 49 Z' fill='white'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0d0a18;
+    --panel: rgba(255, 255, 255, 0.045);
+    --panel-border: rgba(255, 255, 255, 0.09);
+    --text: #f4f1ff;
+    --muted: #a9a2c4;
+    --accent: #a78bfa;
+    --accent-strong: #8b5cf6;
+    --glow: rgba(139, 92, 246, 0.35);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f7f5ff;
+      --panel: rgba(255, 255, 255, 0.8);
+      --panel-border: rgba(76, 29, 149, 0.12);
+      --text: #1d1433;
+      --muted: #5f577a;
+      --accent: #6d28d9;
+      --accent-strong: #7c3aed;
+      --glow: rgba(139, 92, 246, 0.22);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    display: grid;
+    place-items: center;
+    padding: 48px 20px;
+    overflow-x: hidden;
+  }
+  /* A soft violet light behind the page, like the agents' glow. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: -20% -10% auto -10%;
+    height: 70vh;
+    background: radial-gradient(closest-side, var(--glow), transparent),
+      radial-gradient(closest-side at 80% 30%, rgba(240, 171, 252, 0.18), transparent);
+    filter: blur(20px);
+    pointer-events: none;
+  }
+  main { position: relative; width: min(880px, 100%); }
+  header { display: flex; align-items: center; gap: 18px; margin-bottom: 14px; }
+  .mark {
+    width: 64px; height: 64px; flex: none; border-radius: 16px;
+    background: linear-gradient(135deg, #a78bfa, #6d28d9 50%, #3b0fa8);
+    box-shadow: 0 10px 30px var(--glow), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    display: grid; place-items: center;
+  }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600;
+  }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent-strong);
+    box-shadow: 0 0 0 0 var(--glow); animation: pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 6px transparent; opacity: 0.6; } }
+  h1 { margin: 2px 0 0; font-size: 30px; line-height: 1.15; letter-spacing: -0.02em; }
+  .lead { color: var(--muted); font-size: 16px; max-width: 640px; margin: 0 0 32px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 14px;
+    padding: 18px 18px 16px;
+    backdrop-filter: blur(6px);
+  }
+  .card svg { width: 22px; height: 22px; stroke: var(--accent); fill: none; stroke-width: 1.8;
+    stroke-linecap: round; stroke-linejoin: round; }
+  .card h2 { font-size: 15px; margin: 10px 0 4px; letter-spacing: -0.005em; }
+  .card p { margin: 0; color: var(--muted); font-size: 13.5px; }
+  footer {
+    margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--panel-border);
+    display: flex; flex-wrap: wrap; gap: 8px 24px; color: var(--muted); font-size: 13px;
+  }
+  footer strong { color: var(--text); font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="mark" aria-hidden="true">
+      <svg width="40" height="40" viewBox="0 0 100 100">
+        <rect x="30" y="12" width="13" height="76" rx="6.5" fill="#fff"/>
+        <path d="M38 14 Q62 17 82 31 Q62 45 38 49 Z" fill="#fff" stroke="#fff" stroke-width="4" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div>
+      <div class="eyebrow"><span class="dot"></span>Controlled by PilotHouse</div>
+      <h1>PilotHouse Chrome</h1>
+    </div>
+  </header>
+  <p class="lead">This is the browser your PilotHouse agents use for real websites. It has a profile of its own, apart from your everyday Chrome, so what happens here stays here.</p>
+
+  <section class="grid">
+    <div class="card">
+      <svg viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/></svg>
+      <h2>Sign in once, here</h2>
+      <p>Sites you sign in to in this window stay signed in, for every agent and every chat.</p>
+    </div>
+    <div class="card">
+      <svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+      <h2>Watch them work</h2>
+      <p>A violet glow and a pointer show the tab an agent is using. Press <b>Stop</b> on it to pause that agent.</p>
+    </div>
+    <div class="card">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><path d="M8 4v5"/></svg>
+      <h2>Your tabs stay yours</h2>
+      <p>Each agent works in tabs of its own. Ask one to take over the tab you are on, and it finishes what you started.</p>
+    </div>
+    <div class="card">
+      <svg viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+      <h2>Passwords are for you</h2>
+      <p>Agents never type passwords or solve "I'm not a robot" checks. They ask you to, in this window.</p>
+    </div>
+    <div class="card">
+      <svg viewBox="0 0 24 24"><path d="M4 17 10 11 4 5"/><path d="M12 19h8"/></svg>
+      <h2>Logs for debugging</h2>
+      <p>Agents read each page's console and network requests, with sign-in headers hidden.</p>
+    </div>
+    <div class="card">
+      <svg viewBox="0 0 24 24"><path d="M12 15V3"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+      <h2>Downloads in one place</h2>
+      <p>Files from this window go to the PilotHouse folder in your Downloads.</p>
+    </div>
+  </section>
+
+  <footer>
+    <span><strong>Open it any time</strong> from PilotHouse's command palette: “Open PilotHouse Chrome”.</span>
+    <span>Close it whenever you like; agents open it again when they need it.</span>
+  </footer>
+</main>
+</body>
+</html>

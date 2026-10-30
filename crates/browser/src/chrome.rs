@@ -120,6 +120,13 @@ pub fn profile_dir(project_id: i64) -> PathBuf {
         .join(project_id.to_string())
 }
 
+/// The profile of the visible Chrome agents use ([`crate::AgentChrome`]):
+/// one for every workspace and chat, so a site signed in to once stays
+/// signed in for all of them.
+pub fn agent_profile_dir() -> PathBuf {
+    ph_store::paths::data_dir().join("browser").join("agents")
+}
+
 /// A running Chrome and the two ends of its DevTools pipe.
 pub struct Chrome {
     child: Child,
@@ -139,9 +146,28 @@ impl Drop for Chrome {
 }
 
 impl Chrome {
-    /// Starts Chrome on `profile`. With `open_port`, Chrome also listens on a
-    /// random localhost port so other DevTools clients can attach.
+    /// Starts headless Chrome on `profile`. With `open_port`, Chrome also
+    /// listens on a random localhost port so other DevTools clients can
+    /// attach.
     pub fn launch(binary: &Path, profile: &Path, open_port: bool) -> Result<Self> {
+        Self::launch_with(binary, profile, Mode::Headless { open_port }, "about:blank")
+    }
+
+    /// Starts Chrome as the user sees it: its own windows, on `profile`,
+    /// driven over the private pipe (it ends with PilotHouse). Pages keep
+    /// running at full speed in background tabs and covered windows, so
+    /// several agents can work at once.
+    /// Starts a visible Chrome showing `first_page`.
+    pub fn launch_visible(binary: &Path, profile: &Path, first_page: &str) -> Result<Self> {
+        ph_store::paths::ensure_private_dir(profile)?;
+        if let Err(err) = brand_profile(profile) {
+            tracing::warn!("could not color the agents' Chrome: {err:#}");
+        }
+        Self::launch_with(binary, profile, Mode::Visible, first_page)
+    }
+
+    fn launch_with(binary: &Path, profile: &Path, mode: Mode, first_page: &str) -> Result<Self> {
+        let open_port = matches!(mode, Mode::Headless { open_port: true });
         ph_store::paths::ensure_private_dir(profile)?;
         stop_leftover(profile);
         let port_file = profile.join("DevToolsActivePort");
@@ -151,36 +177,59 @@ impl Chrome {
         let (reader, chrome_writes) = std::io::pipe()?;
         let mut command = Command::new(binary);
         command
-            .arg("--headless=new")
             .arg("--remote-debugging-pipe")
             .arg(format!("--user-data-dir={}", profile.display()))
             .args([
                 "--no-first-run",
                 "--no-default-browser-check",
-                // Keep it on-device: no sync, updates, metrics or Google services.
-                "--disable-background-networking",
-                "--disable-component-update",
                 "--disable-sync",
-                "--disable-domain-reliability",
-                "--disable-features=Translate,OptimizationHints,MediaRouter",
                 "--no-pings",
-                // No macOS keychain prompts from a headless browser. The
-                // profile folder is private to the user instead.
-                "--use-mock-keychain",
-                "--password-store=basic",
-                "--window-size=1280,800",
-                // Pages would otherwise see `navigator.webdriver` (Chrome
-                // sets it for any browser driven over DevTools), which bot
-                // checks look at first.
-                "--disable-blink-features=AutomationControlled",
-            ])
+            ]);
+        match mode {
+            Mode::Headless { .. } => {
+                command.arg("--headless=new").args([
+                    // Pages would otherwise see `navigator.webdriver`
+                    // (Chrome sets it for any browser driven over
+                    // DevTools), which bot checks look at first. A visible
+                    // Chrome shows a warning bar for this flag, so agents'
+                    // Chrome uses a page script instead
+                    // (`agent_scripts::NOT_AUTOMATED`).
+                    "--disable-blink-features=AutomationControlled",
+                    // Keep it on-device: no updates, metrics or Google
+                    // services in a browser nobody sees.
+                    "--disable-background-networking",
+                    "--disable-component-update",
+                    "--disable-domain-reliability",
+                    "--disable-features=Translate,OptimizationHints,MediaRouter",
+                    // No macOS keychain prompts from a headless browser. The
+                    // profile folder is private to the user instead.
+                    "--use-mock-keychain",
+                    "--password-store=basic",
+                    "--window-size=1280,800",
+                ]);
+            }
+            // A browser the user signs in to: Safe Browsing and the system
+            // keychain stay, as in their own Chrome.
+            Mode::Visible => {
+                command.args([
+                    "--disable-features=Translate,MediaRouter",
+                    // Agents work in tabs that are not in front, or in
+                    // windows under others: they must not be slowed down.
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                    "--window-size=1280,900",
+                ]);
+            }
+        }
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if open_port {
             command.arg("--remote-debugging-port=0");
         }
-        command.arg("about:blank");
+        command.arg(first_page);
         give_pipe(&mut command, &chrome_reads, &chrome_writes)?;
         let child = command
             .spawn()
@@ -199,6 +248,15 @@ impl Chrome {
         }
         Ok(chrome)
     }
+}
+
+/// How Chrome is started.
+#[derive(Clone, Copy)]
+enum Mode {
+    /// No windows; PilotHouse draws the page (the Browser pane).
+    Headless { open_port: bool },
+    /// Windows the user sees and can use (agents' Chrome).
+    Visible,
 }
 
 /// Makes Chrome's pipe ends its file descriptors 3 (it reads) and 4 (it
@@ -340,8 +398,100 @@ fn stop_leftover(profile: &Path) {
     }
 }
 
+/// PilotHouse's violet, as Chrome stores a color (ARGB, signed).
+const BRAND_COLOR: i32 = 0xFF8B_5CF6_u32 as i32;
+
+/// Colors the agents' Chrome with PilotHouse's violet (its window frame,
+/// tabs and toolbar), so it is told apart from the user's own windows at a
+/// glance. Written into the profile's preferences before Chrome reads
+/// them; a color the user chose there since is kept.
+fn brand_profile(profile: &Path) -> Result<()> {
+    let path = profile.join("Default").join("Preferences");
+    let mut prefs: serde_json::Value = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("reading Chrome's preferences")?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(err) => return Err(err.into()),
+    };
+    if !brand(&mut prefs) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path.parent().context("no profile folder")?)?;
+    std::fs::write(&path, serde_json::to_vec(&prefs)?)?;
+    Ok(())
+}
+
+/// Chrome's "vibrant" palette from a color: the frame and tabs take it
+/// strongly, not as a faint tint.
+const VIBRANT: i64 = 3;
+
+/// Sets the theme color in Chrome's preferences unless the user chose
+/// another (under the names Chrome has used for it). Says whether it
+/// changed anything.
+fn brand(prefs: &mut serde_json::Value) -> bool {
+    let Some(root) = prefs.as_object_mut() else {
+        return false;
+    };
+    let browser = root
+        .entry("browser")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(browser) = browser.as_object_mut() else {
+        return false;
+    };
+    let theme = browser
+        .entry("theme")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(theme) = theme.as_object_mut() else {
+        return false;
+    };
+    let color = theme.get("user_color2").or_else(|| theme.get("user_color"));
+    let ours = color.is_none_or(|color| *color == serde_json::json!(BRAND_COLOR));
+    let current = theme.get("color_variant2") == Some(&serde_json::json!(VIBRANT));
+    if !ours || (color.is_some() && current) {
+        return false;
+    }
+    for (key, value) in [
+        ("user_color2", serde_json::json!(BRAND_COLOR)),
+        ("user_color", serde_json::json!(BRAND_COLOR)),
+        ("color_variant2", serde_json::json!(VIBRANT)),
+        ("color_variant", serde_json::json!(VIBRANT)),
+    ] {
+        theme.insert(key.into(), value);
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
+    use super::brand;
+
+    #[test]
+    fn the_agents_chrome_takes_the_brand_color_once() {
+        let mut prefs = serde_json::json!({ "browser": { "window_placement": {} } });
+        assert!(brand(&mut prefs));
+        assert_eq!(
+            prefs["browser"]["theme"]["user_color2"],
+            serde_json::json!(-7_643_914)
+        );
+        assert!(
+            prefs["browser"]["window_placement"].is_object(),
+            "the rest is kept"
+        );
+        assert!(!brand(&mut prefs), "once");
+        // An earlier, paler variant of ours is brought up to date.
+        prefs["browser"]["theme"]["color_variant2"] = serde_json::json!(1);
+        assert!(brand(&mut prefs));
+        assert_eq!(
+            prefs["browser"]["theme"]["color_variant2"],
+            serde_json::json!(3)
+        );
+        // A color the user chose stays.
+        let mut chosen = serde_json::json!({ "browser": { "theme": { "user_color2": 42 } } });
+        assert!(!brand(&mut chosen));
+        assert_eq!(
+            chosen["browser"]["theme"]["user_color2"],
+            serde_json::json!(42)
+        );
+    }
 
     #[cfg(unix)]
     #[test]

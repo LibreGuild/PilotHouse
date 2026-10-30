@@ -12,6 +12,7 @@
 //! | `ui.click`      | `{"id": "save"}` or `{"label": "Save"}`  |
 //! | `ui.right_click`| same as `ui.click`                       |
 //! | `ui.input`      | `{"text": "hello"}`                      |
+//! | `ui.type`       | `{"text": "hello"}`: as typed, no redraw |
 //! | `ui.press`      | `{"key": "secondary-k"}`                 |
 //! | `ui.screenshot` | `{"path": "/tmp/shot.png"}`              |
 //! | `ui.dispatch`   | `{"action": "workspace::NewSession"}`    |
@@ -101,6 +102,26 @@ pub fn register(cx: &mut App) {
             let text = string_param(&params, "text")?;
             with_window(cx, |window, cx| {
                 window.input(&text, cx);
+                Ok(Value::Null)
+            })
+        },
+        cx,
+    );
+    // Keys as a person types them: no forced redraw of the whole window
+    // between them (`ui.input` refreshes every frame, which hides what
+    // drawing only the changed views costs). For profiling typing.
+    ControlServer::handle(
+        "ui.type",
+        |params, cx| {
+            let text = string_param(&params, "text")?;
+            with_window(cx, |window, cx| {
+                for character in text.chars() {
+                    let typed = character.to_string();
+                    let mut key = gpui_kit::Keystroke::parse(&typed)
+                        .map_err(|err| anyhow!("cannot type {typed:?}: {err}"))?;
+                    key.key_char = Some(typed);
+                    window.dispatch_keystroke(key, cx);
+                }
                 Ok(Value::Null)
             })
         },
@@ -226,16 +247,34 @@ fn click(params: Value, button: MouseButton, window: &mut Window, cx: &mut App) 
         .and_then(Value::as_u64)
         .unwrap_or(1)
         .clamp(1, 3) as usize;
+    // `modifiers: ["secondary"]` holds keys down (⌘ or Ctrl, `alt`, `shift`).
+    let modifiers = params
+        .get("modifiers")
+        .and_then(Value::as_array)
+        .map(|keys| {
+            let mut modifiers = gpui_kit::Modifiers::default();
+            for key in keys.iter().filter_map(Value::as_str) {
+                match key {
+                    "secondary" if cfg!(target_os = "macos") => modifiers.platform = true,
+                    "secondary" | "ctrl" | "control" => modifiers.control = true,
+                    "cmd" | "platform" => modifiers.platform = true,
+                    "alt" => modifiers.alt = true,
+                    "shift" => modifiers.shift = true,
+                    _ => {}
+                }
+            }
+            modifiers
+        });
     // `at: [x, y]` clicks a window point, e.g. inside a live browser pane.
     if let Some(at) = point_param(&params, "at") {
         window.pointer_move(at, None, cx);
-        press(at, button, count, window, cx);
+        press(at, button, count, modifiers, window, cx);
         return Ok(json!({ "clicked": [f32::from(at.x), f32::from(at.y)] }));
     }
     let target = resolve(params, window)?;
     let center = target.bounds().center();
     window.pointer_move(center, None, cx);
-    press(center, button, count, window, cx);
+    press(center, button, count, modifiers, window, cx);
     Ok(json!({ "clicked": describe(&target) }))
 }
 
@@ -245,17 +284,18 @@ fn press(
     at: gpui_kit::Point<gpui_kit::Pixels>,
     button: MouseButton,
     count: usize,
+    held: Option<gpui_kit::Modifiers>,
     window: &mut Window,
     cx: &mut App,
 ) {
     use gpui_kit::InputEvent as _;
-    if count == 1 {
+    if count == 1 && held.is_none() {
         window.pointer_down(at, button, cx);
         window.pointer_up(at, button, cx);
         return;
     }
     for click_count in 1..=count {
-        let modifiers = window.modifiers();
+        let modifiers = held.unwrap_or_else(|| window.modifiers());
         window.dispatch_event(
             gpui_kit::MouseDownEvent {
                 button,

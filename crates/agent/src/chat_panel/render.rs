@@ -284,23 +284,48 @@ impl ChatPanel {
         .into_any_element()
     }
 
-    /// The setup checks for `agent`; file-system lookups, so cached briefly.
-    pub(super) fn setup_checks(&mut self, agent: &'static AgentSpec) -> Vec<setup::Check> {
-        let fresh = self.setup.as_ref().is_some_and(|(id, at, _)| {
-            *id == agent.id && at.elapsed() < std::time::Duration::from_secs(5)
-        });
-        if !fresh {
-            self.setup = Some((agent.id, std::time::Instant::now(), setup::checks(agent)));
+    /// The setup checks for `agent`. They search the PATH, so they run once
+    /// here and then again in the background when a few seconds old (an
+    /// install shows up without a restart, and drawing never waits).
+    pub(super) fn setup_checks(
+        &mut self,
+        agent: &'static AgentSpec,
+        cx: &mut Context<Self>,
+    ) -> Vec<setup::Check> {
+        match &self.setup {
+            Some((id, at, checks)) if *id == agent.id => {
+                if at.elapsed() >= std::time::Duration::from_secs(5)
+                    && self._setup_refresh.is_none()
+                {
+                    let checks = cx.background_spawn(async move { setup::checks(agent) });
+                    self._setup_refresh = Some(cx.spawn(async move |panel, cx| {
+                        let checks = checks.await;
+                        _ = panel.update(cx, |panel, cx| {
+                            panel._setup_refresh = None;
+                            let changed = panel
+                                .setup
+                                .as_ref()
+                                .is_none_or(|(id, _, old)| *id != agent.id || *old != checks);
+                            panel.setup = Some((agent.id, std::time::Instant::now(), checks));
+                            if changed {
+                                cx.notify();
+                            }
+                        });
+                    }));
+                }
+                checks.clone()
+            }
+            _ => {
+                let checks = setup::checks(agent);
+                self.setup = Some((agent.id, std::time::Instant::now(), checks.clone()));
+                checks
+            }
         }
-        self.setup
-            .as_ref()
-            .map(|(_, _, checks)| checks.clone())
-            .unwrap_or_default()
     }
 
     pub(super) fn render_empty(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let agent = self.active.read(cx).agent();
-        let checks = self.setup_checks(agent);
+        let checks = self.setup_checks(agent, cx);
         let (title, subtitle): (SharedString, SharedString) = match &self.context {
             Some(context) => (
                 context.title.clone().into(),

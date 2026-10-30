@@ -103,6 +103,49 @@ pub enum ApplyMode {
     Restore,
 }
 
+/// Adds `path` (relative to `root`; a folder when `folder`) to the
+/// repository's top `.gitignore`, as VS Code's Add to .gitignore does.
+/// Returns `false` when it is listed there already.
+pub fn add_to_gitignore(root: &Path, path: &str, folder: bool) -> Result<bool> {
+    let top = git(root, &["rev-parse", "--show-toplevel"])?;
+    let top = Path::new(top.trim());
+    let prefix = git(root, &["rev-parse", "--show-prefix"])?;
+    let entry = gitignore_entry(prefix.trim(), path, folder);
+    let file = top.join(".gitignore");
+    let current = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err).context("reading .gitignore"),
+    };
+    if current.lines().any(|line| line.trim() == entry) {
+        return Ok(false);
+    }
+    let mut text = current;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&entry);
+    text.push('\n');
+    std::fs::write(&file, text).context("writing .gitignore")?;
+    Ok(true)
+}
+
+/// The `.gitignore` line for `path` under the repository's `prefix`
+/// (`sub/` when the folder is inside it): from the top, with `/` between
+/// folders, and a trailing `/` for a folder.
+fn gitignore_entry(prefix: &str, path: &str, folder: bool) -> String {
+    let path = path.trim_matches('/').replace('\\', "/");
+    let mut entry = format!("{prefix}{path}");
+    // Names that start like a comment or a negation are escaped.
+    if entry.starts_with('#') || entry.starts_with('!') {
+        entry.insert(0, '\\');
+    }
+    if folder {
+        entry.push('/');
+    }
+    entry
+}
+
 /// Stages a whole path, new files included.
 pub fn stage_path(root: &Path, path: &str) -> Result<()> {
     git(root, &[crate::run::LITERAL, "add", "--", path]).map(|_| ())
@@ -251,6 +294,32 @@ pub fn unstage_path(root: &Path, path: &str) -> Result<()> {
 }
 
 /// What a commit would contain, for writing its message.
+/// Every change against the last commit, staged or not, and the names of
+/// new files: what Commit All would commit, for writing its message.
+pub fn all_changes_diff(root: &Path) -> Result<String> {
+    let args = ["diff", "--no-color", "--no-ext-diff", "--no-textconv"];
+    let mut diff = match git(root, &[&args[..], &["HEAD"]].concat()) {
+        Ok(diff) => diff,
+        // No commit yet: what is staged, then the rest.
+        Err(_) => format!(
+            "{}{}",
+            git(root, &[&args[..], &["--cached"]].concat())?,
+            git(root, &args)?
+        ),
+    };
+    let new_files = git(root, &["ls-files", "--others", "--exclude-standard"])?;
+    if !new_files.trim().is_empty() {
+        diff.push_str("\nNew files:\n");
+        diff.push_str(&new_files);
+    }
+    Ok(diff)
+}
+
+/// Stages every change, new files included (`git add -A`), for Commit All.
+pub fn stage_all(root: &Path) -> Result<()> {
+    git(root, &["add", "-A"]).map(|_| ())
+}
+
 pub fn staged_diff(root: &Path) -> Result<String> {
     git(
         root,
@@ -373,5 +442,72 @@ mod tests {
                 .unwrap()
                 .contains("line twenty-eight")
         );
+    }
+}
+
+#[cfg(test)]
+mod gitignore_tests {
+    use super::gitignore_entry;
+
+    #[test]
+    fn adds_once_to_the_top_gitignore() {
+        let root = std::env::temp_dir().join(format!("ph-gitignore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join(".gitignore"), "target/").unwrap();
+        // From a folder inside the repository.
+        let app = root.join("app");
+        assert!(super::add_to_gitignore(&app, "dist", true).unwrap());
+        assert!(super::add_to_gitignore(&root, "notes.txt", false).unwrap());
+        assert!(!super::add_to_gitignore(&root, "notes.txt", false).unwrap());
+        let text = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+        assert_eq!(text, "target/\napp/dist/\nnotes.txt\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn every_change_for_commit_all() {
+        let root = std::env::temp_dir().join(format!("ph-commit-all-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        // Before the first commit too.
+        assert!(super::all_changes_diff(&root).unwrap().contains("a.txt"));
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "first"]);
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        std::fs::write(root.join("new.txt"), "x\n").unwrap();
+        let diff = super::all_changes_diff(&root).unwrap();
+        assert!(diff.contains("+two") && diff.contains("new.txt"), "{diff}");
+        assert!(super::staged_diff(&root).unwrap().is_empty());
+        super::stage_all(&root).unwrap();
+        let staged = super::staged_diff(&root).unwrap();
+        assert!(staged.contains("+two") && staged.contains("new.txt"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn entries_from_the_top() {
+        assert_eq!(gitignore_entry("", "build/out.log", false), "build/out.log");
+        assert_eq!(gitignore_entry("app/", "dist", true), "app/dist/");
+        assert_eq!(gitignore_entry("", "#notes", false), "\\#notes");
     }
 }

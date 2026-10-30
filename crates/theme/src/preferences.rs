@@ -73,7 +73,28 @@ impl Default for Preferences {
     }
 }
 
+/// One zoom step, in points: small, so a size that is just right can be
+/// found (VS Code's steps are a fifth of the size).
+pub const ZOOM_STEP: f32 = 0.5;
+
 impl Preferences {
+    /// Zooms in (`steps` > 0) or out: interface, code and terminal text grow
+    /// or shrink together, each kept within its bounds.
+    pub fn zoom(&mut self, steps: i32) {
+        let by = steps as f32 * ZOOM_STEP;
+        self.ui_font_size = (self.ui_font_size + by).clamp(11.0, MAX_UI_FONT_SIZE);
+        self.code_font_size = (self.code_font_size + by).clamp(10.0, 24.0);
+        self.terminal_font_size = (self.terminal_font_size + by).clamp(9.0, 24.0);
+    }
+
+    /// Back to the default sizes.
+    pub fn reset_zoom(&mut self) {
+        let (ui, code) = DEFAULT_SIZES;
+        self.ui_font_size = ui;
+        self.code_font_size = code;
+        self.terminal_font_size = code;
+    }
+
     /// Brings sizes saved with older defaults to the current ones; a size
     /// the user chose stays. True when something changed (save it).
     pub fn migrate_sizes(&mut self) -> bool {
@@ -430,6 +451,13 @@ mod tests {
         assert_eq!(saved.ui_font_size, DEFAULT_SIZES.0);
         assert_eq!(saved.code_font_size, 16.0, "a size the user chose stays");
         assert_eq!(saved.terminal_font_size, DEFAULT_SIZES.1);
+        let mut zoomed = Preferences::default();
+        zoomed.zoom(2);
+        assert_eq!(zoomed.ui_font_size, DEFAULT_SIZES.0 + 1.0);
+        zoomed.zoom(-100);
+        assert_eq!(zoomed.ui_font_size, 11.0, "kept within bounds");
+        zoomed.reset_zoom();
+        assert_eq!(zoomed, Preferences::default());
         assert!(!saved.migrate_sizes(), "once");
         assert!(!Preferences::default().clone().migrate_sizes());
     }

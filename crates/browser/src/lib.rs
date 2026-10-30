@@ -13,6 +13,9 @@
 //! Nothing here talks to the internet on its own: Chrome's background
 //! services are switched off and the address bar never searches.
 
+mod agent_chrome;
+mod agent_control;
+mod agent_scripts;
 mod browser;
 mod browser_panel;
 pub mod cdp;
@@ -23,12 +26,32 @@ mod input;
 pub mod logs;
 mod scripts;
 
+pub use agent_chrome::{AgentChrome, AgentChromeEvent, AgentChromeStatus};
 pub use browser::{Browser, BrowserEvent, BrowserStatus, Emulation, Viewport, normalize_url};
 pub use browser_panel::BrowserPanel;
 pub use hub::BrowserHub;
 
+gpui_kit::actions!(
+    browser,
+    [
+        /// Show agents' Chrome (starting it): to sign in to sites agents
+        /// use, or to watch them.
+        OpenAgentChrome,
+    ]
+);
+
 /// Sets up the hub and the control methods. Call once at startup.
 pub fn init(store: ph_store::Store, cx: &mut gpui_kit::App) {
-    BrowserHub::init(store, cx);
+    BrowserHub::init(store.clone(), cx);
+    AgentChrome::init(store, cx);
     control::register(cx);
+    agent_control::register(cx);
+    cx.on_action(|_: &OpenAgentChrome, cx| {
+        use gpui_kit::TaskExt as _;
+        if let Some(chrome) = AgentChrome::global(cx) {
+            chrome
+                .update(cx, |chrome, cx| chrome.show(cx))
+                .detach_and_log_err(cx);
+        }
+    });
 }

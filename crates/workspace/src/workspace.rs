@@ -28,7 +28,7 @@ use crate::github_view::GithubView;
 use crate::status::WorkspaceStatus;
 use crate::workspace_screen::{WorkspaceScreen, WorkspaceScreenEvent};
 use crate::{command_palette, settings_dialog, sidebar, status_bar, title_bar};
-use ph_files::{FindInProject, QuickOpen};
+use ph_files::{FindInProject, GoToSymbol, QuickOpen};
 
 /// A hidden workspace's screen is closed after this long with nothing going on.
 const UNLOAD_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60);
@@ -101,6 +101,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let store = AppState::store(cx);
+        // Scratch folders left behind by a moved data folder come back
+        // first, so chats can start in them.
+        if let Err(err) = store.heal_scratch_folders(&ph_store::paths::scratch_root()) {
+            tracing::warn!("checking scratch folders failed: {err:#}");
+        }
         let projects = workspaces(store);
         let chats_space = store
             .chats_space(&ph_store::paths::scratch_root())
@@ -895,8 +900,6 @@ impl Workspace {
             self.previous_project = self.active_project;
         }
         self.active_project = Some(id);
-        self.inbox
-            .update(cx, |inbox, cx| inbox.set_project(Some(id), cx));
         let store = AppState::store(cx);
         let _ = store.touch_project(id);
         let _ = store.set_setting(keys::LAST_PROJECT, &Some(id));
@@ -1635,6 +1638,12 @@ impl Workspace {
         self.with_active_space(window, cx, |space, window, cx| space.quick_open(window, cx));
     }
 
+    fn go_to_symbol(&mut self, _: &GoToSymbol, window: &mut Window, cx: &mut Context<Self>) {
+        self.with_active_space(window, cx, |space, window, cx| {
+            space.go_to_symbol(window, cx)
+        });
+    }
+
     fn find_in_project(&mut self, _: &FindInProject, window: &mut Window, cx: &mut Context<Self>) {
         self.with_active_space(window, cx, |space, window, cx| {
             space.find_in_project(window, cx)
@@ -1731,6 +1740,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_zoom))
             .on_action(cx.listener(Self::reset_layout))
             .on_action(cx.listener(Self::quick_open))
+            .on_action(cx.listener(Self::go_to_symbol))
             .on_action(cx.listener(Self::find_in_project))
             .on_action(cx.listener(|this, _: &ShowFiles, window, cx| {
                 this.show_tab(ContextTab::Files, window, cx)
@@ -1841,6 +1851,9 @@ impl Render for Workspace {
                 TitleBar::new()
                     .h(ph_theme::layout::TITLE_BAR_HEIGHT)
                     .bg(cx.theme().title_bar)
+                    // No line under it: the bar, the sidebar and the side
+                    // toolbar read as one surface around the bordered center.
+                    .border_b_0()
                     .child(title_bar::render(self, window, cx)),
             )
             .child(

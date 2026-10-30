@@ -20,6 +20,8 @@ use gpui_kit::{
 };
 use lsp_types::{DocumentSymbolResponse, Location, SymbolKind, TextEdit, WorkspaceEdit};
 
+use crate::code_index::CodeIndex;
+
 /// Opens a file at a 0-based line (from a reference, a symbol…).
 pub type OpenLocation = Rc<dyn Fn(PathBuf, u32, &mut Window, &mut App)>;
 
@@ -453,96 +455,128 @@ mod tests {
     }
 }
 
-/// Go to definition without a language server: the name under the cursor
-/// is looked up in the workspace's symbol index ([`crate::symbols`]),
-/// read in the background the first time and kept a minute. It finds
-/// functions, classes and types by their declarations; a language server,
-/// once there, does better and takes over.
-pub struct SymbolDefinitions {
-    root: PathBuf,
-    here: PathBuf,
-    index: std::sync::Arc<std::sync::Mutex<Option<ReadIndex>>>,
+/// Go to definition: the file's language server first; when there is none,
+/// it is still starting, or it finds nothing, the folder's code index
+/// ([`CodeIndex`]), which finds functions, classes and types by their
+/// declarations. The file's own declarations come from its text as shown,
+/// unsaved edits included.
+pub struct Definitions {
+    pub server: Option<ph_lsp::Binding>,
+    pub index: std::sync::Arc<CodeIndex>,
+    pub root: PathBuf,
+    pub here: PathBuf,
 }
 
-/// The symbol index, and when it was read.
-type ReadIndex = (
-    std::time::Instant,
-    std::sync::Arc<Vec<crate::symbols::Symbol>>,
-);
-
-impl SymbolDefinitions {
-    pub fn new(root: PathBuf, here: PathBuf) -> Self {
-        Self {
-            root,
-            here,
-            index: Default::default(),
-        }
-    }
-}
-
-impl gpui_kit::component::input::DefinitionProvider for SymbolDefinitions {
+impl gpui_kit::component::input::DefinitionProvider for Definitions {
     fn definitions(
         &self,
         text: &Rope,
         offset: usize,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> gpui_kit::Task<Result<Vec<lsp_types::LocationLink>>> {
-        let source = text.to_string();
-        let Some((word, range)) = word_at(&source, offset) else {
-            return gpui_kit::Task::ready(Ok(Vec::new()));
+        let from_server = self
+            .server
+            .as_ref()
+            .map(|server| server.definitions(text, offset, window, cx));
+        let Some((word, range)) = word_in_rope(text, offset) else {
+            return from_server.unwrap_or_else(|| gpui_kit::Task::ready(Ok(Vec::new())));
         };
         let origin = lsp_types::Range {
             start: text.offset_to_position(range.start),
             end: text.offset_to_position(range.end),
         };
-        let (root, here, index) = (self.root.clone(), self.here.clone(), self.index.clone());
         let line_here = text.offset_to_position(offset).line as usize + 1;
-        cx.background_spawn(async move {
-            let symbols = {
-                let cached = index.lock().ok().and_then(|cached| {
-                    cached
-                        .as_ref()
-                        .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(60))
-                        .map(|(_, symbols)| symbols.clone())
-                });
-                match cached {
-                    Some(symbols) => symbols,
-                    None => {
-                        let roots = crate::roots::Roots::new(&[(root.clone(), None)]);
-                        let files = roots.index();
-                        let symbols = std::sync::Arc::new(crate::symbols::index(&roots, &files));
-                        if let Ok(mut cached) = index.lock() {
-                            *cached = Some((std::time::Instant::now(), symbols.clone()));
-                        }
-                        symbols
-                    }
-                }
-            };
-            let mut found: Vec<(PathBuf, usize)> = symbols
-                .iter()
-                .filter(|symbol| symbol.name == word)
-                .map(|symbol| (root.join(symbol.path.as_ref()), symbol.line))
-                // Not the declaration the cursor is on.
-                .filter(|(path, line)| !(*path == here && *line == line_here))
-                .collect();
-            // This file's first, then nearer folders.
-            found.sort_by_key(|(path, _)| (path != &here, path.components().count()));
-            Ok(found
-                .into_iter()
-                .take(10)
-                .filter_map(|(path, line)| {
-                    let at = lsp_types::Position::new(line.saturating_sub(1) as u32, 0);
-                    Some(lsp_types::LocationLink {
-                        origin_selection_range: Some(origin),
-                        target_uri: ph_lsp::uri::from_path(&path)?,
-                        target_range: lsp_types::Range::new(at, at),
-                        target_selection_range: lsp_types::Range::new(at, at),
+        let (index, root, here, text) = (
+            self.index.clone(),
+            self.root.clone(),
+            self.here.clone(),
+            text.clone(),
+        );
+        cx.spawn(async move |cx| {
+            if let Some(task) = from_server
+                && let Ok(found) = task.await
+                && !found.is_empty()
+            {
+                return Ok(found);
+            }
+            cx.background_spawn(async move {
+                let relative = here
+                    .strip_prefix(&root)
+                    .ok()
+                    .map(|path| path.to_string_lossy().replace('\\', "/"));
+                let extension = here
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or_default();
+                // This file as shown, then the rest of the folder.
+                let here_name: std::sync::Arc<str> = relative.as_deref().unwrap_or("").into();
+                let mut found: Vec<(PathBuf, usize)> =
+                    crate::symbols::scan_text(&here_name, extension, &text.to_string())
+                        .into_iter()
+                        .filter(|symbol| symbol.name == word)
+                        .map(|symbol| (here.clone(), symbol.line))
+                        .collect();
+                found.extend(
+                    index
+                        .definitions(&word, relative.as_deref())
+                        .into_iter()
+                        .filter(|symbol| Some(symbol.path.as_ref()) != relative.as_deref())
+                        .map(|symbol| (root.join(symbol.path.as_ref()), symbol.line)),
+                );
+                Ok(found
+                    .into_iter()
+                    // Not the declaration the cursor is on.
+                    .filter(|(path, line)| !(*path == here && *line == line_here))
+                    .take(10)
+                    .filter_map(|(path, line)| {
+                        let at = lsp_types::Position::new(line.saturating_sub(1) as u32, 0);
+                        Some(lsp_types::LocationLink {
+                            origin_selection_range: Some(origin),
+                            target_uri: ph_lsp::uri::from_path(&path)?,
+                            target_range: lsp_types::Range::new(at, at),
+                            target_selection_range: lsp_types::Range::new(at, at),
+                        })
                     })
-                })
-                .collect())
+                    .collect())
+            })
+            .await
         })
     }
+}
+
+/// The identifier around byte `offset` of `text`, and its byte range,
+/// read from its line only.
+pub fn word_in_rope(text: &Rope, offset: usize) -> Option<(String, std::ops::Range<usize>)> {
+    let offset = offset.min(text.len());
+    let point = text.offset_to_point(offset);
+    let line_start = text.line_start_offset(point.row);
+    let line = text.slice_line(point.row).to_string();
+    let (word, range) = word_at(&line, point.column.min(line.len()))?;
+    Some((word, line_start + range.start..line_start + range.end))
+}
+
+/// The outline of a file from its declarations (no language server).
+pub fn outline_from_symbols(symbols: Vec<crate::symbols::Symbol>) -> Vec<Symbol> {
+    symbols
+        .into_iter()
+        .map(|symbol| Symbol {
+            kind: match symbol.kind {
+                "struct" => SymbolKind::STRUCT,
+                "class" | "object" | "record" => SymbolKind::CLASS,
+                "enum" => SymbolKind::ENUM,
+                "trait" | "interface" => SymbolKind::INTERFACE,
+                "type" => SymbolKind::TYPE_PARAMETER,
+                "const" => SymbolKind::CONSTANT,
+                "method" => SymbolKind::METHOD,
+                _ => SymbolKind::FUNCTION,
+            },
+            detail: symbol.kind.to_string(),
+            name: symbol.name,
+            line: symbol.line.saturating_sub(1) as u32,
+            depth: 0,
+        })
+        .collect()
 }
 
 /// The identifier around byte `offset` of `text`, and its byte range.

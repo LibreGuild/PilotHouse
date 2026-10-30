@@ -3,8 +3,8 @@
 //!
 //! - **Inbox**: agents' questions waiting for an answer, reminders that came
 //!   due, and schedules that finished since you last cleared them.
-//! - **To-dos**: a short list of your own, for this workspace or for all of
-//!   them, each with an optional reminder. A due reminder is announced once
+//! - **To-dos**: a short list of your own for the whole app, each with an
+//!   optional reminder (to-dos agents add for a workspace show its name). A due reminder is announced once
 //!   (in the window and from the system) and stays in the inbox until the
 //!   to-do is done or snoozed.
 //!
@@ -12,8 +12,9 @@
 //! schedules' tick ([`crate::schedules::Automation`], which also announces
 //! reminders) and after every change here, not on every frame.
 
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
     badge::Badge,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
@@ -36,7 +37,7 @@ use ph_store::todos::{Todo, TodoId};
 
 use crate::AppState;
 use crate::workspace::Workspace;
-use ph_ui::{Icons, MenuButton as _};
+use ph_ui::{EmptyState, Icons, MenuButton as _};
 
 /// When the user last cleared the inbox's finished runs (milliseconds).
 const SEEN_KEY: &str = "inbox.seen_at";
@@ -70,8 +71,8 @@ impl Remind {
         match self {
             Remind::Never => "No reminder",
             Remind::InTenMinutes => "In 10 min",
-            Remind::InAnHour => "In 1 h",
-            Remind::Tonight => "18:00",
+            Remind::InAnHour => "In 1 hour",
+            Remind::Tonight => "Today 18:00",
             Remind::Tomorrow => "Tomorrow 09:00",
         }
     }
@@ -103,8 +104,6 @@ impl Remind {
 
 pub struct InboxView {
     workspace: WeakEntity<Workspace>,
-    /// The workspace in front: its to-dos are listed (with the shared ones).
-    project_id: Option<ProjectId>,
     tab: Tab,
     /// Reminders that came due and are not done.
     due: Vec<Todo>,
@@ -117,8 +116,8 @@ pub struct InboxView {
     /// `fri 10:00`, `in 20 min`, `2026-11-02 10:00`); it wins over the
     /// choices when set.
     remind_text: Entity<InputState>,
-    /// The new to-do is for every workspace, not just this one.
-    shared: bool,
+    /// The typed reminder time is shown (chosen from the reminder menu).
+    custom_time: bool,
     _inputs: Vec<Subscription>,
 }
 
@@ -128,11 +127,9 @@ impl InboxView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let new_todo = cx
-            .new(|cx| InputState::new(window, cx).placeholder("Something to do… (Enter adds it)"));
+        let new_todo = cx.new(|cx| InputState::new(window, cx).placeholder("Add a to-do…"));
         let remind_text = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Or a time: 14:30, tomorrow 9am, fri 10:00, in 20 min")
+            InputState::new(window, cx).placeholder("14:30, tomorrow 9am, fri 10:00, in 20 min")
         });
         let input = cx.subscribe_in(
             &new_todo,
@@ -145,7 +142,6 @@ impl InboxView {
         );
         let mut view = Self {
             workspace,
-            project_id: None,
             tab: Tab::Inbox,
             due: Vec::new(),
             finished: Vec::new(),
@@ -153,7 +149,7 @@ impl InboxView {
             new_todo,
             remind: Remind::Never,
             remind_text: remind_text.clone(),
-            shared: false,
+            custom_time: false,
             // The typed time is read back as it is typed.
             _inputs: vec![input, cx.observe(&remind_text, |_, _, cx| cx.notify())],
         };
@@ -166,13 +162,6 @@ impl InboxView {
         ph_agent::approvals::pending_count(cx) + self.due.len() + self.finished.len()
     }
 
-    pub fn set_project(&mut self, project_id: Option<ProjectId>, cx: &mut Context<Self>) {
-        if self.project_id != project_id {
-            self.project_id = project_id;
-            self.refresh(cx);
-        }
-    }
-
     /// Reads the inbox again.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let store = AppState::store(cx);
@@ -180,7 +169,7 @@ impl InboxView {
         self.due = store.due_todos(now).unwrap_or_default();
         let seen: i64 = store.setting(SEEN_KEY);
         self.finished = store.finished_since(seen).unwrap_or_default();
-        self.todos = store.todos(self.project_id).unwrap_or_default();
+        self.todos = store.all_todos().unwrap_or_default();
         cx.notify();
     }
 
@@ -197,8 +186,10 @@ impl InboxView {
     }
 
     fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.new_todo.read(cx).value().to_string();
-        let project = if self.shared { None } else { self.project_id };
+        let text = self.new_todo.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
         let Ok(remind_at) = self.new_reminder(cx) else {
             window.push_notification(
                 Notification::warning(
@@ -208,13 +199,14 @@ impl InboxView {
             );
             return;
         };
-        match AppState::store(cx).add_todo(project, &text, remind_at) {
+        match AppState::store(cx).add_todo(None, &text, remind_at) {
             Ok(_) => {
                 self.new_todo
                     .update(cx, |input, cx| input.set_value("", window, cx));
                 self.remind_text
                     .update(cx, |input, cx| input.set_value("", window, cx));
                 self.remind = Remind::Never;
+                self.custom_time = false;
             }
             Err(err) => window.push_notification(Notification::warning(format!("{err:#}")), cx),
         }
@@ -281,10 +273,14 @@ impl InboxView {
         let muted = cx.theme().muted_foreground;
         if approvals.is_empty() && self.due.is_empty() && self.finished.is_empty() {
             return div()
-                .py_4()
-                .text_sm()
-                .text_color(muted)
-                .child("Nothing needs you. Agents' questions, reminders and finished schedules appear here.")
+                .py_6()
+                .child(
+                    EmptyState::new("All caught up")
+                        .icon(Icons::Inbox)
+                        .description(
+                            "Agents' questions, reminders and finished schedules appear here.",
+                        ),
+                )
                 .into_any_element();
         }
         let due =
@@ -393,6 +389,7 @@ impl InboxView {
         let rows = self.todos.iter().enumerate().map(|(ix, todo)| {
             let (id, done) = (todo.id, todo.done);
             let due = todo.is_due(now);
+            let workspace = self.workspace_name(todo.project_id, cx);
             let when = todo
                 .remind_at
                 .filter(|_| !todo.done)
@@ -434,9 +431,9 @@ impl InboxView {
             h_flex()
                 .id(("todo", ix))
                 .group("todo")
-                .gap_2()
+                .gap_2p5()
                 .px_2()
-                .py_1()
+                .py_1p5()
                 .rounded(cx.theme().radius)
                 .hover(|style| style.bg(cx.theme().list_hover))
                 .when(due, |this| this.bg(cx.theme().warning.opacity(0.1)))
@@ -455,8 +452,9 @@ impl InboxView {
                                 .when(todo.done, |this| this.line_through().text_color(muted))
                                 .child(todo.text.clone()),
                         )
-                        .when(todo.project_id.is_none(), |this| {
-                            this.child(div().text_xs().text_color(muted).child("All workspaces"))
+                        // One an agent added for a workspace says which.
+                        .when_some(workspace, |this, name| {
+                            this.child(div().text_xs().text_color(muted).child(name))
                         }),
                 )
                 .when(!todo.done, |this| this.child(pill))
@@ -475,69 +473,157 @@ impl InboxView {
                         ),
                 )
         });
-        let choice = |id: SharedString, text: &'static str, on: bool| {
-            Button::new(id)
-                .xsmall()
-                .when(on, |this| this.primary())
-                .when(!on, |this| this.ghost())
-                .label(text)
-        };
         let typed = self.remind_text.read(cx).value().trim().to_string();
-        let preview: Option<(String, bool)> =
-            (!typed.is_empty()).then(|| match parse_when(&typed, &Zoned::now()) {
-                Some(at) => (at.strftime("Reminds %a %-d %b, %H:%M").to_string(), true),
-                None => ("Cannot read that time.".to_string(), false),
-            });
-        v_flex()
-            .gap_2()
-            .child(Input::new(&self.new_todo).small())
-            .child(
-                h_flex()
-                    .gap_1()
-                    .flex_wrap()
-                    .children(Remind::ALL.map(|remind| {
-                        choice(
-                            SharedString::from(format!("remind-{}", remind.label())),
-                            remind.label(),
-                            typed.is_empty() && self.remind == remind,
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.remind = remind;
-                            this.remind_text
-                                .update(cx, |input, cx| input.set_value("", window, cx));
-                            cx.notify();
-                        }))
-                    })),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.remind_text).small()))
-                    .child(
-                        choice("todo-shared".into(), "All workspaces", self.shared).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.shared = !this.shared;
-                                cx.notify();
-                            }),
+        let typed_at = (!typed.is_empty()).then(|| parse_when(&typed, &Zoned::now()));
+        let theme = cx.theme();
+        let (border, background) = (theme.border, theme.background);
+        // The reminder: a menu of times, or one typed.
+        let remind_label: SharedString = match &typed_at {
+            Some(Some(at)) => at.strftime("%a %-d %b, %H:%M").to_string().into(),
+            Some(None) => "Pick a time".into(),
+            None if self.remind != Remind::Never => self.remind.label().into(),
+            None => "Remind me".into(),
+        };
+        let reminding =
+            matches!(typed_at, Some(Some(_))) || (typed.is_empty() && self.remind != Remind::Never);
+        let view = cx.entity().downgrade();
+        let remind_button = Button::new("todo-remind")
+            .small()
+            .ghost()
+            .icon(if reminding {
+                Icons::BellRing
+            } else {
+                Icons::Bell
+            })
+            .label(remind_label)
+            .when(reminding, |this| this.text_color(cx.theme().primary))
+            .tooltip("When to remind you")
+            .menu(gpui_kit::Anchor::TopLeft, move |menu, _, _| {
+                let pick = |menu: gpui_kit::component::menu::PopupMenu,
+                            label: &'static str,
+                            remind: Option<Remind>| {
+                    let view = view.clone();
+                    menu.item(
+                        gpui_kit::component::menu::PopupMenuItem::new(label).on_click(
+                            move |_, window, cx| {
+                                _ = view.update(cx, |this, cx| {
+                                    match remind {
+                                        Some(remind) => {
+                                            this.remind = remind;
+                                            this.custom_time = false;
+                                            this.remind_text.update(cx, |input, cx| {
+                                                input.set_value("", window, cx)
+                                            });
+                                        }
+                                        // Pick a time: the field for it, focused.
+                                        None => {
+                                            this.custom_time = true;
+                                            this.remind_text
+                                                .update(cx, |input, cx| input.focus(window, cx));
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            },
                         ),
+                    )
+                };
+                let menu = [
+                    Remind::InTenMinutes,
+                    Remind::InAnHour,
+                    Remind::Tonight,
+                    Remind::Tomorrow,
+                ]
+                .into_iter()
+                .fold(menu, |menu, remind| {
+                    pick(menu, remind.label(), Some(remind))
+                });
+                let menu = pick(menu.separator(), "Pick a time…", None);
+                pick(menu, "No reminder", Some(Remind::Never))
+            });
+        let can_add = !self.new_todo.read(cx).value().trim().is_empty();
+        let add_button = Button::new("todo-add")
+            .small()
+            .primary()
+            .icon(Icons::Plus)
+            .label("Add")
+            .disabled(!can_add)
+            .tooltip("Add (Enter)")
+            .on_click(cx.listener(|this, _, window, cx| this.add(window, cx)));
+        let show_time = self.custom_time || !typed.is_empty();
+        let composer = v_flex()
+            .rounded(cx.theme().radius_lg)
+            .border_1()
+            .border_color(border)
+            .bg(background)
+            .child(
+                h_flex()
+                    .pl_3()
+                    .pr_2()
+                    .pt_2()
+                    .gap_2()
+                    .child(Icon::new(Icons::Circle).small().text_color(muted))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Input::new(&self.new_todo).appearance(false)),
                     ),
             )
-            .when_some(preview, |this, (text, ok)| {
+            .when(show_time, |this| {
                 this.child(
-                    div()
-                        .text_xs()
-                        .text_color(if ok {
-                            cx.theme().muted_foreground
-                        } else {
-                            cx.theme().danger
-                        })
-                        .child(text),
+                    h_flex()
+                        .pl_3()
+                        .pr_3()
+                        .gap_2()
+                        .child(Icon::new(Icons::CalendarClock).small().text_color(muted))
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(Input::new(&self.remind_text).appearance(false).small()),
+                        )
+                        .when_some(typed_at.clone(), |this, at| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if at.is_some() {
+                                        muted
+                                    } else {
+                                        cx.theme().danger
+                                    })
+                                    .child(if at.is_some() {
+                                        "✓"
+                                    } else {
+                                        "Cannot read it"
+                                    }),
+                            )
+                        }),
                 )
             })
+            .child(
+                h_flex()
+                    .mt_1()
+                    .px_1p5()
+                    .py_1p5()
+                    .gap_1()
+                    .border_t_1()
+                    .border_color(border)
+                    .child(remind_button)
+                    .child(div().flex_1())
+                    .child(add_button),
+            );
+        v_flex()
+            .gap_3()
+            .child(composer)
             .when(self.todos.is_empty(), |this| {
-                this.child(div().text_xs().text_color(muted).child(
-                    "Nothing to do yet. Add what you must not forget; give it a reminder to be told when.",
-                ))
+                this.child(
+                    div().py_4().child(
+                        EmptyState::new("Nothing to do yet")
+                            .icon(Icons::ListTodo)
+                            .description(
+                                "Add what you must not forget; give it a reminder to be told when.",
+                            ),
+                    ),
+                )
             })
             .child(
                 v_flex()
@@ -554,44 +640,73 @@ impl Render for InboxView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let count = self.count(cx);
         let open = self.todos.iter().filter(|todo| !todo.done).count();
-        let tab = |id: &'static str, label: String, which: Tab, cx: &mut Context<Self>| {
-            Button::new(id)
-                .xsmall()
-                .when(self.tab == which, |this| this.primary())
-                .when(self.tab != which, |this| this.ghost())
-                .label(label)
+        let theme = cx.theme();
+        let (fg, muted, background, radius) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.background,
+            theme.radius,
+        );
+        let tab = |id: &'static str,
+                   label: &'static str,
+                   number: usize,
+                   which: Tab,
+                   cx: &mut Context<Self>| {
+            let selected = self.tab == which;
+            h_flex()
+                .id(id)
+                .flex_1()
+                .h_7()
+                .px_3()
+                .gap_1p5()
+                .justify_center()
+                .rounded(radius)
+                .cursor_pointer()
+                .text_sm()
+                .role(gpui_kit::accesskit::Role::Tab)
+                .aria_label(label)
+                .text_color(if selected { fg } else { muted })
+                .when(selected, |this| {
+                    this.bg(background)
+                        .shadow_xs()
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                })
+                .when(!selected, |this| this.hover(|style| style.text_color(fg)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.tab = which;
                     cx.notify();
                 }))
+                .child(label)
+                .when(number > 0, |this| {
+                    this.child(
+                        div()
+                            .px_1p5()
+                            .rounded(radius)
+                            .bg(cx
+                                .theme()
+                                .primary
+                                .opacity(if selected { 0.18 } else { 0.12 }))
+                            .text_color(cx.theme().primary)
+                            .text_xs()
+                            .child(number.to_string()),
+                    )
+                })
+                .test_support()
         };
         v_flex()
             .w(px(400.))
-            .gap_2()
-            .p_1()
+            .gap_3()
+            .p_2()
             .child(
                 h_flex()
-                    .gap_1()
-                    .child(tab(
-                        "inbox-tab",
-                        if count > 0 {
-                            format!("Inbox {count}")
-                        } else {
-                            "Inbox".into()
-                        },
-                        Tab::Inbox,
-                        cx,
-                    ))
-                    .child(tab(
-                        "todos-tab",
-                        if open > 0 {
-                            format!("To-dos {open}")
-                        } else {
-                            "To-dos".into()
-                        },
-                        Tab::Todos,
-                        cx,
-                    )),
+                    .id("inbox-tabs")
+                    .role(gpui_kit::accesskit::Role::TabList)
+                    .p_0p5()
+                    .gap_0p5()
+                    .rounded(radius)
+                    .bg(cx.theme().muted)
+                    .child(tab("inbox-tab", "Inbox", count, Tab::Inbox, cx))
+                    .child(tab("todos-tab", "To-dos", open, Tab::Todos, cx)),
             )
             .child(match self.tab {
                 Tab::Inbox => self.render_inbox(cx),

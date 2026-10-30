@@ -106,11 +106,23 @@ struct Search {
     query: String,
     /// The folder searched, when not the whole workspace.
     scope: Option<String>,
+    /// Files whose name matches, above the text matches.
+    files: Vec<std::sync::Arc<str>>,
     results: SearchResults,
     running: bool,
     error: Option<SharedString>,
+    /// Set to stop the search under way (a newer one replaces it).
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     _task: Option<Task<()>>,
+    /// Searches a moment after typing (or a file change) stops.
+    _debounce: Option<Task<()>>,
 }
+
+/// Places Back keeps.
+const MAX_HISTORY: usize = 100;
+
+/// How long typing pauses before the search runs.
+const SEARCH_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
 pub struct FilesPanel {
     pub(crate) weak: WeakEntity<Self>,
@@ -131,6 +143,16 @@ pub struct FilesPanel {
     pub(crate) search_scope: Option<String>,
     pub(crate) open_files: Vec<Entity<FileView>>,
     pub(crate) active: Option<usize>,
+    /// Open files, the one in front last: closing it brings back the one
+    /// used before, as VS Code does.
+    recent: Vec<gpui_kit::EntityId>,
+    /// Where Back (and Forward) go: a file and a 0-based line, newest last.
+    back: Vec<(String, u32)>,
+    forward: Vec<(String, u32)>,
+    /// Back or Forward is moving: what it does is not history itself.
+    navigating: bool,
+    /// Each open file's subscriptions, dropped with its tab.
+    file_subscriptions: HashMap<gpui_kit::EntityId, [Subscription; 2]>,
     /// The Changes tab (after the files' tabs), and whether it is in front.
     diff: Option<Entity<crate::diff_tab::DiffTab>>,
     pub(crate) diff_active: bool,
@@ -176,10 +198,11 @@ impl FilesPanel {
             cx.subscribe_in(
                 &search_input,
                 window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.run_search(window, cx);
-                    }
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.run_search(window, cx),
+                    // Results follow the query as it is typed.
+                    InputEvent::Change => this.search_soon(window, cx),
+                    _ => {}
                 },
             ),
         ];
@@ -231,6 +254,11 @@ impl FilesPanel {
             diff_active: false,
             tabs_scroll: gpui_kit::ScrollHandle::new(),
             active: None,
+            recent: Vec::new(),
+            back: Vec::new(),
+            forward: Vec::new(),
+            navigating: false,
+            file_subscriptions: HashMap::new(),
             clipboard: None,
             compare: None,
             staged: Rc::default(),
@@ -312,7 +340,10 @@ impl FilesPanel {
                     view.set_label(label);
                     view
                 });
-                self._subscriptions.push(cx.subscribe(
+                // A tab shows its file's state (unsaved, …) even while
+                // another is in front.
+                let observe = cx.observe(&view, |_, _, cx| cx.notify());
+                let events = cx.subscribe(
                     &view,
                     |this, view, event: &crate::file_view::FileViewEvent, cx| match event {
                         crate::file_view::FileViewEvent::Ask(ask) => {
@@ -325,12 +356,28 @@ impl FilesPanel {
                             let path = view.read(cx).relative_path().to_string();
                             this.reveal_in_tree(path, cx);
                         }
+                        crate::file_view::FileViewEvent::Jumped(line) => {
+                            let path = view.read(cx).relative_path().to_string();
+                            this.remember(path, *line);
+                        }
                     },
-                ));
+                );
+                self.file_subscriptions
+                    .insert(view.entity_id(), [observe, events]);
                 self.open_files.push(view);
                 self.open_files.len() - 1
             }
         };
+        // Leaving the file in front: Back returns to where it was.
+        if let Some(active) = self.active.filter(|active| *active != ix)
+            && let Some(file) = self.open_files.get(active)
+        {
+            let (path, at) = {
+                let file = file.read(cx);
+                (file.relative_path().to_string(), file.cursor_line(cx))
+            };
+            self.remember(path, at);
+        }
         if let Some(line) = line {
             self.open_files[ix].update(cx, |file, cx| file.go_to_line(line, window, cx));
         }
@@ -340,37 +387,235 @@ impl FilesPanel {
         cx.notify();
     }
 
+    /// Keeps a place for Back; a new place forgets what Forward had.
+    fn remember(&mut self, path: String, line: u32) {
+        if self.navigating {
+            return;
+        }
+        if self.back.last() != Some(&(path.clone(), line)) {
+            self.back.push((path, line));
+            if self.back.len() > MAX_HISTORY {
+                self.back.remove(0);
+            }
+        }
+        self.forward.clear();
+    }
+
+    /// Back (`true`) or Forward: to the place before, skipping files that
+    /// are gone.
+    pub fn navigate(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let here = self
+            .active
+            .and_then(|ix| self.open_files.get(ix))
+            .map(|file| {
+                let file = file.read(cx);
+                (file.relative_path().to_string(), file.cursor_line(cx))
+            });
+        loop {
+            let next = if back {
+                self.back.pop()
+            } else {
+                self.forward.pop()
+            };
+            let Some((path, line)) = next else {
+                return;
+            };
+            if self
+                .roots
+                .absolute(&path)
+                .is_none_or(|path| !path.is_file())
+            {
+                continue;
+            }
+            if let Some(here) = here.clone() {
+                if back {
+                    self.forward.push(here);
+                } else {
+                    self.back.push(here);
+                }
+            }
+            self.navigating = true;
+            self.open_file(&path, Some(line), window, cx);
+            self.navigating = false;
+            return;
+        }
+    }
+
     /// Closes every tab but `keep`.
-    fn close_others(&mut self, keep: usize, cx: &mut Context<Self>) {
-        self.close_where(|ix, _| ix != keep, cx);
+    fn close_others(&mut self, keep: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_where(|ix, _| ix != keep, window, cx);
     }
 
     /// Closes the tabs after `ix`.
-    fn close_right(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.close_where(|other, _| other > ix, cx);
+    fn close_right(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_where(|other, _| other > ix, window, cx);
     }
 
     /// Closes the tabs without unsaved changes.
-    fn close_saved(&mut self, cx: &mut Context<Self>) {
-        self.close_where(|_, file| !file.is_dirty(), cx);
+    fn close_saved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_where(|_, file| !file.is_dirty(), window, cx);
     }
 
-    pub fn close_all(&mut self, cx: &mut Context<Self>) {
-        self.close_where(|_, _| true, cx);
+    pub fn close_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_where(|_, _| true, window, cx);
     }
 
-    /// Closes the tabs `close` picks (by index and file), from the last so
-    /// the indexes stay right. Unsaved text is kept, as for any closed tab.
-    fn close_where(&mut self, close: impl Fn(usize, &FileView) -> bool, cx: &mut Context<Self>) {
-        let picked: Vec<usize> = self
+    /// Closes the tabs `close` picks (by index and file).
+    fn close_where(
+        &mut self,
+        close: impl Fn(usize, &FileView) -> bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let picked = self
             .open_files
             .iter()
             .enumerate()
             .filter(|(ix, file)| close(*ix, file.read(cx)))
-            .map(|(ix, _)| ix)
+            .map(|(_, file)| file.clone())
             .collect();
-        for ix in picked.into_iter().rev() {
-            self.close_file(ix, cx);
+        self.request_close(picked, window, cx);
+    }
+
+    /// ⌘N in the editor: a new file in the open file's folder (or the
+    /// workspace's first), opened once made.
+    pub fn new_file_beside_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self
+            .active
+            .and_then(|ix| self.open_files.get(ix))
+            .and_then(|file| {
+                file.read(cx)
+                    .relative_path()
+                    .rsplit_once('/')
+                    .map(|(dir, _)| dir.to_string())
+            })
+            .unwrap_or_else(|| {
+                if self.roots.is_multi() {
+                    self.roots.list()[0].name.clone()
+                } else {
+                    String::new()
+                }
+            });
+        self.new_entry(dir, false, window, cx);
+    }
+
+    /// Closes tab `ix`, asking first about unsaved changes.
+    pub fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(file) = self.open_files.get(ix).cloned() {
+            self.request_close(vec![file], window, cx);
+        }
+    }
+
+    /// Closes `files`. With unsaved changes among them it asks first, as VS
+    /// Code does: save them, drop them, or keep the tabs open.
+    fn request_close(
+        &mut self,
+        files: Vec<Entity<FileView>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_kit::component::WindowExt as _;
+        let unsaved: Vec<Entity<FileView>> = files
+            .iter()
+            .filter(|file| file.read(cx).is_dirty())
+            .cloned()
+            .collect();
+        if unsaved.is_empty() {
+            self.close_views(&files, cx);
+            return;
+        }
+        let question = match unsaved.as_slice() {
+            [file] => format!(
+                "Save the changes to {}?",
+                file_name(file.read(cx).relative_path())
+            ),
+            _ => format!("Save the changes to {} files?", unsaved.len()),
+        };
+        let panel = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let save = {
+                let (panel, files, unsaved) = (panel.clone(), files.clone(), unsaved.clone());
+                move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
+                    window.close_dialog(cx);
+                    let saves: Vec<Task<bool>> = unsaved
+                        .iter()
+                        .map(|file| file.update(cx, |file, cx| file.save_file(window, cx)))
+                        .collect();
+                    let (panel, files, unsaved) = (panel.clone(), files.clone(), unsaved.clone());
+                    window
+                        .spawn(cx, async move |cx| {
+                            let mut saved = Vec::with_capacity(saves.len());
+                            for save in saves {
+                                saved.push(save.await);
+                            }
+                            // A file that could not be saved stays open, its
+                            // footer saying why.
+                            let close: Vec<_> = files
+                                .iter()
+                                .filter(|file| {
+                                    unsaved
+                                        .iter()
+                                        .position(|other| other == *file)
+                                        .is_none_or(|ix| saved[ix])
+                                })
+                                .cloned()
+                                .collect();
+                            _ = panel.update(cx, |panel, cx| panel.close_views(&close, cx));
+                        })
+                        .detach();
+                }
+            };
+            let discard = {
+                let (panel, files, unsaved) = (panel.clone(), files.clone(), unsaved.clone());
+                move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
+                    window.close_dialog(cx);
+                    for file in &unsaved {
+                        file.update(cx, |file, cx| file.discard_changes(cx));
+                    }
+                    _ = panel.update(cx, |panel, cx| panel.close_views(&files, cx));
+                }
+            };
+            dialog
+                .title(question.clone())
+                .w(px(440.))
+                .child(
+                    div()
+                        .text_sm()
+                        .child("Your changes are lost if you don't save them."),
+                )
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            Button::new("close-discard")
+                                .ghost()
+                                .label("Don't Save")
+                                .on_click(discard),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("close-cancel")
+                                .ghost()
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("close-save")
+                                .primary()
+                                .label("Save")
+                                .on_click(save),
+                        ),
+                )
+        });
+    }
+
+    /// Closes the tabs of `files` that are still open.
+    fn close_views(&mut self, files: &[Entity<FileView>], cx: &mut Context<Self>) {
+        for file in files {
+            if let Some(ix) = self.open_files.iter().position(|open| open == file) {
+                self.close_file(ix, cx);
+            }
         }
     }
 
@@ -403,6 +648,12 @@ impl FilesPanel {
 
     /// Brings tab `ix` forward; a video or sound in the tab going back stops.
     pub(crate) fn activate(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(file) = self.open_files.get(ix) else {
+            return;
+        };
+        let id = file.entity_id();
+        self.recent.retain(|recent| *recent != id);
+        self.recent.push(id);
         if let Some(previous) = self.active.filter(|previous| *previous != ix)
             && let Some(file) = self.open_files.get(previous)
         {
@@ -429,18 +680,36 @@ impl FilesPanel {
         self.open_file(&relative, Some(line), window, cx);
     }
 
+    /// Closes tab `ix` as it is (unsaved text is kept for next time; see
+    /// [`Self::close_tab`] to ask first).
     pub fn close_file(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix >= self.open_files.len() {
             return;
         }
         let closed = self.open_files.remove(ix);
+        let id = closed.entity_id();
+        self.file_subscriptions.remove(&id);
+        self.recent.retain(|recent| *recent != id);
         closed.update(cx, |file, cx| file.detach_lsp(cx));
         self.active = match self.active {
             _ if self.open_files.is_empty() => None,
+            // The tab in front closed: the one used before it comes back.
+            Some(active) if active == ix => self
+                .recent
+                .last()
+                .and_then(|id| {
+                    self.open_files
+                        .iter()
+                        .position(|file| file.entity_id() == *id)
+                })
+                .or(Some(ix.min(self.open_files.len() - 1))),
             Some(active) if active > ix => Some(active - 1),
             Some(active) => Some(active.min(self.open_files.len() - 1)),
             None => None,
         };
+        if let Some(active) = self.active {
+            self.activate(active, cx);
+        }
         cx.emit(FilesPanelEvent::OpenFilesChanged);
         cx.notify();
     }
@@ -469,6 +738,41 @@ impl FilesPanel {
                 .detach();
             }
         }
+    }
+
+    /// ⌘T: a function, class or type by name, in every folder.
+    pub fn go_to_symbol(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let multi = self.roots.is_multi();
+        let folders: Vec<(String, PathBuf)> = self
+            .roots
+            .list()
+            .iter()
+            .map(|root| (root.name.clone(), root.path.clone()))
+            .collect();
+        let indexes = folders
+            .iter()
+            .map(|(name, path)| (name.clone(), crate::code_index::CodeIndex::for_root(path)))
+            .collect();
+        let panel = cx.weak_entity();
+        crate::symbol_search::open(
+            indexes,
+            move |folder, symbol, window, cx| {
+                let Some((name, _)) = folders.get(folder) else {
+                    return;
+                };
+                let path = if multi {
+                    format!("{name}/{}", symbol.path)
+                } else {
+                    symbol.path.to_string()
+                };
+                let line = symbol.line.saturating_sub(1) as u32;
+                _ = panel.update(cx, |panel, cx| {
+                    panel.open_file(&path, Some(line), window, cx)
+                });
+            },
+            window,
+            cx,
+        );
     }
 
     /// Switches the tree to workspace search and focuses the query.
@@ -667,11 +971,37 @@ impl FilesPanel {
         cx: &mut Context<Self>,
     ) {
         self.index_stale = true;
+        // Something was staged or committed: the changed-line marks
+        // compare against Git's copy again.
+        if changed.iter().any(|path| {
+            path.file_name().is_some_and(|name| name == "index")
+                && path
+                    .parent()
+                    .and_then(|dir| dir.file_name())
+                    .is_some_and(|dir| dir == ".git")
+        }) {
+            for file in &self.open_files {
+                file.update(cx, |file, cx| file.refresh_git_base(cx));
+            }
+        }
+        // Declarations are read again where files changed.
+        for root in self.roots.list() {
+            if let Some(index) = crate::code_index::CodeIndex::existing(&root.path) {
+                index.invalidate(&changed);
+            }
+        }
         let relative: Vec<String> = changed
             .iter()
             .filter_map(|path| self.roots.path_of(path))
             .filter(|path| !path.split('/').any(|part| part == ".git"))
             .collect();
+        // Results follow the files (a line changed, a file went away).
+        if !relative.is_empty()
+            && self.browse == Browse::Search
+            && !self.search.query.trim().is_empty()
+        {
+            self.search_soon(window, cx);
+        }
 
         let mut dirs: Vec<String> = relative
             .iter()
@@ -705,23 +1035,78 @@ impl FilesPanel {
         }
     }
 
+    /// Runs the search a moment from now, unless asked again before.
+    fn search_soon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search._debounce = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(SEARCH_DELAY).await;
+            _ = this.update_in(cx, |this, window, cx| this.run_search(window, cx));
+        }));
+    }
+
+    /// Searches file names, then file contents, for the typed query. A
+    /// search still running is stopped first.
     fn run_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        self.search._debounce = None;
+        if let Some(cancel) = self.search.cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
         let query = self.search_input.read(cx).value().to_string();
-        let roots = self.roots.clone();
         let scope = self.search_scope.clone();
         self.search.query = query.clone();
         self.search.scope = scope.clone();
-        self.search.running = true;
         self.search.error = None;
-        let search = cx.background_spawn(async move {
-            match &scope {
-                Some(dir) => roots.search_in(dir, &query),
-                None => roots.search(&query),
-            }
-        });
-        // Replacing the task cancels a search that is still running.
+        if query.trim().is_empty() {
+            self.search.files.clear();
+            self.search.results = SearchResults::default();
+            self.search.running = false;
+            self.search._task = None;
+            cx.notify();
+            return;
+        }
+        self.search.running = true;
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        self.search.cancel = Some(cancel.clone());
+        let roots = self.roots.clone();
+        // The file list for names, rebuilt when files changed since.
+        let index = self.index.clone().filter(|_| !self.index_stale);
+        let names = {
+            let (roots, query, scope) = (roots.clone(), query.clone(), scope.clone());
+            cx.background_spawn(async move {
+                let rebuilt = index.is_none();
+                let index = index.unwrap_or_else(|| roots.index());
+                let prefix = scope.map(|dir| format!("{}/", dir.trim_end_matches('/')));
+                let found = crate::search::match_file_names(&index, &query, |path| {
+                    prefix
+                        .as_deref()
+                        .is_none_or(|prefix| path.starts_with(prefix))
+                });
+                (found, rebuilt.then_some(index))
+            })
+        };
         self.search._task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = search.await;
+            let (files, rebuilt) = names.await;
+            let stop = cancel.clone();
+            let Ok(text) = this.update(cx, |this, cx| {
+                if let Some(index) = rebuilt {
+                    this.index = Some(index);
+                    this.index_stale = false;
+                }
+                this.search.files = files;
+                cx.notify();
+                cx.background_spawn(async move {
+                    match &scope {
+                        Some(dir) => roots.search_in(dir, &query, &stop),
+                        None => roots.search(&query, &stop),
+                    }
+                })
+            }) else {
+                return;
+            };
+            let result = text.await;
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
             _ = this.update(cx, |this, cx| {
                 this.search.running = false;
                 match result {
@@ -907,18 +1292,87 @@ impl FilesPanel {
     fn render_search(&self, cx: &mut Context<Self>) -> AnyElement {
         let results = &self.search.results;
         let mut rows: Vec<AnyElement> = Vec::new();
+        if !self.search.files.is_empty() {
+            rows.push(section_label("Files", cx));
+        }
+        for (ix, path) in self.search.files.iter().enumerate() {
+            let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+            let open = path.to_string();
+            rows.push(
+                h_flex()
+                    .id(("search-file", ix))
+                    .px_2()
+                    .gap_1p5()
+                    .rounded(cx.theme().radius)
+                    .text_xs()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(cx.theme().list_hover))
+                    .child(ph_ui::file_icon_element(name, px(14.)))
+                    .child(div().flex_none().child(name.to_string()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(dir.to_string()),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_file(&open, None, window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if !results.matches.is_empty() && !self.search.files.is_empty() {
+            rows.push(section_label("Text", cx));
+        }
         let mut current_file: Option<&str> = None;
         for (ix, found) in results.matches.iter().enumerate() {
             if current_file != Some(found.path.as_str()) {
                 current_file = Some(found.path.as_str());
+                let (dir, name) = found.path.rsplit_once('/').unwrap_or(("", &found.path));
+                let count = results.matches[ix..]
+                    .iter()
+                    .take_while(|other| other.path == found.path)
+                    .count();
+                let open = found.path.clone();
                 rows.push(
-                    div()
-                        .pt_2()
+                    h_flex()
+                        .id(("search-file-hits", ix))
+                        .w_full()
+                        .mt_2()
                         .px_2()
+                        .gap_1p5()
+                        .rounded(cx.theme().radius)
                         .text_xs()
-                        .font_weight(gpui_kit::FontWeight::MEDIUM)
-                        .truncate()
-                        .child(found.path.clone())
+                        .cursor_pointer()
+                        .hover(|style| style.bg(cx.theme().list_hover))
+                        .child(ph_ui::file_icon_element(name, px(14.)))
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                .child(name.to_string()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(dir.to_string()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .px_1()
+                                .rounded_full()
+                                .bg(cx.theme().muted)
+                                .text_color(cx.theme().muted_foreground)
+                                .child(count.to_string()),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_file(&open, None, window, cx);
+                        }))
                         .into_any_element(),
                 );
             }
@@ -952,10 +1406,12 @@ impl FilesPanel {
             Some("Searching…".into())
         } else if let Some(error) = &self.search.error {
             Some(error.clone())
-        } else if self.search.query.is_empty() {
-            Some("Type and press Enter.".into())
-        } else if results.matches.is_empty() {
+        } else if self.search.query.trim().is_empty() {
+            Some("File names and text in files.".into())
+        } else if results.matches.is_empty() && self.search.files.is_empty() {
             Some("No results.".into())
+        } else if results.matches.is_empty() {
+            None
         } else if results.truncated {
             Some(format!("First {} matches.", results.matches.len()).into())
         } else {
@@ -1106,30 +1562,69 @@ impl FilesPanel {
                 .unwrap_or_default()
                 .to_string();
             let icon = ph_ui::file_icon_element(&name, px(14.));
-            let label = if file.is_dirty() {
-                format!("● {name}")
-            } else {
-                name
-            };
+            let dirty = file.is_dirty();
             let panel = cx.weak_entity();
+            let group = SharedString::from(format!("open-file-{ix}"));
+            // As in VS Code: unsaved changes show as a dot where the close
+            // button is, which comes back while the pointer is on the tab.
+            let close = Button::new(("close-file", ix))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Close)
+                .accessibility_label("Close file")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    // Not also a click on the tab, which would bring
+                    // forward the tab now at this place.
+                    cx.stop_propagation();
+                    this.close_tab(ix, window, cx);
+                }));
+            let suffix = div()
+                .relative()
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(dirty, |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .group_hover(group.clone(), |style| style.invisible())
+                            .child(
+                                div()
+                                    .size(px(7.))
+                                    .rounded_full()
+                                    .bg(cx.theme().foreground.opacity(0.75)),
+                            ),
+                    )
+                })
+                .child(
+                    div()
+                        .when(dirty, |this| {
+                            this.invisible()
+                                .group_hover(group.clone(), |style| style.visible())
+                        })
+                        .child(close),
+                );
             Tab::new()
+                .group(group)
                 .prefix(div().pl_2().child(icon))
                 .child(
                     div()
                         .id(("open-file-label", ix))
                         .min_w_0()
                         .whitespace_nowrap()
-                        .child(label)
+                        .child(name)
+                        // A middle click closes the tab.
+                        .on_mouse_up(
+                            gpui_kit::MouseButton::Middle,
+                            cx.listener(move |this, _, window, cx| this.close_tab(ix, window, cx)),
+                        )
                         .context_menu(move |menu, _, _| tab_menu(menu, panel.clone(), ix)),
                 )
-                .suffix(
-                    Button::new(("close-file", ix))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .accessibility_label("Close file")
-                        .on_click(cx.listener(move |this, _, _, cx| this.close_file(ix, cx))),
-                )
+                .suffix(suffix)
         });
 
         // The Changes tab comes first, where it is seen however many files
@@ -1175,11 +1670,20 @@ impl Render for FilesPanel {
         // the editor instead of widening the column.
         div()
             .key_context(FILES_PANEL_CONTEXT)
-            .on_action(cx.listener(|this, _: &CloseFile, _, cx| {
+            .on_action(cx.listener(|this, _: &crate::NavigateBack, window, cx| {
+                this.navigate(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::NavigateForward, window, cx| {
+                this.navigate(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::NewFile, window, cx| {
+                this.new_file_beside_active(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CloseFile, window, cx| {
                 if this.diff_active && this.diff.is_some() {
                     this.close_diff(cx);
                 } else if let Some(ix) = this.active {
-                    this.close_file(ix, cx);
+                    this.close_tab(ix, window, cx);
                 }
             }))
             .size_full()
@@ -1242,6 +1746,22 @@ impl Render for FileTree {
     }
 }
 
+/// A heading in the search results.
+fn section_label(label: &'static str, cx: &gpui_kit::App) -> AnyElement {
+    div()
+        .pt_2()
+        .px_2()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(label)
+        .into_any_element()
+}
+
+/// The last part of a path.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
 /// The menu of open-file tab `ix`.
 fn tab_menu(
     menu: gpui_kit::component::menu::PopupMenu,
@@ -1257,16 +1777,23 @@ fn tab_menu(
         })
     };
     menu.item(
-        item("Close", |panel, ix, _, cx| panel.close_file(ix, cx)).action(Box::new(CloseFile)),
+        item("Close", |panel, ix, window, cx| {
+            panel.close_tab(ix, window, cx)
+        })
+        .action(Box::new(CloseFile)),
     )
-    .item(item("Close Others", |panel, ix, _, cx| {
-        panel.close_others(ix, cx)
+    .item(item("Close Others", |panel, ix, window, cx| {
+        panel.close_others(ix, window, cx)
     }))
-    .item(item("Close to the Right", |panel, ix, _, cx| {
-        panel.close_right(ix, cx)
+    .item(item("Close to the Right", |panel, ix, window, cx| {
+        panel.close_right(ix, window, cx)
     }))
-    .item(item("Close Saved", |panel, _, _, cx| panel.close_saved(cx)))
-    .item(item("Close All", |panel, _, _, cx| panel.close_all(cx)))
+    .item(item("Close Saved", |panel, _, window, cx| {
+        panel.close_saved(window, cx)
+    }))
+    .item(item("Close All", |panel, _, window, cx| {
+        panel.close_all(window, cx)
+    }))
     .separator()
     .item(item("Copy Path", |panel, ix, _, cx| {
         if let Some(path) = panel

@@ -314,7 +314,10 @@ impl WorkspaceTerminals {
             })
             .detach();
         } else {
-            terminal.read(cx).run_command(&command);
+            // A new shell: typed once it shows its prompt.
+            terminal.update(cx, |terminal, cx| {
+                terminal.run_command_when_ready(command, cx)
+            });
         }
         cx.notify();
         Some(terminal)

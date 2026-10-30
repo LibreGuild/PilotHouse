@@ -6,6 +6,7 @@
 //! and refreshes whenever the project folder changes.
 
 mod branch_picker;
+mod change_tree;
 mod changes_panel;
 mod commit_box;
 mod conflict_view;

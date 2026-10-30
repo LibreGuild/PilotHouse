@@ -22,6 +22,10 @@ ph-preview.workspace = true
 ph-store.workspace = true
 ph-theme.workspace = true
 ph-ui.workspace = true
+similar.workspace = true
 smol.workspace = true
+# The same syntect gpui-component highlights with (see `highlight.rs`).
+syntect = { version = "5.3", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
+two-face = { version = "0.4.5", default-features = false, features = ["syntect-fancy"] }
 tracing.workspace = true
 trash = "5"

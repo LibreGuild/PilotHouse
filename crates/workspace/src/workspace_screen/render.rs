@@ -8,7 +8,7 @@ impl WorkspaceScreen {
     /// The chat, under what finished while the workspace was away.
     pub(super) fn render_chat(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(away) = &self.away else {
-            return self.chat.clone().into_any_element();
+            return self.chat.clone().cached(filled()).into_any_element();
         };
         v_flex()
             .size_full()
@@ -100,7 +100,7 @@ impl WorkspaceScreen {
         let content = match pane {
             Pane::Chat => self.render_chat(cx),
             Pane::Editor => match self.files.clone() {
-                Some(files) => files.into_any_element(),
+                Some(files) => files.cached(filled()).into_any_element(),
                 None => div().into_any_element(),
             },
             Pane::Tool(tab) => {
@@ -263,24 +263,27 @@ impl WorkspaceScreen {
                 )
                 .into_any_element();
         }
+        // Each tool is drawn again only when it changes, not on every
+        // keystroke in the editor next to it.
+        fn cached<V: Render>(panel: &Option<Entity<V>>) -> Option<AnyElement> {
+            panel
+                .clone()
+                .map(|panel| panel.cached(filled()).into_any_element())
+        }
         let panel = match tab {
-            ContextTab::Files => self.file_tree.clone().map(IntoElement::into_any_element),
-            ContextTab::Changes => self
-                .changes
-                .get(&self.git_folder)
-                .cloned()
-                .map(|panel| self.with_folder_picker(panel.into_any_element(), cx)),
-            ContextTab::Board => self.board.clone().map(IntoElement::into_any_element),
-            ContextTab::Terminal => self.terminal.clone().map(IntoElement::into_any_element),
-            ContextTab::Browser => self.browser.clone().map(IntoElement::into_any_element),
-            ContextTab::Devices => self.devices.clone().map(IntoElement::into_any_element),
-            ContextTab::Runs => self.runs.clone().map(IntoElement::into_any_element),
-            ContextTab::Pulls => self
-                .pulls
-                .get(&self.git_folder)
-                .cloned()
-                .map(|panel| self.with_folder_picker(panel.into_any_element(), cx)),
-            ContextTab::Tests => self.tests.clone().map(IntoElement::into_any_element),
+            ContextTab::Files => cached(&self.file_tree),
+            ContextTab::Changes => self.changes.get(&self.git_folder).cloned().map(|panel| {
+                self.with_folder_picker(panel.cached(filled()).into_any_element(), cx)
+            }),
+            ContextTab::Board => cached(&self.board),
+            ContextTab::Terminal => cached(&self.terminal),
+            ContextTab::Browser => cached(&self.browser),
+            ContextTab::Devices => cached(&self.devices),
+            ContextTab::Runs => cached(&self.runs),
+            ContextTab::Pulls => self.pulls.get(&self.git_folder).cloned().map(|panel| {
+                self.with_folder_picker(panel.cached(filled()).into_any_element(), cx)
+            }),
+            ContextTab::Tests => cached(&self.tests),
         };
         panel.unwrap_or_else(|| div().into_any_element())
     }
@@ -293,12 +296,12 @@ impl WorkspaceScreen {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let roots = self.roots();
-        let folders: Vec<(usize, String, bool)> = roots
+        let folders: Vec<(usize, String, std::path::PathBuf)> = roots
             .list()
             .iter()
             .enumerate()
             .skip(usize::from(self.project.empty))
-            .map(|(ix, root)| (ix, root.name.clone(), ph_git::is_repository(&root.path)))
+            .map(|(ix, root)| (ix, root.name.clone(), root.path.clone()))
             .collect();
         if folders.len() < 2 {
             return panel;
@@ -330,9 +333,10 @@ impl WorkspaceScreen {
                             .label(current)
                             .dropdown_caret(true)
                             .menu(gpui_kit::Anchor::TopLeft, move |menu, _, _| {
-                                folders.iter().fold(menu, |menu, (ix, name, repo)| {
+                                // Looked up as the menu opens, not on every frame.
+                                folders.iter().fold(menu, |menu, (ix, name, path)| {
                                     let (space, ix) = (space.clone(), *ix);
-                                    let label = if *repo {
+                                    let label = if ph_git::is_repository(path) {
                                         name.clone()
                                     } else {
                                         format!("{name} (no Git)")
@@ -410,4 +414,9 @@ pub(super) fn short(text: &str, max: usize) -> String {
     let mut cut: String = text.chars().take(max - 1).collect();
     cut.push('…');
     cut
+}
+
+/// A cached tool's layout: it fills the pane it is drawn in.
+fn filled() -> gpui_kit::StyleRefinement {
+    gpui_kit::StyleRefinement::default().size_full()
 }

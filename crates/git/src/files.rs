@@ -50,6 +50,13 @@ pub fn commit_diff(root: &Path, id: &str, path: &str) -> Result<Vec<FileChange>>
     Ok(parse_diff(&out))
 }
 
+/// `path` (relative to `root`) as Git has it staged, which is what VS Code
+/// marks changed lines against; `None` when Git does not track it.
+pub fn staged_text(root: &Path, path: &str) -> Option<String> {
+    let spec = format!(":./{}", path.trim_start_matches("./"));
+    git(root, &[LITERAL, "show", "--no-textconv", &spec]).ok()
+}
+
 /// `path`'s changes since the last commit (staged or not).
 pub fn diff_with_head(root: &Path, path: &str) -> Result<Vec<FileChange>> {
     let out = git(

@@ -44,7 +44,15 @@ enum Stage {
     Building,
     Installing,
     Launching,
-    Running { package: String, took: Duration },
+    Running {
+        package: String,
+        took: Duration,
+    },
+    /// Build APK finished: where the APK is.
+    Built {
+        apk: PathBuf,
+        took: Duration,
+    },
     Failed(String),
 }
 
@@ -188,68 +196,33 @@ impl AndroidRun {
         else {
             return;
         };
-        self.log.clear();
-        self.push_log(format!(
-            "Building {} ({}) for {}…",
-            module.path,
-            variant.name,
-            device.display_name()
-        ));
-        self.stage = Stage::Building;
         self.serial = Some(device.serial.clone());
         let started = Instant::now();
-        self.started = Some(started);
-        self._tick = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    return;
-                }
-            }
-        }));
-        cx.notify();
-
-        let (lines, receiver) = smol::channel::unbounded::<String>();
-        let root = self.root.clone();
-        let gradle = self.gradle.clone();
-        let serial = device.serial.clone();
         let task = format!("{}:assemble{}", module.path, variant.task_suffix());
         let module_dir = module.dir.clone();
         let apk_variant = variant.clone();
-        let build_adb = adb.clone();
-        let build = cx.background_spawn(async move {
-            let abis = build_adb
-                .shell(&serial, "getprop ro.product.cpu.abilist")
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            build_with_gradle(&root, &task, &serial, &abis, &gradle, lines)
-        });
-        // Gradle's output, as it comes; ends when the build does.
-        let reader = cx.spawn(async move |this, cx| {
-            while let Ok(first) = receiver.recv().await {
-                let mut batch = vec![first];
-                while let Ok(line) = receiver.try_recv() {
-                    batch.push(line);
-                }
-                if this
-                    .update(cx, |run, cx| {
-                        batch.into_iter().for_each(|line| run.push_log(line));
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-            }
-        });
+        let (build_adb, serial) = (adb.clone(), device.serial.clone());
+        let build = self.start_gradle(
+            format!(
+                "Building {} ({}) for {}…",
+                module.path,
+                variant.name,
+                device.display_name()
+            ),
+            task,
+            Some(device.serial.clone()),
+            // Only the device's ABIs: a quicker build.
+            move || {
+                build_adb
+                    .shell(&serial, "getprop ro.product.cpu.abilist")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            },
+            cx,
+        );
         self._run = Some(cx.spawn(async move |this, cx| {
-            let built = build.await;
-            reader.await;
-            if let Err(message) = built {
+            if let Err(message) = build.await {
                 let _ = this.update(cx, |run, cx| run.fail(message, cx));
                 return;
             }
@@ -302,6 +275,131 @@ impl AndroidRun {
         }));
     }
 
+    /// Starts Gradle on `task` (for the device `serial`, built for the
+    /// ABIs `abis` gives, when there is one): the log fills as it builds
+    /// and the status counts the seconds. The task ends with the build.
+    fn start_gradle(
+        &mut self,
+        heading: String,
+        task: String,
+        serial: Option<String>,
+        abis: impl FnOnce() -> String + Send + 'static,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        self.log.clear();
+        self.push_log(heading);
+        self.stage = Stage::Building;
+        self.started = Some(Instant::now());
+        self._tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }
+        }));
+        cx.notify();
+        let (lines, receiver) = smol::channel::unbounded::<String>();
+        let (root, gradle) = (self.root.clone(), self.gradle.clone());
+        let build = cx.background_spawn(async move {
+            let abis = abis();
+            build_with_gradle(
+                &root,
+                &task,
+                serial.as_deref().unwrap_or_default(),
+                &abis,
+                &gradle,
+                lines,
+            )
+        });
+        // Gradle's output, as it comes; ends when the build does.
+        let reader = cx.spawn(async move |this, cx| {
+            while let Ok(first) = receiver.recv().await {
+                let mut batch = vec![first];
+                while let Ok(line) = receiver.try_recv() {
+                    batch.push(line);
+                }
+                if this
+                    .update(cx, |run, cx| {
+                        batch.into_iter().for_each(|line| run.push_log(line));
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+            }
+        });
+        cx.spawn(async move |_, _| {
+            let built = build.await;
+            reader.await;
+            built
+        })
+    }
+
+    /// Build APK, as Android Studio has it: builds the picked module and
+    /// variant for every ABI, no device needed, and says where the APK is.
+    pub fn build_apk(&mut self, cx: &mut Context<Self>) {
+        if self.is_busy() {
+            return;
+        }
+        let Some(module) = self.modules.get(self.module).cloned() else {
+            return;
+        };
+        let Some(variant) = module
+            .variants
+            .iter()
+            .find(|variant| variant.name == self.variant[self.module])
+            .cloned()
+        else {
+            return;
+        };
+        let task = format!("{}:assemble{}", module.path, variant.task_suffix());
+        let started = Instant::now();
+        let build = self.start_gradle(
+            format!("Building the APK of {} ({})…", module.path, variant.name),
+            task,
+            None,
+            String::new,
+            cx,
+        );
+        let module_dir = module.dir.clone();
+        self._run = Some(cx.spawn(async move |this, cx| {
+            let built = build.await;
+            let found = cx
+                .background_spawn(async move {
+                    variant
+                        .built_apk(&module_dir)
+                        .map(|(_, apk)| apk)
+                        .ok_or_else(|| {
+                            format!(
+                                "No APK of {} was found under {}.",
+                                variant.name,
+                                module_dir.display()
+                            )
+                        })
+                })
+                .await;
+            let _ = this.update(cx, |run, cx| {
+                run._tick = None;
+                match built.and(found) {
+                    Ok(apk) => {
+                        run.push_log(format!("Built {}.", apk.display()));
+                        run.stage = Stage::Built {
+                            apk,
+                            took: started.elapsed(),
+                        };
+                    }
+                    Err(message) => run.fail(message, cx),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
     fn fail(&mut self, message: String, cx: &mut Context<Self>) {
         self._tick = None;
         self.push_log(message.clone());
@@ -347,6 +445,17 @@ impl AndroidRun {
             Stage::Launching => ("Starting the app…".into(), muted, true),
             Stage::Running { package, took } => (
                 format!("{package} is running · {:.0}s", took.as_secs_f32()),
+                cx.theme().success,
+                false,
+            ),
+            Stage::Built { apk, took } => (
+                format!(
+                    "{} built · {:.0}s",
+                    apk.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    took.as_secs_f32()
+                ),
                 cx.theme().success,
                 false,
             ),
@@ -459,6 +568,10 @@ impl Render for AndroidRun {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.is_busy();
         let running = matches!(self.stage, Stage::Running { .. });
+        let built_apk = match &self.stage {
+            Stage::Built { apk, .. } => Some(apk.clone()),
+            _ => None,
+        };
         let can_run = !busy
             && self
                 .manager
@@ -521,6 +634,41 @@ impl Render for AndroidRun {
                             .tooltip("Build, install and start the app on the device")
                             .on_click(cx.listener(|run, _, _, cx| run.run(cx))),
                     )
+                    .child(
+                        Button::new("android-build-apk")
+                            .ghost()
+                            .small()
+                            .icon(Icons::Package)
+                            .label("Build APK")
+                            .disabled(busy)
+                            .tooltip("Build the APK of this module and variant; no device needed")
+                            .on_click(cx.listener(|run, _, _, cx| run.build_apk(cx))),
+                    )
+                    .when_some(built_apk, |this, apk| {
+                        let copy = apk.clone();
+                        this.child(
+                            Button::new("android-reveal-apk")
+                                .ghost()
+                                .small()
+                                .icon(Icons::FolderOpen)
+                                .tooltip("Show the APK in its folder")
+                                .accessibility_label("Show the APK")
+                                .on_click(move |_, _, cx| cx.reveal_path(&apk)),
+                        )
+                        .child(
+                            Button::new("android-copy-apk")
+                                .ghost()
+                                .small()
+                                .icon(gpui_kit::component::IconName::Copy)
+                                .tooltip("Copy the APK's path")
+                                .accessibility_label("Copy the APK's path")
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                        copy.to_string_lossy().into_owned(),
+                                    ))
+                                }),
+                        )
+                    })
                     .when(busy || running, |this| {
                         this.child(
                             Button::new("android-stop")

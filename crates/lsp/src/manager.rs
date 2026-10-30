@@ -83,6 +83,15 @@ impl LspManager {
         list
     }
 
+    /// The server started for `path`'s language and how it is doing. Reads
+    /// no files, so the status bar can ask on every frame (finding an
+    /// installed server searches the PATH).
+    pub fn server_for(&self, path: &Path) -> Option<(&'static str, ServerStatus)> {
+        servers::candidates(path)
+            .find_map(|spec| self.servers.get(spec.name))
+            .map(|slot| (slot.spec.name, slot.status.clone()))
+    }
+
     /// The server for `path` (started on first use), or `None` if none is
     /// installed for its language.
     fn slot(&mut self, path: &Path, cx: &mut Context<Self>) -> Option<&Slot> {

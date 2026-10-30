@@ -93,6 +93,51 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
                 ("UI tests", action(Box::new(ShowTests))),
             ],
         ),
+        ("Editor", {
+            let mac = cfg!(target_os = "macos");
+            let pick = |mac_keys: &'static [&'static str], other: &'static [&'static str]| {
+                Keys::Fixed(if mac { mac_keys } else { other })
+            };
+            vec![
+                ("Find a file", action(Box::new(ph_files::QuickOpen))),
+                (
+                    "Go to symbol in the workspace",
+                    action(Box::new(ph_files::GoToSymbol)),
+                ),
+                ("Symbols of the file", Keys::Fixed(&["secondary-shift-o"])),
+                ("Go to line", Keys::Fixed(&["ctrl-g"])),
+                (
+                    "Go to definition",
+                    Keys::Text(if mac {
+                        "F12, ⌘-click".into()
+                    } else {
+                        "F12, Ctrl+click".into()
+                    }),
+                ),
+                ("Find references", Keys::Fixed(&["shift-f12"])),
+                ("Back", pick(&["ctrl--"], &["alt-left"])),
+                ("Forward", pick(&["ctrl-shift--"], &["alt-right"])),
+                ("Toggle comment", Keys::Fixed(&["secondary-/"])),
+                ("Move line up or down", Keys::Fixed(&["alt-up", "alt-down"])),
+                (
+                    "Copy line up or down",
+                    Keys::Fixed(&["shift-alt-up", "shift-alt-down"]),
+                ),
+                ("Delete line", Keys::Fixed(&["secondary-shift-k"])),
+                (
+                    "New line below or above",
+                    Keys::Fixed(&["secondary-enter", "secondary-shift-enter"]),
+                ),
+                ("Select next occurrence", Keys::Fixed(&["secondary-d"])),
+                ("Delete word", pick(&["alt-backspace"], &["ctrl-backspace"])),
+                ("New file", Keys::Fixed(&["secondary-n"])),
+                ("Save", Keys::Fixed(&["secondary-s"])),
+                ("Close file", Keys::Fixed(&["secondary-w"])),
+                ("Zoom in", action(Box::new(ZoomIn))),
+                ("Zoom out", action(Box::new(ZoomOut))),
+                ("Default size", action(Box::new(ResetZoom))),
+            ]
+        }),
         (
             "Chat",
             vec![
