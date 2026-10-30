@@ -6184,7 +6184,7 @@ dependencies = [
  "serde_json",
  "similar",
  "smol",
- "toml 0.8.23",
+ "toml 1.1.8+spec-1.1.0",
  "tracing",
 ]
 
@@ -6408,7 +6408,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tar",
- "toml 0.8.23",
+ "toml 1.1.8+spec-1.1.0",
  "tracing",
  "ttf-parser",
  "windows 0.58.0",
@@ -6569,7 +6569,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "similar",
- "toml 0.8.23",
+ "toml 1.1.8+spec-1.1.0",
  "url",
  "x509-parser",
  "yaml-rust2",
@@ -6612,7 +6612,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
- "toml 0.8.23",
+ "toml 1.1.8+spec-1.1.0",
  "tracing",
  "ureq",
  "windows-sys 0.61.2",
@@ -9047,7 +9047,6 @@ version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
 dependencies = [
- "indexmap 2.14.2",
  "serde",
  "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",
