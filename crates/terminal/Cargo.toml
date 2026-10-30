@@ -10,7 +10,7 @@ publish.workspace = true
 alacritty_terminal = "0.26"
 anyhow.workspace = true
 # The same versions alacritty_terminal uses (its PTY traits name their types).
-base64 = "0.22"
+base64 = "0.23"
 polling = "3"
 gpui-kit.workspace = true
 ph-env.workspace = true
