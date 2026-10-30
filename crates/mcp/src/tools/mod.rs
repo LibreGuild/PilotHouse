@@ -2,6 +2,7 @@
 
 mod board;
 mod browser;
+mod chrome;
 mod devices;
 mod runs;
 mod tests;
@@ -28,6 +29,7 @@ pub fn all() -> impl Iterator<Item = &'static Tool> {
     board::TOOLS
         .iter()
         .chain(browser::TOOLS)
+        .chain(chrome::TOOLS)
         .chain(devices::TOOLS)
         .chain(runs::TOOLS)
         .chain(tests::TOOLS)

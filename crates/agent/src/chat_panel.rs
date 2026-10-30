@@ -192,6 +192,8 @@ pub struct ChatPanel {
     pulls_asked: bool,
     /// The current agent's setup checks, refreshed every few seconds.
     setup: Option<(&'static str, std::time::Instant, Vec<setup::Check>)>,
+    /// Checks the setup again off the UI thread (they search the PATH).
+    _setup_refresh: Option<Task<()>>,
     /// Attached to the next message.
     attachments: Vec<Attachment>,
     /// Title for the chat the next send creates, instead of its text.
@@ -284,6 +286,7 @@ impl ChatPanel {
             pulls: Vec::new(),
             pulls_asked: false,
             setup: None,
+            _setup_refresh: None,
             attachments: Vec::new(),
             next_title: None,
             live: None,

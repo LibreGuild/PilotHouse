@@ -68,41 +68,98 @@ pub(crate) fn open(
     let viewport = window.viewport_size();
     let width = (viewport.width - px(80.)).clamp(px(560.), px(960.));
     let height = (viewport.height - px(120.)).clamp(px(420.), px(680.));
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, _, cx| {
         let fonts = fonts.clone();
+        let theme = cx.theme();
+        let mut sidebar = gpui_kit::StyleRefinement::default();
+        sidebar.background = Some(theme.sidebar.into());
+        // The search box level with the page's top edge (the list's header
+        // has room above it of its own).
+        let search = gpui_kit::StyleRefinement::default().mt(px(-12.));
+        // Like the workspace: the title, the list and the frame are one
+        // surface, and the page floats on it, rounded and bordered, its top
+        // level with the search box. The page's bottom corners reach past
+        // the list, so the line between the two meets their straight edge;
+        // at the top, a strip of the frame's color hides the line beside
+        // the curve.
+        let frame = div()
+            .absolute()
+            .top(px(TOP))
+            .left(px(SIDEBAR_WIDTH))
+            .right(px(FRAME))
+            .bottom(px(FRAME))
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .shadow_xs();
         dialog
             .w(width)
             .p_0()
+            .bg(theme.sidebar)
             .close_button(true)
             .title(div().px_4().pt_3().child("Settings"))
             .child(
-                div().h(height).border_t_1().child(
-                    Settings::new("settings")
-                        .sidebar_width(px(210.))
-                        .default_selected_index(gpui_kit::component::setting::SelectIndex {
-                            page_ix: page.index(),
-                            group_ix: None,
-                        })
-                        .pages([
-                            // In this order: see `Page::index`.
-                            appearance_page(&fonts),
-                            editor_page(&fonts),
-                            terminal_page(),
-                            chat_page(),
-                            agents_page(),
-                            tools_page(tools.clone()),
-                            github_page(accounts.clone()),
-                            templates_page(templates.clone()),
-                            drives_page(drives.clone()),
-                            storage_page(storage.clone()),
-                            features_page(),
-                            shortcuts_page(),
-                            about_page(),
-                        ]),
-                ),
+                div()
+                    .relative()
+                    .h(height)
+                    .child(frame)
+                    .child(
+                        div()
+                            .size_full()
+                            .pt(px(TOP))
+                            .pr(px(FRAME))
+                            .pb(theme.radius_lg + px(FRAME + 2.))
+                            .child(
+                                Settings::new("settings")
+                                    .sidebar_width(px(SIDEBAR_WIDTH))
+                                    // Fixed: the page's frame is drawn at its edge.
+                                    .sidebar_size_range(px(SIDEBAR_WIDTH)..px(SIDEBAR_WIDTH))
+                                    .sidebar_style(&sidebar)
+                                    .header_style(&search)
+                                    .default_selected_index(
+                                        gpui_kit::component::setting::SelectIndex {
+                                            page_ix: page.index(),
+                                            group_ix: None,
+                                        },
+                                    )
+                                    .pages([
+                                        // In this order: see `Page::index`.
+                                        appearance_page(&fonts),
+                                        editor_page(&fonts),
+                                        terminal_page(),
+                                        chat_page(),
+                                        agents_page(),
+                                        tools_page(tools.clone()),
+                                        github_page(accounts.clone()),
+                                        templates_page(templates.clone()),
+                                        drives_page(drives.clone()),
+                                        storage_page(storage.clone()),
+                                        features_page(),
+                                        shortcuts_page(),
+                                        about_page(),
+                                    ]),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(TOP))
+                            .left(px(SIDEBAR_WIDTH - 1.))
+                            .w(px(2.))
+                            .h((theme.radius_lg - px(5.)).max(px(0.)))
+                            .bg(theme.sidebar),
+                    ),
             )
     });
 }
+
+/// The settings list's width.
+const SIDEBAR_WIDTH: f32 = 210.;
+/// Room around the page, as around the workspace's panels.
+const FRAME: f32 = 8.;
+/// Room above the page and the list, under the title.
+const TOP: f32 = 4.;
 
 /// "System default" first, then every installed family.
 fn font_options(cx: &App) -> Vec<(SharedString, SharedString)> {

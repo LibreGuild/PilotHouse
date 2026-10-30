@@ -50,20 +50,29 @@ impl Store {
     /// The open to-dos of `project_id` and those of no workspace, oldest
     /// first, then the ten done most lately.
     pub fn todos(&self, project_id: Option<ProjectId>) -> Result<Vec<Todo>> {
+        self.listed_todos("(project_id IS NULL OR project_id = ?1)", &[&project_id])
+    }
+
+    /// Every to-do, whichever workspace it was made for (the app's list).
+    pub fn all_todos(&self) -> Result<Vec<Todo>> {
+        self.listed_todos("1", &[])
+    }
+
+    /// The open to-dos matching `filter`, oldest first, then the latest
+    /// finished ones.
+    fn listed_todos(&self, filter: &str, args: &[&dyn rusqlite::ToSql]) -> Result<Vec<Todo>> {
         let conn = self.conn();
         let mut open = conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM todos WHERE done = 0 AND (project_id IS NULL OR project_id = ?1)
-             ORDER BY created_at, id"
+            "SELECT {COLUMNS} FROM todos WHERE done = 0 AND {filter} ORDER BY created_at, id"
         ))?;
         let mut todos = open
-            .query_map(params![project_id], Todo::from_row)?
+            .query_map(args, Todo::from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut done = conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM todos WHERE done = 1 AND (project_id IS NULL OR project_id = ?1)
-             ORDER BY done_at DESC LIMIT 10"
+            "SELECT {COLUMNS} FROM todos WHERE done = 1 AND {filter} ORDER BY done_at DESC LIMIT 10"
         ))?;
         todos.extend(
-            done.query_map(params![project_id], Todo::from_row)?
+            done.query_map(args, Todo::from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         );
         Ok(todos)
@@ -177,6 +186,7 @@ mod tests {
             1,
             "no workspace: only the shared ones"
         );
+        assert_eq!(store.all_todos().unwrap().len(), 2, "the app's list: all");
 
         let due = store.due_todos(2_000).unwrap();
         assert_eq!(due.len(), 1);

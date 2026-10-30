@@ -41,8 +41,9 @@ pub use diff::{ChangeKind, FileChange, Hunk, parse_diff};
 pub use run::{git, git_env};
 pub(crate) use run::{local_path, null_device};
 pub use status::{
-    ApplyMode, Change, RepoStatus, WorkingChanges, apply, current_branch, is_repository,
-    stage_path, staged_diff, status, unstage_path, working_changes,
+    ApplyMode, Change, RepoStatus, WorkingChanges, add_to_gitignore, all_changes_diff, apply,
+    current_branch, is_repository, stage_all, stage_path, staged_diff, status, unstage_path,
+    working_changes,
 };
 
 /// Refuses a branch or ref name git would read as an option, for callers

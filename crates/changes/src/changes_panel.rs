@@ -7,12 +7,14 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    menu::ContextMenuExt as _,
     notification::Notification,
     v_flex,
 };
@@ -27,6 +29,7 @@ use ph_ui::{EmptyState, Icons};
 
 use ph_git::{self as git, ApplyMode, FileChange, WorkingChanges};
 
+use crate::change_tree::{self, TreeRow};
 use crate::commit_box::{CommitBox, Writer};
 use crate::conflict_view::{ConflictEvent, ConflictView};
 use crate::history_view::HistoryView;
@@ -62,6 +65,8 @@ enum State {
 enum Row {
     /// The commit box, conflicts, the summary and the notes bar.
     Top,
+    /// A folder of View as Tree (an index into the panel's `tree`).
+    Folder(usize),
     File(usize),
     /// A binary file's note, in place of its hunks.
     Binary(usize),
@@ -116,6 +121,10 @@ pub struct ChangesPanel {
     /// every frame.
     list: gpui_kit::ListState,
     list_rows: Vec<Row>,
+    /// View as Tree's folders and files, for the rows that point into it.
+    tree: Vec<TreeRow>,
+    /// Folders folded in View as Tree (new files' with a `new:` prefix).
+    folded: HashSet<String>,
     /// The branch against its base, once looked at (`None` inside: there
     /// is no base, or this is it).
     branch: Option<Result<Option<git::diff::BranchChanges>, SharedString>>,
@@ -165,6 +174,8 @@ impl ChangesPanel {
             notes: Vec::new(),
             list: gpui_kit::ListState::new(0, gpui_kit::ListAlignment::Top, gpui_kit::px(800.)),
             list_rows: Vec::new(),
+            tree: Vec::new(),
+            folded: HashSet::new(),
             branch: None,
             _branch_task: None,
             _refresh: None,
@@ -277,6 +288,50 @@ impl ChangesPanel {
 
     fn keep_path(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         self.run(window, cx, move |root| git::stage_path(root, &path));
+    }
+
+    /// Keeps changed files `files` (a folder's, in View as Tree).
+    fn keep_files(&mut self, files: &[usize], window: &mut Window, cx: &mut Context<Self>) {
+        let paths: Vec<String> = files
+            .iter()
+            .filter_map(|ix| self.file(*ix).map(|file| file.path.clone()))
+            .collect();
+        self.run(window, cx, move |root| {
+            for path in &paths {
+                git::stage_path(root, path)?;
+            }
+            Ok(())
+        });
+    }
+
+    /// Adds `path` to the repository's `.gitignore`.
+    fn add_to_gitignore(
+        &mut self,
+        path: String,
+        folder: bool,
+        tracked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self.root.clone();
+        let shown = path.clone();
+        let task = cx.background_spawn(async move { git::add_to_gitignore(&root, &path, folder) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            _ = this.update_in(cx, |this, window, cx| {
+                let note = match result {
+                    Ok(true) if tracked => Notification::info(format!(
+                        "Added {shown} to .gitignore. Git still tracks it: it stays in the changes until it is removed from Git (git rm --cached)."
+                    )),
+                    Ok(true) => Notification::success(format!("Added {shown} to .gitignore.")),
+                    Ok(false) => Notification::info(format!("{shown} is in .gitignore already.")),
+                    Err(err) => Notification::error(format!("Could not add to .gitignore: {err:#}")),
+                };
+                window.push_notification(note, cx);
+                this.refresh(cx);
+            });
+        })
+        .detach();
     }
 
     fn discard_file(&mut self, file_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -627,6 +682,20 @@ impl ChangesPanel {
                         .on_click(cx.listener(|this, _, window, cx| this.undo_discard(window, cx))),
                 )
             })
+            .child({
+                let tree = as_tree();
+                Button::new("changes-view-as")
+                    .ghost()
+                    .xsmall()
+                    .icon(if tree { Icons::List } else { Icons::ListTree })
+                    .tooltip(if tree { "View as List" } else { "View as Tree" })
+                    .accessibility_label(if tree { "View as List" } else { "View as Tree" })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        AS_TREE.store(!as_tree(), Ordering::Relaxed);
+                        this.sync_rows();
+                        cx.notify();
+                    }))
+            })
             .child(
                 Button::new("refresh-changes")
                     .ghost()
@@ -639,6 +708,11 @@ impl ChangesPanel {
     }
 
     fn render_file(&self, ix: usize, file: &FileChange, cx: &mut Context<Self>) -> AnyElement {
+        // In View as Tree, files sit under their folder and need no path.
+        let depth = self.tree.iter().find_map(|row| match row {
+            TreeRow::File { ix: at, depth } if *at == ix => Some(*depth),
+            _ => None,
+        });
         let collapsed = !self.expanded.contains(&file.path);
         let path = file.path.clone();
         let diff_path = file.path.clone();
@@ -658,6 +732,7 @@ impl ChangesPanel {
                     .group(group.clone())
                     .h_7()
                     .px_1p5()
+                    .when_some(depth, |this, depth| this.pl(tree_indent(depth)))
                     .gap_1p5()
                     .rounded(cx.theme().radius)
                     .cursor_pointer()
@@ -707,69 +782,27 @@ impl ChangesPanel {
                                     })
                                     .child(name),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .truncate()
-                                    .child(dir),
-                            )
+                            .when(depth.is_none(), |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .truncate()
+                                        .child(dir),
+                                )
+                            })
                     })
                     .child(change_counts(file.added(), file.removed(), cx))
                     .child(kind_badge(kind, cx))
-                    // Acting on a file is for the row under the pointer.
-                    .child(
-                        h_flex()
-                            .gap_0p5()
-                            .invisible()
-                            .group_hover(group, |style| style.visible())
-                            .child({
-                                let path = file.path.clone();
-                                Button::new(("diff-changed-file", ix))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(ph_ui::Icons::GitCompare)
-                                    .tooltip("Open the changes in the editor")
-                                    .accessibility_label("Open the changes")
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.stop_propagation();
-                                        cx.emit(ChangesPanelEvent::OpenDiff(Some(path.clone())));
-                                    }))
-                            })
-                            .child(
-                                Button::new(("open-changed-file", ix))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::File)
-                                    .tooltip("Open file")
-                                    .accessibility_label("Open file")
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.emit(ChangesPanelEvent::OpenFile {
-                                            path: open_path.clone(),
-                                            line: 0,
-                                        });
-                                    })),
-                            )
-                            .child(
-                                Button::new(("discard-file", ix))
-                                    .ghost()
-                                    .xsmall()
-                                    .label("Discard")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.discard_file(ix, window, cx)
-                                    })),
-                            )
-                            .child({
-                                let path = file.path.clone();
-                                Button::new(("keep-file", ix))
-                                    .outline()
-                                    .xsmall()
-                                    .label("Keep")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.keep_path(path.clone(), window, cx)
-                                    }))
-                            }),
-                    ),
+                    // What to do with the file is in its right-click menu,
+                    // so the counts keep the row's right edge at any width.
+                    .context_menu({
+                        let panel = cx.weak_entity();
+                        let path = file.path.clone();
+                        move |menu, _, _| {
+                            file_menu(menu, panel.clone(), ix, path.clone(), open_path.clone())
+                        }
+                    }),
             )
             .into_any_element()
     }
@@ -991,31 +1024,53 @@ impl ChangesPanel {
     /// The changes list's rows: the top (commit box, header), each file's
     /// row and its hunks (unless folded), and the new files. A hunk is a
     /// row of its own so a long diff is drawn only where it shows.
-    fn rows(&self) -> Vec<Row> {
+    fn rows(&self) -> (Vec<Row>, Vec<TreeRow>) {
         let State::Loaded(changes) = &self.state else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let mut rows = vec![Row::Top];
-        for (ix, file) in changes.files.iter().enumerate() {
+        let add_file = |rows: &mut Vec<Row>, ix: usize| {
+            let file = &changes.files[ix];
             rows.push(Row::File(ix));
             if !self.expanded.contains(&file.path) {
-                continue;
+                return;
             }
             if file.binary {
                 rows.push(Row::Binary(ix));
             }
             rows.extend((0..file.hunks.len()).map(|hunk| Row::Hunk(ix, hunk)));
-        }
+        };
+        let tree = if as_tree() {
+            let paths: Vec<&str> = changes
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect();
+            let tree = change_tree::layout(&paths, &self.folded);
+            for (at, row) in tree.iter().enumerate() {
+                match row {
+                    TreeRow::Folder { .. } => rows.push(Row::Folder(at)),
+                    TreeRow::File { ix, .. } => add_file(&mut rows, *ix),
+                }
+            }
+            tree
+        } else {
+            for ix in 0..changes.files.len() {
+                add_file(&mut rows, ix);
+            }
+            Vec::new()
+        };
         if !changes.untracked.is_empty() {
             rows.push(Row::Untracked);
         }
-        rows
+        (rows, tree)
     }
 
     /// Takes the rows as they are now; the list keeps its place when they
     /// are the same ones.
     fn sync_rows(&mut self) {
-        let rows = self.rows();
+        let (rows, tree) = self.rows();
+        self.tree = tree;
         if rows != self.list_rows {
             self.list.reset(rows.len());
             self.list_rows = rows;
@@ -1028,7 +1083,8 @@ impl ChangesPanel {
     /// File `ix` was folded or unfolded: its hunk rows go or come back,
     /// the rest of the list stays where it is.
     fn toggled_file(&mut self, ix: usize) {
-        let rows = self.rows();
+        let (rows, tree) = self.rows();
+        self.tree = tree;
         let Some(at) = self.list_rows.iter().position(|row| *row == Row::File(ix)) else {
             self.sync_rows();
             return;
@@ -1059,6 +1115,10 @@ impl ChangesPanel {
                 .children(self.render_conflicts(cx))
                 .child(div().flex_none().child(self.render_header(cx)))
                 .children(self.render_notes_bar(cx))
+                .into_any_element(),
+            Row::Folder(at) => div()
+                .px_2()
+                .child(self.render_folder(at, cx))
                 .into_any_element(),
             Row::File(file) => div()
                 .px_2()
@@ -1174,87 +1234,206 @@ impl ChangesPanel {
     }
 
     fn render_untracked(&self, untracked: &[String], cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
+        let heading = div()
+            .px_1p5()
+            .pt_3()
+            .pb_1()
+            .text_xs()
+            .font_weight(gpui_kit::FontWeight::MEDIUM)
+            .text_color(cx.theme().muted_foreground)
+            .child("New files");
+        let rows: Vec<AnyElement> = if as_tree() {
+            // Folded with a prefix, apart from the changed files' folders.
+            let folded: HashSet<String> = self
+                .folded
+                .iter()
+                .filter_map(|key| key.strip_prefix(NEW_FOLDER).map(str::to_string))
+                .collect();
+            let paths: Vec<&str> = untracked.iter().map(String::as_str).collect();
+            change_tree::layout(&paths, &folded)
+                .into_iter()
+                .enumerate()
+                .map(|(at, row)| match row {
+                    TreeRow::Folder {
+                        path,
+                        label,
+                        depth,
+                        files,
+                    } => self.folder_row(
+                        ("new-folder", at),
+                        format!("{NEW_FOLDER}{path}"),
+                        path,
+                        label,
+                        depth,
+                        files,
+                        None,
+                        cx,
+                    ),
+                    TreeRow::File { ix, depth } => {
+                        self.untracked_row(ix, &untracked[ix], Some(depth), cx)
+                    }
+                })
+                .collect()
+        } else {
+            untracked
+                .iter()
+                .enumerate()
+                .map(|(ix, path)| self.untracked_row(ix, path, None, cx))
+                .collect()
+        };
+        v_flex().child(heading).children(rows).into_any_element()
+    }
+
+    /// A new file's row (indented at `depth` in View as Tree).
+    fn untracked_row(
+        &self,
+        ix: usize,
+        path: &str,
+        depth: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = path.to_string();
+        let (dir, name) = match path.rsplit_once('/') {
+            Some((dir, name)) => (format!("{dir}/"), name.to_string()),
+            None => (String::new(), path.to_string()),
+        };
+        h_flex()
+            .id(("untracked", ix))
+            .h_7()
+            .px_1p5()
+            .when_some(depth, |this, depth| this.pl(tree_indent(depth)))
+            .gap_1p5()
+            .rounded(cx.theme().radius)
+            .cursor_pointer()
+            .hover(|style| style.bg(cx.theme().list_hover))
+            .text_sm()
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(ChangesPanelEvent::OpenFile {
+                    path: open.clone(),
+                    line: 0,
+                });
+            }))
             .child(
                 div()
-                    .px_1p5()
-                    .pt_3()
-                    .pb_1()
+                    .w_3()
+                    .flex_none()
                     .text_xs()
-                    .font_weight(gpui_kit::FontWeight::MEDIUM)
-                    .text_color(cx.theme().muted_foreground)
-                    .child("New files"),
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_color(cx.theme().success)
+                    .child("A"),
             )
-            .children(untracked.iter().enumerate().map(|(ix, path)| {
-                let keep = path.clone();
-                let open = path.clone();
-                let group = SharedString::from(format!("untracked-{ix}"));
-                let (dir, name) = match path.rsplit_once('/') {
-                    Some((dir, name)) => (format!("{dir}/"), name.to_string()),
-                    None => (String::new(), path.clone()),
-                };
-                h_flex()
-                    .id(("untracked", ix))
-                    .group(group.clone())
-                    .h_7()
-                    .px_1p5()
-                    .gap_1p5()
-                    .rounded(cx.theme().radius)
-                    .hover(|style| style.bg(cx.theme().list_hover))
-                    .text_sm()
-                    .child(
-                        div()
-                            .w_3()
-                            .flex_none()
-                            .text_xs()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_color(cx.theme().success)
-                            .child("A"),
-                    )
-                    .child(ph_ui::file_icon_element(&name, gpui_kit::px(14.)))
-                    .child(div().flex_none().child(name))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(dir),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_0p5()
-                            .invisible()
-                            .group_hover(group, |style| style.visible())
-                            .child(
-                                Button::new(("open-untracked", ix))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::File)
-                                    .tooltip("Open file")
-                                    .accessibility_label("Open file")
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.emit(ChangesPanelEvent::OpenFile {
-                                            path: open.clone(),
-                                            line: 0,
-                                        });
-                                    })),
-                            )
-                            .child(
-                                Button::new(("keep-untracked", ix))
-                                    .outline()
-                                    .xsmall()
-                                    .label("Keep")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.keep_path(keep.clone(), window, cx)
-                                    })),
-                            ),
-                    )
+            .child(ph_ui::file_icon_element(&name, gpui_kit::px(14.)))
+            .child(div().flex_none().child(name))
+            .when(depth.is_none(), |this| {
+                this.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(dir),
+                )
+            })
+            .context_menu({
+                let (panel, path) = (cx.weak_entity(), path.to_string());
+                move |menu, _, _| new_file_menu(menu, panel.clone(), path.clone())
+            })
+            .into_any_element()
+    }
+
+    /// Changed folder `at` of View as Tree.
+    fn render_folder(&self, at: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(TreeRow::Folder {
+            path,
+            label,
+            depth,
+            files,
+        }) = self.tree.get(at).cloned()
+        else {
+            return div().into_any_element();
+        };
+        let counts = match &self.state {
+            State::Loaded(changes) => files.iter().fold((0, 0), |(added, removed), ix| {
+                let file = &changes.files[*ix];
+                (added + file.added(), removed + file.removed())
+            }),
+            _ => (0, 0),
+        };
+        self.folder_row(
+            ("change-folder", at),
+            path.clone(),
+            path,
+            label,
+            depth,
+            files,
+            Some(counts),
+            cx,
+        )
+    }
+
+    /// A folder row: folds on click; its menu keeps, discards or ignores
+    /// what is in it. `key` is what it folds by; `counts` the lines its
+    /// changed files add and remove (none for new files).
+    #[allow(clippy::too_many_arguments)]
+    fn folder_row(
+        &self,
+        id: (&'static str, usize),
+        key: String,
+        path: String,
+        label: String,
+        depth: usize,
+        files: Vec<usize>,
+        counts: Option<(usize, usize)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let folded = self.folded.contains(&key);
+        let new_files = counts.is_none();
+        h_flex()
+            .id(id)
+            .h_7()
+            .px_1p5()
+            .pl(tree_indent(depth))
+            .gap_1p5()
+            .rounded(cx.theme().radius)
+            .cursor_pointer()
+            .hover(|style| style.bg(cx.theme().list_hover))
+            .text_sm()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.folded.remove(&key) {
+                    this.folded.insert(key.clone());
+                }
+                this.sync_rows();
+                cx.notify();
             }))
+            .child(
+                Icon::new(if folded {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .xsmall()
+                .text_color(cx.theme().muted_foreground),
+            )
+            .child(ph_ui::folder_icon_element(&label, gpui_kit::px(14.)))
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .when_some(counts, |this, (added, removed)| {
+                // The width of a file's kind letter, so counts line up.
+                this.child(change_counts(added, removed, cx))
+                    .child(div().flex_none().w_4())
+            })
+            .context_menu({
+                let panel = cx.weak_entity();
+                move |menu, _, _| {
+                    folder_menu(menu, panel.clone(), path.clone(), files.clone(), new_files)
+                }
+            })
             .into_any_element()
     }
 }
+
+/// Folds a new files' folder apart from a changed one of the same path.
+const NEW_FOLDER: &str = "new:";
 
 /// `+12 −3`, in the git colours, small.
 fn change_counts(added: usize, removed: usize, cx: &gpui_kit::App) -> impl IntoElement {
@@ -1402,6 +1581,190 @@ fn ask_note(
             })
     });
     focus.update(cx, |input, cx| input.focus(window, cx));
+}
+
+/// The menu of changed file `ix` (`path`): see its changes, open it, keep
+/// or discard it.
+fn file_menu(
+    menu: gpui_kit::component::menu::PopupMenu,
+    panel: gpui_kit::WeakEntity<ChangesPanel>,
+    ix: usize,
+    path: String,
+    open_path: String,
+) -> gpui_kit::component::menu::PopupMenu {
+    use gpui_kit::component::menu::PopupMenuItem;
+    let diff = {
+        let (panel, path) = (panel.clone(), path.clone());
+        move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut gpui_kit::App| {
+            _ = panel.update(cx, |_, cx| {
+                cx.emit(ChangesPanelEvent::OpenDiff(Some(path.clone())))
+            });
+        }
+    };
+    let open = {
+        let panel = panel.clone();
+        move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut gpui_kit::App| {
+            _ = panel.update(cx, |_, cx| {
+                cx.emit(ChangesPanelEvent::OpenFile {
+                    path: open_path.clone(),
+                    line: 0,
+                })
+            });
+        }
+    };
+    let keep = {
+        let (panel, path) = (panel.clone(), path.clone());
+        move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
+            _ = panel.update(cx, |panel, cx| panel.keep_path(path.clone(), window, cx));
+        }
+    };
+    let discard = {
+        let panel = panel.clone();
+        move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
+            _ = panel.update(cx, |panel, cx| panel.discard_file(ix, window, cx));
+        }
+    };
+    menu.item(
+        PopupMenuItem::new("Open Changes")
+            .icon(Icons::GitCompare)
+            .on_click(diff),
+    )
+    .item(
+        PopupMenuItem::new("Open File")
+            .icon(IconName::File)
+            .on_click(open),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new("Keep")
+            .icon(IconName::Check)
+            .on_click(keep),
+    )
+    .item(
+        PopupMenuItem::new("Discard Changes")
+            .icon(IconName::Undo2)
+            .on_click(discard),
+    )
+    .separator()
+    .item(ignore_item(panel, path, false, true))
+}
+
+/// Add to .gitignore for `path` (a folder when `folder`). Git keeps
+/// tracking a file it tracks already, so that one gets a word about it.
+fn ignore_item(
+    panel: gpui_kit::WeakEntity<ChangesPanel>,
+    path: String,
+    folder: bool,
+    tracked: bool,
+) -> gpui_kit::component::menu::PopupMenuItem {
+    gpui_kit::component::menu::PopupMenuItem::new("Add to .gitignore")
+        .icon(Icons::EyeOff)
+        .on_click(move |_, window, cx| {
+            _ = panel.update(cx, |panel, cx| {
+                panel.add_to_gitignore(path.clone(), folder, tracked, window, cx)
+            });
+        })
+}
+
+/// The menu of a folder in View as Tree: keep, discard or ignore all of it.
+fn folder_menu(
+    menu: gpui_kit::component::menu::PopupMenu,
+    panel: gpui_kit::WeakEntity<ChangesPanel>,
+    path: String,
+    files: Vec<usize>,
+    new_files: bool,
+) -> gpui_kit::component::menu::PopupMenu {
+    use gpui_kit::component::menu::PopupMenuItem;
+    let keep = {
+        let (panel, files, path) = (panel.clone(), files.clone(), path.clone());
+        move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
+            _ = panel.update(cx, |panel, cx| {
+                if new_files {
+                    panel.keep_path(path.clone(), window, cx);
+                } else {
+                    panel.keep_files(&files, window, cx);
+                }
+            });
+        }
+    };
+    let discard = {
+        let (panel, files) = (panel.clone(), files.clone());
+        move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
+            _ = panel.update(cx, |panel, cx| {
+                for ix in files.iter().rev() {
+                    panel.discard_file(*ix, window, cx);
+                }
+            });
+        }
+    };
+    let menu = menu.item(
+        PopupMenuItem::new("Keep All")
+            .icon(IconName::Check)
+            .on_click(keep),
+    );
+    let menu = if new_files {
+        menu
+    } else {
+        menu.item(
+            PopupMenuItem::new("Discard All Changes")
+                .icon(IconName::Undo2)
+                .on_click(discard),
+        )
+    };
+    menu.separator()
+        .item(ignore_item(panel, path, true, !new_files))
+}
+
+/// How far a View as Tree row at `depth` is indented.
+fn tree_indent(depth: usize) -> gpui_kit::Pixels {
+    gpui_kit::px(6. + 14. * depth as f32)
+}
+
+/// Whether the Git tab shows changes as a tree of folders (View as Tree),
+/// the same in every Git tab of the session.
+static AS_TREE: AtomicBool = AtomicBool::new(false);
+
+fn as_tree() -> bool {
+    AS_TREE.load(Ordering::Relaxed)
+}
+
+/// The menu of a new file: open it, or keep it for the commit.
+fn new_file_menu(
+    menu: gpui_kit::component::menu::PopupMenu,
+    panel: gpui_kit::WeakEntity<ChangesPanel>,
+    path: String,
+) -> gpui_kit::component::menu::PopupMenu {
+    use gpui_kit::component::menu::PopupMenuItem;
+    let open = {
+        let (panel, path) = (panel.clone(), path.clone());
+        move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut gpui_kit::App| {
+            _ = panel.update(cx, |_, cx| {
+                cx.emit(ChangesPanelEvent::OpenFile {
+                    path: path.clone(),
+                    line: 0,
+                })
+            });
+        }
+    };
+    let keep = {
+        let (panel, path) = (panel.clone(), path.clone());
+        move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
+            _ = panel.update(cx, |panel, cx| panel.keep_path(path.clone(), window, cx));
+        }
+    };
+    menu.item(
+        PopupMenuItem::new("Open File")
+            .icon(IconName::File)
+            .on_click(open),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new("Keep")
+            .icon(IconName::Check)
+            .on_click(keep),
+    )
+    .separator()
+    .item(ignore_item(panel, path, false, false))
 }
 
 /// A letter for what happened to a file: A(dded), D(eleted), R(enamed),

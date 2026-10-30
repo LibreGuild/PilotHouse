@@ -190,6 +190,10 @@ pub struct ChatThread {
     /// Whether the running agent accepts images.
     accepts_images: bool,
     entries: Vec<Entry>,
+    /// The questions of `entries` still waiting for an answer, oldest
+    /// first: the sidebar and title bar ask on every frame, and a long
+    /// transcript is too much to search each time.
+    pending: Vec<Entity<PermissionRequest>>,
     /// Replies whose drawn view is kept, most recently drawn last (see
     /// [`KEPT_VIEWS`]).
     views: VecDeque<usize>,
@@ -276,6 +280,7 @@ impl ChatThread {
             importing: false,
             accepts_images: true,
             entries: Vec::new(),
+            pending: Vec::new(),
             views: VecDeque::new(),
             saved: 0,
             status: ThreadStatus::Idle,
@@ -605,20 +610,17 @@ impl ChatThread {
 
     /// The agent waits for the user to answer a question (a permission).
     pub fn is_waiting(&self, cx: &gpui_kit::App) -> bool {
-        self.entries.iter().rev().any(|entry| match entry {
-            Entry::Permission(request) => request.read(cx).is_pending(),
-            _ => false,
-        })
+        self.pending
+            .iter()
+            .any(|request| request.read(cx).is_pending())
     }
 
     /// The question the agent waits on, if any (a permission request's
     /// title).
     pub fn pending_question(&self, cx: &App) -> Option<String> {
-        self.entries.iter().rev().find_map(|entry| match entry {
-            Entry::Permission(request) if request.read(cx).is_pending() => {
-                Some(request.read(cx).title.to_string())
-            }
-            _ => None,
+        self.pending.iter().rev().find_map(|request| {
+            let request = request.read(cx);
+            request.is_pending().then(|| request.title.to_string())
         })
     }
 
@@ -1540,6 +1542,10 @@ impl ChatThread {
     fn add_request(&mut self, request: Entity<PermissionRequest>, cx: &mut Context<Self>) {
         ApprovalInbox::add(&request, cx);
         cx.observe(&request, |thread, request, cx| {
+            // An answered question stays answered.
+            thread
+                .pending
+                .retain(|pending| pending.read(cx).is_pending());
             if let Some(ix) = thread
                 .entries
                 .iter()
@@ -1549,6 +1555,7 @@ impl ChatThread {
             }
         })
         .detach();
+        self.pending.push(request.clone());
         self.push(Entry::Permission(request), cx);
     }
 
@@ -1841,17 +1848,7 @@ impl ChatThread {
     }
 
     fn cancel_pending_permissions(&mut self, cx: &mut Context<Self>) {
-        let pending: Vec<_> = self
-            .entries
-            .iter()
-            .filter_map(|entry| match entry {
-                Entry::Permission(request) if request.read(cx).is_pending() => {
-                    Some(request.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        for request in pending {
+        for request in std::mem::take(&mut self.pending) {
             request.update(cx, |request, cx| request.cancel(cx));
         }
     }

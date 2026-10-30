@@ -72,6 +72,14 @@ impl RpcProcess {
         cwd: &Path,
         env: &HashMap<String, String>,
     ) -> Result<(Arc<Self>, smol::channel::Receiver<Incoming>)> {
+        // Said plainly: the system reports a missing folder as the program
+        // missing ("npx: No such file or directory").
+        if !cwd.is_dir() {
+            anyhow::bail!(
+                "the folder it works in, {}, no longer exists",
+                cwd.display()
+            );
+        }
         let mut child = ph_env::command(program)
             .args(args)
             .current_dir(cwd)

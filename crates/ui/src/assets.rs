@@ -100,6 +100,9 @@ icon_assets!(
         Pointer,
         Wifi,
         WifiOff,
+        List,
+        ListTree,
+        EyeOff,
     ]
 );
 

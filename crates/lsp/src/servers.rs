@@ -12,6 +12,8 @@ pub struct ServerSpec {
     /// The LSP `languageId` for documents it opens.
     pub language: &'static str,
     pub extensions: &'static [&'static str],
+    /// How to install it, shown when it is missing or fails.
+    pub install: &'static str,
 }
 
 /// Known servers, in order of preference per language.
@@ -21,6 +23,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "rust-analyzer",
         args: &[],
         language: "rust",
+        install: "rustup component add rust-analyzer",
         extensions: &["rs"],
     },
     ServerSpec {
@@ -28,6 +31,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "typescript-language-server",
         args: &["--stdio"],
         language: "typescript",
+        install: "npm install -g typescript typescript-language-server",
         extensions: &["ts", "tsx", "mts", "cts"],
     },
     ServerSpec {
@@ -35,6 +39,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "typescript-language-server",
         args: &["--stdio"],
         language: "javascript",
+        install: "npm install -g typescript typescript-language-server",
         extensions: &["js", "jsx", "mjs", "cjs"],
     },
     ServerSpec {
@@ -42,6 +47,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "pyright-langserver",
         args: &["--stdio"],
         language: "python",
+        install: "npm install -g pyright",
         extensions: &["py", "pyi"],
     },
     ServerSpec {
@@ -49,6 +55,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "pylsp",
         args: &[],
         language: "python",
+        install: "pip install python-lsp-server",
         extensions: &["py", "pyi"],
     },
     ServerSpec {
@@ -56,6 +63,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "gopls",
         args: &[],
         language: "go",
+        install: "go install golang.org/x/tools/gopls@latest",
         extensions: &["go"],
     },
     ServerSpec {
@@ -63,6 +71,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "clangd",
         args: &[],
         language: "cpp",
+        install: "Install clangd (LLVM): brew install llvm, apt install clangd, or winget install LLVM.LLVM",
         extensions: &["c", "h", "cc", "cpp", "cxx", "hpp", "hh", "m", "mm"],
     },
     ServerSpec {
@@ -70,6 +79,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "kotlin-language-server",
         args: &[],
         language: "kotlin",
+        install: "brew install kotlin-language-server (or the release from github.com/fwcd/kotlin-language-server)",
         extensions: &["kt", "kts"],
     },
     ServerSpec {
@@ -77,6 +87,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "jdtls",
         args: &[],
         language: "java",
+        install: "brew install jdtls (Eclipse JDT Language Server)",
         extensions: &["java"],
     },
     ServerSpec {
@@ -84,6 +95,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "csharp-ls",
         args: &[],
         language: "csharp",
+        install: "dotnet tool install --global csharp-ls",
         extensions: &["cs"],
     },
     ServerSpec {
@@ -91,6 +103,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "sourcekit-lsp",
         args: &[],
         language: "swift",
+        install: "Comes with Xcode or the Swift toolchain (sourcekit-lsp)",
         extensions: &["swift"],
     },
     ServerSpec {
@@ -98,6 +111,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "dart",
         args: &["language-server", "--protocol=lsp"],
         language: "dart",
+        install: "Comes with the Dart and Flutter SDKs",
         extensions: &["dart"],
     },
     ServerSpec {
@@ -105,6 +119,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "zls",
         args: &[],
         language: "zig",
+        install: "brew install zls",
         extensions: &["zig"],
     },
     ServerSpec {
@@ -112,6 +127,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "lua-language-server",
         args: &[],
         language: "lua",
+        install: "brew install lua-language-server",
         extensions: &["lua"],
     },
     ServerSpec {
@@ -119,6 +135,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "ruby-lsp",
         args: &[],
         language: "ruby",
+        install: "gem install ruby-lsp",
         extensions: &["rb"],
     },
     ServerSpec {
@@ -126,6 +143,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "bash-language-server",
         args: &["start"],
         language: "shellscript",
+        install: "npm install -g bash-language-server",
         extensions: &["sh", "bash"],
     },
     ServerSpec {
@@ -133,6 +151,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "vscode-json-language-server",
         args: &["--stdio"],
         language: "json",
+        install: "npm install -g vscode-langservers-extracted",
         extensions: &["json", "jsonc"],
     },
     ServerSpec {
@@ -140,6 +159,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "yaml-language-server",
         args: &["--stdio"],
         language: "yaml",
+        install: "npm install -g yaml-language-server",
         extensions: &["yaml", "yml"],
     },
     ServerSpec {
@@ -147,6 +167,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "vscode-html-language-server",
         args: &["--stdio"],
         language: "html",
+        install: "npm install -g vscode-langservers-extracted",
         extensions: &["html", "htm"],
     },
     ServerSpec {
@@ -154,6 +175,7 @@ pub const SERVERS: &[ServerSpec] = &[
         program: "vscode-css-language-server",
         args: &["--stdio"],
         language: "css",
+        install: "npm install -g vscode-langservers-extracted",
         extensions: &["css", "scss", "less"],
     },
 ];

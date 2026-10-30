@@ -9,19 +9,24 @@
 //! [`index_files`] lists a project's files (for `@file` mentions).
 
 mod blame_view;
+pub mod code_index;
 mod code_intel;
 pub mod diff_tab;
 mod dir_tree;
+pub mod editing;
 mod file_index;
 pub mod file_ops;
 mod file_view;
 mod files_panel;
 pub mod fuzzy;
+mod highlight;
 pub mod large;
+mod line_changes;
 mod name_dialog;
 mod quick_open;
 pub mod roots;
 mod search;
+mod symbol_search;
 pub mod symbols;
 mod tree_menu;
 pub mod unsaved;
@@ -39,6 +44,8 @@ actions!(
     [
         /// Fuzzy-find a file and open it (⌘P).
         QuickOpen,
+        /// Find a function, class or type by name in the workspace (⌘T).
+        GoToSymbol,
         /// Open the file selected in the tree (Enter; arrows move and fold).
         OpenSelected,
         /// Search the whole project for text (⌘⇧F).
@@ -97,8 +104,42 @@ actions!(
         RevealFile,
         /// Select the open file in the Files tree.
         RevealInFiles,
+        /// Comment out the selected lines, or uncomment them (⌘/).
+        ToggleComment,
+        /// Delete the word before the cursor, never past the line's start
+        /// (⌥⌫, Ctrl+Backspace).
+        DeleteWordLeft,
+        /// Delete the word after the cursor, never past the line's end.
+        DeleteWordRight,
+        /// Move the selected lines up (⌥↑).
+        MoveLineUp,
+        /// Move the selected lines down (⌥↓).
+        MoveLineDown,
+        /// Copy the selected lines above them (⇧⌥↑).
+        CopyLineUp,
+        /// Copy the selected lines below them (⇧⌥↓).
+        CopyLineDown,
+        /// Delete the selected lines (⌘⇧K).
+        DeleteLine,
+        /// Start a new line below the cursor's (⌘↵).
+        InsertLineBelow,
+        /// Start a new line above the cursor's (⌘⇧↵).
+        InsertLineAbove,
+        /// Select the word, then each next place it appears (⌘D).
+        SelectNextOccurrence,
+        /// Jump to a line (Ctrl+G).
+        GoToLine,
+        /// Back to where the cursor was before a jump or another file
+        /// (⌃- on a Mac, Alt+← elsewhere).
+        NavigateBack,
+        /// Forward again after Back (⌃⇧-, Alt+→).
+        NavigateForward,
     ]
 );
+
+/// The code editor's text, inside an open file (its keys win over the text
+/// input's own).
+const EDITOR_TEXT_CONTEXT: &str = "FileView > Input";
 
 /// The key context of the Files tree, where its keys act on the selection.
 pub const FILE_TREE_CONTEXT: &str = "FileTree";
@@ -109,6 +150,7 @@ pub fn init(cx: &mut App, workspace_context: &'static str) {
     ph_preview::rich::init(cx);
     cx.bind_keys([
         KeyBinding::new("secondary-p", QuickOpen, Some(workspace_context)),
+        KeyBinding::new("secondary-t", GoToSymbol, Some(workspace_context)),
         KeyBinding::new("enter", OpenSelected, Some("Tree")),
         KeyBinding::new("secondary-shift-f", FindInProject, Some(workspace_context)),
         KeyBinding::new("secondary-s", SaveFile, Some(file_view::FILE_VIEW_CONTEXT)),
@@ -133,6 +175,55 @@ pub fn init(cx: &mut App, workspace_context: &'static str) {
             CloseFile,
             Some(files_panel::FILES_PANEL_CONTEXT),
         ),
+        // In the editor, ⌘N makes a file (beside the open one), as in VS
+        // Code; elsewhere it starts a chat.
+        KeyBinding::new(
+            "secondary-n",
+            NewFile,
+            Some(files_panel::FILES_PANEL_CONTEXT),
+        ),
+    ]);
+    // Zoom takes ⌘- on a Mac (Ctrl+- elsewhere), as in VS Code; Back takes
+    // what VS Code gives it there.
+    let (back, forward) = if cfg!(target_os = "macos") {
+        ("ctrl--", "ctrl-shift--")
+    } else {
+        ("alt-left", "alt-right")
+    };
+    cx.bind_keys([
+        KeyBinding::new(back, NavigateBack, Some(files_panel::FILES_PANEL_CONTEXT)),
+        KeyBinding::new(
+            forward,
+            NavigateForward,
+            Some(files_panel::FILES_PANEL_CONTEXT),
+        ),
+    ]);
+    // Over the editor's own keys (the same keys in its text input), so
+    // these are bound after it and scoped to the input inside a file view.
+    let text = Some(EDITOR_TEXT_CONTEXT);
+    let word_left = if cfg!(target_os = "macos") {
+        "alt-backspace"
+    } else {
+        "ctrl-backspace"
+    };
+    let word_right = if cfg!(target_os = "macos") {
+        "alt-delete"
+    } else {
+        "ctrl-delete"
+    };
+    cx.bind_keys([
+        KeyBinding::new("secondary-/", ToggleComment, text),
+        KeyBinding::new(word_left, DeleteWordLeft, text),
+        KeyBinding::new(word_right, DeleteWordRight, text),
+        KeyBinding::new("alt-up", MoveLineUp, text),
+        KeyBinding::new("alt-down", MoveLineDown, text),
+        KeyBinding::new("shift-alt-up", CopyLineUp, text),
+        KeyBinding::new("shift-alt-down", CopyLineDown, text),
+        KeyBinding::new("secondary-shift-k", DeleteLine, text),
+        KeyBinding::new("secondary-enter", InsertLineBelow, text),
+        KeyBinding::new("secondary-shift-enter", InsertLineAbove, text),
+        KeyBinding::new("secondary-d", SelectNextOccurrence, text),
+        KeyBinding::new("ctrl-g", GoToLine, text),
     ]);
     let tree = Some(FILE_TREE_CONTEXT);
     let trash = if cfg!(target_os = "macos") {

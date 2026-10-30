@@ -84,17 +84,30 @@ impl CommitBox {
         cx.notify();
     }
 
-    /// Asks the agent for a message describing the staged diff.
+    /// Asks the agent for a message describing the staged diff or, with
+    /// nothing staged, every change (what Commit All commits), as VS Code
+    /// does.
     fn write_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(writer) = self.writer.clone() else {
             return;
         };
         let root = self.root(cx);
+        let staged = self
+            .repo
+            .read(cx)
+            .status()
+            .is_some_and(|status| !status.staged.is_empty());
         self.writing = true;
         cx.notify();
         let diff = cx.background_spawn({
             let root = root.clone();
-            async move { ph_git::staged_diff(&root) }
+            async move {
+                if staged {
+                    ph_git::staged_diff(&root)
+                } else {
+                    ph_git::all_changes_diff(&root)
+                }
+            }
         });
         self._task = Some(cx.spawn_in(window, async move |this, cx| {
             let prompt = match diff.await {
@@ -103,9 +116,7 @@ impl CommitBox {
                     _ = this.update_in(cx, |this, window, cx| {
                         this.writing = false;
                         window.push_notification(
-                            Notification::warning(
-                                "Stage changes first (Keep), then write a message.",
-                            ),
+                            Notification::warning("There are no changes to describe."),
                             cx,
                         );
                     });
@@ -141,13 +152,25 @@ impl CommitBox {
         }));
     }
 
+    /// Commits what is staged; with nothing staged, every change (Commit
+    /// All, VS Code's smart commit).
     fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let message = self.message.read(cx).value().to_string();
         let (root, amend) = (self.root(cx), self.amend);
+        let all = !amend
+            && self
+                .repo
+                .read(cx)
+                .status()
+                .is_some_and(|status| status.staged.is_empty() && !status.changes.is_empty());
         self.committing = true;
         cx.notify();
-        let work =
-            cx.background_spawn(async move { ph_git::commit::commit(&root, &message, amend) });
+        let work = cx.background_spawn(async move {
+            if all {
+                ph_git::stage_all(&root)?;
+            }
+            ph_git::commit::commit(&root, &message, amend)
+        });
         self._task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
             _ = this.update_in(cx, |this, window, cx| {
@@ -189,14 +212,17 @@ impl CommitBox {
 
 impl Render for CommitBox {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let staged = self
+        let (staged, changed) = self
             .repo
             .read(cx)
             .status()
-            .map(|status| status.staged.clone())
+            .map(|status| (status.staged.clone(), !status.changes.is_empty()))
             .unwrap_or_default();
         let has_message = !self.message.read(cx).value().trim().is_empty();
-        let can_commit = has_message && (!staged.is_empty() || self.amend) && !self.committing;
+        // Nothing staged: Commit All keeps every change first.
+        let commit_all = staged.is_empty() && changed && !self.amend;
+        let can_commit =
+            has_message && (!staged.is_empty() || self.amend || changed) && !self.committing;
         v_flex()
             .gap_2()
             .p_3()
@@ -226,8 +252,12 @@ impl Render for CommitBox {
                                 } else {
                                     "Write message"
                                 })
-                                .disabled(self.writing || staged.is_empty())
-                                .tooltip("An agent writes the message from the staged changes")
+                                .disabled(self.writing || (staged.is_empty() && !changed))
+                                .tooltip(if staged.is_empty() {
+                                    "An agent writes the message from every change"
+                                } else {
+                                    "An agent writes the message from the staged changes"
+                                })
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.write_message(window, cx)
                                 })),
@@ -238,7 +268,16 @@ impl Render for CommitBox {
                             .small()
                             .primary()
                             .when(self.committing, |this| this.child(Spinner::new().xsmall()))
-                            .label(if self.amend { "Amend commit" } else { "Commit" })
+                            .label(if self.amend {
+                                "Amend commit"
+                            } else if commit_all {
+                                "Commit All"
+                            } else {
+                                "Commit"
+                            })
+                            .when(commit_all, |this| {
+                                this.tooltip("Nothing is kept yet: keeps every change, new files too, and commits them")
+                            })
                             .disabled(!can_commit)
                             .on_click(cx.listener(|this, _, window, cx| this.commit(window, cx))),
                     ),
@@ -251,9 +290,11 @@ impl Render for CommitBox {
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(if staged.is_empty() {
-                                SharedString::from(
-                                    "Nothing staged yet: Keep the changes to commit below.",
-                                )
+                                SharedString::from(if changed {
+                                    "Nothing kept yet: Commit All commits every change, or Keep files below."
+                                } else {
+                                    "No changes."
+                                })
                             } else {
                                 format!("Staged ({})", staged.len()).into()
                             }),

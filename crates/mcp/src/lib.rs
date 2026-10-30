@@ -58,12 +58,16 @@ pub struct Session {
     options: BridgeOptions,
     client: Option<ControlClient>,
     project_id: Option<i64>,
+    /// This agent session, for the tab it uses in agents' Chrome: one bridge
+    /// runs per agent session.
+    owner: String,
 }
 
 impl Session {
     pub fn new(options: BridgeOptions) -> Self {
         Self {
             project_id: options.project_id,
+            owner: format!("{}-{}", options.agent_name, std::process::id()),
             options,
             client: None,
         }
@@ -135,7 +139,12 @@ impl Session {
         let tool = tools::find(name).with_context(|| format!("unknown tool `{name}`"))?;
         let project_id = self.project_id()?;
         let agent = self.options.agent_name.clone();
-        let (method, params) = (tool.build)(arguments, project_id, &agent)?;
+        let (method, mut params) = (tool.build)(arguments, project_id, &agent)?;
+        // Agents' Chrome gives each agent session a tab of its own.
+        if method.starts_with("chrome.") {
+            params["owner"] = json!(self.owner);
+            params["agent"] = json!(agent);
+        }
         let result = match self.client()?.call(method, params) {
             Ok(result) => result,
             // The app quit or restarted: connect again for the next call

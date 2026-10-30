@@ -385,6 +385,54 @@ impl Store {
 
     /// The space for chats outside any workspace, made (with a scratch
     /// folder under `scratch_root`) the first time.
+    /// Makes again the scratch folders (of the Chats space and of
+    /// workspaces without folders) that are gone from where they were
+    /// recorded, as after the data folder moved: under the same name in
+    /// `scratch_root`, so agents can start in them again. These folders
+    /// belong to PilotHouse; a workspace's own folders are never touched.
+    /// Returns how many were made again.
+    pub fn heal_scratch_folders(&self, scratch_root: &Path) -> Result<usize> {
+        let missing: Vec<(ProjectId, PathBuf)> = {
+            let conn = self.conn();
+            let mut statement =
+                conn.prepare("SELECT id, path FROM projects WHERE kind IN ('empty', 'chats')")?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, ProjectId>(0)?, row.get::<_, String>(1)?))
+                })?
+                .filter_map(|row| row.ok())
+                .map(|(id, path)| (id, PathBuf::from(path)))
+                .filter(|(_, path)| {
+                    !path.is_dir()
+                        && path
+                            .parent()
+                            .and_then(Path::file_name)
+                            .is_some_and(|parent| parent == "workspaces")
+                })
+                .collect()
+        };
+        let mut healed = 0;
+        for (id, old) in missing {
+            let Some(name) = old.file_name() else {
+                continue;
+            };
+            let scratch = scratch_root.join(name);
+            crate::paths::ensure_private_dir(&scratch)?;
+            let scratch = crate::paths::canonical(&scratch)?;
+            self.conn().execute(
+                "UPDATE projects SET path = ?2 WHERE id = ?1",
+                params![id, scratch.to_string_lossy()],
+            )?;
+            tracing::info!(
+                "scratch folder {} made again at {}",
+                old.display(),
+                scratch.display()
+            );
+            healed += 1;
+        }
+        Ok(healed)
+    }
+
     pub fn chats_space(&self, scratch_root: &Path) -> Result<Project> {
         let find = |conn: &rusqlite::Connection| {
             conn.query_row(
@@ -602,6 +650,36 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ph-store-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn scratch_folders_come_back_after_the_data_folder_moves() {
+        let store = Store::open_in_memory().unwrap();
+        let old_root = temp_folder("old-scratch").join("workspaces");
+        let chats = store.chats_space(&old_root).unwrap();
+        let empty = store
+            .create_empty_workspace("Workspace 1", &old_root)
+            .unwrap();
+        let mine = temp_folder("a-real-folder");
+        let folder = store.add_project(&mine).unwrap();
+        std::fs::remove_dir_all(&old_root).unwrap();
+        std::fs::remove_dir_all(&mine).unwrap();
+
+        let new_root = temp_folder("new-scratch").join("workspaces");
+        assert_eq!(store.heal_scratch_folders(&new_root).unwrap(), 2);
+        for id in [chats.id, empty.id] {
+            let project = store.project(id).unwrap().unwrap();
+            assert!(
+                project.path.is_dir()
+                    && project
+                        .path
+                        .starts_with(crate::paths::canonical(&new_root).unwrap())
+            );
+        }
+        // A workspace's own folder is never made up.
+        let folder = store.project(folder.id).unwrap().unwrap();
+        assert!(!folder.path.exists());
+        assert_eq!(store.heal_scratch_folders(&new_root).unwrap(), 0);
     }
 
     #[test]

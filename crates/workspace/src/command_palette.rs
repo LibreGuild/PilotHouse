@@ -319,6 +319,12 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
                 &["view", "sidebar", "chats"],
             ),
             Entry::action(
+                "Open PilotHouse Chrome (agents' browser, to sign in or watch)",
+                IconName::Globe,
+                ph_browser::OpenAgentChrome,
+                &["chrome", "edge", "browser", "sign in", "login", "agents"],
+            ),
+            Entry::action(
                 "Show the agents at work",
                 ph_ui::Icons::Bot,
                 ShowAgentsView,

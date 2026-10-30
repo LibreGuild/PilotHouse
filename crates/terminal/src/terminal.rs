@@ -89,6 +89,10 @@ pub struct Terminal {
     columns: usize,
     rows: usize,
     _events: Task<()>,
+    /// When the program last wrote to the screen.
+    last_output: Option<std::time::Instant>,
+    /// Types a command once the shell has shown its prompt.
+    _type_when_ready: Option<Task<()>>,
 }
 
 impl EventEmitter<TerminalEvent> for Terminal {}
@@ -241,6 +245,8 @@ impl Terminal {
             columns: shell.columns,
             rows: shell.rows,
             _events: events,
+            last_output: None,
+            _type_when_ready: None,
         }
     }
 
@@ -325,6 +331,40 @@ impl Terminal {
         self.write(format!("{command}\r").into_bytes());
     }
 
+    /// Types `command` once the shell is ready for it: it has drawn
+    /// something (its prompt) and gone quiet. A shell still starting up
+    /// (PowerShell loading its profile on a slow computer) can drop what is
+    /// typed before; after a few seconds it is typed anyway.
+    pub fn run_command_when_ready(&mut self, command: String, cx: &mut Context<Self>) {
+        const QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+        const GIVE_UP: std::time::Duration = std::time::Duration::from_secs(8);
+        let started = std::time::Instant::now();
+        self._type_when_ready = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                let Ok(ready) = this.update(cx, |terminal, _| {
+                    terminal.exited
+                        || started.elapsed() > GIVE_UP
+                        || terminal
+                            .last_output
+                            .is_some_and(|last| last.elapsed() >= QUIET)
+                }) else {
+                    return;
+                };
+                if ready {
+                    _ = this.update(cx, |terminal, _| {
+                        if !terminal.exited {
+                            terminal.run_command(&command);
+                        }
+                    });
+                    return;
+                }
+            }
+        }));
+    }
+
     /// Ctrl-C: stops whatever runs in the foreground.
     pub fn interrupt(&self) {
         self.write(vec![0x03]);
@@ -373,6 +413,7 @@ impl Terminal {
                     self.mark_exited(cx);
                 }
                 Event::Exit => self.mark_exited(cx),
+                Event::Wakeup => self.last_output = Some(std::time::Instant::now()),
                 _ => {}
             }
         }

@@ -4,15 +4,16 @@ Crate: `ph-runs`. The **Run** tab.
 
 ## Run configurations
 
-- **Detected** from the project root, without running anything: `package.json` scripts (with npm, pnpm, yarn or bun, chosen by lockfile), cargo, go, Django `manage.py`, pytest, Gradle, Docker Compose, and `Makefile` and `justfile` targets. Script names come from the repository, so unusual ones are shell-quoted.
+- **Detected** from the project root, without running anything: `package.json` scripts (with npm, pnpm, yarn or bun, chosen by lockfile), cargo, go, Django `manage.py`, `main.py` and `app.py`, pytest, Maven (`mvnw` when there is one; `spring-boot:run` for Spring Boot), .NET (`dotnet run`, `build`, `test` for a project or solution), CMake (configure and build), Flutter and Dart, Deno tasks, Gradle (Android: install and *Build debug APK*; a JVM application: `gradle run`), Docker Compose, and `Makefile` and `justfile` targets. Script names come from the repository, so unusual ones are shell-quoted.
 - **Your own**: **Add** a name and a command. These are stored per project in the database, not in the repository.
-- **Run** opens a terminal tab named after the configuration and types the command, so the output stays and Ctrl-C works. Running it again stops the previous run first. Running a configuration turns the Terminal tab on if it was hidden.
+- **Run** opens a terminal tab named after the configuration and types the command once the new shell has shown its prompt (a shell still loading its profile, PowerShell on a slow computer, would drop what is typed before), so the output stays and Ctrl-C works. Running it again stops the previous run first. Running a configuration turns the Terminal tab on if it was hidden.
 
 ## Android apps
 
 When a folder is a Gradle project with an app module (`com.android.application`), the tab starts with an **Android app** card (`ph_devices::AndroidRun`), like Android Studio's run bar:
 
 - **Module** (when there are several), **build variant** (product flavors per dimension times build types, read from `build.gradle(.kts)` without running Gradle; `debug` first) and **device** (the same menu as the Devices pane, with emulators to start and *Connect a device…*).
+- **Build APK** builds the picked module and variant for every ABI with no device needed, then shows the APK's name with buttons to show it in its folder or copy its path, as Android Studio's *Build APK(s)*.
 - **Run** builds `:<module>:assemble<Variant>` with the project's wrapper, installs the APK on that device, stops the app if it runs and starts it, then shows the Devices pane. A status line says what it is doing and for how long; **Build log** shows Gradle's output with errors in red, and opens by itself when a step fails. **Stop** ends the build, or the app.
 - **Fast like Studio's builds**: Gradle is told the device's ABIs (`android.injected.build.abi`), so native code is built for that device only, and the Gradle daemon is reused between runs. Gradle runs on Android Studio's bundled JDK when one is installed (as Studio does), since a newer JDK on `PATH` can break the build. The APK and application id come from the plugin's own listing (`output-metadata.json`, following Studio's redirect file), so per-variant suffixes need no parsing.
 

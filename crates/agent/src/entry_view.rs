@@ -15,6 +15,7 @@ use gpui_kit::component::{
     h_flex,
     shimmer::ShimmerText,
     spinner::Spinner,
+    text::TextView,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -522,10 +523,48 @@ fn render_user(
                     .rounded(cx.theme().radius_lg)
                     .bg(cx.theme().muted)
                     .text_sm()
-                    .child(text.to_string()),
+                    // Selectable and copyable like a reply, shown as typed.
+                    .child(
+                        TextView::markdown(
+                            SharedString::from(format!("user-text-{entry_ix}")),
+                            as_typed(text),
+                        )
+                        .selectable(true),
+                    ),
             )
         })
         .into_any_element()
+}
+
+/// Markdown that shows `text` as typed: punctuation escaped (no emphasis,
+/// links or headings), each line its own line, leading indentation kept.
+fn as_typed(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 4);
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        let body = line.trim_start_matches([' ', '\t']);
+        // Leading blanks as no-break spaces: kept, and never read as an
+        // indented code block.
+        for blank in line[..line.len() - body.len()].chars() {
+            let width = if blank == '\t' { 4 } else { 1 };
+            out.extend(std::iter::repeat_n('\u{a0}', width));
+        }
+        for ch in body.chars() {
+            if ch.is_ascii_punctuation() {
+                out.push('\\');
+            }
+            out.push(ch);
+        }
+        match lines.peek() {
+            None => {}
+            // A hard break between lines of one paragraph.
+            Some(next) if !line.trim().is_empty() && !next.trim().is_empty() => {
+                out.push_str("\\\n")
+            }
+            Some(_) => out.push('\n'),
+        }
+    }
+    out
 }
 
 fn render_sign_in(
@@ -1402,4 +1441,18 @@ fn render_notice(text: &str, is_error: bool, cx: &App) -> AnyElement {
         })
         .child(div().flex_1().min_w_0().child(text.to_string()))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::as_typed;
+
+    #[test]
+    fn user_text_shows_as_typed() {
+        assert_eq!(as_typed("*not* bold"), "\\*not\\* bold");
+        assert_eq!(as_typed("# 1. [x](y)"), "\\# 1\\. \\[x\\]\\(y\\)");
+        assert_eq!(as_typed("one\ntwo\n\nthree"), "one\\\ntwo\n\nthree");
+        assert_eq!(as_typed("    code"), "\u{a0}\u{a0}\u{a0}\u{a0}code");
+        assert_eq!(as_typed("path\\"), "path\\\\");
+    }
 }

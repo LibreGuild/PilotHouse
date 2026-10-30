@@ -162,9 +162,14 @@ impl Roots {
     /// Searches every folder; paths in the results name their folder.
     /// Searches tree folder `dir` only; paths come back as the tree names
     /// them.
-    pub fn search_in(&self, dir: &str, query: &str) -> anyhow::Result<SearchResults> {
+    pub fn search_in(
+        &self,
+        dir: &str,
+        query: &str,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> anyhow::Result<SearchResults> {
         let (root, within) = self.split(dir).context("not a folder in this workspace")?;
-        let mut found = search_project(&root.path.join(within), query)?;
+        let mut found = search_project(&root.path.join(within), query, cancel)?;
         for hit in &mut found.matches {
             let inside = if within.is_empty() {
                 hit.path.clone()
@@ -176,10 +181,14 @@ impl Roots {
         Ok(found)
     }
 
-    pub fn search(&self, query: &str) -> anyhow::Result<SearchResults> {
+    pub fn search(
+        &self,
+        query: &str,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> anyhow::Result<SearchResults> {
         let mut all = SearchResults::default();
         for root in &self.0 {
-            let mut found = search_project(&root.path, query)?;
+            let mut found = search_project(&root.path, query, cancel)?;
             for hit in &mut found.matches {
                 hit.path = self.prefixed(root, &hit.path);
             }
@@ -267,7 +276,9 @@ mod tests {
                 .iter()
                 .any(|file| &**file == "server/src/main.rs")
         );
-        let found = roots.search("serve").unwrap();
+        let found = roots
+            .search("serve", &std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
         let paths: Vec<_> = found.matches.iter().map(|hit| hit.path.as_str()).collect();
         assert_eq!(paths, ["client/src/main.rs", "server/src/main.rs"]);
     }

@@ -14,7 +14,7 @@ use std::rc::Rc;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui_kit::component::input::{
-    Editor, EditorState, InputEvent, Position, RopeExt as _, TabSize, TextDecoration,
+    Editor, EditorState, InputEvent, Position, Rope, RopeExt as _, TabSize, TextDecoration,
     TextDecorationCollection,
 };
 use gpui_kit::component::{
@@ -32,7 +32,9 @@ use ph_ui::{EmptyState, Icons};
 
 use crate::blame_view::{self, Blamed};
 use crate::code_intel::{self, OpenLocation};
+use crate::editing;
 use crate::large::LargeFileView;
+use crate::line_changes::{LineChange, line_changes};
 use crate::{
     AskAboutSelection, CopyAsMarkdown, CopyFilePath, CopyFileRelativePath, CopyLinkToLines,
     CopyReference, ExplainSelection, FindBugsInSelection, FindReferences, RenameSymbol, RevealFile,
@@ -139,7 +141,13 @@ pub enum FileViewEvent {
     OpenInBrowser(PathBuf),
     /// Select this file in the Files tree.
     RevealInTree,
+    /// The cursor jumped far (to a definition, a line): it was on this
+    /// 0-based line, for Back.
+    Jumped(u32),
 }
+
+/// A cursor move of at least this many lines counts as a jump for Back.
+const JUMP_LINES: u32 = 10;
 
 /// The view last picked for each kind of file, so the next one opens the
 /// same way (for this run of the app).
@@ -187,6 +195,9 @@ pub struct FileView {
     _blame: Option<Task<()>>,
     /// The project's language servers, and how to open another file.
     lsp: Option<Entity<LspManager>>,
+    /// The folder's declarations, shared with its other open files: go to
+    /// definition, the outline and references without a language server.
+    index: std::sync::Arc<crate::code_index::CodeIndex>,
     open_location: Option<OpenLocation>,
     /// Errors and warnings from the language server.
     problems: (usize, usize),
@@ -196,7 +207,22 @@ pub struct FileView {
     _intel: Option<Task<()>>,
     editor: Entity<EditorState>,
     content: Content,
+    /// The text differs from `saved`.
     dirty: bool,
+    /// The cursor's line as last seen, to notice jumps.
+    cursor_line: Option<u32>,
+    /// ⌘D's progress: the selection it started from and the last place it
+    /// added (forgotten when the text changes).
+    occurrences: Option<(std::ops::Range<usize>, std::ops::Range<usize>)>,
+    /// The text as it is on disk (as last read or saved): undoing back to
+    /// it leaves nothing unsaved. A rope, so keeping it costs no copy.
+    saved: Rope,
+    /// The file as Git has it staged (`None`: not tracked), and the lines
+    /// that differ from it, marked beside the line numbers.
+    git_base: Option<std::sync::Arc<str>>,
+    line_marks: Rc<Vec<(usize, LineChange)>>,
+    _git_base: Option<Task<()>>,
+    _marks: Option<Task<()>>,
     /// The text came back from changes kept after a crash or quit
     /// ([`crate::unsaved`]), not from the file.
     restored: bool,
@@ -247,7 +273,10 @@ impl FileView {
             .unwrap_or(View::Source);
         let options = ph_theme::preferences::preferences(cx).editor;
         let editor = cx.new(|cx| {
-            EditorState::new(window, cx)
+            let mut editor = EditorState::new(window, cx);
+            // Colours each keystroke's line rather than the whole file.
+            editor.set_highlighter_factory(crate::highlight::factory(), cx);
+            editor
                 // ⌘F find and replace in the file.
                 .searchable(true)
                 .language(language)
@@ -280,17 +309,23 @@ impl FileView {
             });
         let subscription = cx.subscribe(&editor, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                if !this.dirty {
-                    this.dirty = true;
-                    cx.notify();
-                }
+                this.text_changed(cx);
                 this.schedule_sync(cx);
-                this.schedule_keep(cx);
                 this.schedule_preview(cx);
             }
         });
         // The footer follows the cursor.
-        let cursor = cx.observe(&editor, |_, _, cx| cx.notify());
+        // The footer follows the cursor; far jumps are remembered for Back.
+        let cursor = cx.observe(&editor, |this: &mut Self, editor, cx| {
+            let line = editor.read(cx).cursor_position().line;
+            if let Some(last) = this.cursor_line.replace(line)
+                && last.abs_diff(line) >= JUMP_LINES
+                && this.content == Content::Text
+            {
+                cx.emit(FileViewEvent::Jumped(last));
+            }
+            cx.notify();
+        });
         let mut view = Self {
             relative: relative.to_string().into(),
             root: root.to_path_buf(),
@@ -302,6 +337,13 @@ impl FileView {
             editor,
             content: Content::Loading,
             dirty: false,
+            occurrences: None,
+            cursor_line: None,
+            saved: Rope::new(),
+            git_base: None,
+            line_marks: Rc::default(),
+            _git_base: None,
+            _marks: None,
             restored: false,
             not_utf8: false,
             save_error: None,
@@ -318,6 +360,7 @@ impl FileView {
             label: SharedString::default(),
             _subscriptions: vec![subscription, preferences, cursor],
             lsp: None,
+            index: crate::code_index::CodeIndex::for_root(root),
             open_location,
             problems: (0, 0),
             squiggles: None,
@@ -363,23 +406,26 @@ impl FileView {
             lsp.read(cx).is_open(&self.absolute)
         });
         let (here, open) = (self.absolute.clone(), self.open_location.clone());
-        let fallback = Rc::new(crate::code_intel::SymbolDefinitions::new(
-            self.root.clone(),
-            self.absolute.clone(),
-        ));
+        // The folder's index is read ahead, off the UI thread, so the first
+        // Ctrl+click does not wait for it.
+        let index = self.index.clone();
+        cx.background_spawn(async move { index.warm() }).detach();
+        let binding = lsp.map(|lsp| Binding {
+            manager: lsp.downgrade(),
+            path: here.clone(),
+        });
+        let definitions = Rc::new(crate::code_intel::Definitions {
+            server: binding.clone(),
+            index: self.index.clone(),
+            root: self.root.clone(),
+            here: here.clone(),
+        });
         self.editor.update(cx, |editor, cx| {
             let hooks = editor.lsp_mut();
-            match lsp {
-                Some(lsp) => {
-                    let binding = Rc::new(Binding {
-                        manager: lsp.downgrade(),
-                        path: here.clone(),
-                    });
-                    hooks.hover_provider = Some(binding.clone());
-                    hooks.definition_provider = Some(binding.clone());
-                    hooks.completion_provider = Some(binding);
-                }
-                None => hooks.definition_provider = Some(fallback),
+            hooks.definition_provider = Some(definitions);
+            if let Some(binding) = binding.map(Rc::new) {
+                hooks.hover_provider = Some(binding.clone());
+                hooks.completion_provider = Some(binding);
             }
             // A definition in another file opens it there.
             hooks.show_document = Some(Rc::new(move |params, window, cx| {
@@ -438,7 +484,7 @@ impl FileView {
         // while the user types (until the server sends fresh ones).
         let (error, warning, info) = (cx.theme().danger, cx.theme().warning, cx.theme().info);
         self.editor.update(cx, |editor, cx| {
-            let text = gpui_kit::component::input::Rope::from(editor.value().as_ref());
+            let text = editor.text().clone();
             let decorations: Vec<TextDecoration> = diagnostics
                 .iter()
                 .filter_map(|diagnostic| {
@@ -453,14 +499,35 @@ impl FileView {
                         Some(lsp_types::DiagnosticSeverity::WARNING) => warning,
                         _ => info,
                     };
+                    let tagged = |tag| {
+                        diagnostic
+                            .tags
+                            .as_ref()
+                            .is_some_and(|tags| tags.contains(&tag))
+                    };
+                    // As in VS Code: unused code is faded and deprecated
+                    // code struck through; a hint about either has no
+                    // squiggle of its own.
+                    let unused = tagged(lsp_types::DiagnosticTag::UNNECESSARY);
+                    let deprecated = tagged(lsp_types::DiagnosticTag::DEPRECATED);
+                    let quiet = (unused || deprecated)
+                        && matches!(
+                            diagnostic.severity,
+                            Some(lsp_types::DiagnosticSeverity::HINT) | None
+                        );
                     (start < end).then(|| {
                         TextDecoration::new(
                             start..end,
                             gpui_kit::HighlightStyle {
-                                underline: Some(gpui_kit::UnderlineStyle {
+                                underline: (!quiet).then_some(gpui_kit::UnderlineStyle {
                                     color: Some(color),
                                     thickness: gpui_kit::px(1.),
                                     wavy: true,
+                                }),
+                                fade_out: unused.then_some(0.45),
+                                strikethrough: deprecated.then_some(gpui_kit::StrikethroughStyle {
+                                    thickness: gpui_kit::px(1.),
+                                    color: None,
                                 }),
                                 ..Default::default()
                             },
@@ -491,7 +558,7 @@ impl FileView {
             },
             position: {
                 let editor = self.editor.read(cx);
-                let text = gpui_kit::component::input::Rope::from(editor.value().as_ref());
+                let text = editor.text().clone();
                 ph_lsp::position::to_server(&text, editor.cursor_position())
             },
         }
@@ -639,30 +706,66 @@ impl FileView {
         .detach();
     }
 
+    /// Where the name under the cursor is used: the language server's
+    /// answer, or else every whole-word use of it in the folder.
     fn find_references(&mut self, _: &FindReferences, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(lsp), Some(open)) = (self.lsp.clone(), self.open_location.clone()) else {
+        let Some(open) = self.open_location.clone() else {
             return;
         };
-        let params = lsp_types::ReferenceParams {
-            text_document_position: self.cursor_position(cx),
-            context: lsp_types::ReferenceContext {
-                include_declaration: true,
-            },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
+        let word = {
+            let editor = self.editor.read(cx);
+            code_intel::word_in_rope(editor.text(), editor.cursor()).map(|(word, _)| word)
         };
-        let request = lsp.update(cx, |lsp, cx| {
-            lsp.request::<lsp_types::request::References>(&self.absolute, params, cx)
+        let Some(word) = word else {
+            use gpui_kit::component::WindowExt as _;
+            use gpui_kit::component::notification::Notification;
+            window.push_notification(Notification::warning("No name under the cursor."), cx);
+            return;
+        };
+        let request = self.lsp.clone().map(|lsp| {
+            let params = lsp_types::ReferenceParams {
+                text_document_position: self.cursor_position(cx),
+                context: lsp_types::ReferenceContext {
+                    include_declaration: true,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            };
+            lsp.update(cx, |lsp, cx| {
+                lsp.request::<lsp_types::request::References>(&self.absolute, params, cx)
+            })
         });
         let root = self.root.clone();
         self._intel = Some(cx.spawn_in(window, async move |_, cx| {
-            let locations = request.await.ok().flatten().unwrap_or_default();
+            let locations = match request {
+                Some(request) => request.await.ok().flatten().unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let (search_root, name) = (root.clone(), word.clone());
             let places = cx
-                .background_spawn(async move { code_intel::places(&locations) })
+                .background_spawn(async move {
+                    if !locations.is_empty() {
+                        return code_intel::places(&locations);
+                    }
+                    let stop = std::sync::atomic::AtomicBool::new(false);
+                    crate::search::search_word(&search_root, &name, &stop)
+                        .map(|found| {
+                            found
+                                .matches
+                                .into_iter()
+                                .map(|hit| code_intel::Place {
+                                    path: search_root.join(&hit.path),
+                                    line: hit.line.saturating_sub(1) as u32,
+                                    preview: hit.text.trim().to_string(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
                 .await;
             _ = cx.update(|window, cx| {
                 code_intel::open_places(
-                    format!("References ({})", places.len()),
+                    format!("References to {word} ({})", places.len()),
                     &root,
                     places,
                     open,
@@ -674,7 +777,26 @@ impl FileView {
     }
 
     fn show_outline(&mut self, _: &ShowOutline, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(lsp), Some(open)) = (self.lsp.clone(), self.open_location.clone()) else {
+        let Some(open) = self.open_location.clone() else {
+            return;
+        };
+        let Some(lsp) = self
+            .lsp
+            .clone()
+            .filter(|lsp| lsp.read(cx).is_open(&self.absolute))
+        else {
+            // Without a language server: the declarations in the text.
+            let text = self.editor.read(cx).text().to_string();
+            let name: std::sync::Arc<str> = self.relative.as_ref().into();
+            let extension = std::path::Path::new(self.relative.as_ref())
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let symbols = code_intel::outline_from_symbols(crate::symbols::scan_text(
+                &name, &extension, &text,
+            ));
+            code_intel::open_outline(self.absolute.clone(), symbols, open, window, cx);
             return;
         };
         let params = lsp_types::DocumentSymbolParams {
@@ -743,13 +865,12 @@ impl FileView {
                 return window.push_notification(Notification::error(format!("{err:#}")), cx);
             }
         };
-        let text = gpui_kit::component::input::Rope::from(self.editor.read(cx).value().as_ref());
+        let text = self.editor.read(cx).text().clone();
         match code_intel::apply_edit(edit, &self.absolute, &text) {
             Ok((own, files)) => {
                 if let Some(own) = own {
                     self.editor
                         .update(cx, |editor, cx| editor.set_value(own, window, cx));
-                    self.dirty = true;
                 }
                 window.push_notification(
                     Notification::success(format!(
@@ -781,6 +902,37 @@ impl FileView {
         self.dirty
     }
 
+    /// The cursor's 0-based line.
+    pub fn cursor_line(&self, cx: &gpui_kit::App) -> u32 {
+        self.editor.read(cx).cursor_position().line
+    }
+
+    /// Whether the text still differs from the file after a change: typing
+    /// and undoing back to the saved text leaves nothing unsaved, as in VS
+    /// Code. Ropes of different lengths differ at once; equal lengths are
+    /// compared chunk by chunk.
+    fn text_changed(&mut self, cx: &mut Context<Self>) {
+        self.occurrences = None;
+        self.schedule_line_marks(cx);
+        let dirty = {
+            let text = self.editor.read(cx).text();
+            text.len() != self.saved.len() || *text != self.saved
+        };
+        if dirty {
+            self.schedule_keep(cx);
+        } else if self.dirty || self._keep.is_some() {
+            // Nothing to keep for a crash any more.
+            self._keep = None;
+            let path = self.absolute.clone();
+            cx.background_spawn(async move { crate::unsaved::forget(&path) })
+                .detach();
+        }
+        if dirty != self.dirty {
+            self.dirty = dirty;
+            cx.notify();
+        }
+    }
+
     /// Re-reads the file from disk unless the user has unsaved edits, which
     /// always win over a change made underneath (e.g. by an agent).
     pub fn reload_if_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -797,6 +949,7 @@ impl FileView {
         }
         self.editor.update(cx, |editor, cx| {
             editor.set_cursor_position(Position { line, character: 0 }, window, cx);
+            center_line(editor, line, cx);
         });
     }
 
@@ -880,12 +1033,14 @@ impl FileView {
                         this.not_utf8 = not_utf8;
                         this.attach_lsp(&text, cx);
                         let restored = kept.is_some();
+                        this.saved = Rope::from(text.as_str());
                         let shown = kept.unwrap_or(text);
                         this.editor
                             .update(cx, |editor, cx| editor.set_value(shown, window, cx));
                         this.content = Content::Text;
-                        this.dirty = restored;
                         this.restored = restored;
+                        this.text_changed(cx);
+                        this.refresh_git_base(cx);
                         if let Some(line) = this.pending_line.take() {
                             this.go_to_line(line, window, cx);
                         }
@@ -1048,9 +1203,8 @@ impl FileView {
                 editor.set_cursor_position(Position { line, character: 0 }, window, cx);
             }
         });
-        self.dirty = true;
+        self.text_changed(cx);
         self.schedule_sync(cx);
-        self.schedule_keep(cx);
         self.update_preview(window, cx);
         cx.notify();
     }
@@ -1116,27 +1270,35 @@ impl FileView {
     }
 
     fn save(&mut self, _: &SaveFile, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_file(window, cx).detach();
+    }
+
+    /// Writes the text to the file. Resolves to whether it was saved (a
+    /// failure shows in the footer).
+    pub fn save_file(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
         if self.content != Content::Text || self.not_utf8 {
-            return;
+            return Task::ready(false);
         }
         // The rich editor's last keystrokes, before its timer.
         if let (Some(rich), View::Rich) = (self.rich.clone(), self.view) {
             let text = rich.update(cx, |rich, cx| rich.text(cx));
             self.replace_text(text, window, cx);
         }
-        let text = self.editor.read(cx).value().to_string();
+        // The text being written; typing on meanwhile stays unsaved.
+        let text = self.editor.read(cx).text().clone();
         let path = self.absolute.clone();
-        let write = cx.background_spawn(async move { std::fs::write(&path, text) });
+        let written = text.clone();
+        let write = cx.background_spawn(async move { write_rope(&path, &written) });
         cx.spawn(async move |this, cx| {
             let result = write.await;
-            _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
+                let saved = result.is_ok();
                 match result {
                     Ok(()) => {
-                        this.dirty = false;
+                        this.saved = text;
                         this.restored = false;
                         this.save_error = None;
-                        this._keep = None;
-                        crate::unsaved::forget(&this.absolute);
+                        this.text_changed(cx);
                         if let Some(lsp) = this.lsp.clone() {
                             lsp.update(cx, |lsp, _| lsp.saved(&this.absolute));
                         }
@@ -1148,10 +1310,356 @@ impl FileView {
                     Err(err) => this.save_error = Some(format!("Could not save: {err}").into()),
                 }
                 cx.notify();
-            });
+                saved
+            })
+            .unwrap_or(false)
         })
-        .detach();
     }
+
+    /// Reads the file as Git has it staged again (it was staged, or the
+    /// file was opened), then marks the changed lines.
+    pub fn refresh_git_base(&mut self, cx: &mut Context<Self>) {
+        let (root, relative) = (self.root.clone(), self.relative.to_string());
+        let read = cx.background_spawn(async move {
+            ph_git::files::staged_text(&root, &relative).map(std::sync::Arc::<str>::from)
+        });
+        self._git_base = Some(cx.spawn(async move |this, cx| {
+            let base = read.await;
+            _ = this.update(cx, |this, cx| {
+                this.git_base = base;
+                this.schedule_line_marks(cx);
+            });
+        }));
+    }
+
+    /// Works out the changed lines a moment after typing stops, off the UI
+    /// thread.
+    fn schedule_line_marks(&mut self, cx: &mut Context<Self>) {
+        let Some(base) = self.git_base.clone() else {
+            if !self.line_marks.is_empty() {
+                self.line_marks = Rc::default();
+                cx.notify();
+            }
+            return;
+        };
+        let text = self.editor.read(cx).text().clone();
+        // Too big to diff on every pause: no marks.
+        if text.len() > MAX_MARKED_BYTES {
+            return;
+        }
+        self._marks = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LINE_MARKS_DELAY).await;
+            let marks = cx
+                .background_spawn(async move { line_changes(&base, &text.to_string()) })
+                .await;
+            _ = this.update(cx, |this, cx| {
+                if *this.line_marks != marks {
+                    this.line_marks = Rc::new(marks);
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// Whether the text can be changed (not shown read-only).
+    fn editable(&self) -> bool {
+        self.content == Content::Text && !self.not_utf8
+    }
+
+    /// Applies a line command to the text and the main selection; one undo
+    /// step.
+    fn edit_lines(
+        &mut self,
+        command: impl FnOnce(&str, std::ops::Range<usize>) -> Option<editing::Edit>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.editable() {
+            return;
+        }
+        let edit = {
+            let editor = self.editor.read(cx);
+            command(&editor.text().to_string(), editor.selected_range())
+        };
+        if let Some(edit) = edit {
+            self.apply_edit(edit, window, cx);
+        }
+    }
+
+    fn apply_edit(&mut self, edit: editing::Edit, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            editor.set_selected_range(edit.range, cx);
+            editor.replace(edit.insert, window, cx);
+            editor.set_selected_range(edit.select, cx);
+        });
+    }
+
+    fn toggle_comment(
+        &mut self,
+        _: &crate::ToggleComment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(comment) = editing::comment_for(&self.relative) else {
+            return;
+        };
+        self.edit_lines(
+            |text, selection| Some(editing::toggle_comment(text, selection, comment)),
+            window,
+            cx,
+        );
+    }
+
+    /// The lines around the cursor (the one before to the one after) and
+    /// where they start: enough for word deletion, without copying a long
+    /// file on each key.
+    fn lines_around(&self, cx: &gpui_kit::App) -> (String, usize, usize) {
+        let editor = self.editor.read(cx);
+        let (text, cursor) = (editor.text(), editor.cursor());
+        let row = text.offset_to_point(cursor).row;
+        let last = text.lines_len().saturating_sub(1);
+        let start = text.line_start_offset(row.saturating_sub(1));
+        let end = text.line_end_offset((row + 1).min(last));
+        (text.slice(start..end).to_string(), start, cursor - start)
+    }
+
+    fn delete_word_left(
+        &mut self,
+        _: &crate::DeleteWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_word(true, window, cx);
+    }
+
+    fn delete_word_right(
+        &mut self,
+        _: &crate::DeleteWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_word(false, window, cx);
+    }
+
+    /// Deletes a word, as VS Code does: only up to the line's start or end
+    /// (there, only the line break); the editor's own word deletion does
+    /// the rest, at every cursor.
+    fn delete_word(&mut self, left: bool, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::input as edit;
+        if !self.editable() {
+            return;
+        }
+        let focus = self.editor.read(cx).focus_handle(cx);
+        if self.editor.read(cx).selected_range().is_empty() {
+            let (text, base, cursor) = self.lines_around(cx);
+            let range = if left {
+                editing::delete_word_left(&text, cursor)
+            } else {
+                editing::delete_word_right(&text, cursor)
+            };
+            if let Some(range) = range {
+                let range = base + range.start..base + range.end;
+                let at = range.start;
+                self.apply_edit(
+                    editing::Edit {
+                        range,
+                        insert: String::new(),
+                        select: at..at,
+                    },
+                    window,
+                    cx,
+                );
+                return;
+            }
+        }
+        if left {
+            focus.dispatch_action(&edit::DeleteToPreviousWordStart, window, cx);
+        } else {
+            focus.dispatch_action(&edit::DeleteToNextWordEnd, window, cx);
+        }
+    }
+
+    /// ⌘D: the word at the cursor first, then each next place the selected
+    /// text appears gets a cursor of its own.
+    fn select_next_occurrence(
+        &mut self,
+        _: &crate::SelectNextOccurrence,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.content != Content::Text {
+            return;
+        }
+        let (selection, text) = {
+            let editor = self.editor.read(cx);
+            (editor.selected_range(), editor.text().clone())
+        };
+        if selection.is_empty() {
+            if let Some((_, range)) = code_intel::word_in_rope(&text, selection.start) {
+                self.occurrences = None;
+                self.editor
+                    .update(cx, |editor, cx| editor.set_selected_range(range, cx));
+            }
+            return;
+        }
+        let needle = text.slice(selection.clone()).to_string();
+        // Go on from the last one added while they are of the same text.
+        let from = match &self.occurrences {
+            Some((first, last)) if *first == selection => last.end,
+            _ => selection.end,
+        };
+        let haystack = text.to_string();
+        let Some(next) = editing::next_occurrence(&haystack, &needle, from, &selection) else {
+            return;
+        };
+        self.occurrences = Some((selection, next.clone()));
+        self.editor
+            .update(cx, |editor, cx| editor.add_selection(next, cx));
+    }
+
+    /// Ctrl+G: asks for a line (or `line:column`) and goes there.
+    fn ask_go_to_line(&mut self, _: &crate::GoToLine, window: &mut Window, cx: &mut Context<Self>) {
+        if self.content != Content::Text {
+            return;
+        }
+        let (current, total) = {
+            let editor = self.editor.read(cx);
+            (editor.cursor_position().line + 1, editor.text().lines_len())
+        };
+        let view = cx.weak_entity();
+        crate::name_dialog::ask_name(
+            format!("Go to line (1–{total}, now {current})"),
+            "Go",
+            String::new(),
+            false,
+            window,
+            cx,
+            Rc::new(move |typed, window, cx| {
+                let (line, column) = editing::parse_line_column(&typed)
+                    .ok_or_else(|| "Type a line number, or line:column.".to_string())?;
+                _ = view.update(cx, |view, cx| {
+                    view.editor.update(cx, |editor, cx| {
+                        let line = line.min(total.saturating_sub(1) as u32);
+                        editor.set_cursor_position(
+                            Position {
+                                line,
+                                character: column,
+                            },
+                            window,
+                            cx,
+                        );
+                        center_line(editor, line, cx);
+                        editor.focus(window, cx);
+                    });
+                });
+                Ok(())
+            }),
+        );
+    }
+
+    /// Drops the unsaved changes (the tab is closing without saving): they
+    /// are not kept for next time either.
+    pub fn discard_changes(&mut self, cx: &mut Context<Self>) {
+        self.dirty = false;
+        self.restored = false;
+        self._keep = None;
+        crate::unsaved::forget(&self.absolute);
+        cx.notify();
+    }
+}
+
+/// Scrolls `line` (0-based) to the middle of the editor when it is out of
+/// sight, as VS Code does after a jump; a line on screen stays where it is.
+fn center_line(editor: &mut EditorState, line: u32, cx: &mut Context<EditorState>) {
+    let (Some(height), Some(rows)) = (editor.line_height(), editor.visible_row_range()) else {
+        return;
+    };
+    if rows.contains(&(line as usize)) {
+        return;
+    }
+    let viewport = editor.input_bounds().size.height;
+    if viewport <= gpui_kit::px(0.) {
+        return;
+    }
+    let top = (height * line as f32 - viewport / 2.).max(gpui_kit::px(0.));
+    let offset = editor.scroll_offset();
+    editor.set_scroll_offset(gpui_kit::point(offset.x, -top), cx);
+}
+
+/// Files bigger than this get no changed-line marks.
+const MAX_MARKED_BYTES: usize = 4 * 1024 * 1024;
+/// The marks follow typing this long after it stops.
+const LINE_MARKS_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+#[derive(Clone, Copy)]
+struct LineMarkColors {
+    added: gpui_kit::Hsla,
+    modified: gpui_kit::Hsla,
+    deleted: gpui_kit::Hsla,
+}
+
+/// Paints the changed-line bars just left of the text, on the lines the
+/// editor laid out this frame (it paints first).
+fn paint_line_marks(
+    editor: &Entity<EditorState>,
+    marks: &[(usize, LineChange)],
+    colors: LineMarkColors,
+    bounds: gpui_kit::Bounds<gpui_kit::Pixels>,
+    window: &mut Window,
+    cx: &mut gpui_kit::App,
+) {
+    use gpui_kit::{Bounds, ContentMask, fill, point, px, size};
+    let state = editor.read(cx);
+    let text = state.text();
+    let lines = text.lines_len();
+    let scroll_x = state.scroll_offset().x;
+    let mut quads = Vec::new();
+    for &(line, change) in marks {
+        let offset = if line < lines {
+            text.line_start_offset(line)
+        } else {
+            text.line_start_offset(lines.saturating_sub(1))
+        };
+        let Some(at) = state.range_to_bounds(&(offset..offset)) else {
+            continue;
+        };
+        // Where the text starts, however far it is scrolled sideways.
+        let x = at.left() - scroll_x - px(7.);
+        let quad = match change {
+            LineChange::Added | LineChange::Modified => fill(
+                Bounds::new(point(x, at.top()), size(px(3.), at.size.height)),
+                if change == LineChange::Added {
+                    colors.added
+                } else {
+                    colors.modified
+                },
+            ),
+            LineChange::Deleted => {
+                let y = if line < lines { at.top() } else { at.bottom() };
+                fill(
+                    Bounds::new(point(x - px(1.), y - px(3.)), size(px(6.), px(6.))),
+                    colors.deleted,
+                )
+            }
+        };
+        quads.push(quad);
+    }
+    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        for quad in quads {
+            window.paint_quad(quad);
+        }
+    });
+}
+
+/// Writes `text` to `path` chunk by chunk, without first copying it into one
+/// string.
+fn write_rope(path: &std::path::Path, text: &Rope) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    for chunk in text.chunks() {
+        file.write_all(chunk.as_bytes())?;
+    }
+    file.flush()
 }
 
 /// Reads a file as text (and whether it was not UTF-8, so shown with
@@ -1253,9 +1761,10 @@ fn editor_menu_lines(asks: bool, navigates: bool) -> Vec<MenuLine> {
         ]);
     }
     lines.extend([
-        // Without a language server it still finds declarations by name.
+        // Without a language server they still find declarations and
+        // uses by name.
         item("Go to Definition", Box::new(edit::GoToDefinition)),
-        navigation("Find References", Box::new(FindReferences)),
+        item("Find References", Box::new(FindReferences)),
         navigation("Rename Symbol", Box::new(RenameSymbol)),
         navigation("Code Actions", Box::new(edit::ToggleCodeActions)),
         None,
@@ -1364,6 +1873,60 @@ impl Render for FileView {
             .on_action(cx.listener(Self::copy_as_markdown))
             .on_action(cx.listener(Self::copy_reference))
             .on_action(cx.listener(Self::copy_link_to_lines))
+            .on_action(cx.listener(Self::toggle_comment))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
+            .on_action(cx.listener(|this, _: &crate::MoveLineUp, window, cx| {
+                this.edit_lines(
+                    |text, selection| editing::move_lines(text, selection, true),
+                    window,
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &crate::MoveLineDown, window, cx| {
+                this.edit_lines(
+                    |text, selection| editing::move_lines(text, selection, false),
+                    window,
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &crate::CopyLineUp, window, cx| {
+                this.edit_lines(
+                    |text, selection| Some(editing::copy_lines(text, selection, false)),
+                    window,
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &crate::CopyLineDown, window, cx| {
+                this.edit_lines(
+                    |text, selection| Some(editing::copy_lines(text, selection, true)),
+                    window,
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &crate::DeleteLine, window, cx| {
+                this.edit_lines(
+                    |text, selection| Some(editing::delete_lines(text, selection)),
+                    window,
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &crate::InsertLineBelow, window, cx| {
+                this.edit_lines(
+                    |text, selection| Some(editing::open_line(text, selection.end, true)),
+                    window,
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &crate::InsertLineAbove, window, cx| {
+                this.edit_lines(
+                    |text, selection| Some(editing::open_line(text, selection.start, false)),
+                    window,
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(Self::select_next_occurrence))
+            .on_action(cx.listener(Self::ask_go_to_line))
             .on_action(cx.listener(|this, _: &CopyFilePath, _, cx| {
                 let path = this.absolute.to_string_lossy().into_owned();
                 cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path));
@@ -1394,6 +1957,33 @@ impl FileView {
                 .when(markdown, |this| {
                     this.capture_key_down(cx.listener(Self::continue_markdown_list))
                 })
+                // Ctrl+click (⌘ on a Mac) goes to the definition, whether or
+                // not the pointer rested on the name first: the editor jumps
+                // only once a lookup made while hovering came back.
+                .on_mouse_up(
+                    gpui_kit::MouseButton::Left,
+                    cx.listener(|this, event: &gpui_kit::MouseUpEvent, window, cx| {
+                        let modifiers = event.modifiers;
+                        if !modifiers.secondary()
+                            || modifiers.alt
+                            || modifiers.shift
+                            || event.click_count != 1
+                            || !this.editor.read(cx).selected_range().is_empty()
+                        {
+                            return;
+                        }
+                        let focus = this.editor.read(cx).focus_handle(cx);
+                        window.defer(cx, move |window, cx| {
+                            if focus.is_focused(window) {
+                                focus.dispatch_action(
+                                    &gpui_kit::component::input::GoToDefinition,
+                                    window,
+                                    cx,
+                                );
+                            }
+                        });
+                    }),
+                )
                 .child({
                     let asks = self.asks;
                     let navigates = self
@@ -1410,6 +2000,24 @@ impl FileView {
                     editor
                         .context_menu(move |menu, _, _| editor_menu(menu, asks, navigates))
                         .into_any_element()
+                })
+                .when(!self.line_marks.is_empty(), |this| {
+                    let (editor, marks) = (self.editor.clone(), self.line_marks.clone());
+                    let colors = LineMarkColors {
+                        added: cx.theme().success,
+                        modified: cx.theme().info,
+                        deleted: cx.theme().danger,
+                    };
+                    this.relative().child(
+                        gpui_kit::canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, cx| {
+                                paint_line_marks(&editor, &marks, colors, bounds, window, cx)
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
                 })
                 .into_any_element(),
             _ => div().into_any_element(),
@@ -1734,7 +2342,20 @@ impl FileView {
                     if self.problems.1 == 1 { "" } else { "s" }
                 )))
             })
-            .children(self.server_label(cx))
+            .children(self.server_status(cx).map(|(label, tip, problem)| {
+                div()
+                    .id("language-server")
+                    .flex_none()
+                    .when(problem, |this| this.text_color(cx.theme().warning))
+                    .child(label)
+                    .when_some(tip, |this, tip| {
+                        use gpui_kit::StatefulInteractiveElement as _;
+                        this.tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                .build(window, cx)
+                        })
+                    })
+            }))
             .when(self.not_utf8, |this| {
                 this.child(
                     div()
@@ -1767,21 +2388,32 @@ impl FileView {
             .when(self.dirty && !self.restored, |this| this.child("Unsaved"))
     }
 
-    /// The language server for this file and how it is doing.
-    fn server_label(&self, cx: &gpui_kit::App) -> Option<String> {
-        let (spec, _) = ph_lsp::servers::find(&self.absolute)?;
-        let status = self
-            .lsp
-            .as_ref()?
-            .read(cx)
-            .status()
-            .into_iter()
-            .find(|(name, _)| *name == spec.name)?
-            .1;
-        Some(match status {
-            ph_lsp::ServerStatus::Starting => format!("{} starting…", spec.name),
-            ph_lsp::ServerStatus::Ready => spec.name.to_string(),
-            ph_lsp::ServerStatus::Failed(_) => format!("{} failed", spec.name),
+    /// The language server for this file and how it is doing, for the
+    /// footer: its label, what the tooltip says, and whether it is a problem.
+    fn server_status(&self, cx: &gpui_kit::App) -> Option<(String, Option<String>, bool)> {
+        let spec = ph_lsp::servers::candidates(&self.absolute).next()?;
+        let lsp = self.lsp.as_ref()?;
+        Some(match lsp.read(cx).server_for(&self.absolute) {
+            Some((name, ph_lsp::ServerStatus::Starting)) => {
+                (format!("{name} starting…"), None, false)
+            }
+            Some((name, ph_lsp::ServerStatus::Ready)) => (name.to_string(), None, false),
+            Some((name, ph_lsp::ServerStatus::Failed(reason))) => (
+                format!("{name} failed"),
+                Some(format!(
+                    "{reason}\n\nTo install or repair it: {}\nGo to definition and references still work from the code index.",
+                    spec.install
+                )),
+                true,
+            ),
+            None => (
+                "No language server".to_string(),
+                Some(format!(
+                    "Errors, hover and completion come from {}. To install it: {}\nGo to definition and references work without it, from the code index.",
+                    spec.name, spec.install
+                )),
+                false,
+            ),
         })
     }
 

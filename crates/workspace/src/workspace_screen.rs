@@ -931,6 +931,15 @@ impl WorkspaceScreen {
         files.update(cx, |files, cx| files.quick_open(window, cx));
     }
 
+    /// ⌘T from anywhere: Go to Symbol over the workspace's folders.
+    pub fn go_to_symbol(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.project.is_workspace() || self.project.folders().is_empty() {
+            return;
+        }
+        let files = self.files(window, cx);
+        files.update(cx, |files, cx| files.go_to_symbol(window, cx));
+    }
+
     /// ⌘⇧F from anywhere: the Files tool's tree turns into workspace search.
     pub fn find_in_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.project.is_workspace() {

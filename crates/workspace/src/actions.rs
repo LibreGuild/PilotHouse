@@ -4,6 +4,8 @@
 use gpui_kit::{Action, App, KeyBinding, actions};
 use serde::Deserialize;
 
+use crate::AppState;
+
 /// Key context set on the workspace root; bindings below only fire inside it.
 pub const WORKSPACE_CONTEXT: &str = "Workspace";
 
@@ -88,6 +90,12 @@ actions!(
         /// Move the workspace in front to a window of its own.
         OpenInNewWindow,
         Quit,
+        /// Everything a little larger (⌘=, Ctrl+= elsewhere).
+        ZoomIn,
+        /// Everything a little smaller (⌘-, Ctrl+-).
+        ZoomOut,
+        /// The default sizes again (⌘0, Ctrl+0).
+        ResetZoom,
     ]
 );
 
@@ -125,6 +133,13 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-,", OpenSettings, context),
         KeyBinding::new("secondary-/", ShowShortcuts, context),
         KeyBinding::new("secondary-q", Quit, None),
+        // Zoom, as in VS Code, everywhere in the window. ⌘+ is ⌘⇧= on most
+        // keyboards; both work.
+        KeyBinding::new("secondary-=", ZoomIn, None),
+        KeyBinding::new("secondary-+", ZoomIn, None),
+        KeyBinding::new("secondary-shift-=", ZoomIn, None),
+        KeyBinding::new("secondary--", ZoomOut, None),
+        KeyBinding::new("secondary-0", ResetZoom, None),
         KeyBinding::new("ctrl-tab", PreviousWorkspace, context),
         KeyBinding::new("secondary-shift-e", ShowWorkspacesView, context),
         KeyBinding::new("secondary-shift-g", ShowGitHubView, context),
@@ -144,4 +159,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         )
     }));
     cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &ZoomIn, cx| AppState::update_preferences(cx, |p| p.zoom(1)));
+    cx.on_action(|_: &ZoomOut, cx| AppState::update_preferences(cx, |p| p.zoom(-1)));
+    cx.on_action(|_: &ResetZoom, cx| AppState::update_preferences(cx, |p| p.reset_zoom()));
 }

@@ -78,6 +78,11 @@ fn patterns(extension: &str) -> &'static [Pattern] {
                 "const",
                 r"^\s*(?:export\s+)?const\s+(?P<name>[\w$]+)\s*(?::[^=]+)?=\s*(?:async\s+)?(?:\([^)]*\)|\w+)\s*=>",
             ),
+            // A method in a class body: `  async save(a: A): B {`.
+            (
+                "method",
+                r"^\s+(?:(?:public|private|protected|static|async|readonly|override|get|set)\s+)*(?P<name>[\w$]+)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?::[^{]+)?\{\s*$",
+            ),
         ])
     });
     static PYTHON: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
@@ -110,6 +115,11 @@ fn patterns(extension: &str) -> &'static [Pattern] {
                 "struct",
                 r"^\s*(?:(?:public|private|internal)\s+)*struct\s+(?P<name>\w+)",
             ),
+            // Java and C# methods: modifiers, a type, the name, `(`.
+            (
+                "method",
+                r"^\s*(?:(?:public|private|protected|internal|static|final|abstract|synchronized|override|virtual|async|sealed|partial|extern|unsafe|default)\s+)+(?:<[^>]*>\s*)?[\w<>\[\],.?]+\s+(?P<name>\w+)\s*\(",
+            ),
         ])
     });
     static C: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
@@ -134,6 +144,11 @@ fn patterns(extension: &str) -> &'static [Pattern] {
         "c" | "h" | "cc" | "cpp" | "hpp" | "cxx" | "m" | "mm" => &C,
         _ => &NONE,
     }
+}
+
+/// Whether files with `extension` have definitions this module finds.
+pub fn has_patterns(extension: &str) -> bool {
+    !patterns(extension).is_empty()
 }
 
 fn build(specs: &[(&'static str, &str)]) -> Vec<Pattern> {
@@ -167,7 +182,18 @@ pub fn scan_text(path: &Arc<str>, extension: &str, text: &str) -> Vec<Symbol> {
             Some((pattern.kind, caps.name("name")?.as_str()))
         }) && !matches!(
             name,
-            "if" | "for" | "while" | "switch" | "return" | "catch" | "main" | "new"
+            "if" | "for"
+                | "while"
+                | "switch"
+                | "return"
+                | "catch"
+                | "main"
+                | "new"
+                | "else"
+                | "do"
+                | "try"
+                | "function"
+                | "constructor"
         ) {
             found.push(Symbol {
                 name: name.to_string(),
@@ -243,5 +269,20 @@ mod tests {
             "Serve"
         );
         assert!(names("md", "fn nope()").is_empty(), "only source files");
+        let java = "public class Repo {\n    public static List<User> findAll(int limit) {\n        if (x) {\n        return load(a);\n    }\n}\n";
+        let found: Vec<String> = names("java", java)
+            .into_iter()
+            .map(|(name, _, _)| name)
+            .collect();
+        assert_eq!(found, ["Repo", "findAll"]);
+        let cs = "internal sealed class Cart {\n    public async Task<int> Total() {\n";
+        assert_eq!(names("cs", cs)[1].0, "Total");
+        let class =
+            "class Api {\n  async fetchUser(id: string): Promise<User> {\n    if (id) {\n  }\n}\n";
+        let found: Vec<String> = names("ts", class)
+            .into_iter()
+            .map(|(name, _, _)| name)
+            .collect();
+        assert_eq!(found, ["Api", "fetchUser"]);
     }
 }

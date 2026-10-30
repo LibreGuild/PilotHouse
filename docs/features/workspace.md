@@ -129,6 +129,7 @@ Removing a folder leaves it on disk; removing the primary folder makes the next 
 Stored in the `settings` table:
 - **Appearance**: System, Light or Dark (`appearance`); the dark theme, *Graphite* or *Warm*, a soft dark brown (`Preferences::dark_theme`, `PilotHouse Warm` in `themes/pilothouse.json`); names under tool icons.
 - **Features**: turn tools off (`features.disabled`); *System* holds the file manager menu switch.
+- **Zoom**: ⌘= and ⌘- (Ctrl+= and Ctrl+- elsewhere) make the interface, code and terminal text half a point larger or smaller together, kept within each size's bounds; ⌘0 (Ctrl+0) goes back to the default sizes (`Preferences::zoom`). Saved with the other appearance preferences. Back in the editor keeps ⌃- on a Mac and Alt+← elsewhere, so the keys do not meet.
 
 ## Architecture map
 

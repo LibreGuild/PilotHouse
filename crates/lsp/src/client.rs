@@ -46,7 +46,8 @@ impl Server {
                     "references": {},
                     "rename": { "prepareSupport": false },
                     "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
-                    "publishDiagnostics": { "relatedInformation": true },
+                    // Unused code (1) is shown faded, deprecated (2) struck through.
+                    "publishDiagnostics": { "relatedInformation": true, "tagSupport": { "valueSet": [1, 2] } },
                 },
                 "window": { "workDoneProgress": false },
             },

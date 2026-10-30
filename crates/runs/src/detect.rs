@@ -84,8 +84,84 @@ pub fn detect(root: &Path) -> Vec<RunConfig> {
             "python manage.py runserver",
         ));
     }
+    for entry in ["main.py", "app.py"] {
+        if has(entry) && !has("manage.py") {
+            configs.push(RunConfig::detected(
+                format!("python {entry}"),
+                format!("python {entry}"),
+            ));
+        }
+    }
     if has("pyproject.toml") || has("pytest.ini") || has("setup.py") {
         configs.push(RunConfig::detected("pytest", "python -m pytest"));
+    }
+    if has("pom.xml") {
+        let mvn = if has("mvnw") {
+            if cfg!(windows) { "mvnw.cmd" } else { "./mvnw" }
+        } else {
+            "mvn"
+        };
+        let pom = std::fs::read_to_string(root.join("pom.xml")).unwrap_or_default();
+        if pom.contains("spring-boot") {
+            configs.push(RunConfig::detected(
+                "spring-boot:run",
+                format!("{mvn} spring-boot:run"),
+            ));
+        }
+        configs.push(RunConfig::detected("mvn package", format!("{mvn} package")));
+        configs.push(RunConfig::detected("mvn test", format!("{mvn} test")));
+    }
+    let dotnet = dir_has_extension(root, &["sln", "slnx", "csproj", "fsproj"]);
+    if let Some(found) = dotnet {
+        if found != "sln" && found != "slnx" {
+            configs.push(RunConfig::detected("dotnet run", "dotnet run"));
+        }
+        configs.push(RunConfig::detected("dotnet build", "dotnet build"));
+        configs.push(RunConfig::detected("dotnet test", "dotnet test"));
+    }
+    if has("CMakeLists.txt") {
+        configs.push(RunConfig::detected(
+            "cmake configure",
+            "cmake -S . -B build",
+        ));
+        configs.push(RunConfig::detected("cmake build", "cmake --build build"));
+    }
+    if let Ok(pubspec) = std::fs::read_to_string(root.join("pubspec.yaml")) {
+        let tool = if pubspec.contains("flutter:") {
+            "flutter"
+        } else {
+            "dart"
+        };
+        configs.push(RunConfig::detected(
+            format!("{tool} run"),
+            format!("{tool} run"),
+        ));
+        configs.push(RunConfig::detected(
+            format!("{tool} test"),
+            format!("{tool} test"),
+        ));
+    }
+    for deno in ["deno.json", "deno.jsonc"] {
+        let Ok(text) = std::fs::read_to_string(root.join(deno)) else {
+            continue;
+        };
+        // Comments in deno.jsonc: whole-line ones only.
+        let json: String = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json)
+            && let Some(tasks) = value["tasks"].as_object()
+        {
+            for name in tasks.keys().filter(|name| plain_word(name)) {
+                configs.push(RunConfig::detected(
+                    format!("deno {name}"),
+                    format!("deno task {name}"),
+                ));
+            }
+        }
+        break;
     }
     if has("gradlew") {
         let gradlew = if cfg!(windows) {
@@ -98,6 +174,14 @@ pub fn detect(root: &Path) -> Vec<RunConfig> {
                 "Install debug app",
                 format!("{gradlew} installDebug"),
             ));
+            configs.push(RunConfig::detected(
+                "Build debug APK",
+                format!("{gradlew} assembleDebug"),
+            ));
+        } else if ["build.gradle", "build.gradle.kts"].iter().any(|file| {
+            std::fs::read_to_string(root.join(file)).is_ok_and(|text| text.contains("application"))
+        }) {
+            configs.push(RunConfig::detected("gradle run", format!("{gradlew} run")));
         }
         configs.push(RunConfig::detected(
             "gradle build",
@@ -136,6 +220,25 @@ pub fn detect(root: &Path) -> Vec<RunConfig> {
         }
     }
     configs
+}
+
+/// The extension of the first top-level file with one of `extensions`.
+fn dir_has_extension(root: &Path, extensions: &[&'static str]) -> Option<&'static str> {
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut found = None;
+    for entry in entries.flatten().take(500) {
+        let path = entry.path();
+        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if let Some(known) = extensions.iter().find(|known| **known == extension) {
+            // A project file wins over a solution: `dotnet run` needs one.
+            if found.is_none() || !matches!(*known, "sln" | "slnx") {
+                found = Some(*known);
+            }
+        }
+    }
+    found
 }
 
 /// A word every shell takes as it is (no quotes, variables or operators in
@@ -202,5 +305,63 @@ mod tests {
                 "make build"
             ]
         );
+    }
+
+    fn commands(files: &[(&str, &str)]) -> Vec<String> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "ph-runs-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for (name, text) in files {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let found = detect(&root)
+            .into_iter()
+            .map(|config| config.command)
+            .collect();
+        let _ = std::fs::remove_dir_all(&root);
+        found
+    }
+
+    #[test]
+    fn detects_other_build_tools() {
+        let mvn = commands(&[("pom.xml", "<artifactId>spring-boot-starter</artifactId>")]);
+        assert_eq!(mvn, ["mvn spring-boot:run", "mvn package", "mvn test"]);
+        let dotnet = commands(&[("App.sln", ""), ("App.csproj", "")]);
+        assert_eq!(dotnet, ["dotnet run", "dotnet build", "dotnet test"]);
+        assert_eq!(
+            commands(&[("CMakeLists.txt", "")]),
+            ["cmake -S . -B build", "cmake --build build"]
+        );
+        assert_eq!(
+            commands(&[("pubspec.yaml", "dependencies:\n  flutter:\n")]),
+            ["flutter run", "flutter test"]
+        );
+        assert_eq!(
+            commands(&[(
+                "deno.jsonc",
+                "{\n// tasks\n\"tasks\": {\"dev\": \"deno run main.ts\"}}"
+            )]),
+            ["deno task dev"]
+        );
+        assert_eq!(commands(&[("main.py", "")]), ["python main.py"]);
+        let gradlew = if cfg!(windows) {
+            "gradlew.bat"
+        } else {
+            "./gradlew"
+        };
+        let android = commands(&[("gradlew", ""), ("app/build.gradle", "")]);
+        assert!(android.contains(&format!("{gradlew} assembleDebug")));
+        let jvm = commands(&[
+            ("gradlew", ""),
+            ("build.gradle.kts", "plugins { application }"),
+        ]);
+        assert_eq!(jvm[0], format!("{gradlew} run"));
     }
 }
