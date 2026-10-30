@@ -23,7 +23,7 @@ grep-searcher = "0.1"
 ignore = "0.4"
 jiff = "0.2"
 memchr = "2"
-similar = "2"
+similar = "3"
 notify = "8"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
