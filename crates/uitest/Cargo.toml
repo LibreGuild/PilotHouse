@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 ph-env.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 gpui-kit.workspace = true
 ph-control.workspace = true
 ph-media.workspace = true

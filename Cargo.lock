@@ -6219,7 +6219,7 @@ name = "ph-browser"
 version = "0.4.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures",
  "gpui-kit",
  "libc",
@@ -6269,7 +6269,7 @@ name = "ph-devices"
 version = "0.4.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "dirs 7.0.0",
  "gpui-kit",
  "ph-control",
@@ -6331,7 +6331,7 @@ name = "ph-github"
 version = "0.4.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "ph-store",
  "security-framework",
  "serde",
@@ -6384,7 +6384,7 @@ name = "ph-preview"
 version = "0.4.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "calamine",
  "csv",
  "flate2",
@@ -6438,7 +6438,7 @@ name = "ph-remote"
 version = "0.4.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "dirs 7.0.0",
  "dunce",
  "ph-env",
@@ -6453,7 +6453,7 @@ name = "ph-review"
 version = "0.4.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "ph-git",
  "ph-github",
  "ph-store",
@@ -6500,7 +6500,7 @@ version = "0.4.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "gpui-kit",
  "ph-env",
  "ph-remote",
@@ -6536,7 +6536,7 @@ name = "ph-uitest"
 version = "0.4.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "gpui-kit",
  "ph-control",
  "ph-env",
@@ -6554,7 +6554,7 @@ name = "ph-utils"
 version = "0.4.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "getrandom 0.4.3",
  "hex",
  "hmac 0.13.0",
