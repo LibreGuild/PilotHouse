@@ -2795,7 +2795,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_repr",
- "similar",
+ "similar 2.7.0",
  "smallvec",
  "smol",
  "syntect",
@@ -6182,7 +6182,7 @@ dependencies = [
  "ph-ui",
  "serde",
  "serde_json",
- "similar",
+ "similar 3.2.1",
  "smol",
  "toml 0.8.23",
  "tracing",
@@ -6308,7 +6308,7 @@ dependencies = [
  "ph-theme",
  "ph-ui",
  "regex",
- "similar",
+ "similar 3.2.1",
  "smol",
  "syntect",
  "tracing",
@@ -6568,7 +6568,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "sha2 0.11.1",
- "similar",
+ "similar 3.2.1",
  "toml 0.8.23",
  "url",
  "x509-parser",
@@ -8229,6 +8229,15 @@ checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 dependencies = [
  "bstr",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "similar"
+version = "3.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f8bec09ae8fae0f4f265a4559a9334be3929d8504e9b536df0a41302bd1733"
+dependencies = [
+ "bstr",
 ]
 
 [[package]]
