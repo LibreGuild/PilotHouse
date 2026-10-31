@@ -1,6 +1,6 @@
 // PilotHouse's site: the sea under the hero, the pointer's glow and pull,
-// the live Agents panel and chat box, the scroll tour, and the download
-// for this computer. Everything still reads with motion turned off.
+// the live Agents panel and chat box, the scroll tour, the Studio stack, the
+// theme painter, and the download for this computer. Everything still reads with motion turned off.
 
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const finePointer = window.matchMedia("(pointer: fine)").matches;
@@ -351,6 +351,195 @@ if (finePointer && !reduceMotion) {
     { passive: true }
   );
   update();
+})();
+
+// ---- Studio: the picked window comes to the front ------------------------
+(() => {
+  const section = $(".studio");
+  const tabs = $$(".studio-tab");
+  const panels = $$(".studio-panel");
+  const cards = $$(".studio-card");
+  const deck = $(".deck");
+  const count = cards.length;
+  // Where a window sits: in front, then further back, to one side and the other.
+  const PLACES = [
+    "translate3d(0, 0, 0) rotateZ(0deg) scale(1)",
+    "translate3d(6%, -13%, -60px) rotateZ(3deg) scale(0.92)",
+    "translate3d(-6%, -24%, -120px) rotateZ(-3.5deg) scale(0.85)",
+  ];
+  const SHADE = ["none", "brightness(0.72) saturate(0.9)", "brightness(0.5) saturate(0.8)"];
+  let front = 0;
+  const place = () => {
+    cards.forEach((card, i) => {
+      const at = (i - front + count) % count;
+      card.style.zIndex = String(count - at);
+      card.style.transform = PLACES[at];
+      card.style.filter = SHADE[at];
+      card.classList.toggle("front", at === 0);
+      card.setAttribute("aria-hidden", String(at !== 0));
+    });
+  };
+  const select = (index, focus = false) => {
+    tabs.forEach((tab, i) => {
+      const on = i === index;
+      tab.setAttribute("aria-selected", String(on));
+      tab.tabIndex = on ? 0 : -1;
+      tab.classList.remove("running");
+      panels[i].hidden = !on;
+    });
+    if (focus) tabs[index].focus();
+    if (index !== front) {
+      const leaving = cards[front];
+      front = index;
+      place();
+      if (!reduceMotion) {
+        // The window leaving the front swings out to the side, then slips in
+        // behind. Its own transition would override the animation, so it
+        // is off until the swing ends.
+        leaving.style.transition = "none";
+        leaving
+          .animate(
+            [
+              { transform: PLACES[0], zIndex: 9, filter: "none" },
+              { transform: "translate3d(64%, 3%, 60px) rotateZ(10deg) scale(0.92)", zIndex: 9, offset: 0.42 },
+              { transform: leaving.style.transform, zIndex: 0, filter: leaving.style.filter },
+            ],
+            { duration: 950, easing: "cubic-bezier(.45, 0, .2, 1)" }
+          )
+          .finished.then(() => (leaving.style.transition = ""), () => {});
+      }
+    }
+    // The next one comes forward when the bar under this tab fills (it
+    // pauses while the pointer is over the section or it is off screen).
+    if (autoplay) {
+      void tabs[index].offsetWidth;
+      tabs[index].classList.add("running");
+    }
+  };
+  let autoplay = !reduceMotion;
+  tabs.forEach((tab, i) => {
+    tab.addEventListener("click", () => {
+      autoplay = false;
+      select(i);
+    });
+    tab.addEventListener("keydown", (event) => {
+      const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+      if (!step) return;
+      event.preventDefault();
+      autoplay = false;
+      select((i + step + count) % count, true);
+    });
+    tab.querySelector(".timer").addEventListener("animationend", () => select((front + 1) % count));
+  });
+  place();
+  select(0);
+  new IntersectionObserver(([entry]) => section.classList.toggle("playing", entry.isIntersecting), { threshold: 0.35 }).observe(section);
+
+  // The stack leans toward the pointer.
+  if (finePointer && !reduceMotion) {
+    const stage = $(".deck-stage");
+    stage.addEventListener("pointermove", (event) => {
+      const box = stage.getBoundingClientRect();
+      const x = (event.clientX - box.left) / box.width - 0.5;
+      const y = (event.clientY - box.top) / box.height - 0.5;
+      deck.style.setProperty("--ry", `${-6 + x * 10}deg`);
+      deck.style.setProperty("--rx", `${4 - y * 8}deg`);
+    });
+    stage.addEventListener("pointerleave", () => {
+      deck.style.setProperty("--ry", "-6deg");
+      deck.style.setProperty("--rx", "4deg");
+    });
+  }
+})();
+
+// ---- Themes: the window repaints from the swatch picked -----------------
+(() => {
+  const section = $(".themes");
+  const frame = $(".themes-window");
+  const swatches = $$(".swatch");
+  const GLOW = {
+    "modern-dark": "#0078d4",
+    "modern-light": "#9cc3ff",
+    "warm-dark": "#d9a45b",
+    "warm-light": "#e8c9a0",
+    dracula: "#bd93f9",
+    "one-dark": "#4d78cc",
+    "one-light": "#526fff",
+    "studio-dark": "#3574f0",
+  };
+  const source = (name) => `shots/themes/${name}.webp`;
+  let current = swatches[0].dataset.theme;
+  const paint = (swatch) => {
+    const name = swatch.dataset.theme;
+    if (name === current) return;
+    current = name;
+    swatches.forEach((other) => {
+      other.setAttribute("aria-checked", String(other === swatch));
+      other.tabIndex = other === swatch ? 0 : -1;
+    });
+    section.style.setProperty("--glow", GLOW[name]);
+    // The paint spreads from the swatch, wherever it is next to the window.
+    const box = frame.getBoundingClientRect();
+    const from = swatch.getBoundingClientRect();
+    const next = document.createElement("img");
+    next.className = reduceMotion ? "paint" : "paint wet";
+    next.width = 1600;
+    next.height = 1000;
+    next.alt = `PilotHouse in the ${swatch.textContent} theme.`;
+    next.style.setProperty("--cx", `${((from.left + from.width / 2 - box.left) / box.width) * 100}%`);
+    next.style.setProperty("--cy", `${((from.top + from.height / 2 - box.top) / box.height) * 100}%`);
+    next.src = source(name);
+    // Only the pictures under this one go, so a quick second pick keeps its own.
+    const settle = () => {
+      while (next.previousElementSibling) next.previousElementSibling.remove();
+      next.classList.remove("wet");
+    };
+    next
+      .decode()
+      .catch(() => {})
+      .then(() => {
+        frame.append(next);
+        if (reduceMotion) settle();
+        else next.addEventListener("animationend", settle, { once: true });
+      });
+  };
+  let cycling = !reduceMotion;
+  swatches.forEach((swatch, i) => {
+    swatch.tabIndex = i === 0 ? 0 : -1;
+    swatch.addEventListener("click", () => {
+      cycling = false;
+      paint(swatch);
+    });
+    swatch.addEventListener("keydown", (event) => {
+      const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+      if (!step) return;
+      event.preventDefault();
+      cycling = false;
+      const target = swatches[(i + step + swatches.length) % swatches.length];
+      target.focus();
+      paint(target);
+    });
+  });
+  // On screen: fetch every theme's picture, and show them in turn until a
+  // swatch is picked.
+  let timer = 0;
+  let fetched = false;
+  new IntersectionObserver(
+    ([entry]) => {
+      clearInterval(timer);
+      if (!entry.isIntersecting) return;
+      if (!fetched) {
+        fetched = true;
+        swatches.forEach((swatch) => (new Image().src = source(swatch.dataset.theme)));
+      }
+      timer = setInterval(() => {
+        if (!cycling) return clearInterval(timer);
+        const at = swatches.findIndex((swatch) => swatch.dataset.theme === current);
+        paint(swatches[(at + 1) % swatches.length]);
+      }, 3200);
+    },
+    { threshold: 0.4 }
+  ).observe(section);
 })();
 
 // ---- Numbers count up ---------------------------------------------------
