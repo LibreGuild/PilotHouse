@@ -84,6 +84,8 @@ pub struct Workspace {
     hidden_since: HashMap<ProjectId, std::time::Instant>,
     _status_poll: gpui_kit::Task<()>,
     _subscriptions: Vec<Subscription>,
+    /// The status bar follows the devices once something uses them.
+    _devices: Option<Subscription>,
     /// The title bar's inbox and to-dos.
     pub(crate) inbox: Entity<crate::inbox::InboxView>,
 }
@@ -119,7 +121,7 @@ impl Workspace {
         // Follow OS light/dark changes while the preference is "System".
         let appearance_subscription = cx.observe_window_appearance(window, |_, window, cx| {
             if AppState::appearance(cx) == Appearance::System {
-                ph_theme::apply_appearance(Appearance::System, Some(window), cx);
+                ph_theme::apply_appearance(&Appearance::System, Some(window), cx);
             }
         });
 
@@ -191,6 +193,7 @@ impl Workspace {
                 automation_subscription,
                 focus_subscription,
             ],
+            _devices: None,
             inbox,
         };
         // Copies made for agents that are no longer needed go, quietly.
@@ -1654,7 +1657,13 @@ impl Workspace {
         let project = self
             .active_space()
             .map(|space| space.read(cx).project().path.clone());
-        settings_dialog::open(project, settings_dialog::Page::First, window, cx);
+        settings_dialog::open(
+            project,
+            settings_dialog::Page::First,
+            cx.entity().downgrade(),
+            window,
+            cx,
+        );
     }
 
     fn open_storage_settings(
@@ -1666,7 +1675,13 @@ impl Workspace {
         let project = self
             .active_space()
             .map(|space| space.read(cx).project().path.clone());
-        settings_dialog::open(project, settings_dialog::Page::Storage, window, cx);
+        settings_dialog::open(
+            project,
+            settings_dialog::Page::Storage,
+            cx.entity().downgrade(),
+            window,
+            cx,
+        );
     }
 
     fn open_github_settings(
@@ -1678,17 +1693,81 @@ impl Workspace {
         let project = self
             .active_space()
             .map(|space| space.read(cx).project().path.clone());
-        settings_dialog::open(project, settings_dialog::Page::GitHub, window, cx);
+        settings_dialog::open(
+            project,
+            settings_dialog::Page::GitHub,
+            cx.entity().downgrade(),
+            window,
+            cx,
+        );
     }
 
-    fn set_appearance(
+    /// A new chat, its message begun, to design a theme with the agent:
+    /// each change shows at once (the `theme_*` tools).
+    pub(crate) fn design_theme(
         &mut self,
-        appearance: Appearance,
+        _: &DesignTheme,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        AppState::set_appearance(appearance, window, cx);
+        window.close_dialog(cx);
+        if self.view != View::Workspaces {
+            self.set_view(View::Workspaces, window, cx);
+        }
+        let from = ph_theme::themes::current(cx).name.clone();
+        let prompt = format!(
+            "Let's design a PilotHouse theme together, starting from {from}. Show each change live with the theme tools, and save it when I say so. I'd like "
+        );
+        self.with_active_space(window, cx, move |space, window, cx| {
+            space.new_session(window, cx);
+            space.begin_message(&prompt, window, cx);
+        });
     }
+}
+
+/// The gradient or image behind the frame, under the frame's veil.
+fn backdrop_layer(cx: &gpui_kit::App) -> Option<gpui_kit::AnyElement> {
+    use gpui_kit::StyledImage as _;
+    use ph_theme::preferences::BackdropPaint;
+    let backdrop = ph_theme::preferences::backdrop(cx)?;
+    let layer = || div().absolute().top_0().left_0().size_full();
+    let picture = match &backdrop.paint {
+        BackdropPaint::Gradient { from, to } => layer()
+            .bg(gpui_kit::linear_gradient(
+                135.,
+                gpui_kit::linear_color_stop(*from, 0.),
+                gpui_kit::linear_color_stop(*to, 1.),
+            ))
+            .into_any_element(),
+        BackdropPaint::Image(path) => layer()
+            .child(
+                gpui_kit::img(path.clone())
+                    .size_full()
+                    .object_fit(gpui_kit::ObjectFit::Cover),
+            )
+            .into_any_element(),
+    };
+    Some(
+        layer()
+            .child(picture)
+            .child(layer().bg(backdrop.veil))
+            .into_any_element(),
+    )
+}
+
+/// The light (or dark) version of the theme in use: its partner, else
+/// Modern Light (or Modern Dark).
+fn switch_mode(dark: bool, cx: &mut gpui_kit::App) {
+    let current = ph_theme::themes::current(cx);
+    if current.mode.is_dark() == dark && AppState::appearance(cx) != Appearance::System {
+        return;
+    }
+    let name = if current.mode.is_dark() == dark {
+        current.name.to_string()
+    } else {
+        ph_theme::themes::partner(&current.name, current.mode.is_dark()).to_string()
+    };
+    AppState::set_appearance(Appearance::Theme(name), cx);
 }
 
 impl Focusable for Workspace {
@@ -1699,6 +1778,11 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self._devices.is_none()
+            && let Some(devices) = ph_devices::DeviceManager::existing(cx)
+        {
+            self._devices = Some(cx.observe(&devices, |_, _, cx| cx.notify()));
+        }
         let github = (self.view == View::GitHub)
             .then(|| self.github.clone())
             .flatten();
@@ -1723,6 +1807,7 @@ impl Render for Workspace {
             .key_context(WORKSPACE_CONTEXT)
             .track_focus(&self.focus_handle)
             .size_full()
+            .relative()
             // The app background; panels float on it as surfaces.
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().foreground)
@@ -1737,6 +1822,19 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::finish_task))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_context_panel))
+            .on_action(cx.listener(|this, _: &ToggleBottomPanel, window, cx| {
+                this.with_active_space(window, cx, |space, window, cx| {
+                    space.toggle_bottom_panel(window, cx)
+                })
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                this.with_active_space(window, cx, |space, window, cx| {
+                    space.toggle_terminal(window, cx)
+                })
+            }))
+            .on_action(cx.listener(|this, _: &ShowLogcat, window, cx| {
+                this.show_tab(ContextTab::Logcat, window, cx)
+            }))
             .on_action(cx.listener(Self::toggle_zoom))
             .on_action(cx.listener(Self::reset_layout))
             .on_action(cx.listener(Self::quick_open))
@@ -1786,15 +1884,20 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_github_settings))
             .on_action(cx.listener(Self::open_storage_settings))
-            .on_action(cx.listener(|this, _: &UseSystemAppearance, window, cx| {
-                this.set_appearance(Appearance::System, window, cx)
+            .on_action(cx.listener(|_, _: &UseSystemAppearance, _, cx| {
+                AppState::set_appearance(Appearance::System, cx)
             }))
-            .on_action(cx.listener(|this, _: &UseLightAppearance, window, cx| {
-                this.set_appearance(Appearance::Light, window, cx)
-            }))
+            .on_action(cx.listener(|_, _: &UseLightAppearance, _, cx| switch_mode(false, cx)))
+            .on_action(cx.listener(Self::design_theme))
             .on_action(
                 cx.listener(|_, _: &ShowUsage, window, cx| crate::usage_view::open(window, cx)),
             )
+            .on_action(cx.listener(|_, _: &NewPresentation, window, cx| {
+                crate::presentations::new_dialog(window, cx)
+            }))
+            .on_action(cx.listener(|_, _: &OpenPresentation, window, cx| {
+                crate::presentations::open_dialog(window, cx)
+            }))
             .on_action(
                 cx.listener(|_, _: &ShowShortcuts, window, cx| crate::shortcuts::open(window, cx)),
             )
@@ -1844,9 +1947,10 @@ impl Render for Workspace {
                     this.open_in_new_window(id, window, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &UseDarkAppearance, window, cx| {
-                this.set_appearance(Appearance::Dark, window, cx)
-            }))
+            .on_action(cx.listener(|_, _: &UseDarkAppearance, _, cx| switch_mode(true, cx)))
+            // A gradient or picture behind the frame, when the user chose
+            // one: first, so everything is drawn over it.
+            .children(backdrop_layer(cx))
             .child(
                 TitleBar::new()
                     .h(ph_theme::layout::TITLE_BAR_HEIGHT)

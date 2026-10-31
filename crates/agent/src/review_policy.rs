@@ -178,9 +178,24 @@ pub fn is_app_tool(kind: Option<ToolKind>, title: &str, raw_input: Option<&Value
         return false;
     }
     let app_tool = |name: &str| {
-        ["browser_", "device_", "test_expect", "ports_list"]
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
+        [
+            "browser_",
+            "device_",
+            "test_expect",
+            "ports_list",
+            // Studio: looking at and changing the picture; saving asks.
+            "studio_get",
+            "studio_edit",
+            "studio_undo",
+            "studio_list",
+            // Slides: looking at and changing the presentation; exporting asks.
+            "slides_get",
+            "slides_edit",
+            "slides_undo",
+            "slides_themes",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     };
     let title = title.trim().to_lowercase();
@@ -300,6 +315,8 @@ mod tests {
             "Tool",
             Some(&serde_json::json!({ "server": "pilothouse", "tool": "device_tap" }))
         ));
+        assert!(tool("mcp__pilothouse__slides_edit"));
+        assert!(!tool("mcp__pilothouse__slides_export"), "exporting asks");
         assert!(!tool("mcp__other__browser_click"));
         assert!(!tool("Write file"));
     }

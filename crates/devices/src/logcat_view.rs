@@ -482,7 +482,7 @@ impl Render for LogcatView {
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .child(if self.logcat.is_none() {
-                    "Logcat starts when a device is on screen."
+                    "Logcat starts when a device is chosen."
                 } else {
                     "No lines match."
                 })

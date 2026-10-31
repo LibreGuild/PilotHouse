@@ -21,12 +21,29 @@ pub fn register(cx: &mut App) {
     ControlServer::handle("util.list", list_utilities, cx);
     ControlServer::handle("util.run", run_utility, cx);
     ph_board::register_control_methods(AppState::store(cx).clone(), cx);
+    ph_workspace::theme_mods::register_control_methods(cx);
+    ph_studio::register_control_methods(cx);
 
     // Testing hook: add a project without the native folder picker.
     #[cfg(feature = "automation")]
     ControlServer::handle("app.add_project", add_project, cx);
     #[cfg(feature = "automation")]
     ControlServer::handle("app.add_folder", add_folder, cx);
+
+    // Testing hook: a file in Studio without going through its viewer.
+    #[cfg(feature = "automation")]
+    ControlServer::handle(
+        "app.studio",
+        |params, cx| {
+            let path = params
+                .get("path")
+                .and_then(Value::as_str)
+                .context("missing `path`")?;
+            ph_workspace::open_in_studio(path.into(), cx)?;
+            Ok(Value::Null)
+        },
+        cx,
+    );
 
     #[cfg(feature = "automation")]
     ph_control::automation::register(cx);

@@ -5,7 +5,10 @@ mod browser;
 mod chrome;
 mod devices;
 mod runs;
+mod slides;
+mod studio;
 mod tests;
+mod theme;
 mod todos;
 mod utils;
 
@@ -32,7 +35,10 @@ pub fn all() -> impl Iterator<Item = &'static Tool> {
         .chain(chrome::TOOLS)
         .chain(devices::TOOLS)
         .chain(runs::TOOLS)
+        .chain(slides::TOOLS)
+        .chain(studio::TOOLS)
         .chain(tests::TOOLS)
+        .chain(theme::TOOLS)
         .chain(todos::TOOLS)
         .chain(utils::TOOLS)
 }

@@ -6,6 +6,8 @@ use super::*;
 
 /// How sharp phones stream (`ph_devices::StreamQuality`), app-wide.
 const STREAM_QUALITY: &str = "devices.stream_quality";
+/// Whether to mirror each device's screen, by serial, as the user chose.
+const MIRROR: &str = "devices.mirror";
 
 impl WorkspaceScreen {
     /// The changes panel, created on first use.
@@ -122,9 +124,11 @@ impl WorkspaceScreen {
             return devices.clone();
         }
         let quality: String = AppState::store(cx).setting(STREAM_QUALITY);
+        let mirror: std::collections::HashMap<String, bool> = AppState::store(cx).setting(MIRROR);
         let devices = cx.new(|cx| {
-            let mut devices = DevicesPanel::new(window, cx);
+            let mut devices = DevicesPanel::new(cx);
             devices.set_stream_quality(ph_devices::StreamQuality::from_key(&quality), cx);
+            devices.set_mirror_choices(mirror, cx);
             devices
         });
         self._subscriptions.push(cx.subscribe_in(
@@ -139,8 +143,43 @@ impl WorkspaceScreen {
                 let _ = AppState::store(cx).set_setting(STREAM_QUALITY, &quality.key());
             },
         ));
+        self._subscriptions.push(cx.subscribe(
+            &devices,
+            |_, _, ph_devices::MirrorChanged { serial, mirror }, cx| {
+                let store = AppState::store(cx);
+                let mut choices: std::collections::HashMap<String, bool> = store.setting(MIRROR);
+                choices.insert(serial.clone(), *mirror);
+                let _ = store.set_setting(MIRROR, &choices);
+            },
+        ));
+        self._subscriptions.push(cx.subscribe_in(
+            &devices,
+            window,
+            |this, _, _: &ph_devices::OpenLogcat, window, cx| {
+                this.show_tab(ContextTab::Logcat, window, cx)
+            },
+        ));
         self.devices = Some(devices.clone());
         devices
+    }
+
+    /// The Logcat tool, created on first use.
+    pub fn logcat(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ph_devices::LogcatPanel> {
+        if let Some(logcat) = &self.logcat {
+            return logcat.clone();
+        }
+        let logcat = cx.new(|cx| ph_devices::LogcatPanel::new(window, cx));
+        self._subscriptions.push(cx.subscribe_in(
+            &logcat,
+            window,
+            |this, _, event: &ToChat, window, cx| this.receive_to_chat(event, window, cx),
+        ));
+        self.logcat = Some(logcat.clone());
+        logcat
     }
 
     /// The Run tab, created on first use.
@@ -407,6 +446,9 @@ impl WorkspaceScreen {
             }
             ContextTab::Devices => {
                 self.devices(window, cx);
+            }
+            ContextTab::Logcat => {
+                self.logcat(window, cx);
             }
             ContextTab::Runs => {
                 self.runs(window, cx);

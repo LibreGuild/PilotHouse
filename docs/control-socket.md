@@ -63,6 +63,7 @@ Try it with `pilothouse ctl <method> '<json params>'`.
 | `ui.hover` | same targets as `ui.click`; moves the pointer there (hover cards, tooltips) |
 | `ui.drag` | `from: [x, y]`, `to: [x, y]` (drawing on, or swiping in, a live pane) |
 | `ui.scroll` | `at: [x, y]`, `dy` (pixels; positive scrolls down) |
+| `ui.pinch` | `at: [x, y]`, `delta` (a trackpad pinch: 0.1 zooms in by a tenth, negative zooms out) |
 | `ui.input` | `text` (typed at the current focus) |
 | `ui.press` | `key`, e.g. `enter`, `secondary-k` |
 | `ui.dispatch` | `action`, e.g. `workspace::NewSession` |

@@ -33,7 +33,7 @@ pub mod unsaved;
 mod watcher;
 
 pub use file_index::{FileList, index_files};
-pub use file_view::{Ask, AskIntent, FileView};
+pub use file_view::{Ask, AskIntent, FileView, FileViewEvent};
 pub use files_panel::{FileTree, FilesPanel, FilesPanelEvent};
 pub use watcher::{FilesChanged, ProjectWatcher, WatcherHub};
 

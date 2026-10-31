@@ -7,7 +7,10 @@ use std::ptr::NonNull;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread as _, MainThreadMarker};
-use objc2_av_foundation::{AVPlayer, AVPlayerItem, AVPlayerItemStatus, AVPlayerItemVideoOutput};
+use objc2_av_foundation::{
+    AVMediaTypeVideo, AVPlayer, AVPlayerItem, AVPlayerItemStatus, AVPlayerItemVideoOutput,
+    AVVideoComposition,
+};
 use objc2_core_foundation::{CFRetained, CFString};
 use objc2_core_media::CMTime;
 use objc2_core_video::{
@@ -32,6 +35,32 @@ pub struct Engine {
 fn ns_key(key: &'static CFString) -> &'static NSString {
     // SAFETY: CFString and NSString are toll-free bridged.
     unsafe { &*(key as *const CFString as *const NSString) }
+}
+
+/// A video recorded turned (a phone's) plays upright: its frames are
+/// handed over as they are stored unless a composition turns them.
+#[allow(deprecated)]
+unsafe fn upright(item: &AVPlayerItem) {
+    // SAFETY: AVFoundation's documented calls; a local file's tracks load
+    // at once.
+    unsafe {
+        let asset = item.asset();
+        let Some(video) = AVMediaTypeVideo else {
+            return;
+        };
+        let Some(track) = asset.tracksWithMediaType(video).firstObject() else {
+            return;
+        };
+        let t = track.preferredTransform();
+        let identity = (t.a - 1.).abs() < 1e-6
+            && t.b.abs() < 1e-6
+            && t.c.abs() < 1e-6
+            && (t.d - 1.).abs() < 1e-6;
+        if !identity {
+            let composition = AVVideoComposition::videoCompositionWithPropertiesOfAsset(&asset);
+            item.setVideoComposition(Some(&composition));
+        }
+    }
 }
 
 impl Engine {
@@ -59,6 +88,7 @@ impl Engine {
                 Some(&attributes),
             );
             item.addOutput(&output);
+            upright(&item);
             let player = AVPlayer::playerWithPlayerItem(Some(&item), main);
             Ok(Self {
                 player,

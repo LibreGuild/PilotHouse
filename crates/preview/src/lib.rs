@@ -32,7 +32,7 @@ mod spreadsheet;
 mod sqlite;
 mod table;
 mod tree;
-mod video;
+pub mod video;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,6 +44,7 @@ use gpui_kit::{
 
 pub use kind::{Kind, View};
 pub use markdown::markdown_view;
+pub use pdf::{page_count as pdf_page_count, page_png as pdf_page_png};
 
 /// What a preview asks of the file view around it.
 #[derive(Debug, Clone)]

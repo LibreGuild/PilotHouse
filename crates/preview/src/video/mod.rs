@@ -5,18 +5,22 @@
 //! player). PilotHouse draws the frames itself, with its own controls.
 
 #[cfg(target_os = "linux")]
+pub mod gst;
+#[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(windows)]
+pub mod mf;
+#[cfg(windows)]
 mod windows;
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::Engine;
+pub use linux::Engine;
 #[cfg(target_os = "macos")]
-pub(crate) use macos::Engine;
+pub use macos::Engine;
 #[cfg(windows)]
-pub(crate) use windows::Engine;
+pub use windows::Engine;
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -243,7 +247,8 @@ impl Drop for VideoPlayer {
     }
 }
 
-fn picture(frame: &Frame) -> AnyElement {
+/// `frame`, filling its element, kept in proportion.
+pub fn picture(frame: &Frame) -> AnyElement {
     match frame {
         #[cfg(target_os = "macos")]
         Frame::Surface(source) => gpui_kit::surface(source.clone())

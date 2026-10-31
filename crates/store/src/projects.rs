@@ -7,11 +7,12 @@
 //! Git tab). A workspace without folders works in a private scratch folder
 //! in PilotHouse's data folder, so chat, the browser and devices still work.
 //!
-//! The same table holds two kinds of space that are not workspaces (see
+//! The same table holds kinds of space that are not workspaces (see
 //! [`ProjectKind`]): the *Chats* space, for chats that belong to no
-//! workspace, and one space per GitHub repository the GitHub view works in
-//! (its managed clone). They give those chats everything a workspace's chats
-//! have (agents, checkpoints, usage) without showing up as workspaces.
+//! workspace; one space per GitHub repository the GitHub view works in
+//! (its managed clone); and one per presentation (its folder), for Studio's
+//! slides. They give those chats everything a workspace's chats have
+//! (agents, checkpoints, usage) without showing up as workspaces.
 
 use std::path::{Path, PathBuf};
 
@@ -34,6 +35,8 @@ pub enum ProjectKind {
     Chats,
     /// A GitHub repository's managed clone, used by the GitHub view.
     GitHub,
+    /// A presentation's folder, used by Studio's slides.
+    Presentation,
 }
 
 impl ProjectKind {
@@ -42,6 +45,7 @@ impl ProjectKind {
             "empty" => Self::Empty,
             "chats" => Self::Chats,
             "github" => Self::GitHub,
+            "presentation" => Self::Presentation,
             _ => Self::Folder,
         }
     }
@@ -511,6 +515,53 @@ impl Store {
         self.with_folders(project)
     }
 
+    /// The space of the presentation whose folder is `folder` (an existing
+    /// folder), named `name`; made the first time, renamed when the
+    /// presentation was.
+    pub fn presentation_space(&self, name: &str, folder: &Path) -> Result<Project> {
+        let folder = crate::paths::canonical(folder)
+            .with_context(|| format!("resolving {}", folder.display()))?;
+        let text = folder.to_string_lossy().to_string();
+        let conn = self.conn();
+        let existing = conn
+            .query_row(
+                "SELECT * FROM projects WHERE path = ?1",
+                params![text],
+                Project::from_row,
+            )
+            .optional()?;
+        let now = now_millis();
+        let project = match existing {
+            Some(project) if project.kind == ProjectKind::Presentation => {
+                conn.execute(
+                    "UPDATE projects SET name = ?2, last_opened_at = ?3 WHERE id = ?1",
+                    params![project.id, name, now],
+                )?;
+                Project {
+                    name: name.to_string(),
+                    last_opened_at: now,
+                    ..project
+                }
+            }
+            Some(_) => bail!("{} is a workspace's folder", folder.display()),
+            None => {
+                let id = next_project_id(&conn)?;
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, last_opened_at, kind)
+                     VALUES (?1, ?2, ?3, ?4, ?4, 'presentation')",
+                    params![id, name, text, now],
+                )?;
+                conn.query_row(
+                    "SELECT * FROM projects WHERE id = ?1",
+                    params![id],
+                    Project::from_row,
+                )?
+            }
+        };
+        drop(conn);
+        self.with_folders(project)
+    }
+
     /// The GitHub repository space whose managed clone is `clone`, if made.
     pub fn github_space_at(&self, clone: &Path) -> Result<Option<Project>> {
         let Ok(clone) = crate::paths::canonical(clone) else {
@@ -883,6 +934,17 @@ mod tests {
         let folder = store.add_project(&temp_folder("kinds-folder")).unwrap();
         assert!(folder.is_workspace() && folder.kind == ProjectKind::Folder);
         assert!(store.github_space("x/y", &folder.path).is_err());
+
+        let deck = temp_folder("kinds-deck");
+        let slides = store.presentation_space("Q3 review", &deck).unwrap();
+        assert_eq!(slides.kind, ProjectKind::Presentation);
+        assert!(!slides.is_workspace());
+        // Again, the same one, renamed when the presentation was.
+        let again = store.presentation_space("Q3 board review", &deck).unwrap();
+        assert_eq!(again.id, slides.id);
+        assert_eq!(again.name, "Q3 board review");
+        assert!(store.add_project(&deck).is_err());
+        assert!(store.presentation_space("x", &folder.path).is_err());
     }
 
     #[test]

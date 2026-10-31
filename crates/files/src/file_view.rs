@@ -139,6 +139,8 @@ pub enum FileViewEvent {
     Ask(Ask),
     /// Show this HTML file in the workspace's browser.
     OpenInBrowser(PathBuf),
+    /// Edit this picture or video in Studio.
+    EditMedia(PathBuf),
     /// Select this file in the Files tree.
     RevealInTree,
     /// The cursor jumped far (to a definition, a line): it was on this
@@ -2268,6 +2270,27 @@ impl FileView {
                     .tooltip("Show the page in the workspace's browser")
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(FileViewEvent::OpenInBrowser(path.clone()))
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if matches!(self.kind, Kind::Image | Kind::Video)
+            && matches!(self.content, Content::Media(_))
+        {
+            let path = self.absolute.clone();
+            actions.push(
+                Button::new("edit-image")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icons::SlidersHorizontal)
+                    .label("Edit")
+                    .tooltip(if self.kind == Kind::Video {
+                        "Cut, speed up, mark up, crop or compress it in Studio, by hand or with an agent"
+                    } else {
+                        "Crop, mark up, resize or compress it in Studio, by hand or with an agent"
+                    })
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(FileViewEvent::EditMedia(path.clone()))
                     }))
                     .into_any_element(),
             );

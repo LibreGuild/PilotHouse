@@ -32,6 +32,10 @@ actions!(
         SearchChats,
         /// Tokens and cost by agent or project.
         ShowUsage,
+        /// A new presentation in Studio (title, size, theme).
+        NewPresentation,
+        /// A presentation from the presentations folder, in Studio.
+        OpenPresentation,
         /// The keyboard shortcuts sheet.
         ShowShortcuts,
         /// Network drives whose work runs on a server over SSH.
@@ -48,7 +52,7 @@ actions!(
         ShowArchitecture,
         /// Show or hide the project sidebar.
         ToggleSidebar,
-        /// Show or hide the context panel next to the chat.
+        /// Show or hide the column of tools beside the chat.
         ToggleContextPanel,
         /// Let the context panel fill the window (and back).
         ToggleZoom,
@@ -63,6 +67,12 @@ actions!(
         ShowRuns,
         ShowPulls,
         ShowTests,
+        /// The chosen device's log (a tool of its own, at the bottom).
+        ShowLogcat,
+        /// Open or close the bottom panel (the terminal, Logcat).
+        ToggleBottomPanel,
+        /// Show the terminal, or hide the bottom panel when it is in front.
+        ToggleTerminal,
         /// Send a screenshot of the visible browser or device (with its marks) to chat.
         CaptureToChat,
         OpenSettings,
@@ -73,6 +83,8 @@ actions!(
         UseSystemAppearance,
         UseLightAppearance,
         UseDarkAppearance,
+        /// A new chat to design a theme with an agent, shown live as it changes.
+        DesignTheme,
         /// Remove the workspace in front from PilotHouse (its folders stay).
         RemoveWorkspace,
         /// A new task: a branch in its own worktree, as a workspace.
@@ -118,7 +130,11 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-;", SideChat, context),
         KeyBinding::new("secondary-shift-k", SearchChats, context),
         KeyBinding::new("secondary-b", ToggleSidebar, context),
-        KeyBinding::new("secondary-j", ToggleContextPanel, context),
+        // As in VS Code: ⌘J the bottom panel, ⌃` the terminal, ⌥⌘B the
+        // column of tools beside the chat.
+        KeyBinding::new("secondary-j", ToggleBottomPanel, context),
+        KeyBinding::new("ctrl-`", ToggleTerminal, context),
+        KeyBinding::new("secondary-alt-b", ToggleContextPanel, context),
         KeyBinding::new("secondary-shift-j", ToggleZoom, context),
         KeyBinding::new("secondary-1", ShowFiles, context),
         KeyBinding::new("secondary-2", ShowChanges, context),

@@ -730,7 +730,7 @@ impl ChangesPanel {
                 h_flex()
                     .id(("change-file", ix))
                     .group(group.clone())
-                    .h_7()
+                    .h(ph_theme::dense(1.75, cx))
                     .px_1p5()
                     .when_some(depth, |this, depth| this.pl(tree_indent(depth)))
                     .gap_1p5()
@@ -1299,7 +1299,7 @@ impl ChangesPanel {
         };
         h_flex()
             .id(("untracked", ix))
-            .h_7()
+            .h(ph_theme::dense(1.75, cx))
             .px_1p5()
             .when_some(depth, |this, depth| this.pl(tree_indent(depth)))
             .gap_1p5()
@@ -1391,7 +1391,7 @@ impl ChangesPanel {
         let new_files = counts.is_none();
         h_flex()
             .id(id)
-            .h_7()
+            .h(ph_theme::dense(1.75, cx))
             .px_1p5()
             .pl(tree_indent(depth))
             .gap_1p5()

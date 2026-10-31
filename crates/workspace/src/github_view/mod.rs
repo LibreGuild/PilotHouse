@@ -600,6 +600,8 @@ impl GithubView {
             placeholder: format!("Ask about #{number}…"),
             cwd: cwd.clone(),
             prepare: Some(prepare),
+            instructions: None,
+            app_tools: false,
         };
         let cwd_text = cwd.to_string_lossy().into_owned();
         let latest = self

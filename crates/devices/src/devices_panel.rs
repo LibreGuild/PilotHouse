@@ -23,8 +23,6 @@ use ph_ui::MenuButton as _;
 use ph_ui::{EmptyState, Icons};
 
 use crate::adb::{Adb, RemoteFile};
-use crate::logcat::Logcat;
-use crate::logcat_view::LogcatView;
 use crate::manager::{DeviceManager, DevicesChanged};
 use crate::screen::{DeviceScreen, ScreenEvent, StreamQuality, SystemKey};
 use crate::ui_tree::{self, UiNode};
@@ -51,7 +49,6 @@ impl Render for NoGhost {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Drawer {
-    Logcat,
     Ui,
     Files,
 }
@@ -61,12 +58,16 @@ pub struct DevicesPanel {
     screen: Option<Entity<DeviceScreen>>,
     /// How sharp a phone streams (Settings key `devices.stream_quality`).
     quality: StreamQuality,
-    logcat: Option<Entity<Logcat>>,
+    /// The device the pane works with while shown (its files, layout and
+    /// apps), mirrored or not.
+    session: Option<String>,
+    /// Whether to mirror each device's screen, as the user chose (Settings
+    /// key `devices.mirror`); a device not in it: emulators yes, phones no.
+    mirror: std::collections::HashMap<String, bool>,
     surface: Entity<SurfaceView>,
     tools: Entity<LiveTools>,
     drawer: Option<Drawer>,
     drawer_height: Pixels,
-    logcat_view: Entity<LogcatView>,
     ui_nodes: Vec<UiNode>,
     /// The Layout row outlined on the screen (by its bounds): clicked
     /// again, its outline goes.
@@ -89,12 +90,24 @@ pub struct StreamQualityChanged(pub StreamQuality);
 
 impl EventEmitter<StreamQualityChanged> for DevicesPanel {}
 
+/// The user asked for the device's log (Logcat is a tool of its own).
+pub struct OpenLogcat;
+
+impl EventEmitter<OpenLogcat> for DevicesPanel {}
+
+/// The user chose to mirror a device's screen, or not; the app keeps it.
+pub struct MirrorChanged {
+    pub serial: String,
+    pub mirror: bool,
+}
+
+impl EventEmitter<MirrorChanged> for DevicesPanel {}
+
 impl DevicesPanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         let manager = DeviceManager::global(cx);
         let surface = cx.new(|cx| SurfaceView::new("", cx));
         let tools = cx.new(|cx| LiveTools::new(surface.clone(), "device", true, cx));
-        let logcat_view = cx.new(|cx| LogcatView::new(window, cx));
         let subscriptions = vec![
             cx.subscribe(&manager, |this, _, _: &DevicesChanged, cx| {
                 this.sync_session(cx)
@@ -103,21 +116,18 @@ impl DevicesPanel {
                 this.surface_event(event, cx)
             }),
             cx.subscribe(&tools, |_, _, event: &ToChat, cx| cx.emit(event.clone())),
-            cx.subscribe(&logcat_view, |_, _, event: &ToChat, cx| {
-                cx.emit(event.clone())
-            }),
             cx.observe(&manager, |_, _, cx| cx.notify()),
         ];
         Self {
             manager,
             screen: None,
             quality: StreamQuality::default(),
-            logcat: None,
+            session: None,
+            mirror: std::collections::HashMap::new(),
             surface,
             tools,
             drawer: None,
             drawer_height: px(DRAWER_HEIGHT),
-            logcat_view,
             ui_nodes: Vec::new(),
             outlined: None,
             files_dir: "/sdcard".into(),
@@ -143,7 +153,39 @@ impl DevicesPanel {
         cx.notify();
     }
 
-    /// Shown or hidden: the screen streams (and logcat runs) only while shown.
+    /// The user's mirroring choices, as saved.
+    pub fn set_mirror_choices(
+        &mut self,
+        mirror: std::collections::HashMap<String, bool>,
+        cx: &mut Context<Self>,
+    ) {
+        self.mirror = mirror;
+        self.sync_session(cx);
+    }
+
+    /// Whether `device`'s screen is mirrored: as the user chose, else an
+    /// emulator yes (that is what it was started for) and a phone no (one
+    /// may be plugged in only for its log or its files).
+    fn wants_mirror(&self, device: &crate::adb::DeviceInfo) -> bool {
+        self.mirror
+            .get(&device.serial)
+            .copied()
+            .unwrap_or(device.emulator)
+    }
+
+    /// Mirrors the device's screen, or stops; remembered for the device.
+    fn set_mirroring(&mut self, mirror: bool, cx: &mut Context<Self>) {
+        let Some(serial) = self.session.clone() else {
+            return;
+        };
+        self.mirror.insert(serial.clone(), mirror);
+        cx.emit(MirrorChanged { serial, mirror });
+        // The screen is made (or dropped) for the same device.
+        self.session = None;
+        self.sync_session(cx);
+    }
+
+    /// Shown or hidden: the screen streams only while shown.
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.active == active {
             return;
@@ -165,11 +207,6 @@ impl DevicesPanel {
         self.surface.read(cx).composite()
     }
 
-    /// Recent logcat errors, for `@log`.
-    pub fn recent_logs(&self, cx: &App) -> Option<String> {
-        self.logcat_view.read(cx).recent_errors(cx)
-    }
-
     fn adb(&self, cx: &App) -> Option<Adb> {
         self.manager.read(cx).adb().cloned()
     }
@@ -182,31 +219,49 @@ impl DevicesPanel {
             .map(|device| device.serial.clone())
     }
 
-    /// Opens the selected device's screen (and logcat) while the pane is
-    /// shown; closes them otherwise or when the device changes.
+    /// Works with the selected device while the pane is shown (its screen
+    /// too, when it is mirrored); lets go of it otherwise or when the device
+    /// changes.
     fn sync_session(&mut self, cx: &mut Context<Self>) {
         let wanted = self.active.then(|| self.selected_serial(cx)).flatten();
-        let current = self
-            .screen
-            .as_ref()
-            .map(|screen| screen.read(cx).serial().to_string());
-        // Same device and still working: keep it. A failed screen (the
-        // emulator restarted, the phone reconnected) is opened again.
-        if wanted == current && self.screen_error.is_none() {
-            self.sync_logcat(cx);
+        let mirror = self
+            .manager
+            .read(cx)
+            .selected()
+            .is_some_and(|device| self.wants_mirror(device));
+        // Same device, mirrored as wanted and working: keep it. A failed
+        // screen (the emulator restarted, the phone reconnected) is opened
+        // again.
+        if wanted == self.session && mirror == self.screen.is_some() && self.screen_error.is_none()
+        {
             return;
         }
+        let same_device = wanted == self.session;
+        self.session = wanted.clone();
         self.screen = None;
-        self.logcat = None;
         self._screen_subscription = None;
         self.screen_error = None;
-        self.ui_nodes.clear();
         self.outlined = None;
-        self.files.clear();
+        if !same_device {
+            self.ui_nodes.clear();
+            self.files.clear();
+        }
         let (Some(serial), Some(adb)) = (wanted, self.adb(cx)) else {
             cx.notify();
             return;
         };
+        if !same_device {
+            self.load_packages(adb.clone(), serial.clone(), cx);
+            match self.drawer {
+                Some(Drawer::Files) => self.open_dir(self.files_dir.clone(), cx),
+                Some(Drawer::Ui) => self.refresh_ui(cx),
+                None => {}
+            }
+        }
+        if !mirror {
+            cx.notify();
+            return;
+        }
         let name = self
             .manager
             .read(cx)
@@ -232,31 +287,7 @@ impl DevicesPanel {
             },
         ));
         self.screen = Some(screen);
-        self.sync_logcat(cx);
-        self.load_packages(adb, serial, cx);
         cx.notify();
-    }
-
-    /// Logcat runs only while its drawer is open.
-    fn sync_logcat(&mut self, cx: &mut Context<Self>) {
-        let wanted = self.active && self.drawer == Some(Drawer::Logcat) && self.screen.is_some();
-        if wanted && self.logcat.is_none() {
-            let (Some(adb), Some(serial)) = (self.adb(cx), self.selected_serial(cx)) else {
-                return;
-            };
-            self.logcat = Some(cx.new(|cx| Logcat::new(&adb, &serial, cx)));
-        } else if !wanted {
-            self.logcat = None;
-        }
-        let device = self
-            .manager
-            .read(cx)
-            .selected()
-            .map(|device| device.display_name())
-            .unwrap_or_default();
-        let logcat = self.logcat.clone();
-        self.logcat_view
-            .update(cx, |view, cx| view.set_logcat(logcat, device, cx));
     }
 
     fn load_packages(&mut self, adb: Adb, serial: String, cx: &mut Context<Self>) {
@@ -266,8 +297,6 @@ impl DevicesPanel {
                 .await
                 .unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
-                this.logcat_view
-                    .update(cx, |view, cx| view.set_packages(packages.clone(), cx));
                 this.packages = packages;
                 cx.notify();
             });
@@ -562,7 +591,6 @@ impl DevicesPanel {
             }
             _ => {}
         }
-        self.sync_logcat(cx);
         cx.notify();
     }
 
@@ -577,7 +605,8 @@ impl DevicesPanel {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let manager = self.manager.read(cx);
         let selected = manager.selected().cloned();
-        let has_device = self.screen.is_some();
+        let mirroring = self.screen.is_some();
+        let has_device = self.session.is_some();
         let label: SharedString = match &selected {
             Some(device) => device.display_name().into(),
             None if manager.devices().is_empty() => "No device".into(),
@@ -618,7 +647,7 @@ impl DevicesPanel {
                     }),
             )
             .child(div().flex_1())
-            .when(has_device, |this| {
+            .when(mirroring, |this| {
                 this.child(
                     icon_button("device-back", Icon::new(IconName::ChevronLeft), "Back").on_click(
                         cx.listener(|this, _, _, cx| this.system_key(SystemKey::Back, cx)),
@@ -677,7 +706,9 @@ impl DevicesPanel {
                         )
                     },
                 )
-                .child(
+            })
+            .when(has_device, |this| {
+                this.child(
                     icon_button(
                         "device-install",
                         Icon::new(Icons::Package),
@@ -713,6 +744,34 @@ impl DevicesPanel {
                         },
                     ),
                 )
+                .child(
+                    icon_button("device-logcat", Icon::new(Icons::ScrollText), "Logcat")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenLogcat))),
+                )
+                .child(div().w_px().h_4().mx_1().bg(cx.theme().border))
+                .child(
+                    Button::new("device-mirror")
+                        .ghost()
+                        .small()
+                        .icon(if mirroring {
+                            Icons::EyeOff
+                        } else {
+                            Icons::Smartphone
+                        })
+                        .label(if mirroring {
+                            "Stop mirroring"
+                        } else {
+                            "Mirror"
+                        })
+                        .tooltip(if mirroring {
+                            "Stop showing the device's screen here"
+                        } else {
+                            "Show the device's screen here, live"
+                        })
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.set_mirroring(!mirroring, cx)),
+                        ),
+                )
             })
     }
 
@@ -738,6 +797,56 @@ impl DevicesPanel {
             EmptyState::new(format!("{} is {}", device.display_name(), device.state))
                 .icon(IconName::TriangleAlert)
                 .description(hint)
+                .into_any_element()
+        } else if let Some(device) = manager
+            .selected()
+            .filter(|device| device.is_ready() && self.screen.is_none())
+        {
+            // Connected, not mirrored: what can be done without the screen.
+            let kind = if device.emulator { "Emulator" } else { "Phone" };
+            EmptyState::new(device.display_name())
+                .icon(if device.emulator {
+                    Icons::TabletSmartphone
+                } else {
+                    Icons::Smartphone
+                })
+                .description(format!(
+                    "{kind} connected. Mirror its screen to see and use it here, or read its log and files without it. Agents can use it either way."
+                ))
+                .action(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .justify_center()
+                        .child(
+                            Button::new("card-mirror")
+                                .small()
+                                .primary()
+                                .icon(Icons::Smartphone)
+                                .label("Mirror screen")
+                                .on_click(cx.listener(|this, _, _, cx| this.set_mirroring(true, cx))),
+                        )
+                        .child(
+                            Button::new("card-logcat")
+                                .small()
+                                .outline()
+                                .icon(Icons::ScrollText)
+                                .label("Logcat")
+                                .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenLogcat))),
+                        )
+                        .child(
+                            Button::new("card-files")
+                                .small()
+                                .outline()
+                                .icon(Icons::FolderOpen)
+                                .label("Files")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if this.drawer != Some(Drawer::Files) {
+                                        this.set_drawer(Drawer::Files, cx)
+                                    }
+                                })),
+                        ),
+                )
                 .into_any_element()
         } else if self.screen.is_none() {
             let avds = manager.avds().to_vec();
@@ -840,14 +949,6 @@ impl DevicesPanel {
                 )
             })
             .child(tab(
-                "drawer-logcat",
-                "Logcat",
-                Icons::ScrollText,
-                Drawer::Logcat,
-                self,
-                cx,
-            ))
-            .child(tab(
                 "drawer-ui",
                 "Layout",
                 Icons::LayoutPanelTop,
@@ -890,7 +991,6 @@ impl DevicesPanel {
             });
         let body = match self.drawer {
             None => None,
-            Some(Drawer::Logcat) => Some(self.logcat_view.clone().into_any_element()),
             Some(Drawer::Ui) => Some(self.render_ui_tree(cx)),
             Some(Drawer::Files) => Some(self.render_files(cx)),
         };
@@ -1177,7 +1277,9 @@ impl DevicesPanel {
 
 /// The device picker: connected devices, emulators to start or stop, and
 /// making, wiping and deleting emulators.
-pub(crate) fn device_menu(
+/// The device menu: connected devices to choose from, emulators to start,
+/// connecting and disconnecting.
+pub fn device_menu(
     menu: PopupMenu,
     manager: &Entity<DeviceManager>,
     window: &mut Window,

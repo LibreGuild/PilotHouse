@@ -8,7 +8,9 @@
 //! grid and turns key presses into bytes.
 //!
 //! Drag to select (double-click a word, triple-click a line) and ⌘C (Ctrl+Shift+C
-//! off macOS) copies. Not yet supported: mouse reporting to programs.
+//! off macOS) copies. A tab can show up to four shells side by side (⌘\, or
+//! the header's split button with any installed shell). Not yet supported:
+//! mouse reporting to programs.
 
 mod keys;
 mod palette;
@@ -40,6 +42,9 @@ actions!(
         TerminalAsk,
         /// Find text in the terminal's history (⌘F; Ctrl+Shift+F off macOS).
         TerminalFind,
+        /// A new shell beside the one in front, both shown (⌘\; Ctrl+Shift+5
+        /// off macOS, as in VS Code).
+        TerminalSplit,
     ]
 );
 
@@ -62,6 +67,15 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-v", TerminalPaste, context),
         KeyBinding::new(copy, TerminalCopy, context),
         KeyBinding::new("secondary-l", TerminalAsk, context),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-\\"
+            } else {
+                "ctrl-shift-5"
+            },
+            TerminalSplit,
+            context,
+        ),
         KeyBinding::new(
             if cfg!(target_os = "macos") {
                 "cmd-f"

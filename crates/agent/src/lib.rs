@@ -49,7 +49,7 @@ pub mod usage_meter;
 pub mod view_mode;
 
 pub use attachments::{Attachment, LiveSources, PullBrief};
-pub use chat_panel::{ChatContext, ChatPanel, ChatPanelEvent, Prepare, Starter};
+pub use chat_panel::{ChatContext, ChatPanel, ChatPanelEvent, Instructions, Prepare, Starter};
 pub use chats::{
     ChatHub, ChatState, ChatSummary, ChatsActivity, WorkspaceChats, WorkspaceChatsEvent,
 };

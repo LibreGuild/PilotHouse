@@ -1,0 +1,64 @@
+[package]
+name = "ph-studio"
+description = "Studio: a window for editing media files (images first), by hand or with an agent."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+color_quant = "1.1"
+dirs.workspace = true
+# Slide text layout, on the same font database usvg draws with.
+cosmic-text = "0.19"
+fontdb = "0.23"
+futures.workspace = true
+gpui-kit.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico", "pnm"] }
+ph-control.workspace = true
+ph-env.workspace = true
+ph-media.workspace = true
+ph-preview.workspace = true
+ph-ui.workspace = true
+png = "0.18"
+# The same resvg GPUI draws SVG icons with, so text and shapes cost nothing more.
+resvg = "0.46"
+serde = { workspace = true, features = ["rc"] }
+# Slides: SVG paths for PowerPoint shapes (usvg's own parser), and the
+# PPTX package.
+svgtypes = "0.16"
+# Reading PowerPoint files (already in the tree through usvg).
+roxmltree = "0.21"
+# PDF: each slide's SVG as a page (svg2pdf works on usvg 0.45, already in
+# the tree through GPUI).
+pdf-writer = "0.12"
+svg2pdf = "0.13"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+# Code on slides, coloured as the editor colours it.
+syntect = { version = "5.3", default-features = false, features = ["parsing", "default-syntaxes", "default-themes", "regex-fancy"] }
+serde_json.workspace = true
+tracing.workspace = true
+
+# Video on macOS: AVFoundation reads and writes it (no codec ships).
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-av-foundation = { version = "0.3", features = ["AVAsset", "AVAssetTrack", "AVAssetReader", "AVAssetReaderOutput", "AVAssetWriter", "AVAssetWriterInput", "AVMediaFormat", "AVVideoSettings", "block2", "objc2-core-media", "objc2-core-video"] }
+objc2-core-audio-types = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NSError", "NSString", "NSURL", "NSValue"] }
+
+# Video on Windows: Media Foundation (loaded when first used, see
+# ph-preview), the same windows crate ph-preview uses.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }

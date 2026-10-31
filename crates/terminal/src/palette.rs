@@ -1,9 +1,10 @@
 //! Terminal colors.
 //!
-//! The 16 ANSI colors are a palette tuned for terminals, one for dark mode
-//! (after One Dark) and one for light (after GitHub's): the theme's own
-//! reds and greens are made for badges and read pale as text, and bright
-//! colors must differ from normal ones. Background, foreground, cursor and
+//! The 16 ANSI colors are the theme's own when it has them (`terminal` in a
+//! theme file: Dracula's terminal looks like Dracula); otherwise a palette
+//! tuned for terminals, one for dark mode (after One Dark) and one for
+//! light (after GitHub's): the theme's reds and greens are made for badges
+//! and read pale as text, and bright colors must differ from normal ones. Background, foreground, cursor and
 //! selection follow the theme. Indexed colors 16–255 follow the standard
 //! xterm cube and grey ramp; programs may still override any of them (OSC 4).
 //!
@@ -39,10 +40,20 @@ const LIGHT: [u32; 16] = [
 ];
 
 impl Palette {
-    pub fn from_theme(theme: &Theme) -> Self {
-        let ansi = if theme.is_dark() { DARK } else { LIGHT };
+    /// The palette of `theme`, its terminal colors laid over the default
+    /// for its mode.
+    pub fn from_theme(theme: &Theme, colors: Option<ph_theme::themes::TerminalColors>) -> Self {
+        let defaults = if theme.is_dark() { DARK } else { LIGHT };
+        let mut ansi: [Hsla; 16] = defaults.map(|hex| rgb(hex).into());
+        if let Some(colors) = colors {
+            for (slot, color) in ansi.iter_mut().zip(colors) {
+                if let Some(color) = color {
+                    *slot = color;
+                }
+            }
+        }
         Self {
-            ansi: ansi.map(|hex| rgb(hex).into()),
+            ansi,
             foreground: theme.foreground,
             background: theme.background,
             cursor: theme.caret,

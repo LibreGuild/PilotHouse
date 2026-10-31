@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString, Subscription};
+use gpui_kit::{
+    App, AppContext as _, Context, Entity, EntityId, Global, SharedString, Subscription,
+};
 
 use crate::terminal::{Terminal, TerminalEvent};
 
@@ -159,6 +161,10 @@ pub struct WorkspaceTerminals {
     folders: Vec<(String, PathBuf)>,
     terminals: Vec<Entity<Terminal>>,
     active: usize,
+    /// Terminals shown side by side, each split in order, left to right. A
+    /// terminal is in one split at most, and a split has two or more; each
+    /// keeps its own tab.
+    splits: Vec<Vec<EntityId>>,
     /// Why the last shell could not start.
     error: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
@@ -171,6 +177,7 @@ impl WorkspaceTerminals {
             folders: Vec::new(),
             terminals: Vec::new(),
             active: 0,
+            splits: Vec::new(),
             error: None,
             _subscriptions: Vec::new(),
         }
@@ -207,6 +214,97 @@ impl WorkspaceTerminals {
         self.folders = folders;
     }
 
+    /// The terminals shown beside `terminal`, it included, left to right
+    /// (`None` when it is shown alone).
+    pub fn split_of(&self, terminal: EntityId) -> Option<Vec<Entity<Terminal>>> {
+        let split = self.splits.iter().find(|split| split.contains(&terminal))?;
+        Some(
+            split
+                .iter()
+                .filter_map(|id| self.terminals.iter().find(|t| t.entity_id() == *id))
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// Shows the terminal `terminal` (a tab of it, or a pane of its split).
+    pub fn select_terminal(&mut self, terminal: EntityId, cx: &mut Context<Self>) {
+        if let Some(ix) = self
+            .terminals
+            .iter()
+            .position(|known| known.entity_id() == terminal)
+            && ix != self.active
+        {
+            self.active = ix;
+            cx.notify();
+        }
+    }
+
+    /// A new `shell` (the default for `None`) beside the terminal shown, in
+    /// its folder: the two (or more) side by side, the new one in front.
+    /// Its tab comes right after the split's others.
+    pub fn split(
+        &mut self,
+        shell: Option<&ph_env::Shell>,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Terminal>> {
+        let Some(beside) = self.active().cloned() else {
+            return self.new_terminal_with(self.cwd.clone(), shell, cx);
+        };
+        let beside_id = beside.entity_id();
+        if self
+            .splits
+            .iter()
+            .any(|split| split.contains(&beside_id) && split.len() >= MAX_SPLIT)
+        {
+            return None;
+        }
+        let cwd = beside.read(cx).cwd().to_path_buf();
+        let terminal = self.start(cwd, shell, cx)?;
+        let id = terminal.entity_id();
+        let split = match self
+            .splits
+            .iter_mut()
+            .find(|split| split.contains(&beside_id))
+        {
+            Some(split) => split,
+            None => {
+                self.splits.push(vec![beside_id]);
+                self.splits.last_mut().expect("just added")
+            }
+        };
+        split.push(id);
+        let last = split[split.len() - 2];
+        let after = self
+            .terminals
+            .iter()
+            .position(|known| known.entity_id() == last)
+            .map_or(self.terminals.len(), |ix| ix + 1);
+        self.terminals.insert(after, terminal.clone());
+        self.active = after;
+        cx.notify();
+        Some(terminal)
+    }
+
+    /// Whether the terminal shown can take one more beside it.
+    pub fn can_split(&self) -> bool {
+        let Some(active) = self.active() else {
+            return true;
+        };
+        let id = active.entity_id();
+        !self
+            .splits
+            .iter()
+            .any(|split| split.contains(&id) && split.len() >= MAX_SPLIT)
+    }
+
+    /// Shows the terminals of `terminal`'s split one at a time again (each
+    /// keeps running, in its tab).
+    pub fn unsplit(&mut self, terminal: EntityId, cx: &mut Context<Self>) {
+        self.splits.retain(|split| !split.contains(&terminal));
+        cx.notify();
+    }
+
     pub fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix < self.terminals.len() {
             self.active = ix;
@@ -236,6 +334,21 @@ impl WorkspaceTerminals {
         shell: Option<&ph_env::Shell>,
         cx: &mut Context<Self>,
     ) -> Option<Entity<Terminal>> {
+        let terminal = self.start(cwd, shell, cx)?;
+        self.terminals.push(terminal.clone());
+        self.active = self.terminals.len() - 1;
+        cx.notify();
+        Some(terminal)
+    }
+
+    /// Starts a `shell` in `cwd`, followed (its title, its end), not yet
+    /// in a tab.
+    fn start(
+        &mut self,
+        cwd: PathBuf,
+        shell: Option<&ph_env::Shell>,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Terminal>> {
         let shell = match Terminal::start_with(cwd, shell) {
             Ok(shell) => shell,
             Err(err) => {
@@ -259,10 +372,7 @@ impl WorkspaceTerminals {
                 TerminalEvent::TitleChanged | TerminalEvent::ProgramStatus => cx.notify(),
             },
         ));
-        self.terminals.push(terminal.clone());
-        self.active = self.terminals.len() - 1;
         self.error = None;
-        cx.notify();
         Some(terminal)
     }
 
@@ -282,8 +392,7 @@ impl WorkspaceTerminals {
             let terminal = terminal.read(cx);
             terminal.has_exited() && terminal.label().is_some_and(|name| name == label)
         }) {
-            self.terminals.remove(ix);
-            self.active = active_after_close(self.active, ix, self.terminals.len());
+            self.remove_at(ix);
         }
         let existing = self
             .terminals
@@ -332,9 +441,19 @@ impl WorkspaceTerminals {
         else {
             return;
         };
-        self.terminals.remove(ix);
-        self.active = active_after_close(self.active, ix, self.terminals.len());
+        self.remove_at(ix);
         cx.notify();
+    }
+
+    /// Takes the terminal at `ix` out of the tabs and of its split (which
+    /// goes on without it; one left alone is a tab again).
+    fn remove_at(&mut self, ix: usize) {
+        let id = self.terminals.remove(ix).entity_id();
+        self.active = active_after_close(self.active, ix, self.terminals.len());
+        for split in &mut self.splits {
+            split.retain(|known| *known != id);
+        }
+        self.splits.retain(|split| split.len() > 1);
     }
 
     pub fn close_index(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -343,6 +462,9 @@ impl WorkspaceTerminals {
         }
     }
 }
+
+/// The most terminals side by side: each needs room for its lines.
+const MAX_SPLIT: usize = 4;
 
 /// The tab shown after closing tab `closed` (`active` was shown; `left`
 /// remain): the same terminal if another closed, else the one that took its

@@ -78,7 +78,7 @@ pub fn open(path: PathBuf, cx: &mut App) -> Result<()> {
         titlebar.traffic_light_position = Some(gpui_kit::point(x, y));
     }
     let (handle, _) = gpui_kit::open_window(options, cx, |window, cx| {
-        ph_theme::apply_appearance(crate::AppState::appearance(cx), Some(window), cx);
+        ph_theme::apply_appearance(&crate::AppState::appearance(cx), Some(window), cx);
         let path = path.clone();
         cx.new(|cx| LoneFile::new(path, window, cx))
     })
@@ -106,6 +106,28 @@ impl LoneFile {
         });
         let watcher = cx.new(|cx| ProjectWatcher::for_file(path.clone(), cx));
         let subscriptions = vec![
+            // A picture opened alone is edited alone: Studio without a chat.
+            cx.subscribe_in(
+                &view,
+                window,
+                |_, _, event: &ph_files::FileViewEvent, window, cx| {
+                    if let ph_files::FileViewEvent::EditMedia(path) = event
+                        && ph_studio::slides::space::is_powerpoint(path)
+                    {
+                        crate::presentations::open_powerpoint(path.clone(), window, cx);
+                    } else if let ph_files::FileViewEvent::EditMedia(path) = event
+                        && let Err(err) = crate::studio_window::open(path.clone(), None, cx)
+                    {
+                        use gpui_kit::component::WindowExt as _;
+                        window.push_notification(
+                            gpui_kit::component::notification::Notification::error(format!(
+                                "Could not open Studio: {err:#}"
+                            )),
+                            cx,
+                        );
+                    }
+                },
+            ),
             cx.subscribe_in(&watcher, window, |this, _, _: &FilesChanged, window, cx| {
                 this.view
                     .update(cx, |view, cx| view.reload_if_clean(window, cx));

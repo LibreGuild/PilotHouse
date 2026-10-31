@@ -8,7 +8,9 @@
 //! - [`DeviceManager`]: connected devices (followed with `adb track-devices`),
 //!   AVDs, and starting emulators headless.
 //! - [`DeviceScreen`]: one device's live screen and input while it is shown.
-//! - [`DevicesPanel`]: the pane.
+//! - [`DevicesPanel`]: the pane: a device's screen (mirrored when asked),
+//!   its files and layout.
+//! - [`LogcatPanel`]: the chosen device's log, a tool of its own.
 //! - [`android_project`] + [`AndroidRun`]: build, install and start an app
 //!   module's variant on the chosen device (the Run tab's Android card).
 //! - `control`: `device.*` control methods behind the MCP tools.
@@ -26,6 +28,7 @@ mod grpc;
 pub mod h264;
 mod input_shell;
 pub mod logcat;
+mod logcat_panel;
 mod logcat_view;
 mod manager;
 mod screen;
@@ -33,7 +36,10 @@ pub mod sdk;
 pub mod ui_tree;
 
 pub use android_run::{AndroidRun, AndroidRunEvent};
-pub use devices_panel::{DevicesPanel, StreamQualityChanged};
+pub use devices_panel::{
+    DevicesPanel, MirrorChanged, OpenLogcat, StreamQualityChanged, device_menu,
+};
+pub use logcat_panel::LogcatPanel;
 pub use manager::{DeviceManager, DevicesChanged};
 pub use screen::{DeviceScreen, ScreenEvent, StreamQuality, SystemKey};
 

@@ -217,6 +217,9 @@ pub struct ChatThread {
     /// PilotHouse's browser, device and test tools run without asking
     /// during the current turn (recording or repairing a UI test).
     app_tools_this_turn: bool,
+    /// They do in every turn (a chat beside a Studio picture, where
+    /// changing it is what the chat is for).
+    app_tools_always: bool,
     /// Stored message ids of user entries, by entry index, so a checkpoint
     /// taken after the message was saved can be added to it.
     user_message_ids: HashMap<usize, i64>,
@@ -291,6 +294,7 @@ impl ChatThread {
             in_folder: false,
             reads_this_turn: false,
             app_tools_this_turn: false,
+            app_tools_always: false,
             user_message_ids: HashMap::new(),
             restoring: false,
             note_for_agent: None,
@@ -354,6 +358,11 @@ impl ChatThread {
     pub fn allow_app_tools_for_turn(&mut self) {
         self.reads_this_turn = true;
         self.app_tools_this_turn = true;
+    }
+
+    /// Lets every turn use PilotHouse's app tools without asking.
+    pub fn trust_app_tools(&mut self) {
+        self.app_tools_always = true;
     }
 
     /// Forwards a review card's requests (open a file, review again).
@@ -1410,7 +1419,7 @@ impl ChatThread {
             if let Some(allow) = allow
                 && !escalates
                 && (crate::review_policy::allows(kind, raw_input.as_ref(), &title)
-                    || (self.app_tools_this_turn
+                    || ((self.app_tools_this_turn || self.app_tools_always)
                         && crate::review_policy::is_app_tool(kind, &title, raw_input.as_ref())))
             {
                 respond(Some(allow.option_id.0.to_string()), cx);

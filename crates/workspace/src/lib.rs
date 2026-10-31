@@ -28,6 +28,7 @@ mod instructions_view;
 mod network_drives;
 mod open;
 mod parallel;
+mod presentations;
 mod rename_dialog;
 mod review;
 mod schedules;
@@ -39,8 +40,10 @@ mod signals;
 mod status;
 mod status_bar;
 mod storage;
+mod studio_window;
 mod tasks;
 mod terminal_agents;
+pub mod theme_mods;
 mod title_bar;
 mod updates;
 mod usage_view;
@@ -55,6 +58,23 @@ pub use context_panel::ContextTab;
 pub use detect::Stack;
 pub use github_view::GithubView;
 pub use open::{main_workspace, open_paths, set_main_window};
+
+/// Opens `path` (a picture or video) in Studio without a chat (testing).
+pub fn open_in_studio(path: std::path::PathBuf, cx: &mut gpui_kit::App) -> anyhow::Result<()> {
+    if ph_studio::slides::space::is_powerpoint(&path) {
+        let window = cx
+            .windows()
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no window to open it from"))?;
+        return window
+            .update(cx, |_, window, cx| {
+                presentations::open_powerpoint(path, window, cx)
+            })
+            .map_err(|err| anyhow::anyhow!("{err}"));
+    }
+    studio_window::open(path, None, cx)
+}
 pub use windows::{open_window, window_options};
 pub use workspace::{View, Workspace};
 pub use workspace_screen::WorkspaceScreen;
@@ -74,6 +94,7 @@ pub fn init(cx: &mut App) {
     sidebar::load_width(cx);
     ph_files::init(cx, WORKSPACE_CONTEXT);
     file_window::bind_keys(cx);
+    ph_studio::bind_keys(cx);
     ph_terminal::init(cx);
     ph_terminal::TerminalHub::keep_between_runs(ph_store::paths::data_dir().join("terminals"), cx);
 }

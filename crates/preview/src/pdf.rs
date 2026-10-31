@@ -229,6 +229,46 @@ fn open(path: &std::path::Path) -> Result<Document, String> {
     })
 }
 
+/// How many pages the PDF at `path` has, or why it can't be read.
+pub fn page_count(path: &std::path::Path) -> Result<usize, String> {
+    open(path).map(|document| document.sizes.len())
+}
+
+/// Page `page` of the PDF at `path`, `width` pixels wide on white, as PNG.
+pub fn page_png(path: &std::path::Path, page: usize, width: u32) -> Result<Vec<u8>, String> {
+    let document = open(path)?;
+    let (page_width, _) = *document
+        .sizes
+        .get(page)
+        .ok_or_else(|| format!("There is no page {}.", page + 1))?;
+    let pages = document.pdf.pages();
+    let page = pages.get(page).ok_or("The page could not be read.")?;
+    let pixels = width as f32 / page_width.max(1.);
+    let cache = hayro::RenderCache::new();
+    let pixmap = hayro::render(
+        page,
+        &cache,
+        &hayro::hayro_interpret::InterpreterSettings::default(),
+        &hayro::RenderSettings::default(),
+        &hayro::PixmapSettings {
+            x_scale: pixels,
+            y_scale: pixels,
+            bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+        },
+    );
+    let (w, h) = (pixmap.width() as u32, pixmap.height() as u32);
+    let pixels = pixmap.take_rgba8(hayro::vello_cpu::peniko::ImageAlphaType::AlphaPremultiplied);
+    let image = ::image::RgbaImage::from_raw(w, h, pixels).ok_or("The page drew empty.")?;
+    let mut png = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut png),
+            ::image::ImageFormat::Png,
+        )
+        .map_err(|err| err.to_string())?;
+    Ok(png)
+}
+
 /// Page `page` drawn at `pixels` pixels per point, on white.
 pub fn draw_page(
     pdf: &hayro::hayro_syntax::Pdf,

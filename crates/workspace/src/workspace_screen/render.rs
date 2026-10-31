@@ -122,7 +122,9 @@ impl WorkspaceScreen {
     /// tooltips (or under them, in Settings).
     pub(super) fn render_tool_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let space = cx.entity();
-        let labels = ph_theme::preferences::preferences(cx).tool_labels;
+        let labels = cx
+            .try_global::<ph_theme::Preferences>()
+            .is_some_and(|preferences| preferences.tool_labels);
         let changes = self
             .changes
             .get(&self.git_folder)
@@ -152,6 +154,7 @@ impl WorkspaceScreen {
                     })
                 })
         });
+        let first_bottom_seen = std::cell::Cell::new(false);
         v_flex()
             .id("context-tabs")
             .flex_none()
@@ -160,7 +163,18 @@ impl WorkspaceScreen {
             .py_1()
             .gap_0p5()
             .items_center()
-            .children(shown_tabs.into_iter().map(|tab| {
+            .children(shown_tabs.into_iter().enumerate().flat_map(|(ix, tab)| {
+                // A line between the column's tools and the bottom panel's.
+                let divider = (tab.in_bottom_panel() && ix > 0 && !first_bottom_seen.replace(true))
+                    .then(|| {
+                        div()
+                            .flex_none()
+                            .w(px(20.))
+                            .h_px()
+                            .my_1()
+                            .bg(cx.theme().border)
+                            .into_any_element()
+                    });
                 let selected = self.shown.contains(&Pane::Tool(tab));
                 let space = space.clone();
                 let badge = (tab == ContextTab::Changes && changes > 0).then(|| {
@@ -185,7 +199,7 @@ impl WorkspaceScreen {
                         })
                 });
                 let hint = tab_shortcut(tab);
-                v_flex()
+                let item = v_flex()
                     .id(SharedString::from(format!("context-tab-{}", tab.key())))
                     .role(gpui_kit::accesskit::Role::Tab)
                     .aria_label(tab.label())
@@ -211,7 +225,10 @@ impl WorkspaceScreen {
                         })
                     })
                     .when(!labels, |this| {
-                        let label = format!("{} ({hint})", tab.label());
+                        let label = match &hint {
+                            Some(hint) => format!("{} ({hint})", tab.label()),
+                            None => tab.label().to_string(),
+                        };
                         this.tooltip(move |window, cx| {
                             gpui_kit::component::tooltip::Tooltip::new(label.clone())
                                 .build(window, cx)
@@ -234,6 +251,8 @@ impl WorkspaceScreen {
                     .children(badge)
                     // Findable by label in UI tests and automation.
                     .test_support()
+                    .into_any_element();
+                divider.into_iter().chain(std::iter::once(item))
             }))
             .children(more_menu)
             .into_any_element()
@@ -284,6 +303,7 @@ impl WorkspaceScreen {
                 self.with_folder_picker(panel.cached(filled()).into_any_element(), cx)
             }),
             ContextTab::Tests => cached(&self.tests),
+            ContextTab::Logcat => cached(&self.logcat),
         };
         panel.unwrap_or_else(|| div().into_any_element())
     }
@@ -386,8 +406,8 @@ pub(super) fn tool_rail_width(labels: bool) -> gpui_kit::Pixels {
     if labels { px(64.) } else { px(42.) }
 }
 
-/// The shortcut that shows `tab` (see `actions::bind_keys`).
-pub(super) fn tab_shortcut(tab: ContextTab) -> String {
+/// The shortcut that shows `tab` (see `actions::bind_keys`), if it has one.
+pub(super) fn tab_shortcut(tab: ContextTab) -> Option<String> {
     let key = match tab {
         ContextTab::Files => 1,
         ContextTab::Changes => 2,
@@ -398,12 +418,13 @@ pub(super) fn tab_shortcut(tab: ContextTab) -> String {
         ContextTab::Runs => 7,
         ContextTab::Pulls => 8,
         ContextTab::Tests => 9,
+        ContextTab::Logcat => return None,
     };
-    if cfg!(target_os = "macos") {
+    Some(if cfg!(target_os = "macos") {
         format!("⌘{key}")
     } else {
         format!("Ctrl+{key}")
-    }
+    })
 }
 
 /// `text` cut to `max` characters, with an ellipsis.

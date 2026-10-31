@@ -400,7 +400,11 @@ impl Terminal {
                     use gpui_kit::component::ActiveTheme as _;
                     let set = self.term.lock().colors()[index];
                     let color = set.unwrap_or_else(|| {
-                        crate::palette::Palette::from_theme(cx.theme()).query(index)
+                        crate::palette::Palette::from_theme(
+                            cx.theme(),
+                            ph_theme::themes::terminal_colors(cx),
+                        )
+                        .query(index)
                     });
                     self.write(format(color).into_bytes());
                 }

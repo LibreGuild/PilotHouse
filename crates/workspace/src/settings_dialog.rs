@@ -11,11 +11,13 @@ use gpui_kit::component::{
     setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
 };
 use gpui_kit::{
-    App, AppContext as _, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
-    px,
+    App, AppContext as _, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use ph_theme::preferences::{self, installed_fonts};
-use ph_theme::{Appearance, ChatWidth, Corners, DarkTheme, Preferences, WindowStyle};
+use ph_theme::{
+    Accent, Appearance, ChatWidth, Corners, Density, Gradient, Preferences, WindowStyle,
+};
 use ph_ui::Icons;
 
 use crate::app_state::AppState;
@@ -45,11 +47,13 @@ impl Page {
 pub(crate) fn open(
     project: Option<std::path::PathBuf>,
     page: Page,
+    workspace: gpui_kit::WeakEntity<crate::Workspace>,
     window: &mut Window,
     cx: &mut App,
 ) {
     // Listing fonts touches the OS font database: do it once per opening.
     let fonts = font_options(cx);
+    let themes = theme_options(cx);
     let store = AppState::store(cx).clone();
     let accounts = cx.new(|cx| ph_pulls::AccountsView::new(store.clone(), window, cx));
     let templates = cx.new(|_| ph_pulls::TemplatesView::new(store.clone()));
@@ -69,10 +73,15 @@ pub(crate) fn open(
     let width = (viewport.width - px(80.)).clamp(px(560.), px(960.));
     let height = (viewport.height - px(120.)).clamp(px(420.), px(680.));
     window.open_dialog(cx, move |dialog, _, cx| {
-        let fonts = fonts.clone();
+        let (fonts, themes, workspace) = (fonts.clone(), themes.clone(), workspace.clone());
+        // Opaque, also when the window lets something show through: a
+        // dialog over the window must not.
+        let frame_color = ph_theme::preferences::opaque_frame(cx);
         let theme = cx.theme();
-        let mut sidebar = gpui_kit::StyleRefinement::default();
-        sidebar.background = Some(theme.sidebar.into());
+        let sidebar = gpui_kit::StyleRefinement {
+            background: Some(frame_color.into()),
+            ..Default::default()
+        };
         // The search box level with the page's top edge (the list's header
         // has room above it of its own).
         let search = gpui_kit::StyleRefinement::default().mt(px(-12.));
@@ -96,7 +105,7 @@ pub(crate) fn open(
         dialog
             .w(width)
             .p_0()
-            .bg(theme.sidebar)
+            .bg(frame_color)
             .close_button(true)
             .title(div().px_4().pt_3().child("Settings"))
             .child(
@@ -125,7 +134,12 @@ pub(crate) fn open(
                                     )
                                     .pages([
                                         // In this order: see `Page::index`.
-                                        appearance_page(&fonts),
+                                        appearance_page(
+                                            &fonts,
+                                            &themes,
+                                            workspace,
+                                            prefs(cx).window,
+                                        ),
                                         editor_page(&fonts),
                                         terminal_page(),
                                         chat_page(),
@@ -148,10 +162,74 @@ pub(crate) fn open(
                             .left(px(SIDEBAR_WIDTH - 1.))
                             .w(px(2.))
                             .h((theme.radius_lg - px(5.)).max(px(0.)))
-                            .bg(theme.sidebar),
+                            .bg(frame_color),
                     ),
             )
     });
+}
+
+/// The accent choices as swatches: the theme's own, then each color in the
+/// shade the theme's mode shows.
+fn accent_swatches(cx: &App) -> impl IntoElement + use<> {
+    let dark = cx.theme().is_dark();
+    let chosen = cx
+        .try_global::<Preferences>()
+        .map_or(Accent::Theme, |preferences| preferences.accent);
+    let ring = cx.theme().foreground;
+    let border = cx.theme().border;
+    h_flex()
+        .gap_1p5()
+        .flex_wrap()
+        .children(Accent::ALL.into_iter().map(move |accent| {
+            let id = SharedString::from(format!("accent-{}", accent.label()));
+            let selected = accent == chosen;
+            let swatch = div()
+                .id(id)
+                .size(px(20.))
+                .rounded_full()
+                .cursor_pointer()
+                .border_2()
+                .border_color(if selected {
+                    ring
+                } else {
+                    gpui_kit::transparent_black()
+                })
+                .p(px(2.))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(accent.label()).build(window, cx)
+                })
+                .on_click(move |_, _, cx| AppState::update_preferences(cx, |p| p.accent = accent));
+            match accent.color(dark) {
+                Some(color) => swatch.child(div().size_full().rounded_full().bg(color)),
+                // The theme's own: a ring of the border's color, empty.
+                None => swatch.child(
+                    div()
+                        .size_full()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(border),
+                ),
+            }
+        }))
+}
+
+/// The Theme dropdown's value for following the system.
+const SYSTEM_THEME: &str = "system";
+
+/// The Theme dropdown's choices: the system, PilotHouse's themes, then the
+/// user's own (read again each time Settings opens).
+fn theme_options(cx: &mut App) -> Vec<(SharedString, SharedString)> {
+    ph_theme::themes::reload_user_themes(cx);
+    let mut options = vec![(SYSTEM_THEME.into(), "Match system".into())];
+    for (theme, mine) in ph_theme::themes::list(cx) {
+        let label = if mine {
+            format!("{} (yours)", theme.name)
+        } else {
+            theme.name.to_string()
+        };
+        options.push((theme.name.clone(), label.into()));
+    }
+    options
 }
 
 /// The settings list's width.
@@ -226,81 +304,205 @@ fn switch(get: fn(&Preferences) -> bool, set: fn(&mut Preferences, bool)) -> Set
     )
 }
 
-fn appearance_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {
+fn appearance_page(
+    fonts: &[(SharedString, SharedString)],
+    themes: &[(SharedString, SharedString)],
+    workspace: gpui_kit::WeakEntity<crate::Workspace>,
+    style: WindowStyle,
+) -> SettingPage {
     let ui_fonts = fonts.to_vec();
-    let window_styles: &'static [WindowStyle] =
-        Box::leak(WindowStyle::available().into_boxed_slice());
+    // What shows behind the window, and under it the picture's own row.
+    let mut window_group = SettingGroup::new().title("Window").item(
+        SettingItem::new(
+            "Background",
+            SettingField::dropdown(
+                WindowStyle::available()
+                    .into_iter()
+                    .map(|style| (style.label().into(), style.label().into()))
+                    .collect(),
+                |cx| prefs(cx).window.label().into(),
+                |picked, cx| {
+                    let Some(style) = WindowStyle::available()
+                        .into_iter()
+                        .find(|style| style.label() == picked.as_ref())
+                    else {
+                        return;
+                    };
+                    // An image needs one: ask for it first.
+                    if style == WindowStyle::Image && prefs(cx).backdrop_image.is_empty() {
+                        crate::theme_mods::choose_backdrop(cx);
+                    } else {
+                        AppState::update_preferences(cx, |p| p.window = style);
+                    }
+                },
+            ),
+        )
+        .description(if cfg!(windows) {
+            "Translucent lets the desktop show through, blurred; Mica uses Windows 11's material. Gradient and Image show behind the frame, the panels stay easy to read."
+        } else {
+            "Translucent lets the desktop show through, blurred. Gradient and Image show behind the frame, the panels stay easy to read."
+        })
+        .keywords(["transparency", "opacity", "blur", "vibrancy", "mica", "gradient", "image", "wallpaper", "backdrop"]),
+    );
+    match style {
+        WindowStyle::Gradient => {
+            window_group = window_group.item(
+                SettingItem::new(
+                    "Gradient",
+                    choice(
+                        &Gradient::ALL,
+                        Gradient::label,
+                        |p| p.gradient,
+                        |p, v| p.gradient = v,
+                    ),
+                )
+                .description(
+                    "Its colors follow the theme: deep on a dark one, soft on a light one.",
+                )
+                .keywords(["gradient", "backdrop", "colors"]),
+            );
+        }
+        WindowStyle::Image => {
+            window_group = window_group.item(
+                SettingItem::new(
+                    "Image",
+                    SettingField::render(|_, _, _| {
+                        Button::new("choose-backdrop")
+                            .small()
+                            .icon(IconName::FolderOpen)
+                            .label("Choose image…")
+                            .on_click(|_, _, cx| crate::theme_mods::choose_backdrop(cx))
+                    }),
+                )
+                .description("PNG, JPEG, WebP, GIF or BMP. PilotHouse keeps its own copy, sized for a screen.")
+                .keywords(["image", "wallpaper", "picture", "backdrop"]),
+            );
+        }
+        _ => {}
+    }
+    if style != WindowStyle::Solid {
+        window_group = window_group.item(
+            SettingItem::new(
+                "Panel opacity (%)",
+                number(
+                    55.0,
+                    100.0,
+                    5.0,
+                    |p| (p.opacity * 100.0).round() as f64,
+                    |p, v| p.opacity = (v / 100.0) as f32,
+                ),
+            )
+            .description("How solid the panels are over what shows behind them.")
+            .keywords(["transparency", "alpha"]),
+        );
+    }
     SettingPage::new("Appearance")
         .icon(Icon::new(Icons::Palette))
         .default_open(true)
         .group(
-            SettingGroup::new().title("Layout").item(
-                SettingItem::new(
-                    "Names under tool icons",
-                    switch(|p| p.tool_labels, |p, v| p.tool_labels = v),
+            SettingGroup::new()
+                .title("Layout")
+                .item(
+                    SettingItem::new("Density", choice(&Density::ALL, Density::label, |p| p.density, |p, v| p.density = v))
+                        .description("How much room rows and spacing take in the sidebar, the file tree, the Git lists and the chat.")
+                        .keywords(["density", "compact", "spacing", "padding", "rows"]),
                 )
-                .description(
-                    "Show each tool's name under its icon on the right, not only when pointing at it.",
-                )
-                .keywords(["layout", "labels", "tools", "icons", "activity bar"]),
-            ),
+                .item(
+                    SettingItem::new(
+                        "Names under tool icons",
+                        switch(|p| p.tool_labels, |p, v| p.tool_labels = v),
+                    )
+                    .description(
+                        "Show each tool's name under its icon on the right, not only when pointing at it.",
+                    )
+                    .keywords(["layout", "labels", "tools", "icons", "activity bar"]),
+                ),
         )
         .group(
             SettingGroup::new()
                 .title("Theme")
                 .item(
                     SettingItem::new(
-                        "Mode",
-                        SettingField::dropdown(
-                            Appearance::ALL.map(|mode| (mode.label().into(), mode.label().into())).to_vec(),
-                            |cx| AppState::appearance(cx).label().into(),
+                        "Theme",
+                        SettingField::scrollable_dropdown(
+                            themes.to_vec(),
+                            |cx| match AppState::appearance(cx) {
+                                Appearance::Theme(name) => name.into(),
+                                // Older choices are moved to names when the app starts.
+                                _ => SYSTEM_THEME.into(),
+                            },
                             |picked, cx| {
-                                let Some(mode) = Appearance::ALL.into_iter().find(|mode| mode.label() == picked.as_ref()) else {
-                                    return;
+                                let appearance = if picked.as_ref() == SYSTEM_THEME {
+                                    Appearance::System
+                                } else {
+                                    Appearance::Theme(picked.to_string())
                                 };
-                                for window in cx.windows() {
-                                    let _ = window.update(cx, |_, window, cx| AppState::set_appearance(mode, window, cx));
-                                }
+                                AppState::set_appearance(appearance, cx);
                             },
                         ),
                     )
-                    .description("Light, dark, or follow the system.")
-                    .keywords(["dark", "light", "theme"]),
+                    .description("Match system follows your computer's light or dark mode with Modern Light and Modern Dark. Themes you design are listed too.")
+                    .keywords(["dark", "light", "mode", "theme", "palette", "colors", "dracula", "one dark", "warm", "studio"]),
+                )
+                .item(
+                    SettingItem::new("Accent", SettingField::render(|_, _, cx| accent_swatches(cx)))
+                        .description("One color for focus, links, selection and highlights, over the theme's own.")
+                        .keywords(["accent", "color", "highlight", "tint"]),
                 )
                 .item(
                     SettingItem::new(
-                        "Dark theme",
-                        choice(&DarkTheme::ALL, DarkTheme::label, |p| p.dark_theme, |p, v| p.dark_theme = v),
+                        "Your own theme",
+                        SettingField::render(move |_, _, _| {
+                            let workspace = workspace.clone();
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("design-theme")
+                                        .small()
+                                        .icon(IconName::Palette)
+                                        .label("Design with an agent")
+                                        // Straight to the workspace: Settings is a dialog
+                                        // over it, outside its actions' reach.
+                                        .on_click(move |_, window, cx| {
+                                            _ = workspace.update(cx, |workspace, cx| {
+                                                workspace.design_theme(&crate::DesignTheme, window, cx)
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    Button::new("import-theme")
+                                        .small()
+                                        .ghost()
+                                        .icon(IconName::ArrowDown)
+                                        .label("Import…")
+                                        .tooltip("Import a VS Code color theme (.json)")
+                                        .on_click(|_, _, cx| crate::theme_mods::import_vscode_file(cx)),
+                                )
+                                .child(
+                                    Button::new("theme-folder")
+                                        .small()
+                                        .ghost()
+                                        .icon(IconName::FolderOpen)
+                                        .tooltip("Open the folder of your themes (JSON files)")
+                                        .accessibility_label("Open themes folder")
+                                        .on_click(|_, _, cx| {
+                                            if let Some(dir) = ph_theme::themes::user_dir(cx) {
+                                                let _ = std::fs::create_dir_all(&dir);
+                                                cx.open_with_system(&dir);
+                                            }
+                                        }),
+                                )
+                        }),
                     )
-                    .description("Modern is the greys of VS Code's dark theme. Warm is a soft dark brown, easier on the eyes.")
-                    .keywords(["dark", "warm", "brown", "theme", "palette", "colors"]),
+                    .description("Describe the look you want in a chat: the agent changes PilotHouse as you talk, and saves it as a theme of your own. Or import a VS Code theme.")
+                    .keywords(["theme", "design", "customize", "colors", "mod", "agent"]),
                 )
                 .item(
                     SettingItem::new("Corners", choice(&Corners::ALL, Corners::label, |p| p.corners, |p, v| p.corners = v))
                         .description("How rounded panels, buttons and cards are."),
                 ),
         )
-        .group(
-            SettingGroup::new()
-                .title("Window")
-                .item(
-                    SettingItem::new("Background", choice(window_styles, WindowStyle::label, |p| p.window, |p, v| p.window = v))
-                        .description(if cfg!(windows) {
-                            "Translucent lets the desktop show through, blurred. Mica uses Windows 11's material."
-                        } else {
-                            "Translucent lets the desktop show through, blurred."
-                        })
-                        .keywords(["transparency", "opacity", "blur", "vibrancy", "mica"]),
-                )
-                .item(
-                    SettingItem::new(
-                        "Panel opacity (%)",
-                        number(55.0, 100.0, 5.0, |p| (p.opacity * 100.0).round() as f64, |p, v| p.opacity = (v / 100.0) as f32),
-                    )
-                    .description("How solid panels are when the background is translucent.")
-                    .keywords(["transparency", "alpha"]),
-                ),
-        )
+        .group(window_group)
         .group(
             SettingGroup::new()
                 .title("Text")

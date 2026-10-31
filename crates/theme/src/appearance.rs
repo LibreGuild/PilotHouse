@@ -1,98 +1,138 @@
-use std::rc::Rc;
-
-use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
-use gpui_kit::{App, Window};
+use gpui_kit::component::Theme;
+use gpui_kit::{App, Window, WindowAppearance};
 use serde::{Deserialize, Serialize};
 
-/// The theme set bundled into the binary.
-const PILOTHOUSE_THEMES: &str = include_str!("../themes/pilothouse.json");
-const LIGHT_THEME_NAME: &str = "PilotHouse Light";
-const DARK_THEME_NAME: &str = "PilotHouse Dark";
+use crate::themes::{self, DEFAULT_DARK, DEFAULT_LIGHT};
 
-/// The user's appearance preference, stored in settings.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The theme the user chose, stored in settings: one by name, or the
+/// system's light or dark one.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Appearance {
-    /// Follow the operating system's light/dark setting.
+    /// Modern Light or Modern Dark, as the operating system is.
     #[default]
     System,
+    /// Saved before themes had names: Modern Light.
     Light,
+    /// Saved before themes had names: the dark palette of the preferences
+    /// (`dark_theme`).
     Dark,
+    /// A theme by name: PilotHouse's or one of the user's.
+    Theme(String),
 }
 
 impl Appearance {
-    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
-
-    pub fn label(self) -> &'static str {
+    /// The name of the theme to show.
+    pub fn theme_name(&self, system_dark: bool, preferences: &crate::Preferences) -> String {
         match self {
-            Appearance::System => "System",
-            Appearance::Light => "Light",
-            Appearance::Dark => "Dark",
+            Appearance::System if system_dark => DEFAULT_DARK.into(),
+            Appearance::System | Appearance::Light => DEFAULT_LIGHT.into(),
+            Appearance::Dark => preferences.dark_theme.theme_name().into(),
+            Appearance::Theme(name) => name.clone(),
+        }
+    }
+
+    /// The same choice in today's terms: a theme by name (or the system).
+    pub fn migrated(&self, preferences: &crate::Preferences) -> Appearance {
+        match self {
+            Appearance::Light | Appearance::Dark => {
+                Appearance::Theme(self.theme_name(false, preferences))
+            }
+            other => other.clone(),
         }
     }
 }
 
-/// Registers the PilotHouse themes and makes them the light/dark pair.
+/// Loads PilotHouse's themes and shows Modern Dark until the user's choice
+/// is applied.
 ///
-/// Must run after `gpui_kit::init`, which creates the theme registry.
+/// Must run after `gpui_kit::init`, which creates the theme.
 pub fn init(cx: &mut App) {
-    if let Err(err) = ThemeRegistry::global_mut(cx).load_themes_from_str(PILOTHOUSE_THEMES) {
-        // The JSON is compiled in and covered by a test, so this only fires
-        // during development when the file is edited by hand.
-        tracing::error!("failed to parse bundled PilotHouse themes: {err:#}");
-        return;
-    }
-
-    let registry = ThemeRegistry::global(cx);
-    let light = registry.themes().get(LIGHT_THEME_NAME).map(Rc::clone);
-    let dark = registry.themes().get(DARK_THEME_NAME).map(Rc::clone);
-
+    themes::init(cx);
+    let dark = themes::select(DEFAULT_DARK, true, cx);
+    let light = themes::find(DEFAULT_LIGHT, cx);
     Theme::update(cx, |theme| {
+        theme.dark_theme = dark;
         if let Some(light) = light {
             theme.light_theme = light;
-        }
-        if let Some(dark) = dark {
-            theme.dark_theme = dark;
         }
     });
 }
 
-/// Switches the active theme to match `appearance`.
+/// Whether the system (as the window sees it) is in dark mode.
+pub fn system_is_dark(window: Option<&Window>, cx: &App) -> bool {
+    let appearance = window
+        .map(|window| window.appearance())
+        .unwrap_or_else(|| cx.window_appearance());
+    matches!(
+        appearance,
+        WindowAppearance::Dark | WindowAppearance::VibrantDark
+    )
+}
+
+/// Shows the theme `appearance` names.
 ///
-/// For [`Appearance::System`] the window's current appearance decides; callers
-/// re-run this from `observe_window_appearance` so the app follows OS changes.
-///
-/// The user's [`crate::Preferences`] (accent, fonts, corners…) are applied on
-/// top afterwards, since loading a theme resets them.
-pub fn apply_appearance(appearance: Appearance, mut window: Option<&mut Window>, cx: &mut App) {
-    match appearance {
-        Appearance::System => Theme::sync_system_appearance(window.as_deref_mut(), cx),
-        Appearance::Light => Theme::change(ThemeMode::Light, window.as_deref_mut(), cx),
-        Appearance::Dark => Theme::change(ThemeMode::Dark, window.as_deref_mut(), cx),
-    }
+/// For [`Appearance::System`] the window's appearance decides; callers
+/// re-run this from `observe_window_appearance` so the app follows OS
+/// changes. The user's [`crate::Preferences`] (fonts, corners…) are applied
+/// on top afterwards, since loading a theme resets them.
+pub fn apply_appearance(appearance: &Appearance, mut window: Option<&mut Window>, cx: &mut App) {
+    let dark = system_is_dark(window.as_deref(), cx);
+    let name = appearance.theme_name(dark, &crate::preferences::preferences(cx));
+    themes::select(&name, dark, cx);
+    // A preview, while there is one, shows over the choice.
+    let shown = themes::current(cx);
+    Theme::update(cx, |theme| {
+        if shown.mode.is_dark() {
+            theme.dark_theme = shown.clone();
+        } else {
+            theme.light_theme = shown.clone();
+        }
+    });
+    Theme::change(shown.mode, window.as_deref_mut(), cx);
     crate::preferences::apply(window, cx);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DarkTheme, Preferences};
 
-    /// The bundled theme file must parse and contain both modes, otherwise the
-    /// app silently falls back to gpui-component's default palette.
     #[test]
-    fn bundled_themes_parse_with_both_modes() {
-        let value: serde_json::Value =
-            serde_json::from_str(PILOTHOUSE_THEMES).expect("theme JSON parses");
-        let names: Vec<&str> = value["themes"]
-            .as_array()
-            .expect("themes array")
-            .iter()
-            .filter_map(|theme| theme["name"].as_str())
-            .collect();
-        assert!(names.contains(&LIGHT_THEME_NAME));
-        assert!(names.contains(&DARK_THEME_NAME));
-        for dark in crate::preferences::DarkTheme::ALL {
-            assert!(names.contains(&dark.theme_name()), "{}", dark.theme_name());
-        }
+    fn choices_saved_before_themes_had_names_keep_their_look() {
+        let mut preferences = Preferences::default();
+        assert_eq!(
+            Appearance::Light.migrated(&preferences),
+            Appearance::Theme("Modern Light".into())
+        );
+        assert_eq!(
+            Appearance::Dark.migrated(&preferences),
+            Appearance::Theme("Modern Dark".into())
+        );
+        preferences.dark_theme = DarkTheme::Warm;
+        assert_eq!(
+            Appearance::Dark.migrated(&preferences),
+            Appearance::Theme("Warm Dark".into())
+        );
+        assert_eq!(
+            Appearance::System.migrated(&preferences),
+            Appearance::System
+        );
+        // Stored as before, and the new choice beside it.
+        let saved: Appearance = serde_json::from_str("\"dark\"").unwrap();
+        assert_eq!(saved, Appearance::Dark);
+        let named = serde_json::to_string(&Appearance::Theme("Dracula".into())).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Appearance>(&named).unwrap(),
+            Appearance::Theme("Dracula".into())
+        );
+        assert_eq!(
+            Appearance::System.theme_name(true, &preferences),
+            "Modern Dark"
+        );
+        assert_eq!(
+            Appearance::System.theme_name(false, &preferences),
+            "Modern Light"
+        );
     }
 }

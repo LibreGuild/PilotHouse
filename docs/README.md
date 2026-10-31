@@ -23,6 +23,9 @@ Short, practical notes on how PilotHouse is built. Start with **architecture**, 
 | [features/tests.md](features/tests.md) | UI tests: recorded from an agent's browser or device actions, replayed without AI, repaired by an agent |
 | [features/schedules.md](features/schedules.md) | Agent prompts and UI test runs at set times or on events (files, commits, pull requests, checks, chains) |
 | [features/inbox.md](features/inbox.md) | The title-bar inbox (approvals, reminders, finished runs) and to-dos |
+| [features/studio.md](features/studio.md) | Studio: edit a picture or a video by hand or with an agent (crop, mark up, hide, resize, frame, compress; cut, speed up, step frames, export MP4 or GIF) |
+| [features/slides.md](features/slides.md) | Slides in Studio: presentations by hand or with an agent (themes, layouts, shapes, tables, charts, icons, code, SVG; point and edit; present; export PPTX, PDF, PNG) |
+| [features/themes.md](features/themes.md) | Eight themes, and designing your own with an agent, shown live as it changes |
 | [features/utilities.md](features/utilities.md) | Offline utilities: formats, encodings, hashes, ids, times, regex, diff, SQLite |
 | [features/changes.md](features/changes.md) | Git: branch picker, commit, history graph, stashes, conflicts, blame, review per hunk |
 | [features/terminal.md](features/terminal.md) | Embedded terminals |

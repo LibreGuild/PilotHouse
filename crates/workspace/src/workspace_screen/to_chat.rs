@@ -100,6 +100,18 @@ impl WorkspaceScreen {
                 ph_browser::BrowserHub::browser(self.project.id, cx)
                     .update(cx, |browser, cx| browser.open(&url, cx));
             }
+            FilesPanelEvent::EditMedia(path) if ph_studio::slides::space::is_powerpoint(path) => {
+                crate::presentations::open_powerpoint(path.clone(), window, cx);
+            }
+            FilesPanelEvent::EditMedia(path) => {
+                let workspace = Some((AppState::store(cx).clone(), self.project.clone()));
+                if let Err(err) = crate::studio_window::open(path.clone(), workspace, cx) {
+                    window.push_notification(
+                        Notification::error(format!("Could not open Studio: {err:#}")),
+                        cx,
+                    );
+                }
+            }
             FilesPanelEvent::RevealInTree => self.show_tab(ContextTab::Files, window, cx),
             FilesPanelEvent::AddFolder => {
                 window.dispatch_action(Box::new(crate::actions::AddFolderToWorkspace), cx)
@@ -208,9 +220,9 @@ impl WorkspaceScreen {
             .as_ref()
             .and_then(|browser| browser.read(cx).recent_logs(cx));
         let device = self
-            .devices
+            .logcat
             .as_ref()
-            .and_then(|devices| devices.read(cx).recent_logs(cx));
+            .and_then(|logcat| logcat.read(cx).recent_logs(cx));
         let text: Vec<String> = browser.into_iter().chain(device).collect();
         (!text.is_empty()).then(|| Attachment::Text {
             label: "logs".into(),

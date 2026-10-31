@@ -197,6 +197,18 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         ),
     ];
     general.push(Entry::action(
+        "New presentation…",
+        Icons::Presentation,
+        NewPresentation,
+        &["slides", "deck", "powerpoint", "pptx", "keynote", "studio"],
+    ));
+    general.push(Entry::action(
+        "Open presentation…",
+        Icons::Presentation,
+        OpenPresentation,
+        &["slides", "deck", "powerpoint", "pptx", "studio"],
+    ));
+    general.push(Entry::action(
         "Search chats…",
         IconName::Search,
         SearchChats,
@@ -260,10 +272,22 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         &["hide", "show"],
     ));
     general.push(Entry::action(
-        "Toggle panel",
+        "Toggle tools",
         IconName::PanelRight,
         ToggleContextPanel,
-        &["hide", "show", "context"],
+        &["hide", "show", "context", "panel", "column"],
+    ));
+    general.push(Entry::action(
+        "Toggle bottom panel",
+        IconName::PanelBottom,
+        ToggleBottomPanel,
+        &["hide", "show", "terminal", "logcat", "panel"],
+    ));
+    general.push(Entry::action(
+        "Toggle terminal",
+        IconName::SquareTerminal,
+        ToggleTerminal,
+        &["shell", "console"],
     ));
     general.push(Entry::action(
         "Maximize panel",
@@ -391,6 +415,12 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
                 IconName::Moon,
                 UseDarkAppearance,
                 &["theme"],
+            ),
+            Entry::action(
+                "Design a theme with an agent",
+                IconName::Palette,
+                DesignTheme,
+                &["theme", "colors", "customize", "mod", "look"],
             ),
         ],
     ));

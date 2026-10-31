@@ -61,6 +61,7 @@ ph-pulls = { path = "crates/pulls" }
 ph-review = { path = "crates/review" }
 ph-remote = { path = "crates/remote" }
 ph-preview = { path = "crates/preview" }
+ph-studio = { path = "crates/studio" }
 
 # Debug info is the largest part of a debug build. Keep line tables for our own
 # crates (readable backtraces) and drop it for dependencies to save disk space.
@@ -70,6 +71,11 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 opt-level = 1
+
+# Studio works on every pixel of a picture; unoptimized it would lag behind
+# a slider even in a debug build.
+[profile.dev.package.ph-studio]
+opt-level = 2
 
 [profile.release]
 lto = "thin"

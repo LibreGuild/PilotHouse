@@ -143,6 +143,9 @@ pub struct WorkspaceScreen {
     terminal: Option<Entity<TerminalPanel>>,
     browser: Option<Entity<BrowserPanel>>,
     devices: Option<Entity<DevicesPanel>>,
+    logcat: Option<Entity<ph_devices::LogcatPanel>>,
+    /// The column tool shown last: what the column comes back with.
+    column_tab: ContextTab,
     runs: Option<Entity<RunsPanel>>,
     pulls: HashMap<usize, Entity<PullsPanel>>,
     tests: Option<Entity<ph_uitest::TestsPanel>>,
@@ -309,6 +312,8 @@ impl WorkspaceScreen {
             terminal: None,
             browser: None,
             devices: None,
+            logcat: None,
+            column_tab: ContextTab::Files,
             runs: None,
             pulls: HashMap::new(),
             tests: None,
@@ -333,6 +338,9 @@ impl WorkspaceScreen {
             ],
         };
         space.git_folder = space.first_repo_folder();
+        if !space.context_tab.in_bottom_panel() {
+            space.column_tab = space.context_tab;
+        }
         let saved_dock = store.setting::<Option<gpui_kit::component::dock::DockAreaState>>(
             &dock_key(space.project.id),
         );
@@ -342,7 +350,10 @@ impl WorkspaceScreen {
                 .saved
                 .context_panel_open
                 .unwrap_or(!space.project.empty);
-            space.panes.set_default(space.context_tab, open, window, cx);
+            let bottom = Some(space.context_tab).filter(|tab| tab.in_bottom_panel());
+            space
+                .panes
+                .set_default(space.column_tab, bottom, open, window, cx);
         }
         // Files (the editor and the tree) from the start: open files come
         // back with the screen.
@@ -414,7 +425,7 @@ impl WorkspaceScreen {
             ContextTab::Pulls => traits.remote,
             ContextTab::Board | ContextTab::Terminal => true,
             ContextTab::Browser => empty || web,
-            ContextTab::Devices => empty || has(Stack::Android),
+            ContextTab::Devices | ContextTab::Logcat => empty || has(Stack::Android),
             ContextTab::Runs => !traits.stacks.is_empty(),
             ContextTab::Tests => empty || traits.has_tests || web || has(Stack::Android),
         }
@@ -574,9 +585,11 @@ impl WorkspaceScreen {
     }
 
     /// Back to the starting layout: the chat and the editor as tabs, the
-    /// tool in view docked on the right.
+    /// tool in view beside them (or in the bottom panel).
     pub fn reset_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.panes.set_default(self.context_tab, true, window, cx);
+        let bottom = Some(self.context_tab).filter(|tab| tab.in_bottom_panel());
+        self.panes
+            .set_default(self.column_tab, bottom, true, window, cx);
         cx.notify();
     }
 
@@ -604,6 +617,9 @@ impl WorkspaceScreen {
         }
         if shown && let Pane::Tool(tab) = pane {
             self.context_tab = tab;
+            if !tab.in_bottom_panel() {
+                self.column_tab = tab;
+            }
         }
         self.update_live_panes(cx);
         self.save_layout(cx);
@@ -714,13 +730,19 @@ impl WorkspaceScreen {
     /// Streams frames only into a pane the user can see.
     fn update_live_panes(&mut self, cx: &mut Context<Self>) {
         let shown = |tab| self.visible && self.shown.contains(&Pane::Tool(tab));
-        let (browser_shown, devices_shown) =
-            (shown(ContextTab::Browser), shown(ContextTab::Devices));
+        let (browser_shown, devices_shown, logcat_shown) = (
+            shown(ContextTab::Browser),
+            shown(ContextTab::Devices),
+            shown(ContextTab::Logcat),
+        );
         if let Some(browser) = &self.browser {
             browser.update(cx, |browser, cx| browser.set_active(browser_shown, cx));
         }
         if let Some(devices) = &self.devices {
             devices.update(cx, |devices, cx| devices.set_active(devices_shown, cx));
+        }
+        if let Some(logcat) = &self.logcat {
+            logcat.update(cx, |logcat, cx| logcat.set_active(logcat_shown, cx));
         }
         let runs_shown = shown(ContextTab::Runs);
         if let Some(runs) = &self.runs {
@@ -728,17 +750,42 @@ impl WorkspaceScreen {
         }
     }
 
-    /// ⌘J: opens or closes the dock holding the tool shown last.
+    /// ⌥⌘B (and the title bar's button): hides the column of tools beside
+    /// the chat, or brings it back as it was.
     pub fn toggle_context_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tab = self.context_tab;
+        let tab = self.column_tab;
         self.ensure_panel(tab, window, cx);
-        let pane = Pane::Tool(tab);
-        if self.panes.placement(pane, cx).is_none() {
-            return self.show_tab(tab, window, cx);
-        }
-        self.panes.toggle_dock_of(pane, window, cx);
+        let shown = self.shown.clone();
+        self.panes
+            .toggle_column(tab, |pane| shown.contains(&pane), window, cx);
         self.save_layout(cx);
         cx.notify();
+    }
+
+    /// ⌘J: opens or closes the bottom panel; the first time, with a
+    /// terminal in it.
+    pub fn toggle_bottom_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.panes.toggle_bottom(window, cx) {
+            return self.show_tab(ContextTab::Terminal, window, cx);
+        }
+        self.save_layout(cx);
+        cx.notify();
+    }
+
+    /// ⌃`: the terminal; hides the bottom panel when the terminal is in
+    /// front there.
+    pub fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let terminal = Pane::Tool(ContextTab::Terminal);
+        if self.shown.contains(&terminal)
+            && self.panes.placement(terminal, cx)
+                == Some(gpui_kit::component::dock::DockPlacement::Bottom)
+        {
+            self.panes.toggle_bottom(window, cx);
+            self.save_layout(cx);
+            cx.notify();
+            return;
+        }
+        self.show_tab(ContextTab::Terminal, window, cx);
     }
 
     /// ⌘⇧J: the tool shown last fills the screen, or gives it back.
@@ -1031,6 +1078,12 @@ impl WorkspaceScreen {
         self.save_layout(cx);
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
+    }
+
+    /// Begins a message in the chat for the user to finish.
+    pub fn begin_message(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat
+            .update(cx, |chat, cx| chat.begin_message(text, window, cx));
     }
 
     /// Whether review `review_id` is of this workspace's own changes.
