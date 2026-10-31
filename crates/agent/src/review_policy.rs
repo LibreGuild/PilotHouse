@@ -90,7 +90,7 @@ fn resolve(cwd: &Path, path: &str) -> Option<PathBuf> {
         return None;
     }
     let path = Path::new(path);
-    let mut out = if path.is_absolute() {
+    let mut out = if rooted(path) {
         PathBuf::new()
     } else {
         cwd.to_path_buf()
@@ -107,6 +107,15 @@ fn resolve(cwd: &Path, path: &str) -> Option<PathBuf> {
         }
     }
     Some(out)
+}
+
+/// Whether `path` starts from a root or a drive rather than the current
+/// folder. On Windows `/etc/passwd` and `C:x` are not absolute, yet they
+/// leave the folder all the same.
+fn rooted(path: &Path) -> bool {
+    path.components()
+        .next()
+        .is_some_and(|part| matches!(part, Component::Prefix(_) | Component::RootDir))
 }
 
 /// Whether `path` (from `cwd`) is `root` or inside it.
@@ -324,7 +333,7 @@ fn single_command(words: &[String], root: &Path, cwd: &Path) -> bool {
             arg.as_str()
         };
         let path = Path::new(value);
-        (path.is_absolute() || path.components().any(|part| part == Component::ParentDir))
+        (rooted(path) || path.components().any(|part| part == Component::ParentDir))
             && !inside(root, cwd, value)
     });
     if outside {
