@@ -24,8 +24,25 @@ use super::space::Space;
 const EMU: f32 = 12_700.;
 const REL_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
+/// Numbers from the file, never NaN or infinite: those would be saved as
+/// JSON null, and the presentation would not open again.
+trait ParseFinite {
+    fn parse_finite<T: std::str::FromStr + Copy + Into<f64>>(&self) -> Result<T, ()>;
+}
+
+impl ParseFinite for str {
+    fn parse_finite<T: std::str::FromStr + Copy + Into<f64>>(&self) -> Result<T, ()> {
+        let value: T = self.parse().map_err(|_| ())?;
+        if value.into().is_finite() {
+            Ok(value)
+        } else {
+            Err(())
+        }
+    }
+}
+
 fn pt(emu: &str) -> f32 {
-    emu.parse::<f64>()
+    emu.parse_finite::<f64>()
         .map(|value| (value / EMU as f64) as f32)
         .unwrap_or(0.)
 }
@@ -222,9 +239,10 @@ impl Reader<'_> {
                 .iter()
                 .find(|(_, _, w, h)| (w - width).abs() < 1.5 && (h - height).abs() < 1.5)
                 .map(|(id, ..)| id.to_string());
+            // PowerPoint's own limits: one inch to 56 inches a side.
             self.deck.size = SlideSize {
-                width: width.max(72.),
-                height: height.max(72.),
+                width: width.clamp(72., 4032.),
+                height: height.clamp(72., 4032.),
                 preset,
             };
         }
@@ -446,7 +464,7 @@ impl Reader<'_> {
             if let Some(defaults) = child(level, "defRPr") {
                 if let Some(size) = defaults
                     .attribute("sz")
-                    .and_then(|sz| sz.parse::<f32>().ok())
+                    .and_then(|sz| sz.parse_finite::<f32>().ok())
                 {
                     style.size = size / 100.;
                 }
@@ -463,13 +481,13 @@ impl Reader<'_> {
             }
             if let Some(spacing) = path(level, &["lnSpc", "spcPct"])
                 .and_then(|pct| pct.attribute("val"))
-                .and_then(|val| val.parse::<f32>().ok())
+                .and_then(|val| val.parse_finite::<f32>().ok())
             {
                 style.line_spacing = spacing / 100_000.;
             }
             if let Some(after) = path(level, &["spcAft", "spcPts"])
                 .and_then(|pts| pts.attribute("val"))
-                .and_then(|val| val.parse::<f32>().ok())
+                .and_then(|val| val.parse_finite::<f32>().ok())
             {
                 style.space_after = after / 100.;
             }
@@ -592,7 +610,7 @@ impl Reader<'_> {
                     prompt,
                     size: defaults
                         .and_then(|d| d.attribute("sz"))
-                        .and_then(|sz| sz.parse::<f32>().ok())
+                        .and_then(|sz| sz.parse_finite::<f32>().ok())
                         .map(|sz| sz / 100.),
                     color: defaults.and_then(|d| self.fill_color(d)),
                     bold: defaults.and_then(|d| d.attribute("b")).map(|b| b == "1"),
@@ -729,7 +747,7 @@ impl Reader<'_> {
         let seconds = transition
             .attributes()
             .find(|attribute| attribute.name() == "dur")
-            .and_then(|attribute| attribute.value().parse::<f32>().ok())
+            .and_then(|attribute| attribute.value().parse_finite::<f32>().ok())
             .map(|ms| ms / 1000.)
             .unwrap_or(match transition.attribute("spd") {
                 Some("slow") => 1.,
@@ -824,13 +842,13 @@ impl Reader<'_> {
                 .filter_map(|inner| {
                     inner
                         .attribute("dur")
-                        .and_then(|dur| dur.parse::<f32>().ok())
+                        .and_then(|dur| dur.parse_finite::<f32>().ok())
                 })
                 .fold(0f32, f32::max)
                 / 1000.;
             let delay = path(node, &["stCondLst", "cond"])
                 .and_then(|cond| cond.attribute("delay"))
-                .and_then(|delay| delay.parse::<f32>().ok())
+                .and_then(|delay| delay.parse_finite::<f32>().ok())
                 .unwrap_or(0.)
                 / 1000.;
             slide.animations.push(Animation {
@@ -894,11 +912,11 @@ impl Reader<'_> {
                     .map(|pos| {
                         (
                             pos.attribute("x")
-                                .and_then(|x| x.parse::<f32>().ok())
+                                .and_then(|x| x.parse_finite::<f32>().ok())
                                 .unwrap_or(0.)
                                 / 8.,
                             pos.attribute("y")
-                                .and_then(|y| y.parse::<f32>().ok())
+                                .and_then(|y| y.parse_finite::<f32>().ok())
                                 .unwrap_or(0.)
                                 / 8.,
                         )
@@ -1146,7 +1164,7 @@ impl Reader<'_> {
                         .find(|(name, _)| name == "adj")
                         .and_then(|(_, fmla)| {
                             fmla.strip_prefix("val ")
-                                .and_then(|value| value.trim().parse::<f32>().ok())
+                                .and_then(|value| value.trim().parse_finite::<f32>().ok())
                         })
                         .unwrap_or(16_667.);
                     adj / 100_000. * frame.w.min(frame.h)
@@ -1221,7 +1239,7 @@ impl Reader<'_> {
             .map(|rect| {
                 ["l", "t", "r", "b"].map(|side| {
                     rect.attribute(side)
-                        .and_then(|v| v.parse::<f32>().ok())
+                        .and_then(|v| v.parse_finite::<f32>().ok())
                         .unwrap_or(0.)
                         / 100_000.
                 })
@@ -1638,7 +1656,13 @@ impl Reader<'_> {
                 .descendants()
                 .filter(|pt| pt.tag_name().name() == "pt")
                 .filter_map(|pt| {
-                    let idx = pt.attribute("idx")?.parse().ok()?;
+                    // Points past what a chart holds are left out (a crafted
+                    // index would otherwise ask for a huge list).
+                    let idx = pt
+                        .attribute("idx")?
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|idx| *idx < 10_000)?;
                     Some((idx, child(pt, "v")?.text().unwrap_or_default().to_string()))
                 })
                 .collect();
@@ -1662,7 +1686,7 @@ impl Reader<'_> {
         let numbers = |node: Option<Node>| -> Vec<f64> {
             strings(node)
                 .iter()
-                .map(|text| text.trim().parse::<f64>().unwrap_or(0.))
+                .map(|text| text.trim().parse_finite::<f64>().unwrap_or(0.))
                 .collect()
         };
         let mut categories = Vec::new();
@@ -1808,7 +1832,7 @@ impl Reader<'_> {
                         .filter(|node| node.tag_name().name() == "gs")
                         .filter_map(|gs| {
                             Some(Stop {
-                                at: gs.attribute("pos")?.parse::<f32>().ok()? / 100_000.,
+                                at: gs.attribute("pos")?.parse_finite::<f32>().ok()? / 100_000.,
                                 color: self.color(gs)?,
                             })
                         })
@@ -1818,7 +1842,7 @@ impl Reader<'_> {
                     }
                     let angle = child(fill, "lin")
                         .and_then(|lin| lin.attribute("ang"))
-                        .and_then(|ang| ang.parse::<f32>().ok())
+                        .and_then(|ang| ang.parse_finite::<f32>().ok())
                         .map(|ang| ang / 60_000.)
                         .unwrap_or(90.);
                     return Some(Fill::Gradient {
@@ -1864,7 +1888,7 @@ impl Reader<'_> {
                 .children()
                 .find(|child| child.tag_name().name() == name)
                 .and_then(|child| child.attribute("val"))
-                .and_then(|val| val.parse::<f32>().ok())
+                .and_then(|val| val.parse_finite::<f32>().ok())
                 .map(|val| val / 100_000.)
         };
         let lum_mod = value("lumMod");
@@ -1925,7 +1949,7 @@ impl Reader<'_> {
                 let channel = |name: &str| {
                     let linear = color
                         .attribute(name)
-                        .and_then(|v| v.parse::<f32>().ok())
+                        .and_then(|v| v.parse_finite::<f32>().ok())
                         .unwrap_or(0.)
                         / 100_000.;
                     // Linear light to sRGB.
@@ -2028,7 +2052,7 @@ impl Reader<'_> {
             distance: shadow.attribute("dist").map(pt).unwrap_or(3.),
             angle: shadow
                 .attribute("dir")
-                .and_then(|dir| dir.parse::<f32>().ok())
+                .and_then(|dir| dir.parse_finite::<f32>().ok())
                 .map(|dir| dir / 60_000.)
                 .unwrap_or(90.),
             opacity: rgba.a as f32 / 255.,
@@ -2088,17 +2112,17 @@ impl Reader<'_> {
                 space_before: pr
                     .and_then(|pr| path_of(pr, &["spcBef", "spcPts"]))
                     .and_then(|pts| pts.attribute("val"))
-                    .and_then(|val| val.parse::<f32>().ok())
+                    .and_then(|val| val.parse_finite::<f32>().ok())
                     .map(|val| val / 100.),
                 space_after: pr
                     .and_then(|pr| path_of(pr, &["spcAft", "spcPts"]))
                     .and_then(|pts| pts.attribute("val"))
-                    .and_then(|val| val.parse::<f32>().ok())
+                    .and_then(|val| val.parse_finite::<f32>().ok())
                     .map(|val| val / 100.),
                 line_spacing: pr
                     .and_then(|pr| path_of(pr, &["lnSpc", "spcPct"]))
                     .and_then(|pct| pct.attribute("val"))
-                    .and_then(|val| val.parse::<f32>().ok())
+                    .and_then(|val| val.parse_finite::<f32>().ok())
                     .map(|val| (val / 100_000.).clamp(0.5, 4.)),
             };
             for node in p.children().filter(Node::is_element) {
@@ -2139,7 +2163,7 @@ impl Reader<'_> {
         };
         run.size = pr
             .attribute("sz")
-            .and_then(|sz| sz.parse::<f32>().ok())
+            .and_then(|sz| sz.parse_finite::<f32>().ok())
             .map(|sz| sz / 100.);
         run.bold = pr.attribute("b").map(|b| b == "1" || b == "true");
         run.italic = pr.attribute("i").map(|i| i == "1" || i == "true");
@@ -2177,7 +2201,7 @@ fn frame_of(xfrm: Node, offset: (f32, f32)) -> Frame {
         h: ext.and_then(|e| e.attribute("cy")).map(pt).unwrap_or(0.),
         rotation: xfrm
             .attribute("rot")
-            .and_then(|rot| rot.parse::<f32>().ok())
+            .and_then(|rot| rot.parse_finite::<f32>().ok())
             .map(|rot| (rot / 60_000.).rem_euclid(360.))
             .unwrap_or(0.),
         flip_h: xfrm.attribute("flipH") == Some("1"),
@@ -2332,18 +2356,18 @@ fn custom_path(custom: Node, w: f32, h: f32) -> Option<String> {
     }) {
         let pw = path
             .attribute("w")
-            .and_then(|v| v.parse::<f32>().ok())
+            .and_then(|v| v.parse_finite::<f32>().ok())
             .filter(|v| *v > 0.)
             .unwrap_or(w * EMU);
         let ph = path
             .attribute("h")
-            .and_then(|v| v.parse::<f32>().ok())
+            .and_then(|v| v.parse_finite::<f32>().ok())
             .filter(|v| *v > 0.)
             .unwrap_or(h * EMU);
         let (sx, sy) = (w / pw, h / ph);
         let point = |node: Node| -> Option<(f32, f32)> {
-            let x = node.attribute("x")?.parse::<f32>().ok()?;
-            let y = node.attribute("y")?.parse::<f32>().ok()?;
+            let x = node.attribute("x")?.parse_finite::<f32>().ok()?;
+            let y = node.attribute("y")?.parse_finite::<f32>().ok()?;
             Some((x * sx, y * sy))
         };
         let mut at = (0f32, 0f32);
@@ -2387,7 +2411,7 @@ fn custom_path(custom: Node, w: f32, h: f32) -> Option<String> {
                     let number = |name: &str| {
                         command
                             .attribute(name)
-                            .and_then(|v| v.parse::<f32>().ok())
+                            .and_then(|v| v.parse_finite::<f32>().ok())
                             .unwrap_or(0.)
                     };
                     let (rx, ry) = (number("wR") * sx, number("hR") * sy);

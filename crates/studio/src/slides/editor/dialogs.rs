@@ -549,9 +549,10 @@ impl SlidesEditor {
             }
             None => {
                 // As wide as tall as the drawing says.
-                let aspect = resvg::usvg::Tree::from_str(&source, &resvg::usvg::Options::default())
-                    .map(|tree| tree.size().width() / tree.size().height().max(1.))
-                    .unwrap_or(1.);
+                let aspect =
+                    resvg::usvg::Tree::from_str(&source, &crate::slides::raster::inert_options())
+                        .map(|tree| tree.size().width() / tree.size().height().max(1.))
+                        .unwrap_or(1.);
                 let size = &self.deck(cx).size;
                 let fit = (size.width * 0.5 / aspect).min(size.height * 0.5);
                 let frame = self.centered(fit * aspect, fit, cx);

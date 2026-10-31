@@ -1110,7 +1110,18 @@ impl VideoEditor {
             })
             .collect();
         let alive: Vec<u32> = doc.edit().overlays.iter().map(|o| o.id).collect();
-        self.sprites.retain(|id, _| alive.contains(id));
+        // Marks deleted: their pictures are freed on the GPU too.
+        let gone: Vec<u32> = self
+            .sprites
+            .keys()
+            .filter(|id| !alive.contains(id))
+            .copied()
+            .collect();
+        for id in gone {
+            if let Some(sprite) = self.sprites.remove(&id) {
+                self.old_images.push(sprite.frame.render_image());
+            }
+        }
         for (id, kind, made_from) in wanted {
             // One at a time per mark: a change meanwhile is made after.
             if self._sprites.contains_key(&id) {

@@ -147,8 +147,9 @@ impl Rect {
         Rect::new(
             x,
             y,
-            self.width.clamp(1., width - x),
-            self.height.clamp(1., height - y),
+            // (A picture of no size still gives a pixel, not a panic.)
+            self.width.clamp(1., (width - x).max(1.)),
+            self.height.clamp(1., (height - y).max(1.)),
         )
     }
 

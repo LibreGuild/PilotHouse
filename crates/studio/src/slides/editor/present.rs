@@ -193,8 +193,6 @@ pub(crate) struct Show {
     /// animations played).
     rehearsing: bool,
     windows: Vec<gpui_kit::AnyWindowHandle>,
-    /// Pictures let go, with the windows that still have to drop them.
-    stale: Vec<(Arc<RenderImage>, Vec<gpui_kit::AnyWindowHandle>)>,
     _watch: Subscription,
 }
 
@@ -414,21 +412,13 @@ impl Show {
         });
     }
 
-    /// Drops in `window` the pictures let go (each window holds its own
-    /// copy of what it drew).
+    /// Frees the pictures let go on the GPU, in every window (the editor's
+    /// too: it draws the same deck).
     fn drop_stale(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let fresh = self.doc.update(cx, |doc, _| doc.take_stale());
-        let windows = self.windows.clone();
-        self.stale
-            .extend(fresh.into_iter().map(|image| (image, windows.clone())));
-        let here = window.window_handle();
-        self.stale.retain_mut(|(image, left)| {
-            if let Some(ix) = left.iter().position(|handle| *handle == here) {
-                left.remove(ix);
-                let _ = window.drop_image(image.clone());
-            }
-            !left.is_empty()
-        });
+        let stale = self.doc.update(cx, |doc, _| doc.take_stale());
+        for image in stale {
+            cx.drop_image(image, Some(window));
+        }
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
@@ -483,7 +473,6 @@ fn new_show(
             width,
             rehearsing,
             windows: Vec::new(),
-            stale: Vec::new(),
             _watch: cx.observe(&watch_doc, |show: &mut Show, doc, cx| {
                 // Slides changed meanwhile (an agent at work): the order
                 // follows.

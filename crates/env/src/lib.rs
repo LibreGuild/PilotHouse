@@ -39,6 +39,12 @@ pub fn shell_env() -> &'static HashMap<String, String> {
     })
 }
 
+/// [`shell_env`] once it has been read, without waiting for it (the login
+/// shell can take seconds to start).
+pub fn shell_env_if_ready() -> Option<&'static HashMap<String, String>> {
+    ENV.get()
+}
+
 /// One variable of [`shell_env`]; the name is case-insensitive on Windows.
 pub fn var(name: &str) -> Option<&'static str> {
     let env = shell_env();

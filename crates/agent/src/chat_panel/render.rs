@@ -284,8 +284,8 @@ impl ChatPanel {
         .into_any_element()
     }
 
-    /// The setup checks for `agent`. They search the PATH, so they run once
-    /// here and then again in the background when a few seconds old (an
+    /// The setup checks for `agent`. They search the PATH, so they run in
+    /// the background, at first and again when a few seconds old (an
     /// install shows up without a restart, and drawing never waits).
     pub(super) fn setup_checks(
         &mut self,
@@ -315,10 +315,14 @@ impl ChatPanel {
                 }
                 checks.clone()
             }
+            // The first time too, in the background: they wait for the
+            // login shell's environment, which can take seconds on start.
             _ => {
-                let checks = setup::checks(agent);
-                self.setup = Some((agent.id, std::time::Instant::now(), checks.clone()));
-                checks
+                let stale = std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(10))
+                    .unwrap_or_else(std::time::Instant::now);
+                self.setup = Some((agent.id, stale, Vec::new()));
+                self.setup_checks(agent, cx)
             }
         }
     }

@@ -34,7 +34,7 @@ impl Options<'_> {
     /// The file of media `name`, if it is there (its small copy when
     /// asked and made).
     pub fn media_file(&self, name: &str) -> Option<std::path::PathBuf> {
-        if name.is_empty() || name.contains("..") || name.contains('/') || name.contains('\\') {
+        if !super::space::safe_media_name(name) {
             return None;
         }
         let media = self.media?;

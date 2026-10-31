@@ -81,6 +81,11 @@ fn parse_color(text: &str) -> Result<(u8, u8, u8)> {
         .strip_prefix('#')
         .or_else(|| (lower.len() == 6).then_some(lower.as_str()))
     {
+        // Digits only (sliced by byte below: other characters would cut
+        // one in two).
+        if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!("Not a hex color");
+        }
         let hex = match hex.len() {
             3 => hex.chars().flat_map(|c| [c, c]).collect(),
             6 | 8 => hex[..6].to_string(),
@@ -159,6 +164,19 @@ pub fn markdown(input: &Input) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colors_with_other_characters_are_refused() {
+        let input = |text: &str| Input {
+            text: text.into(),
+            ..Input::default()
+        };
+        // Sliced by byte, `é` would have been cut in two (a panic).
+        assert!(color(&input("#aééa")).is_err());
+        assert!(color(&input("aééa")).is_err());
+        assert!(color(&input("#12g")).is_err());
+        assert!(color(&input("#fa0")).is_ok());
+    }
 
     #[test]
     fn regex_diff_color_markdown() {

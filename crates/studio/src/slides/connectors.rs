@@ -116,6 +116,50 @@ pub fn follow(deck: &mut Deck, before: Option<&Deck>) {
     }
 }
 
+/// Frames made NaN or infinite (a division by a zero size somewhere) are
+/// put back to something drawable: saved, they would be JSON null and the
+/// deck would not open again. Only slides changed since `before` are looked
+/// at.
+pub fn keep_finite(deck: &mut Deck, before: Option<&Deck>) {
+    fn bad(frame: &Frame) -> bool {
+        ![frame.x, frame.y, frame.w, frame.h, frame.rotation]
+            .iter()
+            .all(|value| value.is_finite())
+    }
+    fn any_bad(elements: &[Element]) -> bool {
+        elements.iter().any(|element| {
+            bad(&element.frame)
+                || matches!(&element.kind, Kind::Group(group) if any_bad(&group.children))
+        })
+    }
+    fn mend(elements: &mut [Element]) {
+        for element in elements {
+            let frame = &mut element.frame;
+            for value in [&mut frame.x, &mut frame.y, &mut frame.rotation] {
+                if !value.is_finite() {
+                    *value = 0.;
+                }
+            }
+            for value in [&mut frame.w, &mut frame.h] {
+                if !value.is_finite() {
+                    *value = 1.;
+                }
+            }
+            if let Kind::Group(group) = &mut element.kind {
+                mend(&mut group.children);
+            }
+        }
+    }
+    for index in 0..deck.slides.len() {
+        let unchanged = before
+            .and_then(|before| before.slides.get(index))
+            .is_some_and(|old| Arc::ptr_eq(old, &deck.slides[index]));
+        if !unchanged && any_bad(&deck.slides[index].elements) {
+            mend(&mut Arc::make_mut(&mut deck.slides[index]).elements);
+        }
+    }
+}
+
 fn is_connector(element: &Element) -> bool {
     matches!(
         &element.kind,

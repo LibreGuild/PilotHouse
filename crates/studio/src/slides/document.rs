@@ -100,6 +100,8 @@ pub struct DeckDocument {
     _draw: Option<Task<()>>,
     /// Pictures replaced, for the window to free on the GPU.
     stale: Vec<Arc<RenderImage>>,
+    /// The slides the canvas showed last (at most two), oldest first.
+    canvas_slides: Vec<String>,
     /// The first slide as last drawn for the list of presentations.
     thumbnail: Option<(Arc<Slide>, u64)>,
     pub selection: Selection,
@@ -135,6 +137,7 @@ impl DeckDocument {
             drawing: false,
             _draw: None,
             stale: Vec::new(),
+            canvas_slides: Vec::new(),
             thumbnail: None,
             selection: Selection::default(),
             used: Instant::now(),
@@ -228,6 +231,7 @@ impl DeckDocument {
     pub fn commit(&mut self, what: &'static str, mut next: Deck, cx: &mut Context<Self>) {
         // Connectors go with the elements they are fixed to.
         super::connectors::follow(&mut next, Some(&self.deck));
+        super::connectors::keep_finite(&mut next, Some(&self.deck));
         if next == self.deck {
             return;
         }
@@ -382,10 +386,13 @@ impl DeckDocument {
     ) -> Option<Arc<RenderImage>> {
         let slide = self.deck.slides.get(index)?.clone();
         let width = width.clamp(16, 7680);
+        if purpose == Purpose::Canvas {
+            self.keep_canvas(&slide.id);
+        }
         let key = (slide.id.clone(), purpose);
         let current = self.pictures.get(&key);
         let fresh = current.is_some_and(|picture| {
-            Arc::ptr_eq(&picture.slide, &slide)
+            drawn_alike(&picture.slide, &slide)
                 && picture.looks == self.looks
                 && picture.hide.as_deref() == hide
                 && picture.hidden.is_empty()
@@ -424,7 +431,7 @@ impl DeckDocument {
         let width = width.clamp(16, 7680);
         let key = (slide.id.clone(), Purpose::Step(step));
         let fresh = self.pictures.get(&key).is_some_and(|picture| {
-            Arc::ptr_eq(&picture.slide, &slide)
+            drawn_alike(&picture.slide, &slide)
                 && picture.looks == self.looks
                 && picture.hidden == hidden
                 && (picture.width as f32 / width as f32 - 1.).abs() < 0.12
@@ -461,7 +468,7 @@ impl DeckDocument {
         let width = (((r - l).max(1.) + 48.) * scale).round().clamp(4., 7680.) as u32;
         let key = (id.to_string(), Purpose::Layer);
         let fresh = self.pictures.get(&key).is_some_and(|picture| {
-            Arc::ptr_eq(&picture.slide, &slide)
+            drawn_alike(&picture.slide, &slide)
                 && picture.looks == self.looks
                 && (picture.width as f32 / width as f32 - 1.).abs() < 0.12
         });
@@ -565,8 +572,40 @@ impl DeckDocument {
         }
     }
 
+    /// The pictures let go since last asked; the caller frees them on the
+    /// GPU in every window (`cx.drop_image(image, Some(window))`), as any
+    /// window showing the deck may have drawn them.
     pub fn take_stale(&mut self) -> Vec<Arc<RenderImage>> {
         std::mem::take(&mut self.stale)
+    }
+
+    /// The canvas shows one slide: pictures of it are kept for that slide
+    /// and the one before (going back is instant), the others let go (one
+    /// can be 130 MB zoomed in).
+    fn keep_canvas(&mut self, id: &str) {
+        if self.canvas_slides.last().map(String::as_str) == Some(id) {
+            return;
+        }
+        self.canvas_slides.retain(|known| known != id);
+        self.canvas_slides.push(id.to_string());
+        while self.canvas_slides.len() > 2 {
+            let gone = self.canvas_slides.remove(0);
+            if let Some(picture) = self.pictures.remove(&(gone, Purpose::Canvas)) {
+                self.stale.push(picture.image);
+            }
+        }
+    }
+
+    /// Frees pictures let go while no window drew (and so took them), but
+    /// the last few, which a window may still show.
+    fn trim_stale(&mut self, cx: &mut Context<Self>) {
+        const KEEP: usize = 6;
+        if self.stale.len() > KEEP {
+            let extra = self.stale.len() - KEEP;
+            for image in self.stale.drain(..extra) {
+                cx.drop_image(image, None);
+            }
+        }
     }
 
     /// Makes the wanted pictures, most wanted first, off the UI thread.
@@ -648,6 +687,7 @@ impl DeckDocument {
                         this.stale.push(old.image);
                     }
                 }
+                this.trim_stale(cx);
                 this.draw(cx);
                 cx.notify();
             });
@@ -762,4 +802,14 @@ fn write_thumbnail(space: &Space, deck: &Deck) {
 /// Whether every slide of `b` looks otherwise than in `a`.
 fn looks_differ(a: &Deck, b: &Deck) -> bool {
     a.theme != b.theme || a.size != b.size
+}
+
+/// Whether two versions of a slide look the same (what is drawn: not its
+/// notes, comments or animations), so a picture of one shows the other.
+fn drawn_alike(a: &Arc<Slide>, b: &Arc<Slide>) -> bool {
+    Arc::ptr_eq(a, b)
+        || (a.id == b.id
+            && a.layout == b.layout
+            && a.background == b.background
+            && a.elements == b.elements)
 }

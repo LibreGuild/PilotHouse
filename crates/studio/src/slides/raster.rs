@@ -11,10 +11,54 @@ use super::fonts::fonts;
 use super::model::Deck;
 use super::svg::{self, Options};
 
+/// The pictures a slide's SVG may load: its own media files (named as
+/// PilotHouse names them, in a `media` folder or its small copies), never
+/// anything else an SVG names (a device such as /dev/zero would be read
+/// forever, a network path would leak the user's credentials).
+pub fn image_resolver() -> usvg::ImageHrefResolver<'static> {
+    let load = usvg::ImageHrefResolver::default_string_resolver();
+    usvg::ImageHrefResolver {
+        resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
+        resolve_string: Box::new(move |href, options| {
+            media_href(href).then(|| load(href, options)).flatten()
+        }),
+    }
+}
+
+/// Whether `href` names one of a deck's media files (see
+/// [`image_resolver`]), a regular file of a sane size.
+pub fn media_href(href: &str) -> bool {
+    let path = std::path::Path::new(href);
+    let named = || -> Option<bool> {
+        let name = path.file_name()?.to_str()?;
+        let folder = path.parent()?;
+        let in_media = match folder.file_name()?.to_str()? {
+            super::space::MEDIA => true,
+            super::space::SMALL => folder.parent()?.file_name()? == super::space::MEDIA,
+            _ => false,
+        };
+        Some(in_media && super::space::safe_media_name(name))
+    };
+    named() == Some(true)
+        && std::fs::metadata(path).is_ok_and(|file| file.is_file() && file.len() <= 512 << 20)
+}
+
+/// Options for SVG that is only checked or measured: it loads nothing.
+pub fn inert_options() -> usvg::Options<'static> {
+    usvg::Options {
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..usvg::Options::default()
+    }
+}
+
 /// `svg` drawn `width` pixels wide (its height in proportion).
 pub fn rasterize(svg: &str, width: u32) -> Result<RgbaImage> {
     let options = usvg::Options {
         fontdb: fonts().db.clone(),
+        image_href_resolver: image_resolver(),
         ..usvg::Options::default()
     };
     let tree = usvg::Tree::from_str(svg, &options).context("the slide's drawing")?;

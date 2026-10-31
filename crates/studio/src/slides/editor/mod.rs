@@ -666,12 +666,20 @@ impl SlidesEditor {
                 gpui_kit::ImageFormat::Svg => "svg",
                 _ => "png",
             };
+            // Decoded and made smaller off the UI thread (a 5K screenshot
+            // takes a while).
             let space = self.doc.read(cx).space().clone();
-            match space.add_media_bytes(&image.bytes, extension) {
-                Ok(name) => self.insert_picture(name, window, cx),
-                Err(err) => window
-                    .push_notification(Notification::error(format!("Not pasted: {err:#}")), cx),
-            }
+            let added =
+                cx.background_spawn(async move { space.add_media_bytes(&image.bytes, extension) });
+            cx.spawn_in(window, async move |this, cx| {
+                let added = added.await;
+                _ = this.update_in(cx, |this, window, cx| match added {
+                    Ok(name) => this.insert_picture(name, window, cx),
+                    Err(err) => window
+                        .push_notification(Notification::error(format!("Not pasted: {err:#}")), cx),
+                });
+            })
+            .detach();
         }
     }
 
@@ -1285,10 +1293,11 @@ impl Render for SlidesEditor {
         let toolbar = self.render_toolbar(cx);
         let bar = self.render_bar(window, cx);
         let side = self.render_side(window, cx);
-        // Pictures replaced are freed on the GPU.
+        // Pictures replaced are freed on the GPU, in every window (the
+        // presenting ones draw the same deck).
         let stale = self.doc.update(cx, |doc, _| doc.take_stale());
         for image in stale {
-            let _ = window.drop_image(image);
+            cx.drop_image(image, Some(window));
         }
         let notes = self.notes_shown.then(|| {
             div()

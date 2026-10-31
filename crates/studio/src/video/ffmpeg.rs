@@ -57,6 +57,8 @@ impl Ffmpeg {
         let json = self.run(
             &self.ffprobe,
             &[
+                "-protocol_whitelist",
+                "file,pipe",
                 "-v",
                 "error",
                 "-print_format",
@@ -121,6 +123,10 @@ impl Ffmpeg {
                 "error",
                 "-ss",
                 &format!("{t:.4}"),
+                // Files only: a ".mp4" that is really a playlist must not
+                // make ffmpeg fetch addresses or read other files.
+                "-protocol_whitelist",
+                "file,pipe",
                 "-i",
                 &path.to_string_lossy(),
                 "-frames:v",
@@ -139,6 +145,8 @@ impl Ffmpeg {
         let text = self.run(
             &self.ffprobe,
             &[
+                "-protocol_whitelist",
+                "file,pipe",
                 "-v",
                 "error",
                 "-select_streams",
@@ -175,6 +183,10 @@ impl Ffmpeg {
                 "error",
                 "-ss",
                 &format!("{from:.4}"),
+                // Files only: a ".mp4" that is really a playlist must not
+                // make ffmpeg fetch addresses or read other files.
+                "-protocol_whitelist",
+                "file,pipe",
                 "-i",
                 &path.to_string_lossy(),
                 "-t",
@@ -259,7 +271,12 @@ impl Ffmpeg {
             "pipe:0".into(),
         ]);
         if !audio.is_empty() {
-            args.extend(["-i".into(), source.to_string_lossy().into_owned()]);
+            args.extend([
+                "-protocol_whitelist".into(),
+                "file,pipe".into(),
+                "-i".into(),
+                source.to_string_lossy().into_owned(),
+            ]);
             // Each kept piece of sound, delayed to its place in the result.
             let mut graph = String::new();
             for (ix, piece) in audio.iter().enumerate() {

@@ -106,13 +106,21 @@ impl SurfaceView {
     }
 
     /// Shows a new frame. The previous image's GPU texture is released on the
-    /// next render, so a long session does not fill the texture atlas.
+    /// next render, so a long session does not fill the texture atlas; frames
+    /// replaced while the window is not drawing (minimized, covered, on
+    /// another desktop) are released at once, all but the last one drawn.
     pub fn set_frame(&mut self, frame: Frame, cx: &mut Context<Self>) {
         let new_id = frame.render_image().id;
         if let Some(old) = self.frame.replace(frame)
             && old.render_image().id != new_id
         {
             self.stale.push(old.render_image());
+        }
+        if self.stale.len() > 1 {
+            let keep = self.stale.len() - 1;
+            for image in self.stale.drain(..keep) {
+                cx.drop_image(image, None);
+            }
         }
         let now = Instant::now();
         self.frame_times

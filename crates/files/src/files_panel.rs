@@ -223,7 +223,8 @@ impl FilesPanel {
             .iter()
             .map(|root| {
                 let path = root.path.clone();
-                cx.new(|_| ph_lsp::LspManager::new(path))
+                let trusted = !ph_store::paths::is_untrusted_copy(&path);
+                cx.new(|_| ph_lsp::LspManager::new(path, trusted))
             })
             .collect();
         // Which folders are repositories, for the menu's Git items.

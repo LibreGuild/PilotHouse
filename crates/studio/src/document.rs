@@ -41,6 +41,9 @@ pub struct Original {
     pub bytes: u64,
     /// The original as shown (for comparing).
     pub frame: Frame,
+    /// What writing over the file would lose (its animation, its 16-bit
+    /// colour): edits are of one 8-bit frame.
+    pub would_lose: Option<&'static str>,
 }
 
 enum State {
@@ -382,6 +385,14 @@ impl ImageDocument {
                 if let Some(old) = this.preview.replace(preview) {
                     this.stale.push(old.frame.render_image());
                 }
+                // Not drawn meanwhile (the window minimized while an agent
+                // edits): all but the last are let go at once.
+                if this.stale.len() > 1 {
+                    let keep = this.stale.len() - 1;
+                    for image in this.stale.drain(..keep) {
+                        cx.drop_image(image, None);
+                    }
+                }
                 this.rendering = false;
                 if this.render_again {
                     this.start_render(cx);
@@ -518,6 +529,11 @@ impl ImageDocument {
                 "PilotHouse cannot write this file's format; save a copy instead"
             )));
         };
+        if let Some(lost) = self.original().and_then(|original| original.would_lose) {
+            return Task::ready(Err(anyhow::anyhow!(
+                "writing over it would lose {lost}; save a copy instead"
+            )));
+        }
         let settings = ExportSettings {
             format,
             ..self.export.clone()
@@ -602,6 +618,35 @@ fn read(path: &Path) -> Result<Original> {
         bail!("this picture is too large to edit here ({width} × {height} pixels)");
     }
     let orientation = decoder.orientation().ok();
+    let deep = !matches!(
+        decoder.color_type(),
+        image::ColorType::L8
+            | image::ColorType::La8
+            | image::ColorType::Rgb8
+            | image::ColorType::Rgba8
+    );
+    let cursor = || std::io::Cursor::new(bytes.as_slice());
+    let animated = match format {
+        Some(Format::Gif) => image::codecs::gif::GifDecoder::new(cursor()).is_ok_and(|gif| {
+            use image::AnimationDecoder as _;
+            gif.into_frames().take(2).count() > 1
+        }),
+        Some(Format::Webp) => {
+            image::codecs::webp::WebPDecoder::new(cursor()).is_ok_and(|webp| webp.has_animation())
+        }
+        Some(Format::Png) => image::codecs::png::PngDecoder::new(cursor())
+            .ok()
+            .and_then(|png| png.is_apng().ok())
+            .unwrap_or(false),
+        _ => false,
+    };
+    let would_lose = if animated {
+        Some("its animation")
+    } else if deep {
+        Some("its 16-bit colour")
+    } else {
+        None
+    };
     let mut picture =
         image::DynamicImage::from_decoder(decoder).context("could not read the picture")?;
     if let Some(orientation) = orientation {
@@ -623,6 +668,7 @@ fn read(path: &Path) -> Result<Original> {
         format,
         bytes: bytes_len,
         frame,
+        would_lose,
     })
 }
 

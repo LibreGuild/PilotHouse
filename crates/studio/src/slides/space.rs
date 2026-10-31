@@ -125,7 +125,13 @@ impl Space {
             let _ = std::fs::copy(&file, versions.join(format!("{stamp}.json")));
             self.prune_versions();
         }
-        let temporary = self.path.join(format!(".{DECK}.{}", std::process::id()));
+        // A name of its own per write: two saves at once (an autosave still
+        // writing as the window closes) never share it.
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let write = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temporary = self
+            .path
+            .join(format!(".{DECK}.{}.{write}", std::process::id()));
         std::fs::write(&temporary, json)
             .with_context(|| format!("could not save in {}", self.path.display()))?;
         std::fs::rename(&temporary, &file).map_err(|err| {
@@ -265,6 +271,15 @@ pub fn import_pptx(root: &Path, pptx: &Path) -> Result<(Space, Vec<String>)> {
         {
             deck.title = stem.to_string_lossy().into_owned();
         }
+        // Where it came from is this file, whatever the deck inside says
+        // (a crafted one could name another file to save over, or another
+        // deck's template to copy from).
+        deck.source = Some(super::model::Source {
+            file: String::new(),
+            original: Some(pptx.to_path_buf()),
+            theme: None,
+            stamp: modified_secs(pptx),
+        });
         let space = Space::create(root, &deck)?;
         let file = std::fs::File::open(pptx)?;
         let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file))?;
@@ -275,15 +290,16 @@ pub fn import_pptx(root: &Path, pptx: &Path) -> Result<(Space, Vec<String>)> {
                 continue;
             };
             // The deck's own pictures only (not the PNGs made for SVG).
-            if name.is_empty()
-                || name.contains('/')
-                || name.contains("..")
-                || name.starts_with("pilothouse")
-            {
+            if !safe_media_name(&name) || name.starts_with("pilothouse") {
                 continue;
             }
             let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut entry, &mut bytes)?;
+            // At most what a picture can be (the declared size is not
+            // trusted).
+            std::io::Read::read_to_end(
+                &mut std::io::Read::take(&mut entry, 512 << 20),
+                &mut bytes,
+            )?;
             std::fs::write(media.join(&name), bytes)?;
         }
         return Ok((space, Vec::new()));
@@ -470,11 +486,43 @@ pub fn folder_name(title: &str) -> String {
         .collect();
     let cleaned = cleaned.trim().trim_matches('.').trim();
     let cleaned: String = cleaned.chars().take(80).collect();
+    // Cut short, it may end in a space or a dot again (Windows refuses
+    // those), and Windows keeps a few names for devices.
+    let cleaned = cleaned
+        .trim_end()
+        .trim_end_matches('.')
+        .trim_end()
+        .to_string();
+    let reserved = {
+        let stem = cleaned
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || (stem.len() == 4
+                && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.as_bytes()[3].is_ascii_digit())
+    };
     if cleaned.is_empty() {
         "Untitled presentation".into()
+    } else if reserved {
+        format!("{cleaned} presentation")
     } else {
         cleaned
     }
+}
+
+/// Whether `name` is a plain media file name (letters, digits, `.`, `_`,
+/// `-`; no folders, drives or hidden files), so joining it to the media
+/// folder never leads out of it, on any system.
+pub fn safe_media_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// A fingerprint of `bytes` (FNV-1a), to name media by what they hold.
@@ -547,7 +595,11 @@ mod import {
         let pptx = root.join("out.pptx");
         crate::slides::pptx::write(&deck, Some(&space.media()), &pptx).unwrap();
         let (back, _) = import_pptx(&root, &pptx).unwrap();
-        let (_, read) = Space::open(&back.path).unwrap();
+        let (_, mut read) = Space::open(&back.path).unwrap();
+        // It remembers the file it came from (not what the deck inside says).
+        let source = read.source.take().unwrap();
+        assert_eq!(source.original.as_deref(), Some(pptx.as_path()));
+        assert!(source.file.is_empty() && source.theme.is_none());
         assert_eq!(read, deck);
         assert!(back.media().join(&name).is_file(), "its picture came too");
         // Only the deck's own pictures (not those made for the icon).

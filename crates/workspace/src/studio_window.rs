@@ -371,8 +371,23 @@ impl StudioWindow {
                     Ok((space, deck)) => {
                         cx.new(|cx| DeckDocument::new(space, deck, Some(project.id), cx))
                     }
-                    // Gone since it was listed: an empty one in its place.
-                    Err(_) => {
+                    // Gone since it was listed: an empty one in its place. A
+                    // deck there that cannot be read is kept aside first, so
+                    // the empty one never saves over it.
+                    Err(err) => {
+                        let file = path.join(ph_studio::slides::space::DECK);
+                        if file.exists() {
+                            let aside = path.join(format!(
+                                "deck.unreadable-{}.json",
+                                ph_studio::slides::ops::now()
+                            ));
+                            tracing::warn!(
+                                "{} cannot be read ({err:#}); kept as {}",
+                                file.display(),
+                                aside.display()
+                            );
+                            let _ = std::fs::rename(&file, &aside);
+                        }
                         let deck = ph_studio::slides::ops::new_deck(
                             &name,
                             "clean",

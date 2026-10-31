@@ -20,25 +20,73 @@ pub struct Diagram {
 }
 
 /// Diagrams drawn lately, by source and theme: a document is parsed again
-/// on every edit, and drawing is the slow part.
-type Drawn = HashMap<(String, bool), Result<Diagram, String>>;
+/// on every edit, and drawing is the slow part. The oldest goes first when
+/// it is full (emptying it would draw every diagram again at once).
+#[derive(Default)]
+struct Drawn {
+    diagrams: HashMap<(String, bool), Result<Diagram, String>>,
+    order: std::collections::VecDeque<(String, bool)>,
+}
 static DRAWN: LazyLock<Mutex<Drawn>> = LazyLock::new(Mutex::default);
 const KEEP: usize = 64;
 
+/// The drawing of `source` made before, if one.
+pub fn cached(source: &str, dark: bool) -> Option<Result<Diagram, String>> {
+    let drawn = DRAWN.lock().ok()?;
+    drawn.diagrams.get(&(source.to_string(), dark)).cloned()
+}
+
 /// Draws `source` for a dark or light background.
 pub fn draw(source: &str, dark: bool) -> Result<Diagram, String> {
-    let key = (source.to_string(), dark);
-    if let Some(found) = DRAWN.lock().ok().and_then(|drawn| drawn.get(&key).cloned()) {
+    if let Some(found) = cached(source, dark) {
         return found;
     }
     let drawn = draw_uncached(source, dark);
     if let Ok(mut cache) = DRAWN.lock() {
-        if cache.len() >= KEEP {
-            cache.clear();
+        let key = (source.to_string(), dark);
+        if cache.diagrams.insert(key.clone(), drawn.clone()).is_none() {
+            cache.order.push_back(key);
         }
-        cache.insert(key, drawn.clone());
+        while cache.order.len() > KEEP {
+            if let Some(oldest) = cache.order.pop_front() {
+                cache.diagrams.remove(&oldest);
+            }
+        }
     }
     drawn
+}
+
+/// Draws `source` off the UI thread (once, however often it is asked for
+/// meanwhile), then redraws the view that asked; until then, [`cached`]
+/// has nothing for it. `wait` first lets typing go on (a diagram half
+/// typed is never drawn).
+pub fn draw_soon<T: 'static>(source: String, dark: bool, wait: bool, cx: &mut Context<T>) {
+    static DRAWING: LazyLock<Mutex<std::collections::HashSet<(String, bool)>>> =
+        LazyLock::new(Mutex::default);
+    let key = (source, dark);
+    if !DRAWING
+        .lock()
+        .is_ok_and(|mut drawing| drawing.insert(key.clone()))
+    {
+        return;
+    }
+    cx.spawn(async move |this, cx| {
+        if wait {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+        }
+        let drawn = key.clone();
+        cx.background_spawn(async move {
+            let _ = draw(&drawn.0, drawn.1);
+        })
+        .await;
+        if let Ok(mut drawing) = DRAWING.lock() {
+            drawing.remove(&key);
+        }
+        _ = this.update(cx, |_, cx| cx.notify());
+    })
+    .detach();
 }
 
 fn draw_uncached(source: &str, dark: bool) -> Result<Diagram, String> {
@@ -50,8 +98,13 @@ fn draw_uncached(source: &str, dark: bool) -> Result<Diagram, String> {
         theme,
         ..RenderOptions::default()
     };
-    let svg = mermaid_rs_renderer::render_with_options(source.trim(), options)
-        .map_err(|err| first_line(&format!("{err:#}")))?;
+    // The renderer has panicked on odd input before: a diagram that cannot
+    // be drawn says so, never takes the app down.
+    let svg = std::panic::catch_unwind(|| {
+        mermaid_rs_renderer::render_with_options(source.trim(), options)
+    })
+    .map_err(|_| "The diagram could not be drawn.".to_string())?
+    .map_err(|err| first_line(&format!("{err:#}")))?;
     let (width, height) = svg_size(&svg).ok_or("The diagram came out empty.")?;
     Ok(Diagram {
         image: Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes())),

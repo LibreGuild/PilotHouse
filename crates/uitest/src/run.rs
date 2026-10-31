@@ -512,6 +512,14 @@ fn with_secrets(mut params: serde_json::Value) -> anyhow::Result<serde_json::Val
             break;
         };
         let name = &rest[start + 6..start + end];
+        // Only variables meant for tests: a test file from someone else's
+        // repository must not type the user's tokens into a page it chose.
+        let upper = name.to_ascii_uppercase();
+        if !(upper.contains("TEST") || upper.contains("E2E")) {
+            anyhow::bail!(
+                "{name} is not typed: only variables meant for tests are (with TEST or E2E in the name, like PILOTHOUSE_TEST_PASSWORD)"
+            );
+        }
         // As the login shell has it, like every tool PilotHouse starts.
         let value = ph_env::var(name).ok_or_else(|| {
             anyhow::anyhow!("set {name} in your shell's environment: this step types it")
@@ -533,15 +541,13 @@ mod tests {
     fn typed_secrets_come_from_the_environment() {
         let plain = serde_json::json!({ "text": "ada" });
         assert_eq!(with_secrets(plain.clone()).unwrap(), plain);
-        let secret = serde_json::json!({ "text": "{{env:PH_SURELY_UNSET_VARIABLE}}" });
+        let secret = serde_json::json!({ "text": "{{env:PH_SURELY_UNSET_TEST_VARIABLE}}" });
         let err = with_secrets(secret).unwrap_err().to_string();
-        assert!(err.contains("PH_SURELY_UNSET_VARIABLE"), "{err}");
-        let path = serde_json::json!({ "text": "at {{env:PATH}}!" });
-        let filled = with_secrets(path).unwrap();
-        assert_eq!(
-            filled["text"],
-            format!("at {}!", ph_env::var("PATH").unwrap())
-        );
+        assert!(err.contains("PH_SURELY_UNSET_TEST_VARIABLE"), "{err}");
+        // Other variables (a token, say) are never typed.
+        let token = serde_json::json!({ "text": "at {{env:PATH}}!" });
+        let err = with_secrets(token).unwrap_err().to_string();
+        assert!(err.contains("not typed"), "{err}");
     }
 
     #[test]

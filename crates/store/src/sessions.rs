@@ -158,6 +158,38 @@ impl Store {
         Ok(id)
     }
 
+    /// Appends transcript entries (role and body each) in one transaction,
+    /// marking the session recently active once: a turn of hundreds of
+    /// tool calls is one write, not hundreds. Their ids, in order.
+    pub fn append_messages(
+        &self,
+        session_id: SessionId,
+        messages: &[(&str, String)],
+    ) -> Result<Vec<i64>> {
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now = now_millis();
+        let mut conn = self.conn();
+        let transaction = conn.transaction()?;
+        let mut ids = Vec::with_capacity(messages.len());
+        {
+            let mut insert = transaction.prepare_cached(
+                "INSERT INTO messages (session_id, role, body, created_at) VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (role, body) in messages {
+                insert.execute(params![session_id, role, body, now])?;
+                ids.push(transaction.last_insert_rowid());
+            }
+        }
+        transaction.execute(
+            "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
+            params![session_id, now],
+        )?;
+        transaction.commit()?;
+        Ok(ids)
+    }
+
     /// Replaces the body of an entry that was still streaming when first saved.
     pub fn update_message(&self, id: i64, body: &str) -> Result<()> {
         self.conn().execute(

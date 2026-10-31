@@ -4,7 +4,7 @@ members = ["crates/*"]
 default-members = ["crates/app"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/LibreGuild/PilotHouse"
@@ -25,7 +25,7 @@ jiff = "0.2"
 memchr = "2"
 similar = "2"
 notify = "8"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "limits"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smol = "2"
@@ -81,4 +81,7 @@ opt-level = 2
 lto = "thin"
 codegen-units = 1
 strip = true
-panic = "abort"
+# Unwinding: a panic in a background thread or a library that is caught
+# (the diagram renderer) does not end the app; one on the UI thread still
+# does.
+panic = "unwind"

@@ -247,15 +247,21 @@ impl Store {
             match project.extra_folders.first() {
                 Some(next) => {
                     let next = next.to_string_lossy().to_string();
-                    let conn = self.conn();
-                    conn.execute(
+                    // Both or neither: a failed move (that folder is
+                    // another workspace's own) must not lose it from this one.
+                    let mut conn = self.conn();
+                    let transaction = conn.transaction()?;
+                    transaction.execute(
                         "DELETE FROM workspace_folders WHERE project_id = ?1 AND path = ?2",
                         params![id, next],
                     )?;
-                    conn.execute(
-                        "UPDATE projects SET path = ?2 WHERE id = ?1",
-                        params![id, next],
-                    )?;
+                    transaction
+                        .execute(
+                            "UPDATE projects SET path = ?2 WHERE id = ?1",
+                            params![id, next],
+                        )
+                        .context("that folder is another workspace's main folder")?;
+                    transaction.commit()?;
                 }
                 None => {
                     let scratch = new_scratch(scratch_root)?;

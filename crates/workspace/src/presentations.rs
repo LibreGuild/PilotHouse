@@ -37,6 +37,8 @@ const FRESH: Duration = Duration::from_secs(10);
 #[derive(Default)]
 struct Presentations {
     listed: Option<(Instant, Rc<Vec<Listed>>)>,
+    /// The list is being read again (off the UI thread).
+    listing: bool,
     /// A title slide in each theme, by theme and size (none while it is
     /// being drawn).
     previews: HashMap<(String, String), Option<Arc<RenderImage>>>,
@@ -44,21 +46,55 @@ struct Presentations {
 
 impl Global for Presentations {}
 
-/// Every presentation, newest first (read again now and then).
+/// Every presentation, newest first: as last read, read again now and then
+/// off the UI thread (each deck's file is read for its title), the windows
+/// drawn again when it changed.
 pub(crate) fn listed(cx: &mut App) -> Rc<Vec<Listed>> {
     let state = cx.default_global::<Presentations>();
-    if let Some((at, listed)) = &state.listed
-        && at.elapsed() < FRESH
-    {
-        return listed.clone();
+    let fresh = state
+        .listed
+        .as_ref()
+        .is_some_and(|(at, _)| at.elapsed() < FRESH);
+    let current = state
+        .listed
+        .as_ref()
+        .map(|(_, listed)| listed.clone())
+        .unwrap_or_default();
+    if !fresh && !state.listing {
+        state.listing = true;
+        let read = cx.background_spawn(async { space::list(&space::root()) });
+        cx.spawn(async move |cx| {
+            let read = read.await;
+            cx.update(|cx| {
+                let state = cx.default_global::<Presentations>();
+                state.listing = false;
+                let key = |list: &[Listed]| -> Vec<(std::path::PathBuf, String, usize, std::time::SystemTime)> {
+                    list.iter()
+                        .map(|listed| (listed.space.path.clone(), listed.title.clone(), listed.slides, listed.modified))
+                        .collect()
+                };
+                let changed = state
+                    .listed
+                    .as_ref()
+                    .is_none_or(|(_, old)| key(old) != key(&read));
+                state.listed = Some((Instant::now(), Rc::new(read)));
+                if changed {
+                    cx.refresh_windows();
+                }
+            });
+        })
+        .detach();
     }
-    let listed = Rc::new(space::list(&space::root()));
-    state.listed = Some((Instant::now(), listed.clone()));
-    listed
+    current
 }
 
+/// Reads the list again soon (it changed: one was made or opened); until
+/// then it shows as it was.
 fn forget_list(cx: &mut App) {
-    cx.default_global::<Presentations>().listed = None;
+    let state = cx.default_global::<Presentations>();
+    if let Some((at, _)) = state.listed.as_mut() {
+        *at = Instant::now().checked_sub(FRESH * 2).unwrap_or(*at);
+    }
 }
 
 /// Opens a presentation's window, saying so if it cannot.
@@ -316,6 +352,12 @@ fn preview(
 /// The Open presentation dialog.
 pub(crate) fn open_dialog(window: &mut Window, cx: &mut App) {
     forget_list(cx);
+    // First-slide pictures are rewritten as decks change: the ones GPUI
+    // keeps by path are read again.
+    for listed in listed(cx).iter() {
+        let thumbnail = listed.space.path.join(space::THUMBNAIL);
+        gpui_kit::ImageSource::from(thumbnail).remove_asset(cx);
+    }
     let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search presentations"));
     search.update(cx, |input, cx| input.focus(window, cx));
     let watch = Rc::new(RefCell::new(None));

@@ -5,7 +5,7 @@
 //! automation methods are added only in `automation` builds.
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use gpui_kit::App;
+use gpui_kit::{App, AppContext as _};
 use ph_control::ControlServer;
 use ph_store::paths;
 use ph_workspace::{AppState, Workspace};
@@ -19,7 +19,18 @@ pub fn register(cx: &mut App) {
     ControlServer::handle("todo.list", list_todos, cx);
     ControlServer::handle("todo.add", add_todo, cx);
     ControlServer::handle("util.list", list_utilities, cx);
-    ControlServer::handle("util.run", run_utility, cx);
+    ControlServer::handle_async(
+        "util.run",
+        |params, cx| match utility_input(params, cx) {
+            // Run off the UI thread (a query or a cron line can take a while).
+            Ok((id, input)) => cx.background_spawn(async move {
+                let output = ph_utils::run(&id, &input)?;
+                Ok(json!({ "output": output }))
+            }),
+            Err(err) => gpui_kit::Task::ready(Err(err)),
+        },
+        cx,
+    );
     ph_board::register_control_methods(AppState::store(cx).clone(), cx);
     ph_workspace::theme_mods::register_control_methods(cx);
     ph_studio::register_control_methods(cx);
@@ -229,7 +240,9 @@ fn list_utilities(_: Value, _: &mut App) -> Result<Value> {
 
 /// Runs a utility on `text` (and `second`), in mode `mode` (an index or a
 /// mode's name).
-fn run_utility(params: Value, cx: &mut App) -> Result<Value> {
+/// What `util.run` runs: the utility's id and its input (checked here,
+/// on the UI thread, where the workspace is known).
+fn utility_input(params: Value, cx: &mut App) -> Result<(String, ph_utils::Input)> {
     let id = params
         .get("id")
         .and_then(Value::as_str)
@@ -275,13 +288,12 @@ fn run_utility(params: Value, cx: &mut App) -> Result<Value> {
             bail!("Only SQLite files inside this workspace's folders can be opened.");
         }
     }
-    let output = ph_utils::run(
-        id,
-        &ph_utils::Input {
+    Ok((
+        id.to_string(),
+        ph_utils::Input {
             text: text("text"),
             second: text("second"),
             mode,
         },
-    )?;
-    Ok(json!({ "output": output }))
+    ))
 }

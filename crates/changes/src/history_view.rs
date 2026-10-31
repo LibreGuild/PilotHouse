@@ -33,7 +33,9 @@ pub struct HistoryView {
     all: bool,
     more: bool,
     selected: Option<usize>,
-    detail: Option<(String, Vec<FileChange>)>,
+    /// The selected commit's changes (shared: drawn every frame, never
+    /// copied).
+    detail: Option<(String, std::rc::Rc<Vec<FileChange>>)>,
     loaded: bool,
     writer: Option<Writer>,
     writing: bool,
@@ -180,7 +182,7 @@ impl HistoryView {
                         .get(ix)
                         .map(|c| c.id.clone())
                         .unwrap_or_default();
-                    this.detail = Some((id, files));
+                    this.detail = Some((id, std::rc::Rc::new(files)));
                     cx.notify();
                 }
             });
@@ -294,8 +296,28 @@ impl HistoryView {
                     Some(files) if files.is_empty() => {
                         this.child(div().text_xs().child("No file changes."))
                     }
+                    // A commit that touched thousands of files (a vendored
+                    // library, a formatter run) shows its first ones.
                     Some(files) => {
-                        this.children(files.iter().map(|file| diff_view::file_diff(file, cx)))
+                        const SHOWN: usize = 50;
+                        let more = files.len().saturating_sub(SHOWN);
+                        this.children(
+                            files
+                                .iter()
+                                .take(SHOWN)
+                                .map(|file| diff_view::file_diff(file, cx)),
+                        )
+                        .when(more > 0, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "{more} more file{} not shown.",
+                                        if more == 1 { "" } else { "s" }
+                                    )),
+                            )
+                        })
                     }
                 })
                 .into_any_element(),

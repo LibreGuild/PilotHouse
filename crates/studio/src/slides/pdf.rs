@@ -43,6 +43,18 @@ pub fn write(
     }
     let usvg_options = usvg::Options {
         fontdb: fonts().db.clone(),
+        // The deck's own media only (see `raster::image_resolver`).
+        image_href_resolver: {
+            let load = usvg::ImageHrefResolver::default_string_resolver();
+            usvg::ImageHrefResolver {
+                resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
+                resolve_string: Box::new(move |href, options| {
+                    super::raster::media_href(href)
+                        .then(|| load(href, options))
+                        .flatten()
+                }),
+            }
+        },
         ..usvg::Options::default()
     };
     // Each page: its SVG and its size.

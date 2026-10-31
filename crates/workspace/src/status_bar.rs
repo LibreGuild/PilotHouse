@@ -385,13 +385,18 @@ fn branch_item(
         })
         .flatten();
     let repo = space_ref.repo_model()?.read(cx);
-    let status = repo.status()?.clone();
+    // Only what it shows (the whole status lists every changed file).
+    let status = repo.status()?;
+    let (branch, head, ahead, behind) = (
+        status.branch.clone(),
+        status.head.clone(),
+        status.ahead,
+        status.behind,
+    );
     let busy = repo.busy().cloned();
     let operation = repo.operation();
-    let name = status
-        .branch
-        .clone()
-        .or_else(|| status.head.clone().map(|head| format!("({head})")))
+    let name = branch
+        .or_else(|| head.map(|head| format!("({head})")))
         .unwrap_or_else(|| "no commits".into());
     let name = match folder {
         Some(folder) => format!("{folder} · {name}"),
@@ -402,12 +407,8 @@ fn branch_item(
         .text_xs()
         .child(Icon::new(Icons::GitBranch).xsmall())
         .child(name)
-        .when(status.ahead > 0, |this| {
-            this.child(format!("↑{}", status.ahead))
-        })
-        .when(status.behind > 0, |this| {
-            this.child(format!("↓{}", status.behind))
-        })
+        .when(ahead > 0, |this| this.child(format!("↑{ahead}")))
+        .when(behind > 0, |this| this.child(format!("↓{behind}")))
         .when_some(operation, |this, operation| {
             this.child(
                 div()

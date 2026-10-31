@@ -311,6 +311,12 @@ pub(crate) fn sync(cx: &mut App) {
     });
 }
 
+/// A redraw of every window is due shortly (see `install`).
+#[derive(Default)]
+struct RedrawSoon(bool);
+
+impl gpui_kit::Global for RedrawSoon {}
+
 /// Answers `agent.event` from `pilothouse agent-hook`, and clears the
 /// hook settings of an earlier run.
 pub(crate) fn install(cx: &mut App) {
@@ -320,9 +326,22 @@ pub(crate) fn install(cx: &mut App) {
         |params, cx| {
             let pane = params["pane"].as_str().unwrap_or_default().to_string();
             apply(&pane, &params["event"], cx);
-            // The Agents board and title bar show its line and time; nothing
-            // else they observe changed.
-            cx.refresh_windows();
+            // The Agents board, title bar and terminal tabs show its line
+            // and time; nothing they observe changed, so every window is
+            // drawn again — once for a burst of events (a tool call sends
+            // two at once, many a second while an agent works).
+            if !std::mem::replace(&mut cx.default_global::<RedrawSoon>().0, true) {
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(250))
+                        .await;
+                    cx.update(|cx| {
+                        cx.default_global::<RedrawSoon>().0 = false;
+                        cx.refresh_windows();
+                    });
+                })
+                .detach();
+            }
             Ok(Value::Null)
         },
         cx,

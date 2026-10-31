@@ -1265,7 +1265,7 @@ fn check(element: &Element) -> Result<()> {
             if art.source.len() > SVG_LARGEST {
                 bail!("the SVG is over 2 MB; simplify it");
             }
-            resvg::usvg::Tree::from_str(&art.source, &resvg::usvg::Options::default())
+            resvg::usvg::Tree::from_str(&art.source, &super::raster::inert_options())
                 .map_err(|err| anyhow!("the SVG does not draw: {err}"))?;
         }
         Kind::Icon(icon) if super::icons::svg(&icon.icon).is_none() => {

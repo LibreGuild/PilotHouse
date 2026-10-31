@@ -4,6 +4,7 @@
 //! run it off the UI thread.
 
 use anyhow::{Context as _, Result, bail};
+use ph_github::models::IssueComment;
 use ph_github::{Client, Repo, accounts, pulls};
 use ph_store::Store;
 use ph_store::reviews::{Finding, PrReview, PullRef};
@@ -286,11 +287,22 @@ pub fn shared(
     store: &Store,
     pull: &PullRef,
 ) -> Result<Option<(u64, crate::comment::SharedReview)>> {
-    let (client, repo, _) = client_for(store, pull)?;
+    let (client, repo, login) = client_for(store, pull)?;
     let conversation = pulls::conversation(&client, &repo, pull.number)?;
+    // Only a summary posted by someone who can write to the repository (or
+    // by this account): on a public one anyone can comment, and could post
+    // a summary of their own.
+    let trusted = |comment: &&IssueComment| {
+        comment.user.login == login
+            || matches!(
+                comment.author_association.as_str(),
+                "OWNER" | "MEMBER" | "COLLABORATOR"
+            )
+    };
     Ok(conversation
         .iter()
         .rev()
+        .filter(trusted)
         .find_map(|comment| crate::comment::read_shared(&comment.body).map(|s| (comment.id, s))))
 }
 

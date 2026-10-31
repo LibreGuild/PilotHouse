@@ -98,6 +98,16 @@ pub fn host_keys(mapping: &Mapping) -> Result<Vec<HostKey>> {
             "StrictHostKeyChecking=accept-new",
         ])
         .args(["-o", "ControlPath=none", "-o", "ConnectTimeout=10"])
+        // Only the key: no sign-in to a server not trusted yet, and nothing
+        // forwarded to it (an agent, ports) from the user's config.
+        .args([
+            "-o",
+            "PreferredAuthentications=none",
+            "-o",
+            "ForwardAgent=no",
+            "-o",
+            "ClearAllForwardings=yes",
+        ])
         .arg("-o")
         .arg(format!(
             "UserKnownHostsFile=\"{}\"",

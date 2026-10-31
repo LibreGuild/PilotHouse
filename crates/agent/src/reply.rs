@@ -100,7 +100,28 @@ impl Reply {
 
     /// More of the reply arrived.
     pub fn push_str(&mut self, chunk: &str, cx: &mut Context<Self>) {
-        let text = format!("{}{chunk}", self.text);
+        // Mostly text with no diagram in it, growing at its end: added to
+        // the last part as it comes, without reading the whole reply again
+        // for every piece (a long reply arrives in thousands of them).
+        let tail_from = self.text.len().saturating_sub(16);
+        let tail_from = (tail_from..=self.text.len())
+            .find(|ix| self.text.is_char_boundary(*ix))
+            .unwrap_or(self.text.len());
+        let fence_near = self.text[tail_from..].contains('`') || chunk.contains('`');
+        if !fence_near
+            && self.parts.len() == 1
+            && let Some(Part::Markdown { text, view }) = self.parts.last_mut()
+            // (The one part is all of it: same length is enough to know.)
+            && text.len() == self.text.len()
+        {
+            self.text.push_str(chunk);
+            text.push_str(chunk);
+            view.update(cx, |view, cx| view.push_str(chunk, cx));
+            cx.notify();
+            return;
+        }
+        let mut text = std::mem::take(&mut self.text);
+        text.push_str(chunk);
         self.set_text(text, cx);
     }
 

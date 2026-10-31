@@ -1453,6 +1453,23 @@ impl Workspace {
         let command = if setup.trim().is_empty() {
             // The number itself: every shell echoes that the same way.
             crate::tasks::setup_command(&format!("echo \"Port for this task: {port}\""), port)
+        } else if ph_store::paths::is_untrusted_copy(root) {
+            // Someone else's repository says what to run: it is typed as a
+            // comment, to read first and then run by hand.
+            let remark = if cfg!(windows)
+                && ph_env::default_shell()
+                    .0
+                    .file_stem()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("cmd"))
+            {
+                "rem"
+            } else {
+                "#"
+            };
+            format!(
+                "{remark} pilothouse.toml asks to run this; read it, then run it yourself: {}",
+                setup.replace(['\n', '\r'], " ")
+            )
         } else {
             crate::tasks::setup_command(&setup, port)
         };

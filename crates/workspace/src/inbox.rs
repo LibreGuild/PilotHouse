@@ -770,10 +770,13 @@ pub(crate) fn parse_when(text: &str, now: &Zoned) -> Option<Zoned> {
             }
             _ => return None,
         };
+        // Out of range ("in 99999999 days") is no time at all, not a panic.
         let span = match unit {
-            "m" | "min" | "mins" | "minute" | "minutes" => count.minutes(),
-            "h" | "hr" | "hrs" | "hour" | "hours" => count.hours(),
-            "d" | "day" | "days" => count.days(),
+            "m" | "min" | "mins" | "minute" | "minutes" => {
+                jiff::Span::new().try_minutes(count).ok()?
+            }
+            "h" | "hr" | "hrs" | "hour" | "hours" => jiff::Span::new().try_hours(count).ok()?,
+            "d" | "day" | "days" => jiff::Span::new().try_days(count).ok()?,
             _ => return None,
         };
         return now.checked_add(span).ok();
@@ -908,6 +911,15 @@ mod tests {
         for bad in ["", "soon", "25:00", "13pm", "in a bit", "xyz 10:00"] {
             assert_eq!(read(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn huge_reminder_counts_are_no_time() {
+        let now: Zoned = "2026-10-29T13:00:00[UTC]".parse().unwrap();
+        // Past what a date can hold: nothing (it used to panic, drawing).
+        assert!(parse_when("in 99999999 days", &now).is_none());
+        assert!(parse_when("in 9999999999999 min", &now).is_none());
+        assert!(parse_when("in 3 days", &now).is_some());
     }
 
     #[test]

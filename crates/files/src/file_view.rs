@@ -233,6 +233,10 @@ pub struct FileView {
     not_utf8: bool,
     /// Why the last save failed; the text stays, to save again.
     save_error: Option<SharedString>,
+    /// The file as last read or written here (change time, length): a save
+    /// over a file changed since (by an agent, another editor) stops once
+    /// and says so.
+    disk: Option<(std::time::SystemTime, u64)>,
     /// Keeps the unsaved text a second after the last change.
     _keep: Option<Task<()>>,
     /// Line to reveal once loading finishes (0-based).
@@ -349,6 +353,7 @@ impl FileView {
             restored: false,
             not_utf8: false,
             save_error: None,
+            disk: None,
             _keep: None,
             pending_line: None,
             asks: true,
@@ -1019,19 +1024,24 @@ impl FileView {
         }
         let path = self.absolute.clone();
         let read = cx.background_spawn(async move {
+            let disk = disk_stamp(&path);
             let (text, not_utf8) = read_text(&path)?;
             // Changes kept from a crash or quit come back, still unsaved.
             let kept = crate::unsaved::kept(&path).filter(|kept| *kept != text);
             if kept.is_none() {
                 crate::unsaved::forget(&path);
             }
-            Ok((text, kept, not_utf8))
+            Ok((text, kept, not_utf8, disk))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = read.await;
             _ = this.update_in(cx, |this, window, cx| {
                 match result {
-                    Ok((text, kept, not_utf8)) => {
+                    // Typed into while it was being read again: the user's
+                    // text stays (a save then says the file changed).
+                    Ok(_) if this.content == Content::Text && this.dirty => {}
+                    Ok((text, kept, not_utf8, disk)) => {
+                        this.disk = disk;
                         this.not_utf8 = not_utf8;
                         this.attach_lsp(&text, cx);
                         let restored = kept.is_some();
@@ -1290,13 +1300,26 @@ impl FileView {
         let text = self.editor.read(cx).text().clone();
         let path = self.absolute.clone();
         let written = text.clone();
-        let write = cx.background_spawn(async move { write_rope(&path, &written) });
+        let expected = self.disk;
+        let write = cx.background_spawn(async move {
+            // Changed on disk since it was read here: not written over
+            // unasked (the next save does write it).
+            let now = disk_stamp(&path);
+            if let (Some(expected), Some(now)) = (expected, now)
+                && expected != now
+            {
+                return Err(SaveError::Changed(now));
+            }
+            write_rope(&path, &written).map_err(SaveError::Io)?;
+            Ok(disk_stamp(&path))
+        });
         cx.spawn(async move |this, cx| {
             let result = write.await;
             this.update(cx, |this, cx| {
                 let saved = result.is_ok();
                 match result {
-                    Ok(()) => {
+                    Ok(disk) => {
+                        this.disk = disk;
                         this.saved = text;
                         this.restored = false;
                         this.save_error = None;
@@ -1309,7 +1332,16 @@ impl FileView {
                             this.load_blame(cx);
                         }
                     }
-                    Err(err) => this.save_error = Some(format!("Could not save: {err}").into()),
+                    Err(SaveError::Changed(now)) => {
+                        this.disk = Some(now);
+                        this.save_error = Some(
+                            "The file changed on disk since it was opened. Save again to write over it, or close without saving to keep the change."
+                                .into(),
+                        );
+                    }
+                    Err(SaveError::Io(err)) => {
+                        this.save_error = Some(format!("Could not save: {err}").into())
+                    }
                 }
                 cx.notify();
                 saved
@@ -1655,13 +1687,53 @@ fn paint_line_marks(
 
 /// Writes `text` to `path` chunk by chunk, without first copying it into one
 /// string.
+/// Why a save did not write.
+enum SaveError {
+    /// The file changed on disk since it was read (its stamp now).
+    Changed((std::time::SystemTime, u64)),
+    Io(std::io::Error),
+}
+
+/// A file's change time and length, to notice it changed.
+fn disk_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// Writes `text` to `path` whole or not at all: beside it first, then moved
+/// over it (a full disk or a dropped network drive never leaves it cut
+/// short), keeping its permissions; a link is followed, so the file it
+/// points at is the one written. Where nothing can be written beside it,
+/// the file is written in place.
 fn write_rope(path: &std::path::Path, text: &Rope) -> std::io::Result<()> {
     use std::io::Write as _;
-    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
-    for chunk in text.chunks() {
-        file.write_all(chunk.as_bytes())?;
+    let write = |file: std::fs::File| -> std::io::Result<std::fs::File> {
+        let mut out = std::io::BufWriter::new(file);
+        for chunk in text.chunks() {
+            out.write_all(chunk.as_bytes())?;
+        }
+        out.into_inner().map_err(|err| err.into_error())
+    };
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let temporary = target.with_file_name(format!(".{name}.{}.pilothouse", std::process::id()));
+    let Ok(file) = std::fs::File::create(&temporary) else {
+        return write(std::fs::File::create(path)?).map(drop);
+    };
+    let written = write(file).and_then(|file| file.sync_all());
+    let result = written.and_then(|()| {
+        if let Ok(meta) = std::fs::metadata(&target) {
+            let _ = std::fs::set_permissions(&temporary, meta.permissions());
+        }
+        std::fs::rename(&temporary, &target)
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
     }
-    file.flush()
+    result
 }
 
 /// Reads a file as text (and whether it was not UTF-8, so shown with

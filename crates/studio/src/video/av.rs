@@ -141,6 +141,9 @@ pub fn probe(path: &Path) -> Result<Info> {
     let natural = unsafe { video.naturalSize() };
     let turns = turns(&video);
     let (width, height) = (natural.width.round() as u32, natural.height.round() as u32);
+    if width == 0 || height == 0 {
+        bail!("AVFoundation finds no picture size in it");
+    }
     let size = if turns % 2 == 1 {
         (height, width)
     } else {

@@ -109,6 +109,9 @@ impl VideoDocument {
         })
         .detach();
         crate::control::register_video(cx.entity().downgrade(), cx);
+        // Its window closed: an export under way stops (it would go on
+        // using the processor, and write a file no one is told about).
+        cx.on_release(|this, _| this.cancel_export()).detach();
         this
     }
 
@@ -278,6 +281,32 @@ impl VideoDocument {
         })
     }
 
+    /// Keeps the timeline pictures to a few hundred (zooming and trimming
+    /// asks for new times): those far from the ones last wanted go, freed
+    /// on the GPU.
+    fn trim_thumbs(&mut self, cx: &mut Context<Self>) {
+        const MOST: usize = 300;
+        if self.thumbs.len() <= MOST {
+            return;
+        }
+        let wanted = &self.thumbs_wanted;
+        let distance = |key: i64| {
+            wanted
+                .iter()
+                .map(|want| (want - key).abs())
+                .min()
+                .unwrap_or(i64::MAX)
+        };
+        let mut keys: Vec<i64> = self.thumbs.keys().copied().collect();
+        keys.sort_by_key(|key| std::cmp::Reverse(distance(*key)));
+        let extra = self.thumbs.len() - MOST;
+        for key in keys.into_iter().take(extra) {
+            if let Some(frame) = self.thumbs.remove(&key) {
+                cx.drop_image(frame.render_image(), None);
+            }
+        }
+    }
+
     /// Makes timeline pictures for source times `times` (those not made
     /// yet), off the UI thread, one batch at a time.
     pub fn want_thumbs(&mut self, times: &[f64], cx: &mut Context<Self>) {
@@ -326,6 +355,7 @@ impl VideoDocument {
                 let alive = this
                     .update(cx, |this, cx| {
                         this.thumbs.extend(batch);
+                        this.trim_thumbs(cx);
                         cx.notify();
                     })
                     .is_ok();

@@ -46,7 +46,7 @@ Good slides: one idea each, short titles, at most about six bullets, generous sp
 
 pub fn register_control_methods(cx: &mut App) {
     ControlServer::handle_async("slides.get", get, cx);
-    ControlServer::handle("slides.edit", edit, cx);
+    ControlServer::handle_async("slides.edit", edit, cx);
     ControlServer::handle("slides.undo", undo, cx);
     ControlServer::handle("slides.themes", themes, cx);
     ControlServer::handle_async("slides.export", export, cx);
@@ -329,64 +329,98 @@ fn get(params: Value, cx: &mut App) -> Task<Result<Value>> {
     })
 }
 
-fn edit(params: Value, cx: &mut App) -> Result<Value> {
-    let document = find(&params, cx)?;
-    let mut done = Vec::new();
-    // Pictures first, so ops can use them.
-    let mut imported = Vec::new();
-    if let Some(files) = params.get("import").and_then(Value::as_array) {
-        let space = document.read(cx).space().clone();
-        for file in files {
-            let path = file.as_str().ok_or_else(|| anyhow!("import: paths"))?;
-            let mut path = PathBuf::from(path);
-            if path.is_relative() {
-                path = space.path.join(path);
-            }
-            let name = space.add_media(&path)?;
-            done.push(format!("imported {} as media `{name}`", path.display()));
-            imported.push(name);
-        }
-    }
+/// Changes the deck: pictures to `import` are read and made ready off the
+/// UI thread (a 50-megapixel photo takes seconds), then the operations are
+/// applied as one step.
+fn edit(params: Value, cx: &mut App) -> Task<Result<Value>> {
+    let document = match find(&params, cx) {
+        Ok(document) => document,
+        Err(err) => return Task::ready(Err(err)),
+    };
     let ops: Vec<Op> = match params.get("ops") {
-        Some(Value::Array(items)) => items
+        Some(Value::Array(items)) => match items
             .iter()
             .enumerate()
             .map(|(ix, item)| {
                 serde_json::from_value(item.clone()).map_err(|err| anyhow!("op {}: {err}", ix + 1))
             })
-            .collect::<Result<_>>()?,
+            .collect::<Result<_>>()
+        {
+            Ok(ops) => ops,
+            Err(err) => return Task::ready(Err(err)),
+        },
         Some(Value::Null) | None => Vec::new(),
-        Some(_) => bail!("ops: a list of operations"),
+        Some(_) => return Task::ready(Err(anyhow!("ops: a list of operations"))),
     };
-    if ops.is_empty() && imported.is_empty() {
-        bail!("nothing to change: give `ops` (see slides_get's guide)");
+    let space = document.read(cx).space().clone();
+    let mut files = Vec::new();
+    if let Some(list) = params.get("import").and_then(Value::as_array) {
+        for file in list {
+            let Some(path) = file.as_str() else {
+                return Task::ready(Err(anyhow!("import: paths")));
+            };
+            // Never a network path: reading one on Windows sends the
+            // user's sign-in to that computer.
+            if ph_ui::platform::is_network_path(path) {
+                return Task::ready(Err(anyhow!("import: {path} is on another computer")));
+            }
+            let mut path = PathBuf::from(path);
+            if path.is_relative() {
+                path = space.path.join(path);
+            }
+            files.push(path);
+        }
     }
-    if !ops.is_empty() {
-        let count = ops.len();
-        let results = document.update(cx, |document, cx| {
-            document.settle();
-            let results = document.apply("agent", ops, cx);
-            document.settle();
-            results
-        })?;
-        let made: Vec<String> = results.into_iter().flatten().collect();
-        done.push(if made.is_empty() {
-            format!("{count} change{}", if count == 1 { "" } else { "s" })
-        } else {
-            format!(
-                "{count} change{} (made or found: {})",
-                if count == 1 { "" } else { "s" },
-                made.join(", ")
-            )
-        });
+    if ops.is_empty() && files.is_empty() {
+        return Task::ready(Err(anyhow!(
+            "nothing to change: give `ops` (see slides_get's guide)"
+        )));
     }
-    Ok(json!({
-        "text": format!(
-            "Done: {}. The user sees it now; look with slides_get render to check it.",
-            done.join("; ")
-        ),
-        "imported": imported,
-    }))
+    // Pictures first, so ops can use them.
+    let imported = cx.background_spawn(async move {
+        files
+            .into_iter()
+            .map(|path| {
+                let name = space.add_media(&path)?;
+                Ok((path, name))
+            })
+            .collect::<Result<Vec<_>>>()
+    });
+    cx.spawn(async move |cx: &mut gpui_kit::AsyncApp| {
+        let imported = imported.await?;
+        cx.update(|cx| {
+            let mut done: Vec<String> = imported
+                .iter()
+                .map(|(path, name)| format!("imported {} as media `{name}`", path.display()))
+                .collect();
+            if !ops.is_empty() {
+                let count = ops.len();
+                let results = document.update(cx, |document, cx| {
+                    document.settle();
+                    let results = document.apply("agent", ops, cx);
+                    document.settle();
+                    results
+                })?;
+                let made: Vec<String> = results.into_iter().flatten().collect();
+                done.push(if made.is_empty() {
+                    format!("{count} change{}", if count == 1 { "" } else { "s" })
+                } else {
+                    format!(
+                        "{count} change{} (made or found: {})",
+                        if count == 1 { "" } else { "s" },
+                        made.join(", ")
+                    )
+                });
+            }
+            Ok(json!({
+                "text": format!(
+                    "Done: {}. The user sees it now; look with slides_get render to check it.",
+                    done.join("; ")
+                ),
+                "imported": imported.into_iter().map(|(_, name)| name).collect::<Vec<_>>(),
+            }))
+        })
+    })
 }
 
 fn undo(params: Value, cx: &mut App) -> Result<Value> {

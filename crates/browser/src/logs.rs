@@ -146,12 +146,13 @@ impl Logs {
             self.console.pop_front();
         }
         let seq = self.take_seq();
+        // A page can log megabytes at a time: each line is kept short.
         self.console.push_back(ConsoleLine {
             level,
-            text,
+            text: clip_line(text),
             seq,
             source,
-            stack,
+            stack: stack.map(clip_line),
         });
     }
 
@@ -490,6 +491,23 @@ fn remote_object_text(object: &Value) -> String {
             .unwrap_or_else(|| object["type"].as_str().unwrap_or("?"))
             .to_string(),
     }
+}
+
+/// At most this much of a console line or stack is kept.
+const MAX_LINE: usize = 16 * 1024;
+
+/// `text`, cut at [`MAX_LINE`] bytes (on a character boundary) with a note.
+fn clip_line(mut text: String) -> String {
+    if text.len() > MAX_LINE {
+        let mut end = MAX_LINE;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let dropped = text.len() - end;
+        text.truncate(end);
+        text.push_str(&format!(" … ({dropped} bytes more)"));
+    }
+    text
 }
 
 #[cfg(test)]

@@ -323,10 +323,20 @@ impl SlidesEditor {
     ) {
         let space = self.doc.read(cx).space().clone();
         match reference.kind {
-            RefKind::Picture => match space.add_media(&reference.path) {
-                Ok(name) => self.insert_picture(name, window, cx),
-                Err(err) => window.push_notification(Notification::error(format!("{err:#}")), cx),
-            },
+            RefKind::Picture => {
+                let path = reference.path.clone();
+                let added = cx.background_spawn(async move { space.add_media(&path) });
+                cx.spawn_in(window, async move |this, cx| {
+                    let added = added.await;
+                    _ = this.update_in(cx, |this, window, cx| match added {
+                        Ok(name) => this.insert_picture(name, window, cx),
+                        Err(err) => {
+                            window.push_notification(Notification::error(format!("{err:#}")), cx)
+                        }
+                    });
+                })
+                .detach();
+            }
             RefKind::Pdf | RefKind::Slides => {
                 let path = reference.path.clone();
                 let kind = reference.kind;
@@ -389,7 +399,10 @@ impl SlidesEditor {
                     cx,
                 );
             }
-            RefKind::Other => cx.open_with_system(&reference.path),
+            RefKind::Other if ph_ui::platform::opens_safely(&reference.path) => {
+                cx.open_with_system(&reference.path)
+            }
+            RefKind::Other => cx.reveal_path(&reference.path),
         }
     }
 
@@ -934,10 +947,15 @@ impl SlidesEditor {
                                             });
                                         },
                                     ))
-                                    .item(
-                                        PopupMenuItem::new("Open")
-                                            .on_click(move |_, _, cx| cx.open_with_system(&open)),
-                                    )
+                                    // Opened only when it is a document, never a
+                                    // program (references come from anywhere).
+                                    .when(ph_ui::platform::opens_safely(&open), |menu| {
+                                        menu.item(
+                                            PopupMenuItem::new("Open").on_click(move |_, _, cx| {
+                                                cx.open_with_system(&open)
+                                            }),
+                                        )
+                                    })
                                     .item(
                                         PopupMenuItem::new(super::reveal_label())
                                             .on_click(move |_, _, cx| cx.reveal_path(&path)),
@@ -1052,7 +1070,13 @@ impl SlidesEditor {
 
 /// Slide `index` of the PowerPoint file at `path`, as a PNG 1920 wide.
 fn slide_png(path: &Path, index: usize) -> anyhow::Result<Vec<u8>> {
-    let scratch = std::env::temp_dir().join(format!("pilothouse-reference-{}", std::process::id()));
+    // A folder of its own per call: two inserts at once never share one.
+    static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let scratch = std::env::temp_dir().join(format!(
+        "pilothouse-reference-{}-{call}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch)?;
     let drawn = (|| {

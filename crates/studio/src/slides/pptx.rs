@@ -62,20 +62,40 @@ fn emu(points: f32) -> i64 {
 /// Writes `deck` (its pictures in `media`) to `out` as PPTX.
 pub fn write(deck: &Deck, media: Option<&Path>, out: &Path) -> Result<()> {
     let parts = package(deck, media)?;
-    let file =
-        std::fs::File::create(out).with_context(|| format!("could not write {}", out.display()))?;
-    let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
-    // Content types first, as readers expect.
-    let mut ordered: Vec<(&String, &Vec<u8>)> = parts.iter().collect();
-    ordered.sort_by_key(|(name, _)| name.as_str() != "[Content_Types].xml");
-    for (name, bytes) in ordered {
-        zip.start_file(name.as_str(), options)?;
-        zip.write_all(bytes)?;
+    // Written beside it, then moved over it: a file being replaced (the
+    // PowerPoint file a deck was opened from) is never left half written.
+    let name = out
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "presentation.pptx".into());
+    let temporary = out.with_file_name(format!(".{name}.{}.part", std::process::id()));
+    let written = (|| -> Result<()> {
+        let file = std::fs::File::create(&temporary)
+            .with_context(|| format!("could not write {}", out.display()))?;
+        let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        // Content types first, as readers expect.
+        let mut ordered: Vec<(&String, &Vec<u8>)> = parts.iter().collect();
+        ordered.sort_by_key(|(name, _)| name.as_str() != "[Content_Types].xml");
+        for (name, bytes) in ordered {
+            zip.start_file(name.as_str(), options)?;
+            zip.write_all(bytes)?;
+        }
+        let file = zip.finish()?.into_inner().map_err(|err| err.into_error())?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    match written.and_then(|()| {
+        std::fs::rename(&temporary, out)
+            .with_context(|| format!("could not write {}", out.display()))
+    }) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&temporary);
+            Err(err)
+        }
     }
-    zip.finish()?.flush()?;
-    Ok(())
 }
 
 /// Every part of the package, by name.
@@ -83,11 +103,16 @@ pub fn package(deck: &Deck, media: Option<&Path>) -> Result<BTreeMap<String, Vec
     // A deck opened from PowerPoint, its theme as read: the file's own
     // masters and layouts go back as they were.
     let template = match &deck.source {
-        Some(source) if source.theme.as_deref() == Some(&deck.theme) => media
-            .and_then(Path::parent)
-            .map(|space| space.join(&source.file))
-            .filter(|file| file.is_file())
-            .and_then(|file| read_template(&file).ok()),
+        Some(source)
+            if source.theme.as_deref() == Some(&deck.theme)
+                && super::space::safe_media_name(&source.file) =>
+        {
+            media
+                .and_then(Path::parent)
+                .map(|space| space.join(&source.file))
+                .filter(|file| file.is_file())
+                .and_then(|file| read_template(&file).ok())
+        }
         _ => None,
     };
     let mut writer = Writer {
@@ -226,13 +251,20 @@ pub(crate) fn unzip(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
             continue;
         }
         let name = entry.name()?.to_string();
-        total += entry.size() as usize;
-        // A file that unpacks to more than 2 GB is not a presentation.
-        if total > 2 << 30 {
-            bail!("{} unpacks to more than 2 GB", path.display());
-        }
+        // A file that unpacks to more than 1 GB is not a presentation (it
+        // is all held in memory); what is read is counted, not what the
+        // archive says (that can lie).
+        const MOST: usize = 1 << 30;
+        let left = MOST.saturating_sub(total);
         let mut bytes = Vec::with_capacity(entry.size().min(256 << 20) as usize);
-        std::io::Read::read_to_end(&mut entry, &mut bytes)?;
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(&mut entry, left as u64 + 1),
+            &mut bytes,
+        )?;
+        total += bytes.len();
+        if total > MOST {
+            bail!("{} unpacks to more than 1 GB", path.display());
+        }
         files.insert(name, bytes);
     }
     Ok(files)
@@ -1026,7 +1058,7 @@ impl<'a> Writer<'a> {
         if let Some(part) = self.media_names.get(name) {
             return Some(format!("../media/{part}"));
         }
-        if name.is_empty() || name.contains("..") || name.contains('/') || name.contains('\\') {
+        if !super::space::safe_media_name(name) {
             return None;
         }
         let bytes = std::fs::read(self.media?.join(name)).ok()?;
