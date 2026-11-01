@@ -1,8 +1,9 @@
 //! The bar at the bottom of the window: the git branch (click for the
 //! branch picker), the project folder, where its work runs when it is on a
 //! network drive, how CI went for the commit checked out, the ports the
-//! workspace's processes listen on, the detected stack, and how close each
-//! agent subscription is to its limits.
+//! workspace's processes listen on, the Android device in use (its menu
+//! switches, connects and opens Logcat), the detected stack, and how close
+//! each agent subscription is to its limits.
 
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _,
@@ -17,7 +18,7 @@ use gpui_kit::{
     AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div,
 };
-use ph_ui::Icons;
+use ph_ui::{Icons, MenuButton as _};
 
 use crate::workspace::Workspace;
 
@@ -69,6 +70,7 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
         .filter(|space| space.signals().merged_task)
         .map(|_| merged_item(cx));
     let branch = space_entity.and_then(|space| branch_item(&space, cx));
+    let device = device_item(cx);
 
     StatusBar::new()
         .left(
@@ -97,7 +99,8 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                         }),
                 )
                 .children(drive)
-                .children(ports),
+                .children(ports)
+                .children(device),
         )
         .right(
             h_flex()
@@ -281,6 +284,48 @@ fn ports_item(ports: &[u16], _: &Context<Workspace>) -> Option<AnyElement> {
     )
 }
 
+/// The Android device in use, once devices are used at all: its menu
+/// switches devices, connects one, and opens Logcat or the Devices pane.
+fn device_item(cx: &Context<Workspace>) -> Option<AnyElement> {
+    let manager = ph_devices::DeviceManager::existing(cx)?;
+    let state = manager.read(cx);
+    let device = state.selected().or_else(|| state.devices().first())?;
+    let label = device.display_name();
+    let icon = if device.emulator {
+        Icons::TabletSmartphone
+    } else {
+        Icons::Smartphone
+    };
+    Some(
+        Button::new("status-device")
+            .ghost()
+            .xsmall()
+            .icon(Icon::new(icon).xsmall())
+            .label(label)
+            .tooltip("The device in use: switch, connect, Logcat")
+            .menu(gpui_kit::Anchor::BottomLeft, move |menu, window, cx| {
+                use gpui_kit::component::menu::PopupMenuItem;
+                ph_devices::device_menu(menu, &manager, window, cx)
+                    .separator()
+                    .item(
+                        PopupMenuItem::new("Logcat")
+                            .icon(Icon::new(Icons::ScrollText))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::actions::ShowLogcat), cx)
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Devices")
+                            .icon(Icon::new(Icons::TabletSmartphone))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::actions::ShowDevices), cx)
+                            }),
+                    )
+            })
+            .into_any_element(),
+    )
+}
+
 /// Where the workspace's work runs when its folder is on a network drive:
 /// the server (mapped), or an offer to set that up. Opens Network drives.
 fn drive_item(
@@ -340,13 +385,18 @@ fn branch_item(
         })
         .flatten();
     let repo = space_ref.repo_model()?.read(cx);
-    let status = repo.status()?.clone();
+    // Only what it shows (the whole status lists every changed file).
+    let status = repo.status()?;
+    let (branch, head, ahead, behind) = (
+        status.branch.clone(),
+        status.head.clone(),
+        status.ahead,
+        status.behind,
+    );
     let busy = repo.busy().cloned();
     let operation = repo.operation();
-    let name = status
-        .branch
-        .clone()
-        .or_else(|| status.head.clone().map(|head| format!("({head})")))
+    let name = branch
+        .or_else(|| head.map(|head| format!("({head})")))
         .unwrap_or_else(|| "no commits".into());
     let name = match folder {
         Some(folder) => format!("{folder} · {name}"),
@@ -357,12 +407,8 @@ fn branch_item(
         .text_xs()
         .child(Icon::new(Icons::GitBranch).xsmall())
         .child(name)
-        .when(status.ahead > 0, |this| {
-            this.child(format!("↑{}", status.ahead))
-        })
-        .when(status.behind > 0, |this| {
-            this.child(format!("↓{}", status.behind))
-        })
+        .when(ahead > 0, |this| this.child(format!("↑{ahead}")))
+        .when(behind > 0, |this| this.child(format!("↓{behind}")))
         .when_some(operation, |this, operation| {
             this.child(
                 div()

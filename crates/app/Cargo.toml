@@ -27,6 +27,7 @@ ph-env.workspace = true
 ph-mcp.workspace = true
 ph-agy.workspace = true
 ph-store.workspace = true
+ph-studio.workspace = true
 ph-theme.workspace = true
 ph-ui.workspace = true
 ph-uitest.workspace = true

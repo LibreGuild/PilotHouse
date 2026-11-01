@@ -6,7 +6,7 @@
 
 <p align="center">
   One fast, native desktop app for working with coding agents.<br>
-  Chat with Claude Code, Codex, Gemini CLI or Antigravity, with your code, Git, a board, terminals, a browser and Android devices beside the chat, and let the agents use them too.
+  Chat with Claude Code, Codex, Gemini CLI or Antigravity, with your code, Git, a board, terminals, a browser and Android devices beside the chat, and let the agents use them too. Make the pictures, videos and slides that go with the work in the same app.
 </p>
 
 <p align="center">
@@ -36,7 +36,18 @@ A day with coding agents usually means several agent CLIs in terminals, an edito
 - **UI tests** recorded from what an agent does, replayed without AI on several screen sizes or devices, compared with accepted screens, and repaired by an agent. A board card can require them to pass before it is Done.
 - **Automation**: agent prompts and test runs at set times, or when files change, a commit lands, a pull request opens or checks fail.
 - **Network drives**: for code on a server's share (a mapped drive), Git, terminals and run configurations work on the server over SSH, next to the files.
+- **Studio** for what goes with the work, by hand or by asking the agent in the chat beside it, with every step undoable:
+  - **Pictures**: arrows, boxes, numbered steps, labels and highlights; blur or pixelate emails and tokens; crop, resize and frame for docs, under a size limit.
+  - **Video**: cut and speed up parts of a screen recording on a timeline, add labels and blurs that show at set times, and export MP4, HEVC, WebM or GIF.
+  - **Slides**: decks drafted by an agent from a few lines, with charts, tables, diagrams, icons, themes and your PowerPoint templates; present with notes; open any `.pptx` and export editable PowerPoint, PDF or pictures.
+- **Themes and layout**: eight themes, or one you describe to an agent (or import from VS Code); an accent, density, and a gradient or picture behind the window. Panes dock and split where you want them, and terminals run side by side.
 - **Inbox and to-dos**, and an offline utilities toolbox (JSON, JWT, hashes, times, cron, regex, SQLite…) for people and agents.
+
+<p align="center">
+  <img src="site/shots/studio-picture.webp" alt="Studio marking up a screenshot: an email blurred, one row spotlit and a label added" width="290">
+  <img src="site/shots/studio-video.webp" alt="Studio editing a screen recording on a timeline, one part at double speed" width="290">
+  <img src="site/shots/slides.webp" alt="A slide deck with a column chart in Studio, the slides down the side" width="290">
+</p>
 
 ## Install
 

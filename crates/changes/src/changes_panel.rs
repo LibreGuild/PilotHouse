@@ -730,7 +730,7 @@ impl ChangesPanel {
                 h_flex()
                     .id(("change-file", ix))
                     .group(group.clone())
-                    .h_7()
+                    .h(ph_theme::dense(1.75, cx))
                     .px_1p5()
                     .when_some(depth, |this, depth| this.pl(tree_indent(depth)))
                     .gap_1p5()
@@ -1233,7 +1233,12 @@ impl ChangesPanel {
         )
     }
 
-    fn render_untracked(&self, untracked: &[String], cx: &mut Context<Self>) -> AnyElement {
+    fn render_untracked(&self, all: &[String], cx: &mut Context<Self>) -> AnyElement {
+        // A folder missing from .gitignore (`node_modules`) can hold tens of
+        // thousands: the first ones show, and how many more there are.
+        const SHOWN: usize = 500;
+        let untracked = &all[..all.len().min(SHOWN)];
+        let more = all.len() - untracked.len();
         let heading = div()
             .px_1p5()
             .pt_3()
@@ -1281,7 +1286,22 @@ impl ChangesPanel {
                 .map(|(ix, path)| self.untracked_row(ix, path, None, cx))
                 .collect()
         };
-        v_flex().child(heading).children(rows).into_any_element()
+        v_flex()
+            .child(heading)
+            .children(rows)
+            .when(more > 0, |this| {
+                this.child(
+                    div()
+                        .px_1p5()
+                        .pt_1()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!(
+                            "{more} more new files not shown (a folder to add to .gitignore?)."
+                        )),
+                )
+            })
+            .into_any_element()
     }
 
     /// A new file's row (indented at `depth` in View as Tree).
@@ -1299,7 +1319,7 @@ impl ChangesPanel {
         };
         h_flex()
             .id(("untracked", ix))
-            .h_7()
+            .h(ph_theme::dense(1.75, cx))
             .px_1p5()
             .when_some(depth, |this, depth| this.pl(tree_indent(depth)))
             .gap_1p5()
@@ -1391,7 +1411,7 @@ impl ChangesPanel {
         let new_files = counts.is_none();
         h_flex()
             .id(id)
-            .h_7()
+            .h(ph_theme::dense(1.75, cx))
             .px_1p5()
             .pl(tree_indent(depth))
             .gap_1p5()

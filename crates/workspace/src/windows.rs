@@ -135,7 +135,7 @@ pub fn open_window(
     let options = window_options(cx);
     let (handle, workspace) = gpui_kit::open_window(options, cx, move |window, cx| {
         // Apply the saved appearance before the first frame so there is no flash.
-        ph_theme::apply_appearance(AppState::appearance(cx), Some(window), cx);
+        ph_theme::apply_appearance(&AppState::appearance(cx), Some(window), cx);
         cx.new(|cx| Workspace::new_showing(project, window, cx))
     })?;
     register(handle, &workspace, cx);

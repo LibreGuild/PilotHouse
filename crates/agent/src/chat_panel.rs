@@ -99,7 +99,16 @@ pub struct ChatContext {
     /// Makes `cwd` ready (clones, checks out) before a new chat's first
     /// message; `label` is shown meanwhile.
     pub prepare: Option<Prepare>,
+    /// Told to the agent with each message (not shown): what the chat is
+    /// beside, and which tools to use. Worked out as each is sent, so it
+    /// can say what the user has selected.
+    pub instructions: Option<Instructions>,
+    /// PilotHouse's app tools run without asking in this chat.
+    pub app_tools: bool,
 }
+
+/// Makes a chat's instructions when a message is sent.
+pub type Instructions = Rc<dyn Fn(&App) -> String>;
 
 /// Starts readying a chat's folder; the task ends when it is ready.
 pub type PrepareFn = Rc<dyn Fn(&mut App) -> Task<anyhow::Result<()>>>;
@@ -361,6 +370,26 @@ impl ChatPanel {
             });
         }
         self.attach(attachment, window, cx);
+    }
+
+    /// A new heading for the empty chat (the thing it is about was
+    /// renamed).
+    pub fn set_title(&mut self, title: String, cx: &mut Context<Self>) {
+        if let Some(context) = self.context.as_mut()
+            && context.title != title
+        {
+            context.title = title;
+            cx.notify();
+        }
+    }
+
+    /// Begins a message for the user to finish: `text` in the composer,
+    /// focused, the cursor after it.
+    pub fn begin_message(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |composer, cx| {
+            composer.set_value(text.to_string(), window, cx)
+        });
+        self.focus_composer(window, cx);
     }
 
     /// Where a new chat works: the context's folder, else the project's.
@@ -968,6 +997,23 @@ impl ChatPanel {
         }
         let accepts_images = self.active.read(cx).accepts_images();
         let mut blocks = Vec::new();
+        if let Some(instructions) = self
+            .context
+            .as_ref()
+            .and_then(|context| context.instructions.clone())
+            .map(|instructions| instructions(cx))
+        {
+            blocks.push(agent_client_protocol_schema::v1::ContentBlock::Text(
+                agent_client_protocol_schema::v1::TextContent::new(instructions),
+            ));
+        }
+        if self
+            .context
+            .as_ref()
+            .is_some_and(|context| context.app_tools)
+        {
+            self.active.update(cx, |thread, _| thread.trust_app_tools());
+        }
         if !text.is_empty() {
             blocks.push(agent_client_protocol_schema::v1::ContentBlock::Text(
                 agent_client_protocol_schema::v1::TextContent::new(text.clone()),

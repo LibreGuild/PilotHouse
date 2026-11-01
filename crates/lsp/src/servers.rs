@@ -14,6 +14,10 @@ pub struct ServerSpec {
     pub extensions: &'static [&'static str],
     /// How to install it, shown when it is missing or fails.
     pub install: &'static str,
+    /// Whether it may start in a folder of someone else's code: it runs
+    /// none of the project's own programs (build scripts, package
+    /// manifests, its copy of a compiler service).
+    pub safe_untrusted: bool,
 }
 
 /// Known servers, in order of preference per language.
@@ -25,6 +29,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "rust",
         install: "rustup component add rust-analyzer",
         extensions: &["rs"],
+        safe_untrusted: true,
     },
     ServerSpec {
         name: "TypeScript",
@@ -33,6 +38,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "typescript",
         install: "npm install -g typescript typescript-language-server",
         extensions: &["ts", "tsx", "mts", "cts"],
+        safe_untrusted: false,
     },
     ServerSpec {
         name: "TypeScript",
@@ -41,6 +47,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "javascript",
         install: "npm install -g typescript typescript-language-server",
         extensions: &["js", "jsx", "mjs", "cjs"],
+        safe_untrusted: false,
     },
     ServerSpec {
         name: "Pyright",
@@ -49,6 +56,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "python",
         install: "npm install -g pyright",
         extensions: &["py", "pyi"],
+        safe_untrusted: true,
     },
     ServerSpec {
         name: "Python LSP",
@@ -57,6 +65,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "python",
         install: "pip install python-lsp-server",
         extensions: &["py", "pyi"],
+        safe_untrusted: true,
     },
     ServerSpec {
         name: "gopls",
@@ -65,6 +74,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "go",
         install: "go install golang.org/x/tools/gopls@latest",
         extensions: &["go"],
+        safe_untrusted: true,
     },
     ServerSpec {
         name: "clangd",
@@ -73,6 +83,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "cpp",
         install: "Install clangd (LLVM): brew install llvm, apt install clangd, or winget install LLVM.LLVM",
         extensions: &["c", "h", "cc", "cpp", "cxx", "hpp", "hh", "m", "mm"],
+        safe_untrusted: true,
     },
     ServerSpec {
         name: "Kotlin",
@@ -81,6 +92,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "kotlin",
         install: "brew install kotlin-language-server (or the release from github.com/fwcd/kotlin-language-server)",
         extensions: &["kt", "kts"],
+        safe_untrusted: false,
     },
     ServerSpec {
         name: "Java",
@@ -89,6 +101,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "java",
         install: "brew install jdtls (Eclipse JDT Language Server)",
         extensions: &["java"],
+        safe_untrusted: false,
     },
     ServerSpec {
         name: "C#",
@@ -97,6 +110,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "csharp",
         install: "dotnet tool install --global csharp-ls",
         extensions: &["cs"],
+        safe_untrusted: false,
     },
     ServerSpec {
         name: "Swift",
@@ -105,6 +119,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "swift",
         install: "Comes with Xcode or the Swift toolchain (sourcekit-lsp)",
         extensions: &["swift"],
+        safe_untrusted: false,
     },
     ServerSpec {
         name: "Dart",
@@ -113,6 +128,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "dart",
         install: "Comes with the Dart and Flutter SDKs",
         extensions: &["dart"],
+        safe_untrusted: false,
     },
     ServerSpec {
         name: "Zig",
@@ -121,6 +137,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "zig",
         install: "brew install zls",
         extensions: &["zig"],
+        safe_untrusted: false,
     },
     ServerSpec {
         name: "Lua",
@@ -129,6 +146,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "lua",
         install: "brew install lua-language-server",
         extensions: &["lua"],
+        safe_untrusted: true,
     },
     ServerSpec {
         name: "Ruby",
@@ -137,6 +155,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "ruby",
         install: "gem install ruby-lsp",
         extensions: &["rb"],
+        safe_untrusted: false,
     },
     ServerSpec {
         name: "Bash",
@@ -145,6 +164,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "shellscript",
         install: "npm install -g bash-language-server",
         extensions: &["sh", "bash"],
+        safe_untrusted: true,
     },
     ServerSpec {
         name: "JSON",
@@ -153,6 +173,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "json",
         install: "npm install -g vscode-langservers-extracted",
         extensions: &["json", "jsonc"],
+        safe_untrusted: true,
     },
     ServerSpec {
         name: "YAML",
@@ -161,6 +182,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "yaml",
         install: "npm install -g yaml-language-server",
         extensions: &["yaml", "yml"],
+        safe_untrusted: true,
     },
     ServerSpec {
         name: "HTML",
@@ -169,6 +191,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "html",
         install: "npm install -g vscode-langservers-extracted",
         extensions: &["html", "htm"],
+        safe_untrusted: true,
     },
     ServerSpec {
         name: "CSS",
@@ -177,6 +200,7 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "css",
         install: "npm install -g vscode-langservers-extracted",
         extensions: &["css", "scss", "less"],
+        safe_untrusted: true,
     },
 ];
 

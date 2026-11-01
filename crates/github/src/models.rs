@@ -112,6 +112,9 @@ pub struct IssueComment {
     pub body: String,
     pub created_at: String,
     pub html_url: String,
+    /// The author's standing in the repository (`OWNER`, `MEMBER`,
+    /// `COLLABORATOR`, `CONTRIBUTOR`, `NONE` …).
+    pub author_association: String,
 }
 
 /// A comment on a line of the diff, possibly a reply in a thread.

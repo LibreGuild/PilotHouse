@@ -41,6 +41,13 @@ impl Global for GlobalManager {}
 impl DeviceManager {
     /// The app's manager, created on first use (SDK lookup is cheap; adb
     /// is not started until something asks for devices).
+    /// The manager, if something already uses devices (it is made on first
+    /// use: finding the SDK touches the disk).
+    pub fn existing(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalManager>()
+            .map(|manager| manager.0.clone())
+    }
+
     pub fn global(cx: &mut App) -> Entity<Self> {
         if let Some(manager) = cx.try_global::<GlobalManager>() {
             return manager.0.clone();

@@ -151,7 +151,7 @@ pub fn render_entry(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> 
     let space = if hidden {
         px(0.)
     } else {
-        space_before(ix.checked_sub(1).map(|prev| &entries[prev]), entry)
+        space_before(ix.checked_sub(1).map(|prev| &entries[prev]), entry) * ph_theme::density(cx)
     };
     // The turn ends here: below its last row, what it changed.
     let ends_turn = !matches!(entry, Entry::User { .. })

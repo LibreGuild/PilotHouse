@@ -265,6 +265,8 @@ pub struct RichEditor {
     /// its text), and that window.
     pressed_here: bool,
     window: Option<gpui_kit::AnyWindowHandle>,
+    /// The diagram being typed, as last drawn.
+    live_diagram: std::cell::RefCell<Option<crate::mermaid::Diagram>>,
     _save: Option<Task<()>>,
     _copy: Subscription,
 }
@@ -301,6 +303,7 @@ impl RichEditor {
             focus: cx.focus_handle(),
             pressed_here: false,
             window: None,
+            live_diagram: Default::default(),
             _save: None,
             _copy: copy,
         }
@@ -1576,7 +1579,7 @@ impl RichEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let id = block.id;
         let shown: AnyElement = match &block.kind {
             Kind::Divider => div()
@@ -1584,7 +1587,13 @@ impl RichEditor {
                 .child(div().h_px().w_full().bg(theme.border))
                 .into_any_element(),
             Kind::Code { lang, .. } if lang == "mermaid" => {
-                match crate::mermaid::draw(&block.body, dark) {
+                // Drawn off the UI thread the first time (a document with
+                // many diagrams opens at once).
+                let drawn = crate::mermaid::cached(&block.body, dark).unwrap_or_else(|| {
+                    crate::mermaid::draw_soon(block.body.clone(), dark, false, cx);
+                    Err("Drawing…".into())
+                });
+                match drawn {
                     Ok(diagram) => div()
                         .w_full()
                         .flex()
@@ -1671,7 +1680,7 @@ impl RichEditor {
     /// The block being edited: its text, looking like the block.
     fn render_input(&self, block: &Block, active: &Active, cx: &mut Context<Self>) -> AnyElement {
         let menu = self.menu.map(|highlight| self.render_menu(highlight, cx));
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         // The text keeps the block's look while it is edited: the field
         // sets its own size, so a heading's goes on the field itself.
         let input = Textarea::new(&active.input)
@@ -1707,9 +1716,24 @@ impl RichEditor {
             Kind::Code { lang, .. } if !lang.is_empty() => Some(lang.clone()),
             _ => None,
         };
+        // The diagram as typed, drawn a moment after typing stops and off
+        // the UI thread; the last good drawing shows meanwhile.
         let live = match &block.kind {
             Kind::Code { lang, .. } if lang == "mermaid" => {
-                crate::mermaid::draw(&active.input.read(cx).value(), theme.is_dark()).ok()
+                let source = active.input.read(cx).value().to_string();
+                let dark = theme.is_dark();
+                match crate::mermaid::cached(&source, dark) {
+                    Some(drawn) => {
+                        if let Ok(diagram) = &drawn {
+                            *self.live_diagram.borrow_mut() = Some(diagram.clone());
+                        }
+                        drawn.ok()
+                    }
+                    None => {
+                        crate::mermaid::draw_soon(source, dark, true, cx);
+                        self.live_diagram.borrow().clone()
+                    }
+                }
             }
             _ => None,
         };

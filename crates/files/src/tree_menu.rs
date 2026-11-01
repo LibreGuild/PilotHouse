@@ -125,6 +125,33 @@ impl FilesPanel {
                         cx.emit(FilesPanelEvent::OpenInWindow(target.absolute.clone()))
                     })),
                 )
+                .when(
+                    target
+                        .absolute
+                        .extension()
+                        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+                        .is_some_and(|extension| extension == "pptx" || extension == "potx"),
+                    |menu| {
+                        menu.item(PopupMenuItem::new("Open in Studio Slides").on_click(run(
+                            |_, target, _, cx| {
+                                cx.emit(FilesPanelEvent::EditMedia(target.absolute.clone()))
+                            },
+                        )))
+                    },
+                )
+                .when(
+                    matches!(
+                        ph_preview::Kind::of(&target.absolute),
+                        ph_preview::Kind::Image | ph_preview::Kind::Video
+                    ),
+                    |menu| {
+                        menu.item(PopupMenuItem::new("Edit in Studio").on_click(run(
+                            |_, target, _, cx| {
+                                cx.emit(FilesPanelEvent::EditMedia(target.absolute.clone()))
+                            },
+                        )))
+                    },
+                )
                 .when(ph_ui::platform::opens_safely(&target.absolute), |menu| {
                     menu.item(PopupMenuItem::new("Open in Default App").on_click(run(
                         |_, target, _, cx| cx.open_with_system(&target.absolute),

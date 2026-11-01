@@ -16,15 +16,32 @@ pub struct Server {
 
 impl Server {
     /// Starts `program` for the project at `root` and initializes it.
-    pub async fn start(spec: &'static ServerSpec, program: &Path, root: &Path) -> Result<Self> {
+    pub async fn start(
+        spec: &'static ServerSpec,
+        program: &Path,
+        root: &Path,
+        trusted: bool,
+    ) -> Result<Self> {
         let transport = Transport::spawn(program, spec.args, root)?;
         let root_uri = crate::uri::from_path(root).map(|uri| uri.as_str().to_string());
         let name = root
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
+        // Untrusted code: rust-analyzer runs neither build scripts nor
+        // procedural macros (both are the project's own programs).
+        let options = if trusted || spec.name != "rust-analyzer" {
+            Value::Null
+        } else {
+            json!({
+                "cargo": { "buildScripts": { "enable": false } },
+                "procMacro": { "enable": false },
+                "checkOnSave": false,
+            })
+        };
         let params = json!({
             "processId": std::process::id(),
+            "initializationOptions": options,
             "clientInfo": { "name": "PilotHouse", "version": env!("CARGO_PKG_VERSION") },
             "rootUri": root_uri,
             "workspaceFolders": root_uri.as_ref().map(|uri| json!([{ "uri": uri, "name": name }])),

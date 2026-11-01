@@ -215,10 +215,13 @@ pub fn shell(mapping: &Mapping, folder: &str) -> (String, Vec<String>) {
     let mut args = options(mapping, true, Connection::Shared);
     args.push("--".into());
     args.push(mapping.host.clone());
-    args.push(format!(
+    // Run by `sh` whatever the login shell is (fish reads `${SHELL:-…}`
+    // differently).
+    let inner = format!(
         "cd {} 2>/dev/null || cd; exec \"${{SHELL:-/bin/sh}}\" -l",
         quote(folder)
-    ));
+    );
+    args.push(format!("exec sh -c {}", quote(&inner)));
     ("ssh".into(), args)
 }
 
@@ -256,7 +259,8 @@ pub fn route(command: &Command) -> Option<Command> {
             .map(|arg| quote(&translate(mapping, arg))),
     );
     let script = format!("cd {} && {}", quote(&remote.path), words.join(" "));
-    tracing::debug!(host = %remote.mapping.host, "on the server: {script}");
+    // Its variables are left out of the log: they can carry a token.
+    tracing::debug!(host = %remote.mapping.host, "on the server: {program} in {}", remote.path);
     Some(self::command(&remote.mapping, &script, Connection::Shared))
 }
 
@@ -362,8 +366,9 @@ mod tests {
         assert_eq!(args[0], "-t");
         assert!(!args.contains(&"BatchMode=yes".to_string()));
         let script = args.last().unwrap();
+        // Run by `sh`, whatever the login shell is.
         assert!(
-            script.starts_with("cd '/srv/code/my app' 2>/dev/null || cd;"),
+            script.starts_with("exec sh -c 'cd '\\''/srv/code/my app'\\'' 2>/dev/null || cd;"),
             "{script}"
         );
         assert_eq!(&args[args.len() - 3..args.len() - 1], ["--", "dev@nas"]);

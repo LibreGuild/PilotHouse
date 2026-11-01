@@ -212,11 +212,25 @@ impl CommitBox {
 
 impl Render for CommitBox {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (staged, changed) = self
+        // The first files staged are listed (a commit of thousands would
+        // lay out every one as each key is typed into the message).
+        const LISTED: usize = 200;
+        let (staged, staged_count, changed) = self
             .repo
             .read(cx)
             .status()
-            .map(|status| (status.staged.clone(), !status.changes.is_empty()))
+            .map(|status| {
+                (
+                    status
+                        .staged
+                        .iter()
+                        .take(LISTED)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    status.staged.len(),
+                    !status.changes.is_empty(),
+                )
+            })
             .unwrap_or_default();
         let has_message = !self.message.read(cx).value().trim().is_empty();
         // Nothing staged: Commit All keeps every change first.
@@ -296,7 +310,7 @@ impl Render for CommitBox {
                                     "No changes."
                                 })
                             } else {
-                                format!("Staged ({})", staged.len()).into()
+                                format!("Staged ({staged_count})").into()
                             }),
                     )
                     .children(staged.into_iter().enumerate().map(|(ix, path)| {

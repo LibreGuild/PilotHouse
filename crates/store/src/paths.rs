@@ -74,6 +74,16 @@ pub fn copies_dirs() -> Vec<PathBuf> {
     }
 }
 
+/// Whether `path` is in a copy of someone else's code: a GitHub clone or a
+/// pull request's copy. Its own settings and scripts are not trusted there
+/// (language servers start without running its build scripts, agents start
+/// outside it).
+pub fn is_untrusted_copy(path: &Path) -> bool {
+    copies_dirs()
+        .iter()
+        .any(|dir| path.starts_with(dir.join("github")))
+}
+
 /// The absolute, symlink-free form of `path`. Unlike `fs::canonicalize`, it
 /// gives `C:\\work\\app` on Windows, not `\\\\?\\C:\\work\\app`, which many
 /// programs refuse as a working directory. A path on a mapped network drive

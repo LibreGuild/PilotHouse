@@ -11,8 +11,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AppContext as _, Context, Image, ImageFormat, InteractiveElement as _, IntoElement, ObjectFit,
-    ParentElement as _, Render, ScrollHandle, ScrollWheelEvent, SharedString,
+    App, AppContext as _, Context, Image, ImageFormat, InteractiveElement as _, IntoElement,
+    ObjectFit, ParentElement as _, Render, ScrollHandle, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, Window, div, img, px,
 };
 
@@ -70,7 +70,18 @@ impl ImagePreview {
             _load: None,
         };
         this.reload(cx);
+        // Closed: its picture leaves GPUI's cache too.
+        cx.on_release(|this, cx| this.set_loaded_on_release(cx))
+            .detach();
         this
+    }
+
+    fn set_loaded_on_release(&mut self, cx: &mut App) {
+        if let Some(old) = self.loaded.take()
+            && old.info != "Mermaid diagram"
+        {
+            old.image.remove_asset(cx);
+        }
     }
 
     /// Reads the file again (it changed on disk).
@@ -84,7 +95,7 @@ impl ImagePreview {
             _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(loaded) => {
-                        this.loaded = Some(loaded);
+                        this.set_loaded(Some(loaded), cx);
                         this.error = None;
                     }
                     Err(err) => this.error = Some(err.into()),
@@ -98,25 +109,27 @@ impl ImagePreview {
     /// last good drawing, with the reason.
     pub fn set_svg(&mut self, text: Arc<str>, cx: &mut Context<Self>) {
         match svg_size(&text) {
-            _ if links_other_computers(&text) => {
-                self.loaded = None;
-                self.error = Some(
-                    "This drawing links to files on another computer, so it is not drawn.".into(),
-                );
+            _ if links_files(&text) => {
+                self.set_loaded(None, cx);
+                self.error =
+                    Some("This drawing links to other files, so it is not drawn here.".into());
             }
             Some((width, height)) if !fits(width as u32, height as u32) => {
-                self.loaded = None;
+                self.set_loaded(None, cx);
                 self.error = Some("This drawing is too large to show here.".into());
             }
             Some(size) => {
-                self.loaded = Some(Loaded {
-                    image: Arc::new(Image::from_bytes(
-                        ImageFormat::Svg,
-                        text.as_bytes().to_vec(),
-                    )),
-                    size,
-                    info: format!("SVG · {}", byte_size(text.len() as u64)),
-                });
+                self.set_loaded(
+                    Some(Loaded {
+                        image: Arc::new(Image::from_bytes(
+                            ImageFormat::Svg,
+                            text.as_bytes().to_vec(),
+                        )),
+                        size,
+                        info: format!("SVG · {}", byte_size(text.len() as u64)),
+                    }),
+                    cx,
+                );
                 self.error = None;
             }
             None => self.error = Some("Not an SVG drawing yet.".into()),
@@ -125,13 +138,32 @@ impl ImagePreview {
     }
 
     pub fn show_diagram(&mut self, diagram: Diagram, cx: &mut Context<Self>) {
-        self.loaded = Some(Loaded {
-            image: diagram.image,
-            size: (diagram.width, diagram.height),
-            info: "Mermaid diagram".into(),
-        });
+        self.set_loaded(
+            Some(Loaded {
+                image: diagram.image,
+                size: (diagram.width, diagram.height),
+                info: "Mermaid diagram".into(),
+            }),
+            cx,
+        );
         self.error = None;
         cx.notify();
+    }
+
+    /// Shows `loaded`; the picture shown before leaves GPUI's cache of
+    /// decoded images (it would stay there for good: an SVG edited for an
+    /// hour, or a screenshot an agent keeps writing, would fill memory).
+    /// A diagram stays: its drawings are cached and shared.
+    fn set_loaded(&mut self, loaded: Option<Loaded>, cx: &mut Context<Self>) {
+        if let Some(old) = std::mem::replace(&mut self.loaded, loaded)
+            && self
+                .loaded
+                .as_ref()
+                .is_none_or(|new| !Arc::ptr_eq(&new.image, &old.image))
+            && old.info != "Mermaid diagram"
+        {
+            old.image.remove_asset(cx);
+        }
     }
 
     fn scale(&self, view: (f32, f32)) -> f32 {
@@ -176,11 +208,12 @@ impl ImagePreview {
 
 const PADDING: f32 = 24.;
 
-/// Whether an SVG document links a file on another computer (an `<image>`
-/// or `<use>` pointing at `\\server\share`, or written with character
-/// references): drawing it would read that file, and on Windows reading one
-/// sends the user's sign-in there.
-fn links_other_computers(svg: &str) -> bool {
+/// Whether an SVG document links a file (an `<image>` or `<use>` naming a
+/// path, on this computer or another, or written with character
+/// references): drawing it would read that file. A device such as
+/// /dev/zero is read forever, and on Windows reading a network path sends
+/// the user's sign-in there.
+fn links_files(svg: &str) -> bool {
     svg.match_indices("href").any(|(at, _)| {
         let rest = svg[at + 4..].trim_start();
         let Some(rest) = rest.strip_prefix('=') else {
@@ -192,8 +225,15 @@ fn links_other_computers(svg: &str) -> bool {
             _ => return false,
         };
         let value = value.trim();
-        let value = value.strip_prefix("file:").unwrap_or(value);
-        ph_ui::platform::is_network_path(value) || value.to_ascii_lowercase().starts_with("&#")
+        // Pictures inside it (data:) and links within it (#id) are drawn;
+        // anything else would be read from disk by the renderer (a device
+        // such as /dev/zero never ends; a network path leaks credentials).
+        let lower = value.to_ascii_lowercase();
+        !(lower.starts_with("data:")
+            || lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || value.starts_with('#')
+            || value.is_empty())
     })
 }
 
@@ -379,5 +419,20 @@ mod tests {
         assert_eq!(byte_size(1536), "1.5 KB");
         assert_eq!(byte_size(250 * 1024), "250 KB");
         assert_eq!(byte_size(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    #[test]
+    fn drawings_that_link_files_are_not_drawn() {
+        assert!(links_files(r#"<svg><image href="/dev/zero"/></svg>"#));
+        assert!(links_files(
+            r#"<svg><image xlink:href='\\server\s\a.png'/></svg>"#
+        ));
+        assert!(links_files(r#"<svg><image href="&#47;etc"/></svg>"#));
+        assert!(!links_files(
+            r##"<svg><use href="#dot"/><image href="data:image/png;base64,AA"/></svg>"##
+        ));
+        assert!(!links_files(
+            r#"<svg><a href="https://example.com">x</a></svg>"#
+        ));
     }
 }

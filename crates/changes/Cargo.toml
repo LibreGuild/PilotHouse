@@ -14,4 +14,5 @@ ph-files.workspace = true
 ph-preview.workspace = true
 ph-git.workspace = true
 ph-ui.workspace = true
+ph-theme.workspace = true
 tracing.workspace = true

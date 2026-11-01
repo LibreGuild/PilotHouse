@@ -53,6 +53,9 @@ impl Automation {
         if let Some(global) = cx.try_global::<AutomationGlobal>() {
             return global.0.clone();
         }
+        if let Err(err) = AppState::store(cx).end_interrupted_schedules() {
+            tracing::warn!("schedules: {err:#}");
+        }
         let automation = cx.new(|cx| Self {
             triggers: Triggers::default(),
             watched_chats: HashMap::new(),

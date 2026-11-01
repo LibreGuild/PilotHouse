@@ -1,157 +1,19 @@
 //! Video on Linux: GStreamer's `playbin` decodes and plays (sound
-//! included), and an `appsink` hands each frame over as BGRA pixels.
-//!
-//! GStreamer is loaded when the first video opens, not linked: PilotHouse
-//! starts on a system without it, and a video then says what to install.
+//! included), and an `appsink` hands each frame over as BGRA pixels. A
+//! `videoflip` stands a phone's recording upright, as its metadata asks.
 
-use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
+use std::ffi::{c_char, c_uint, c_void};
 use std::path::Path;
-use std::ptr::NonNull;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use gpui_kit::RenderImage;
-use libloading::Library;
 
+use super::gst::{
+    GST_FORMAT_TIME, GST_MAP_READ, GST_MESSAGE_ERROR, GST_SEEK_FLAG_ACCURATE, GST_SEEK_FLAG_FLUSH,
+    GST_SEEK_TYPE_NONE, GST_SEEK_TYPE_SET, GST_STATE_NULL, GST_STATE_PAUSED, GST_STATE_PLAYING,
+    Gboolean, Gst, GstMapInfo, MISSING, NANOS, c, gst, with_hint,
+};
 use super::{Frame, Status};
-
-type Gboolean = c_int;
-const GST_STATE_NULL: c_int = 1;
-const GST_STATE_PAUSED: c_int = 3;
-const GST_STATE_PLAYING: c_int = 4;
-const GST_FORMAT_TIME: c_int = 3;
-const GST_SEEK_FLAG_FLUSH: c_int = 1 << 0;
-const GST_SEEK_FLAG_ACCURATE: c_int = 1 << 1;
-const GST_SEEK_TYPE_NONE: c_int = 0;
-const GST_SEEK_TYPE_SET: c_int = 1;
-const GST_MESSAGE_ERROR: c_uint = 1 << 1;
-const GST_MAP_READ: c_uint = 1;
-const NANOS: f64 = 1_000_000_000.;
-
-#[repr(C)]
-struct GError {
-    domain: u32,
-    code: c_int,
-    message: *const c_char,
-}
-
-#[repr(C)]
-struct GstMapInfo {
-    memory: *mut c_void,
-    flags: c_uint,
-    data: *const u8,
-    size: usize,
-    maxsize: usize,
-    user_data: [*mut c_void; 4],
-    reserved: [*mut c_void; 4],
-}
-
-/// The GStreamer calls the player makes, loaded once.
-struct Gst {
-    _libraries: Vec<Library>,
-    element_factory_make: unsafe extern "C" fn(*const c_char, *const c_char) -> *mut c_void,
-    object_set: unsafe extern "C" fn(*mut c_void, *const c_char, ...),
-    object_unref: unsafe extern "C" fn(*mut c_void),
-    caps_from_string: unsafe extern "C" fn(*const c_char) -> *mut c_void,
-    filename_to_uri: unsafe extern "C" fn(*const c_char, *mut *mut GError) -> *mut c_char,
-    free: unsafe extern "C" fn(*mut c_void),
-    error_free: unsafe extern "C" fn(NonNull<GError>),
-    set_state: unsafe extern "C" fn(*mut c_void, c_int) -> c_int,
-    query_duration: unsafe extern "C" fn(*mut c_void, c_int, *mut i64) -> Gboolean,
-    query_position: unsafe extern "C" fn(*mut c_void, c_int, *mut i64) -> Gboolean,
-    seek: unsafe extern "C" fn(*mut c_void, f64, c_int, c_int, c_int, i64, c_int, i64) -> Gboolean,
-    get_bus: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
-    bus_pop_filtered: unsafe extern "C" fn(*mut c_void, c_uint) -> *mut c_void,
-    // The outputs as `Option<NonNull<_>>`, the same as nullable pointers:
-    // no null pointer is ever read.
-    message_parse_error: unsafe extern "C" fn(
-        *mut c_void,
-        *mut Option<NonNull<GError>>,
-        *mut Option<NonNull<c_char>>,
-    ),
-    mini_object_unref: unsafe extern "C" fn(*mut c_void),
-    try_pull_sample: unsafe extern "C" fn(*mut c_void, u64) -> *mut c_void,
-    try_pull_preroll: unsafe extern "C" fn(*mut c_void, u64) -> *mut c_void,
-    sample_get_buffer: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
-    sample_get_caps: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
-    caps_get_structure: unsafe extern "C" fn(*mut c_void, c_uint) -> *mut c_void,
-    structure_get_int: unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_int) -> Gboolean,
-    buffer_map: unsafe extern "C" fn(*mut c_void, *mut GstMapInfo, c_uint) -> Gboolean,
-    buffer_unmap: unsafe extern "C" fn(*mut c_void, *mut GstMapInfo),
-}
-
-// SAFETY: plain function pointers into libraries kept loaded for good.
-unsafe impl Send for Gst {}
-unsafe impl Sync for Gst {}
-
-const MISSING: &str = "Video needs GStreamer, which is not installed. Install it (for example \
-     `sudo apt install gstreamer1.0-plugins-good gstreamer1.0-libav`) and open the file again.";
-
-fn gst() -> Result<&'static Gst, String> {
-    static GST: OnceLock<Result<Gst, String>> = OnceLock::new();
-    GST.get_or_init(|| unsafe { load() })
-        .as_ref()
-        .map_err(Clone::clone)
-}
-
-unsafe fn load() -> Result<Gst, String> {
-    let open = |name: &str| unsafe { Library::new(name) }.map_err(|_| MISSING.to_string());
-    let gstreamer = open("libgstreamer-1.0.so.0")?;
-    let app = open("libgstapp-1.0.so.0")?;
-    let gobject = open("libgobject-2.0.so.0")?;
-    let glib = open("libglib-2.0.so.0")?;
-    macro_rules! symbol {
-        ($library:expr, $name:literal) => {
-            *unsafe { $library.get(concat!($name, "\0").as_bytes()) }
-                .map_err(|_| format!("GStreamer is too old (no {}).", $name))?
-        };
-    }
-    let init: unsafe extern "C" fn(
-        *mut c_int,
-        *mut *mut *mut c_char,
-        *mut *mut GError,
-    ) -> Gboolean = symbol!(gstreamer, "gst_init_check");
-    if unsafe {
-        init(
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    } == 0
-    {
-        return Err("GStreamer could not start.".into());
-    }
-    let gst = Gst {
-        element_factory_make: symbol!(gstreamer, "gst_element_factory_make"),
-        object_set: symbol!(gobject, "g_object_set"),
-        object_unref: symbol!(gstreamer, "gst_object_unref"),
-        caps_from_string: symbol!(gstreamer, "gst_caps_from_string"),
-        filename_to_uri: symbol!(gstreamer, "gst_filename_to_uri"),
-        free: symbol!(glib, "g_free"),
-        error_free: symbol!(glib, "g_error_free"),
-        set_state: symbol!(gstreamer, "gst_element_set_state"),
-        query_duration: symbol!(gstreamer, "gst_element_query_duration"),
-        query_position: symbol!(gstreamer, "gst_element_query_position"),
-        seek: symbol!(gstreamer, "gst_element_seek"),
-        get_bus: symbol!(gstreamer, "gst_element_get_bus"),
-        bus_pop_filtered: symbol!(gstreamer, "gst_bus_pop_filtered"),
-        message_parse_error: symbol!(gstreamer, "gst_message_parse_error"),
-        mini_object_unref: symbol!(gstreamer, "gst_mini_object_unref"),
-        try_pull_sample: symbol!(app, "gst_app_sink_try_pull_sample"),
-        try_pull_preroll: symbol!(app, "gst_app_sink_try_pull_preroll"),
-        sample_get_buffer: symbol!(gstreamer, "gst_sample_get_buffer"),
-        sample_get_caps: symbol!(gstreamer, "gst_sample_get_caps"),
-        caps_get_structure: symbol!(gstreamer, "gst_caps_get_structure"),
-        structure_get_int: symbol!(gstreamer, "gst_structure_get_int"),
-        buffer_map: symbol!(gstreamer, "gst_buffer_map"),
-        buffer_unmap: symbol!(gstreamer, "gst_buffer_unmap"),
-        _libraries: vec![gstreamer, app, gobject, glib],
-    };
-    Ok(gst)
-}
-
-fn c(text: &str) -> CString {
-    CString::new(text).unwrap_or_default()
-}
 
 pub struct Engine {
     gst: &'static Gst,
@@ -201,6 +63,21 @@ impl Engine {
                 sink,
                 std::ptr::null::<c_char>(),
             );
+            // Upright, when this GStreamer can (1.10 on).
+            let flip = (gst.element_factory_make)(c("videoflip").as_ptr(), std::ptr::null());
+            if !flip.is_null() {
+                if gst.set_if_known(flip, "video-direction", "auto") {
+                    (gst.object_set)(
+                        playbin,
+                        c("video-filter").as_ptr(),
+                        flip,
+                        std::ptr::null::<c_char>(),
+                    );
+                } else {
+                    (gst.object_ref_sink)(flip);
+                    (gst.object_unref)(flip);
+                }
+            }
             let file = c(&path.to_string_lossy());
             let uri = (gst.filename_to_uri)(file.as_ptr(), std::ptr::null_mut());
             if uri.is_null() {
@@ -232,27 +109,7 @@ impl Engine {
             if message.is_null() {
                 return;
             }
-            let (mut error, mut debug) = (None, None);
-            (self.gst.message_parse_error)(message, &mut error, &mut debug);
-            let text = error
-                .map(|error| error.as_ref().message)
-                .filter(|message| !message.is_null())
-                .map(|message| CStr::from_ptr(message).to_string_lossy().into_owned())
-                .unwrap_or_else(|| "GStreamer could not play it.".to_string());
-            let lower = text.to_lowercase();
-            let text =
-                if lower.contains("plugin") || lower.contains("decoder") || lower.contains("codec")
-                {
-                    format!("{text} Install the codec (for example `gstreamer1.0-libav`).")
-                } else {
-                    text
-                };
-            if let Some(error) = error {
-                (self.gst.error_free)(error);
-            }
-            if let Some(debug) = debug {
-                (self.gst.free)(debug.as_ptr().cast());
-            }
+            let text = with_hint(self.gst.error_text(message));
             (self.gst.mini_object_unref)(message);
             *self.error.borrow_mut() = Some(text);
         }

@@ -6,8 +6,8 @@ use gpui_kit::Action;
 use ph_ui::Icons;
 
 use crate::actions::{
-    ShowBoard, ShowBrowser, ShowChanges, ShowDevices, ShowFiles, ShowPulls, ShowRuns, ShowTerminal,
-    ShowTests,
+    ShowBoard, ShowBrowser, ShowChanges, ShowDevices, ShowFiles, ShowLogcat, ShowPulls, ShowRuns,
+    ShowTerminal, ShowTests,
 };
 
 /// Which tool the context panel shows. Persisted per project by [`Self::key`].
@@ -23,20 +23,31 @@ pub enum ContextTab {
     Devices,
     Runs,
     Tests,
+    /// A device's log, a tool of its own (the Devices pane is its screen).
+    Logcat,
 }
 
 impl ContextTab {
-    pub const ALL: [ContextTab; 9] = [
+    /// In the icon bar's order: the column's tools, then the bottom
+    /// panel's.
+    pub const ALL: [ContextTab; 10] = [
         ContextTab::Files,
         ContextTab::Changes,
         ContextTab::Pulls,
         ContextTab::Board,
-        ContextTab::Terminal,
         ContextTab::Browser,
         ContextTab::Devices,
         ContextTab::Runs,
         ContextTab::Tests,
+        ContextTab::Terminal,
+        ContextTab::Logcat,
     ];
+
+    /// Its home is the bottom panel, where long lines have the window's
+    /// width (the others' is the column beside the chat).
+    pub fn in_bottom_panel(self) -> bool {
+        matches!(self, ContextTab::Terminal | ContextTab::Logcat)
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -49,6 +60,7 @@ impl ContextTab {
             ContextTab::Devices => "Devices",
             ContextTab::Runs => "Run",
             ContextTab::Tests => "Tests",
+            ContextTab::Logcat => "Logcat",
         }
     }
 
@@ -63,6 +75,7 @@ impl ContextTab {
             ContextTab::Devices => Icons::TabletSmartphone,
             ContextTab::Runs => Icons::Play,
             ContextTab::Tests => Icons::FlaskConical,
+            ContextTab::Logcat => Icons::ScrollText,
         }
     }
 
@@ -78,6 +91,7 @@ impl ContextTab {
             ContextTab::Devices => "devices",
             ContextTab::Runs => "runs",
             ContextTab::Tests => "tests",
+            ContextTab::Logcat => "logcat",
         }
     }
 
@@ -97,6 +111,7 @@ impl ContextTab {
             ContextTab::Devices => Box::new(ShowDevices),
             ContextTab::Runs => Box::new(ShowRuns),
             ContextTab::Tests => Box::new(ShowTests),
+            ContextTab::Logcat => Box::new(ShowLogcat),
         }
     }
 

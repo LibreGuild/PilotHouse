@@ -3,14 +3,13 @@
 Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 
 ```
-┌ title bar: ◆ · sidebar · [Workspaces | Agents | GitHub] · ⌘K search · inbox · theme · tools · settings ┐
-│ sidebar          │ editor (while a file  │ chat              │ right dock       │ icon │
-│  New chat   ⌘N   │  is open)             │                   │ (Files, Git, …)  │ bar  │
-│  CHATS           │                       │                   │                  │      │
-│  WORKSPACES      │                       │                   │                  │      │
-│   ▾ ● app  ⟳     │                       │                   │                  │      │
-│       chats…     │                       │                   │                  │      │
-└ status bar: branch · CI · folder · ports     agent limits · detected stack · version ┘
+┌ title bar: ◆ · [Workspaces | Agents | GitHub] · ⌘K search · inbox · agents · sidebar · bottom · tools · settings ┐
+│ sidebar          │ chat / editor (tabs)                │ tools column     │ icon │
+│  New chat   ⌘N   │                                     │ (Files, Git, …)  │ bar  │
+│  CHATS           │                                     │                  │      │
+│  WORKSPACES      ├─────────────────────────────────────┴──────────────────┤      │
+│   ▾ ● app  ⟳     │ bottom panel: Terminal · Logcat (when opened)          │      │
+└ status bar: branch · CI · folder · ports · device     agent limits · detected stack · version ┘
 ```
 
 - **`Workspace`** (`workspace.rs`) is a window's root: the title bar, the sidebar, the workspace in front and the status bar. It keeps one `WorkspaceScreen` per workspace opened in the window, and the window's [GitHub view](pulls.md#the-github-view) once shown.
@@ -81,8 +80,9 @@ A row of kind `chats` in `projects` (`ph_store::projects::ProjectKind`): no fold
 - The **chat and the editor** are two tabs of one group in the layout a workspace starts with: picking a file (from the tree, ⌘P, search, a link) brings the Editor tab to the front, and anything sent to the chat, or ⌘L from the editor, brings the Chat tab back. The Editor tab shows only while a file is open. The panes sit on a rounded card between the sidebar and the icon bar.
 - The **icon bar** on the right shows the tools this workspace uses (Files in a workspace, Git with a repository, PRs with a hosted remote, Browser for web code, Devices for Android, Run with something to run, Tests with tests or an app); the rest are under **⋯**. Names show in tooltips, or under the icons with *Settings → Appearance → Names under tool icons*.
 - **Docking.** Every pane has a tab. Drag a tab into another group to share it, onto a group's edge to split beside or below it, or to the window's left, right or bottom edge to dock it there. A pane's ⋯ menu does the same (*Move into the chat's tabs*, *Move beside the chat*, *Move below the chat*, *Move to the left side*, *to the right side*, *to the bottom*), and also works where a drag cannot: the last pane of a dock does not drag out of it. A dock left empty goes away. Tools close with their tab's ×; the chat and the editor stay. The layout is kept per workspace and comes back with it (version `dock::LAYOUT_VERSION`; a layout this build cannot read falls back to the default). *Reset layout* (the ⋯ menu, or the palette) goes back to the default.
-- A tool shown from the icon bar is selected where it is docked (its dock opens if closed), or docked on the right when it is not. The icon bar highlights every tool on screen.
-- ⌘J opens or closes the dock holding the tool shown last; ⌘⇧J lets that tool fill the window (each pane's ⋯ menu does the same for it).
+- **Where tools open.** Lists and panes sit in the **tools column** beside the chat (Files, Git, PRs, Board, Browser, Devices, Run, Tests); output read line by line opens in the **bottom panel** (Terminal, Logcat), which spans the chat, the editor and the tools column, so long lines have the window's width. The tools column is a split of the main area, not a side dock, which is what lets the bottom panel run under it. It starts at about 30% of the main area (between 280 and 520 px), the chat keeping the rest; drag its edge and the width is kept with the layout. A tool shown from the icon bar is selected where it is (its dock opens if closed), or put in its home when it is not. The icon bar lists the column's tools, then (after a line) the bottom panel's, and highlights every tool on screen.
+- **Showing and hiding.** ⌘J opens or closes the bottom panel (the first time, with a terminal); Ctrl+backtick shows the terminal, or hides the bottom panel when the terminal is in front there; ⌥⌘B (and the title bar's right button) hides the tools column, and brings it back as it was, its tabs and the one in front. ⌘⇧J lets the tool shown last fill the window (each pane's ⋯ menu does the same for it). The title bar's three buttons are the sidebar, the bottom panel and the tools column, then Settings.
+- **Layouts from before.** A layout saved by 0.4 (tools in the right dock) is moved once: its tools to the column, the terminal to the bottom panel; a tool placed anywhere else stays there, and a right dock that was closed comes back as a hidden column.
 
 ## Several workspaces
 
@@ -127,7 +127,7 @@ Removing a folder leaves it on disk; removing the primary folder makes the next 
 ## Settings
 
 Stored in the `settings` table:
-- **Appearance**: System, Light or Dark (`appearance`); the dark theme, *Graphite* or *Warm*, a soft dark brown (`Preferences::dark_theme`, `PilotHouse Warm` in `themes/pilothouse.json`); names under tool icons.
+- **Appearance**: the theme (`appearance`: the system's light or dark one, or a theme by name), accent, density, the window's background (solid, translucent, a gradient or an image); see [Themes](themes.md), with designing your own and importing; names under tool icons.
 - **Features**: turn tools off (`features.disabled`); *System* holds the file manager menu switch.
 - **Zoom**: ⌘= and ⌘- (Ctrl+= and Ctrl+- elsewhere) make the interface, code and terminal text half a point larger or smaller together, kept within each size's bounds; ⌘0 (Ctrl+0) goes back to the default sizes (`Preferences::zoom`). Saved with the other appearance preferences. Back in the editor keeps ⌃- on a Mac and Alt+← elsewhere, so the keys do not meet.
 

@@ -537,9 +537,11 @@ fn push_run(runs: &mut Vec<TextRun>, run: TextRun) {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = Palette::from_theme(cx.theme(), ph_theme::themes::terminal_colors(cx));
         let theme = cx.theme();
-        let palette = Palette::from_theme(theme);
-        let font_size = px(ph_theme::preferences::preferences(cx).terminal_font_size);
+        let font_size = px(cx
+            .try_global::<ph_theme::Preferences>()
+            .map_or(14., |preferences| preferences.terminal_font_size));
         let line_height = line_height(font_size);
         let base = font(theme.mono_font_family.clone());
         let font_id = window.text_system().resolve_font(&base);

@@ -37,6 +37,8 @@ struct UtilitiesView {
     second: Entity<TextareaState>,
     output: Result<String, String>,
     _inputs: Vec<Subscription>,
+    /// The run under way, if one (dropped, it stops).
+    _run: Option<gpui_kit::Task<()>>,
 }
 
 impl UtilitiesView {
@@ -61,6 +63,7 @@ impl UtilitiesView {
             text,
             second,
             output: Ok(String::new()),
+            _run: None,
             _inputs: inputs,
         };
         view.select(selected, window, cx);
@@ -92,12 +95,30 @@ impl UtilitiesView {
         };
         // Ids and the current time make sense without input; others wait.
         let wants_input = !matches!(self.utility().id, "ids" | "time");
-        self.output = if wants_input && input.text.trim().is_empty() {
-            Ok(String::new())
-        } else {
-            ph_utils::run(self.utility().id, &input).map_err(|err| format!("{err:#}"))
-        };
-        cx.notify();
+        if wants_input && input.text.trim().is_empty() {
+            self.output = Ok(String::new());
+            self._run = None;
+            cx.notify();
+            return;
+        }
+        // Off the UI thread, a moment after the last key (a query on a big
+        // database, or a cron line that never fires, takes a while); a
+        // newer run replaces one not done.
+        let id = self.utility().id;
+        self._run = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(120))
+                .await;
+            let output = cx
+                .background_spawn(async move {
+                    ph_utils::run(id, &input).map_err(|err| format!("{err:#}"))
+                })
+                .await;
+            _ = this.update(cx, |this, cx| {
+                this.output = output;
+                cx.notify();
+            });
+        }));
     }
 
     fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {

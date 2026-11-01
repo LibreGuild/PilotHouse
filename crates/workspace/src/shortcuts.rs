@@ -65,10 +65,26 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
                 ("Previous workspace", action(Box::new(PreviousWorkspace))),
                 ("Show or hide the sidebar", action(Box::new(ToggleSidebar))),
                 (
-                    "Show or hide the tool panel",
+                    "Show or hide the tools beside the chat",
                     action(Box::new(ToggleContextPanel)),
                 ),
-                ("Tool panel full size", action(Box::new(ToggleZoom))),
+                (
+                    "Show or hide the bottom panel",
+                    action(Box::new(ToggleBottomPanel)),
+                ),
+                (
+                    "Show or hide the terminal",
+                    action(Box::new(ToggleTerminal)),
+                ),
+                (
+                    "Split the terminal",
+                    Keys::Fixed(if cfg!(target_os = "macos") {
+                        &["cmd-\\"]
+                    } else {
+                        &["ctrl-shift-5"]
+                    }),
+                ),
+                ("Tool full size", action(Box::new(ToggleZoom))),
                 (
                     "Screen capture to the chat",
                     action(Box::new(CaptureToChat)),
@@ -91,6 +107,7 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
                 ("Runs", action(Box::new(ShowRuns))),
                 ("Pull requests", action(Box::new(ShowPulls))),
                 ("UI tests", action(Box::new(ShowTests))),
+                ("Logcat", action(Box::new(ShowLogcat))),
             ],
         ),
         ("Editor", {

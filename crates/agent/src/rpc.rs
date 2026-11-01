@@ -80,14 +80,20 @@ impl RpcProcess {
                 cwd.display()
             );
         }
-        let mut child = ph_env::command(program)
+        let mut command = ph_env::command(program);
+        command
             .args(args)
             .current_dir(cwd)
             .env_clear()
             .envs(env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        // A group of its own, so stopping it stops what it started too
+        // (`npx` starts the adapter, which starts the agent's program).
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command
             .spawn()
             .with_context(|| format!("starting {}", program.display()))?;
 
@@ -235,6 +241,20 @@ impl Drop for RpcProcess {
     fn drop(&mut self) {
         // Agents are children of the app; never leave them running.
         if let Ok(mut child) = self.child.lock() {
+            // The whole group (or tree): its children too.
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            #[cfg(windows)]
+            {
+                let _ = ph_env::command("taskkill")
+                    .args(["/T", "/F", "/PID", &child.id().to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+            }
             let _ = child.kill();
             let _ = child.wait();
         }

@@ -81,11 +81,15 @@ impl RateLimits {
                 if !limits.is_empty() {
                     cx.update(|cx| {
                         let windows = cx.default_global::<Self>().0.entry("Codex").or_default();
+                        let before = windows.clone();
                         windows.clear();
                         for limit in limits {
                             windows.insert(limit.window.clone(), limit);
                         }
-                        cx.refresh_windows();
+                        // Drawn again only when they changed.
+                        if *windows != before {
+                            cx.refresh_windows();
+                        }
                     });
                 }
                 cx.background_executor()

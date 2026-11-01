@@ -141,7 +141,12 @@ impl Terminal {
         cwd: std::path::PathBuf,
     ) -> anyhow::Result<StartedShell> {
         let shell = std::path::PathBuf::from(program);
-        let mut extra_env = ph_env::shell_env().clone();
+        // Not waiting for the login shell's environment (a terminal opened
+        // as the app starts would hang until it is read): the shell started
+        // here reads its own profile anyway.
+        let mut extra_env = ph_env::shell_env_if_ready()
+            .cloned()
+            .unwrap_or_else(|| std::env::vars().collect());
         extra_env.insert("TERM".into(), "xterm-256color".into());
         extra_env.insert("COLORTERM".into(), "truecolor".into());
         extra_env.insert("TERM_PROGRAM".into(), "PilotHouse".into());
@@ -400,7 +405,11 @@ impl Terminal {
                     use gpui_kit::component::ActiveTheme as _;
                     let set = self.term.lock().colors()[index];
                     let color = set.unwrap_or_else(|| {
-                        crate::palette::Palette::from_theme(cx.theme()).query(index)
+                        crate::palette::Palette::from_theme(
+                            cx.theme(),
+                            ph_theme::themes::terminal_colors(cx),
+                        )
+                        .query(index)
                     });
                     self.write(format(color).into_bytes());
                 }

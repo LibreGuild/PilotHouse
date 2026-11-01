@@ -44,26 +44,31 @@ impl LineMap {
     /// Reads `git diff -U0 -M <old> <new>`.
     pub fn parse(diff: &str) -> Self {
         let mut files: Vec<FileChange> = Vec::new();
+        // Inside a file's hunks, lines are its content: a removed line
+        // reading `-- x` shows as `--- x`, never a header.
+        let mut in_hunks = false;
         for line in diff.lines() {
             if line.starts_with("diff --git ") {
                 files.push(FileChange::default());
+                in_hunks = false;
                 continue;
             }
             let Some(file) = files.last_mut() else {
                 continue;
             };
-            if let Some(path) = line.strip_prefix("--- ") {
+            if !in_hunks && let Some(path) = line.strip_prefix("--- ") {
                 file.old = side(path, "a/");
-            } else if let Some(path) = line.strip_prefix("+++ ") {
+            } else if !in_hunks && let Some(path) = line.strip_prefix("+++ ") {
                 file.new = side(path, "b/");
-            } else if let Some(path) = line.strip_prefix("rename from ") {
+            } else if !in_hunks && let Some(path) = line.strip_prefix("rename from ") {
                 file.old = Some(path.to_string());
-            } else if let Some(path) = line.strip_prefix("rename to ") {
+            } else if !in_hunks && let Some(path) = line.strip_prefix("rename to ") {
                 file.new = Some(path.to_string());
             } else if line.starts_with("@@")
                 && let Some(hunk) = parse_hunk(line)
             {
                 file.hunks.push(hunk);
+                in_hunks = true;
             }
         }
         Self { files }
@@ -204,5 +209,16 @@ mod tests {
         assert!(map.touched("src/a.rs", 12, 12));
         assert!(!map.touched("src/a.rs", 6, 9));
         assert!(!map.touched("other.rs", 1, 5));
+    }
+
+    #[test]
+    fn content_that_looks_like_a_header_is_content() {
+        // A removed SQL comment `-- x` and an added `++ y` line.
+        let diff =
+            "diff --git a/q.sql b/q.sql\n--- a/q.sql\n+++ b/q.sql\n@@ -3,1 +3,1 @@\n--- x\n+++ y\n";
+        let map = LineMap::parse(diff);
+        assert!(map.touched("q.sql", 3, 3));
+        assert_eq!(map.files[0].old.as_deref(), Some("q.sql"));
+        assert_eq!(map.files[0].new.as_deref(), Some("q.sql"));
     }
 }

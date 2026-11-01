@@ -4,6 +4,12 @@
 //! developer arranges the screen their way. The layout is kept per
 //! workspace.
 //!
+//! By default the tools sit in a column beside the chat, inside the main
+//! area (not a side dock), so the bottom panel spans the editor, the chat
+//! and the tools: the terminal and Logcat, whose long lines want the
+//! window's whole width, open there. The column hides and comes back as a
+//! whole (its tabs and the one in front are remembered).
+//!
 //! A pane is only a frame: what it shows belongs to the screen (the chat
 //! panel, the files, a tool panel made the first time it is shown), so a
 //! pane can move, close and come back without touching what runs in it.
@@ -13,7 +19,8 @@ use std::sync::Arc;
 
 use gpui_kit::component::dock::{
     BasePanel, BasePanelView, DockArea, DockAreaState, DockLayout, DockPlacement, InsertTarget,
-    Panel, PanelControl, PanelEvent, PanelInfo, PanelState, TabGroup, panel_handle, register_panel,
+    NodeId, Panel, PanelControl, PanelEvent, PanelId, PanelInfo, PanelState, TabGroup,
+    panel_handle, register_panel,
 };
 use gpui_kit::{
     App, AppContext as _, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Global,
@@ -24,8 +31,10 @@ use gpui_kit::{
 use super::WorkspaceScreen;
 use crate::context_panel::ContextTab;
 
-/// Bumped when a saved layout can no longer be read.
-pub(super) const LAYOUT_VERSION: usize = 1;
+/// Bumped when a saved layout can no longer be read as it is. Version 1
+/// (tools in the right dock) is still read, and moved to version 2's
+/// places once.
+pub(super) const LAYOUT_VERSION: usize = 2;
 
 /// What a pane shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,6 +67,7 @@ impl Pane {
                 ContextTab::Devices => "pilothouse.devices",
                 ContextTab::Runs => "pilothouse.runs",
                 ContextTab::Tests => "pilothouse.tests",
+                ContextTab::Logcat => "pilothouse.logcat",
             },
         }
     }
@@ -76,6 +86,16 @@ impl Pane {
             Pane::Editor => ph_ui::Icons::FileCode,
             Pane::Tool(tab) => tab.icon(),
         }
+    }
+
+    /// A tool whose home is the bottom panel: long lines, read across.
+    pub(crate) fn in_bottom_panel(self) -> bool {
+        matches!(self, Pane::Tool(tab) if tab.in_bottom_panel())
+    }
+
+    /// A tool whose home is the column beside the chat.
+    fn in_column(self) -> bool {
+        matches!(self, Pane::Tool(_)) && !self.in_bottom_panel()
     }
 }
 
@@ -313,6 +333,9 @@ fn register(cx: &mut App) {
 pub(super) struct Panes {
     pub(super) area: Entity<DockArea>,
     panes: HashMap<Pane, Entity<DockPane>>,
+    /// The tools column while it is hidden: its tabs in order, and the one
+    /// in front.
+    hidden_column: Option<(Vec<Pane>, Pane)>,
 }
 
 impl Panes {
@@ -339,7 +362,11 @@ impl Panes {
             cx.global_mut::<DockPanes>().0.remove(&area_id);
         })
         .detach();
-        Self { area, panes }
+        Self {
+            area,
+            panes,
+            hidden_column: None,
+        }
     }
 
     pub(super) fn pane(&self, pane: Pane) -> &Entity<DockPane> {
@@ -350,8 +377,42 @@ impl Panes {
         panel_handle(self.pane(pane).clone())
     }
 
-    fn id(&self, pane: Pane) -> gpui_kit::component::dock::PanelId {
-        gpui_kit::component::dock::PanelId::from(self.pane(pane).entity_id())
+    fn id(&self, pane: Pane) -> PanelId {
+        PanelId::from(self.pane(pane).entity_id())
+    }
+
+    /// The pane a panel of the layout is.
+    fn pane_of(&self, id: PanelId) -> Option<Pane> {
+        self.panes
+            .iter()
+            .find(|(_, entity)| PanelId::from(entity.entity_id()) == id)
+            .map(|(pane, _)| *pane)
+    }
+
+    /// The tools column: the first tab group of the main area that holds a
+    /// column tool and is not the chat's.
+    fn column_node(&self, area: &DockArea) -> Option<NodeId> {
+        let tree = area.layout(DockPlacement::Center)?;
+        let chat = tree.find_panel_node(self.id(Pane::Chat));
+        tree.panels()
+            .filter(|id| self.pane_of(*id).is_some_and(Pane::in_column))
+            .filter_map(|id| tree.find_panel_node(id))
+            .find(|node| Some(*node) != chat)
+    }
+
+    /// The tools column's tabs, in order.
+    fn column_panes(&self, cx: &App) -> Vec<Pane> {
+        let area = self.area.read(cx);
+        let Some(node) = self.column_node(area) else {
+            return Vec::new();
+        };
+        let Some(tree) = area.layout(DockPlacement::Center) else {
+            return Vec::new();
+        };
+        tree.panels()
+            .filter(|id| tree.find_panel_node(*id) == Some(node))
+            .filter_map(|id| self.pane_of(id))
+            .collect()
     }
 
     /// Where `pane` is docked, if it is.
@@ -390,49 +451,64 @@ impl Panes {
     }
 
     /// The layout a workspace starts with: the chat and the editor as tabs
-    /// of one group (opening a file brings the editor forward), the tool in
-    /// view docked on the right. Also what *Reset layout* goes back to, so
-    /// any other dock goes away.
+    /// of one group (opening a file brings the editor forward) and, when
+    /// `open`, the `column` tool beside them and the `bottom` one (the
+    /// terminal, Logcat) below. Also what *Reset layout* goes back to, so
+    /// every dock goes away.
     pub(super) fn set_default(
-        &self,
-        tool: ContextTab,
+        &mut self,
+        column: ContextTab,
+        bottom: Option<ContextTab>,
         open: bool,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let center = DockLayout::tabs()
+        self.hidden_column = None;
+        let main = DockLayout::tabs()
             .panel_view(self.handle(Pane::Chat), cx)
             .panel_view(self.handle(Pane::Editor), cx);
-        let right = DockLayout::tabs().panel_view(self.handle(Pane::Tool(tool)), cx);
+        let tool = Pane::Tool(column);
+        let center = if open && tool.in_column() {
+            let width = column_width(window, cx);
+            DockLayout::h_split().child(main, None).child(
+                DockLayout::tabs().panel_view(self.handle(tool), cx),
+                Some(width),
+            )
+        } else {
+            main
+        };
         self.area.update(cx, |area, cx| {
             if area.is_zoomed() {
                 area.set_zoomed_out(window, cx);
             }
-            for placement in [DockPlacement::Left, DockPlacement::Bottom] {
+            for placement in [
+                DockPlacement::Left,
+                DockPlacement::Right,
+                DockPlacement::Bottom,
+            ] {
                 area.remove_dock(placement, window, cx);
             }
             area.set_center(center, window, cx);
-            area.set_dock(DockPlacement::Right, right, window, cx);
-            let size = dock_size(window, cx);
-            area.set_dock_size(DockPlacement::Right, size, window, cx);
-            // A replaced dock keeps its open state.
-            if area.is_dock_open(DockPlacement::Right) != open {
-                area.toggle_dock(DockPlacement::Right, window, cx);
-            }
         });
+        if open && let Some(bottom) = bottom.map(Pane::Tool).filter(|pane| pane.in_bottom_panel()) {
+            self.show(bottom, window, cx);
+        }
     }
 
     /// Restores a saved layout; `false` if it cannot be (none, or from an
     /// older build), leaving the area as it was.
     pub(super) fn load(
-        &self,
+        &mut self,
         saved: Option<DockAreaState>,
         window: &mut Window,
         cx: &mut App,
     ) -> bool {
-        let Some(state) = saved.filter(|state| state.version == Some(LAYOUT_VERSION)) else {
+        let Some(state) = saved.filter(|state| {
+            matches!(state.version, Some(version) if version == 1 || version == LAYOUT_VERSION)
+        }) else {
             return false;
         };
+        let from_v1 = state.version == Some(1);
         // Every pane the layout names must be one this build has.
         let known = |state: &PanelState| known_names(state);
         let docks_known = [&state.left_dock, &state.right_dock, &state.bottom_dock]
@@ -442,43 +518,93 @@ impl Panes {
         if !known(&state.center) || !docks_known {
             return false;
         }
-        self.area
+        if self
+            .area
             .update(cx, |area, cx| area.load(state, window, cx))
-            .is_ok()
+            .is_err()
+        {
+            return false;
+        }
+        if from_v1 {
+            self.move_from_v1(window, cx);
+        }
+        true
+    }
+
+    /// A layout of version 1 had the tools in the right dock: they move to
+    /// the column beside the chat, the terminal to the bottom panel, once.
+    /// A tool the user put anywhere else stays there.
+    fn move_from_v1(&mut self, window: &mut Window, cx: &mut App) {
+        let (right, was_open) = {
+            let area = self.area.read(cx);
+            let right: Vec<Pane> = area
+                .layout(DockPlacement::Right)
+                .map(|tree| tree.panels().filter_map(|id| self.pane_of(id)).collect())
+                .unwrap_or_default();
+            (right, area.is_dock_open(DockPlacement::Right))
+        };
+        let front = right.first().copied();
+        for pane in right {
+            if pane.in_bottom_panel() {
+                self.move_to(pane, MoveTo::Bottom, window, cx);
+                // Not opened by the move: it was in the right dock's back.
+                self.area.update(cx, |area, cx| {
+                    if area.is_dock_open(DockPlacement::Bottom) {
+                        area.toggle_dock(DockPlacement::Bottom, window, cx);
+                    }
+                });
+            } else if pane.in_column() {
+                self.area.update(cx, |area, cx| {
+                    area.remove_panel(self.pane(pane).clone(), window, cx);
+                });
+                self.show(pane, window, cx);
+            }
+        }
+        let column = self.column_panes(cx);
+        if !was_open && !column.is_empty() {
+            let front = front
+                .filter(|pane| column.contains(pane))
+                .unwrap_or(column[0]);
+            self.hide_column(column, front, window, cx);
+        }
+        self.area.update(cx, |area, cx| {
+            if area
+                .layout(DockPlacement::Right)
+                .is_some_and(|tree| tree.panels().next().is_none())
+            {
+                area.remove_dock(DockPlacement::Right, window, cx);
+            }
+            area.set_version(Some(LAYOUT_VERSION), cx);
+        });
     }
 
     /// Shows `pane`: selects it where it is docked (opening its dock), or
-    /// docks it on the right when it is not.
-    pub(super) fn show(&self, pane: Pane, window: &mut Window, cx: &mut App) {
+    /// puts it in its home when it is not: the tools column (back as it was
+    /// when it was hidden), or the bottom panel.
+    pub(super) fn show(&mut self, pane: Pane, window: &mut Window, cx: &mut App) {
+        if pane.in_column()
+            && self.placement(pane, cx).is_none()
+            && let Some((hidden, _)) = self.hidden_column.take()
+        {
+            // The whole column comes back, this tool in front.
+            for hidden in hidden.iter().filter(|hidden| **hidden != pane) {
+                if self.placement(*hidden, cx).is_none() {
+                    self.place(*hidden, window, cx);
+                }
+            }
+            if !hidden.contains(&pane) {
+                self.place(pane, window, cx);
+            }
+        }
         let id = self.id(pane);
-        let placement = self.placement(pane, cx);
-        let handle = self.handle(pane);
+        let placement = match self.placement(pane, cx) {
+            Some(placement) => placement,
+            None => self.place(pane, window, cx),
+        };
         self.area.update(cx, |area, cx| {
             if area.is_zoomed() {
                 area.set_zoomed_out(window, cx);
             }
-            let placement = match placement {
-                Some(placement) => placement,
-                None => {
-                    let placement = match pane {
-                        Pane::Tool(_) => DockPlacement::Right,
-                        _ => DockPlacement::Center,
-                    };
-                    if placement == DockPlacement::Center || area.has_dock(placement) {
-                        area.add_panel_view(handle, placement, None, window, cx);
-                    } else {
-                        area.set_dock(
-                            placement,
-                            DockLayout::tabs().panel_view(handle, cx),
-                            window,
-                            cx,
-                        );
-                        let size = dock_size(window, cx);
-                        area.set_dock_size(placement, size, window, cx);
-                    }
-                    placement
-                }
-            };
             if placement != DockPlacement::Center && !area.is_dock_open(placement) {
                 area.toggle_dock(placement, window, cx);
             }
@@ -486,8 +612,110 @@ impl Panes {
         });
     }
 
+    /// Puts `pane`, not in the layout, in its home; returns where.
+    fn place(&mut self, pane: Pane, window: &mut Window, cx: &mut App) -> DockPlacement {
+        let (id, handle) = (self.id(pane), self.handle(pane));
+        if pane.in_bottom_panel() {
+            self.area.update(cx, |area, cx| {
+                if area.has_dock(DockPlacement::Bottom) {
+                    area.add_panel_view(handle, DockPlacement::Bottom, None, window, cx);
+                } else {
+                    area.set_dock(
+                        DockPlacement::Bottom,
+                        DockLayout::tabs().panel_view(handle, cx),
+                        window,
+                        cx,
+                    );
+                    let height = bottom_height(window);
+                    area.set_dock_size(DockPlacement::Bottom, height, window, cx);
+                }
+            });
+            return DockPlacement::Bottom;
+        }
+        let column = self.column_node(self.area.read(cx));
+        let chat = self
+            .area
+            .read(cx)
+            .layout(DockPlacement::Center)
+            .and_then(|tree| tree.find_panel_node(self.id(Pane::Chat)));
+        let width = column_width(window, cx);
+        self.area.update(cx, |area, cx| {
+            // Into the main area's first group, then where it belongs.
+            area.add_panel_view(handle, DockPlacement::Center, None, window, cx);
+            let target = match (pane.in_column(), column, chat) {
+                (true, Some(node), _) => Some(InsertTarget::Tabs {
+                    node,
+                    ix: None,
+                    activate: true,
+                }),
+                (true, None, Some(node)) => Some(InsertTarget::Split {
+                    node,
+                    placement: gpui_kit::component::Placement::Right,
+                    size: Some(width),
+                }),
+                _ => None,
+            };
+            if let Some(target) = target {
+                area.move_panel(id, target, window, cx);
+            }
+        });
+        DockPlacement::Center
+    }
+
+    /// Hides the tools column, or brings it back as it was (`fallback` in
+    /// it when there was none).
+    pub(super) fn toggle_column(
+        &mut self,
+        fallback: ContextTab,
+        is_shown: impl Fn(Pane) -> bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let column = self.column_panes(cx);
+        if !column.is_empty() {
+            let front = column
+                .iter()
+                .copied()
+                .find(|pane| is_shown(*pane))
+                .unwrap_or(column[0]);
+            self.hide_column(column, front, window, cx);
+            return;
+        }
+        let front = self
+            .hidden_column
+            .as_ref()
+            .map(|(_, front)| *front)
+            .unwrap_or(Pane::Tool(fallback));
+        self.show(front, window, cx);
+    }
+
+    fn hide_column(&mut self, column: Vec<Pane>, front: Pane, window: &mut Window, cx: &mut App) {
+        let entities: Vec<Entity<DockPane>> =
+            column.iter().map(|pane| self.pane(*pane).clone()).collect();
+        self.area.update(cx, |area, cx| {
+            for entity in entities {
+                area.remove_panel(entity, window, cx);
+            }
+        });
+        self.hidden_column = Some((column, front));
+    }
+
+    /// Opens or closes the bottom panel; `false` when there is none yet.
+    pub(super) fn toggle_bottom(&self, window: &mut Window, cx: &mut App) -> bool {
+        self.area.update(cx, |area, cx| {
+            if !area.has_dock(DockPlacement::Bottom) {
+                return false;
+            }
+            if area.is_zoomed() {
+                area.set_zoomed_out(window, cx);
+            }
+            area.toggle_dock(DockPlacement::Bottom, window, cx);
+            true
+        })
+    }
+
     /// Moves `pane` as its menu asked (docking it first if it is not).
-    pub(super) fn move_to(&self, pane: Pane, to: MoveTo, window: &mut Window, cx: &mut App) {
+    pub(super) fn move_to(&mut self, pane: Pane, to: MoveTo, window: &mut Window, cx: &mut App) {
         let (id, chat) = (self.id(pane), self.id(Pane::Chat));
         let (handle, entity) = (self.handle(pane), self.pane(pane).clone());
         if self.placement(pane, cx).is_none() {
@@ -550,7 +778,12 @@ impl Panes {
                                 window,
                                 cx,
                             );
-                            let size = dock_size(window, cx);
+                            // A side dock's width, or the bottom panel's height.
+                            let size = if dock == DockPlacement::Bottom {
+                                bottom_height(window)
+                            } else {
+                                dock_size(window, cx)
+                            };
                             area.set_dock_size(dock, size, window, cx);
                         }
                     }
@@ -571,22 +804,24 @@ impl Panes {
             area.select_panel(id, window, cx);
         });
     }
+}
 
-    /// Opens or closes the dock that holds `pane` (the right one when it is
-    /// not docked).
-    pub(super) fn toggle_dock_of(&self, pane: Pane, window: &mut Window, cx: &mut App) -> bool {
-        let placement = match self.placement(pane, cx) {
-            Some(DockPlacement::Center) | None => DockPlacement::Right,
-            Some(placement) => placement,
-        };
-        self.area.update(cx, |area, cx| {
-            if !area.has_dock(placement) {
-                return false;
-            }
-            area.toggle_dock(placement, window, cx);
-            area.is_dock_open(placement)
-        })
-    }
+/// The bottom panel's height when it is made: room for a screenful of
+/// output, the editor and chat keeping most of the window.
+fn bottom_height(window: &Window) -> gpui_kit::Pixels {
+    (window.viewport_size().height * 0.34).clamp(gpui_kit::px(180.), gpui_kit::px(420.))
+}
+
+/// Share of the main area the tools column takes when it is made: about
+/// 70/30, the chat keeping the room (a file tree or a Git list needs little
+/// width). Dragged wider or narrower, the column keeps that.
+const COLUMN_SHARE: f32 = 0.28;
+
+/// The tools column's width when it is made.
+fn column_width(window: &Window, cx: &gpui_kit::App) -> gpui_kit::Pixels {
+    let rail = gpui_kit::px(58.);
+    let main = window.viewport_size().width - crate::sidebar::width(cx) - rail;
+    (main * COLUMN_SHARE).clamp(gpui_kit::px(280.), gpui_kit::px(520.))
 }
 
 /// A new dock's width: the usual tool width, less when the window leaves

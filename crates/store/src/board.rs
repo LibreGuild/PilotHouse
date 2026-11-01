@@ -266,7 +266,17 @@ impl Store {
         let Some(card) = self.card(id)? else {
             bail!("no card with id {id}");
         };
-        let position = match before.and_then(|before| self.card(before).ok().flatten()) {
+        let mut anchor = before.and_then(|before| self.card(before).ok().flatten());
+        // Halving the gap between two cards runs out of precision after
+        // some fifty moves into it: the column is numbered afresh first.
+        if let Some(known) = &anchor
+            && known.status == status
+            && self.gap_too_small(card.project_id, status, known.position)?
+        {
+            self.renumber(card.project_id, status)?;
+            anchor = self.card(known.id)?;
+        }
+        let position = match anchor {
             Some(anchor) if anchor.status == status && anchor.id != id => {
                 let previous: Option<f64> = self
                     .conn()
@@ -291,6 +301,43 @@ impl Store {
         )?;
         self.card(id)?
             .ok_or_else(|| anyhow::anyhow!("card {id} vanished"))
+    }
+
+    /// Whether the cards just before `position` in the column are too close
+    /// to it to place another between them.
+    fn gap_too_small(&self, project: i64, status: CardStatus, position: f64) -> Result<bool> {
+        let previous: Option<f64> = self
+            .conn()
+            .query_row(
+                "SELECT MAX(position) FROM cards WHERE project_id = ?1 AND status = ?2 AND position < ?3",
+                params![project, status.key(), position],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(previous.is_some_and(|previous| position - previous < 1e-6))
+    }
+
+    /// Numbers the column's cards 1, 2, 3 … in their order.
+    fn renumber(&self, project: i64, status: CardStatus) -> Result<()> {
+        let mut conn = self.conn();
+        let transaction = conn.transaction()?;
+        let ids: Vec<i64> = {
+            let mut statement = transaction.prepare(
+                "SELECT id FROM cards WHERE project_id = ?1 AND status = ?2 ORDER BY position, id",
+            )?;
+            statement
+                .query_map(params![project, status.key()], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for (ix, id) in ids.iter().enumerate() {
+            transaction.execute(
+                "UPDATE cards SET position = ?2 WHERE id = ?1",
+                params![id, (ix + 1) as f64],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn delete_card(&self, id: CardId) -> Result<()> {
@@ -424,6 +471,34 @@ mod tests {
             .link_card_test(card.id, "a-smoke-test", false)
             .unwrap();
         assert_eq!(store.card_tests(card.id).unwrap(), ["sign-in-works"]);
+    }
+
+    #[test]
+    fn moving_into_one_gap_again_and_again_keeps_the_order() {
+        let (store, project) = setup();
+        let cards = store
+            .add_cards(project, &[new("first"), new("last")])
+            .unwrap();
+        let (first, last) = (cards[0].id, cards[1].id);
+        // Each new card goes just before "last": the gap halves each time.
+        let mut placed = Vec::new();
+        for ix in 0..80 {
+            let card = store
+                .add_cards(project, &[new(&format!("c{ix}"))])
+                .unwrap()
+                .remove(0);
+            let status = store.card(last).unwrap().unwrap().status;
+            store.move_card(card.id, status, Some(last)).unwrap();
+            placed.push(card.id);
+        }
+        let mut order: Vec<_> = store.cards(project).unwrap();
+        order.retain(|card| card.status == store.card(last).unwrap().unwrap().status);
+        order.sort_by(|a, b| a.position.total_cmp(&b.position));
+        let ids: Vec<_> = order.iter().map(|card| card.id).collect();
+        let mut expected = vec![first];
+        expected.extend(placed);
+        expected.push(last);
+        assert_eq!(ids, expected);
     }
 
     #[test]

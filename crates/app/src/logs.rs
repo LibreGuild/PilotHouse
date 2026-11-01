@@ -38,14 +38,48 @@ pub fn init(to_file: bool) {
         .try_init();
 }
 
+/// A log grows to this, then starts afresh (the full one moved along), so
+/// a session left running for weeks never fills the disk.
+const LOG_LIMIT: u64 = 20 << 20;
+
+/// The log file being written, and how much it holds.
+struct Log {
+    path: PathBuf,
+    file: File,
+    written: u64,
+}
+
+impl std::io::Write for Log {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.written > LOG_LIMIT {
+            rotate(&self.path, OLD_LOGS);
+            if let Ok(file) = File::create(&self.path) {
+                self.file = file;
+                self.written = 0;
+            }
+        }
+        let written = self.file.write(bytes)?;
+        self.written += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
 /// A fresh `pilothouse.log`, the earlier ones moved along (`.1` is the
-/// previous run).
-fn open_log() -> Option<File> {
+/// previous run, or the earlier part of a long one).
+fn open_log() -> Option<Log> {
     let dir = logs_dir();
     ph_store::paths::ensure_private_dir(&dir).ok()?;
     let log = dir.join("pilothouse.log");
     rotate(&log, OLD_LOGS);
-    File::create(&log).ok()
+    Some(Log {
+        file: File::create(&log).ok()?,
+        path: log,
+        written: 0,
+    })
 }
 
 /// Shifts `path` to `path.1`, `path.1` to `path.2`, …, dropping the oldest.
@@ -66,7 +100,7 @@ pub fn install_crash_handler() {
         let backtrace = std::backtrace::Backtrace::force_capture();
         let thread = std::thread::current();
         let report = format!(
-            "PilotHouse {} crashed on thread {}.\n\n{info}\n\nBacktrace:\n{backtrace}\n",
+            "PilotHouse {} panicked on thread {} (on the UI thread it closes; elsewhere it may have been caught).\n\n{info}\n\nBacktrace:\n{backtrace}\n",
             env!("CARGO_PKG_VERSION"),
             thread.name().unwrap_or("(unnamed)"),
         );

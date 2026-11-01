@@ -54,6 +54,8 @@ struct Document {
 }
 
 pub struct LspManager {
+    /// Whether the folder's own code may run (see [`LspManager::new`]).
+    trusted: bool,
     root: PathBuf,
     servers: HashMap<&'static str, Slot>,
     documents: HashMap<PathBuf, Document>,
@@ -63,9 +65,14 @@ pub struct LspManager {
 impl EventEmitter<LspEvent> for LspManager {}
 
 impl LspManager {
-    pub fn new(root: PathBuf) -> Self {
+    /// Language servers for the folder `root`; `trusted` false for code
+    /// that is not the user's (a clone of someone else's repository): there
+    /// servers that would run its build scripts or its own copy of a tool
+    /// start without them, or not at all.
+    pub fn new(root: PathBuf, trusted: bool) -> Self {
         Self {
             root,
+            trusted,
             servers: HashMap::new(),
             documents: HashMap::new(),
             diagnostics: HashMap::new(),
@@ -96,11 +103,17 @@ impl LspManager {
     /// installed for its language.
     fn slot(&mut self, path: &Path, cx: &mut Context<Self>) -> Option<&Slot> {
         let (spec, program) = servers::find(path)?;
+        if !self.trusted && !spec.safe_untrusted {
+            return None;
+        }
         if !self.servers.contains_key(spec.name) {
             let (outbox, inbox) = smol::channel::unbounded::<Outgoing>();
             let root = self.root.clone();
+            let trusted = self.trusted;
             let start =
-                cx.background_spawn(async move { Server::start(spec, &program, &root).await });
+                cx.background_spawn(
+                    async move { Server::start(spec, &program, &root, trusted).await },
+                );
             let task = cx.spawn(async move |this, cx| {
                 let server = match start.await {
                     Ok(server) => Arc::new(server),
@@ -140,7 +153,13 @@ impl LspManager {
                             };
                             if this
                                 .update(cx, |this, cx| {
-                                    this.diagnostics.insert(path.clone(), params.diagnostics);
+                                    // None for a file is no entry (a server
+                                    // reports every file of a big project).
+                                    if params.diagnostics.is_empty() {
+                                        this.diagnostics.remove(&path);
+                                    } else {
+                                        this.diagnostics.insert(path.clone(), params.diagnostics);
+                                    }
                                     cx.emit(LspEvent::Diagnostics(path));
                                 })
                                 .is_err()

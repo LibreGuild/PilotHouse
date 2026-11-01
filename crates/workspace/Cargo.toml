@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+dunce.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 gpui-kit.workspace = true
@@ -25,6 +26,7 @@ ph-runs.workspace = true
 ph-files.workspace = true
 ph-media.workspace = true
 ph-store.workspace = true
+ph-studio.workspace = true
 ph-terminal.workspace = true
 ph-control.workspace = true
 ph-theme.workspace = true

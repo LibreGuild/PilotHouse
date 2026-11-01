@@ -280,7 +280,18 @@ impl WorkspaceChats {
         {
             return connection.clone();
         }
-        let cwd = self.project.path.clone();
+        // Someone else's code (a GitHub clone or a pull request's copy):
+        // the agent's launcher starts outside it, so its `.npmrc` or a
+        // vendored copy of the adapter never runs; each chat still works
+        // in the folder (the session's own folder).
+        let cwd =
+            if self.project.read_only || ph_store::paths::is_untrusted_copy(&self.project.path) {
+                let neutral = ph_store::paths::data_dir().join("agents");
+                let _ = std::fs::create_dir_all(&neutral);
+                neutral
+            } else {
+                self.project.path.clone()
+            };
         let connection = cx.new(|cx| AgentConnection::start(spec, cwd, cx));
         self.connections.insert(spec.id, connection.clone());
         connection
@@ -382,11 +393,13 @@ impl WorkspaceChats {
             ChatState::Idle
         };
         let line = match state {
-            ChatState::NeedsYou => question,
-            ChatState::Working => thread.activity().and_then(|(_, step)| step),
-            _ => thread.last_reply(),
-        }
-        .map(|text| first_line(&text));
+            ChatState::NeedsYou => question.map(|text| first_line(&text)),
+            ChatState::Working => thread
+                .activity()
+                .and_then(|(_, step)| step)
+                .map(|text| first_line(&text)),
+            _ => thread.last_reply_text().map(first_line),
+        };
         Some(ChatSummary {
             state,
             title: thread.title(),

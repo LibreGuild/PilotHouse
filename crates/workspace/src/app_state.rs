@@ -1,4 +1,4 @@
-use gpui_kit::{App, Global, Window};
+use gpui_kit::{App, Global};
 use ph_store::Store;
 use ph_theme::{Appearance, Preferences};
 
@@ -36,6 +36,7 @@ impl Global for AppState {}
 impl AppState {
     /// Installs the app state and the saved look-and-feel preferences.
     pub fn install(store: Store, cx: &mut App) {
+        cx.set_global(DisabledTabs(store.setting(keys::DISABLED_FEATURES)));
         let mut preferences: Preferences = store.setting(keys::PREFERENCES);
         // Sizes saved with older defaults move to the new ones, once.
         if preferences.migrate_sizes()
@@ -43,8 +44,18 @@ impl AppState {
         {
             tracing::warn!("saving the preferences failed: {err:#}");
         }
+        // A light or dark choice from before themes had names becomes the
+        // theme it showed, once.
+        let appearance: Appearance = store.setting(keys::APPEARANCE);
+        let migrated = appearance.migrated(&preferences);
+        if migrated != appearance
+            && let Err(err) = store.set_setting(keys::APPEARANCE, &migrated)
+        {
+            tracing::warn!("saving the theme choice failed: {err:#}");
+        }
         cx.set_global(Self { store });
         cx.set_global(preferences);
+        ph_theme::themes::set_user_dir(ph_store::paths::data_dir().join("themes"), cx);
     }
 
     pub fn global(cx: &App) -> &Self {
@@ -61,7 +72,11 @@ impl AppState {
 
     /// Context-panel tools the user has switched on (Settings → Features).
     pub fn enabled_tabs(cx: &App) -> Vec<ContextTab> {
-        let disabled: Vec<String> = Self::store(cx).setting(keys::DISABLED_FEATURES);
+        // Kept in memory: asked on every frame of every workspace.
+        let disabled: Vec<String> = match cx.try_global::<DisabledTabs>() {
+            Some(known) => known.0.clone(),
+            None => Self::store(cx).setting(keys::DISABLED_FEATURES),
+        };
         ContextTab::ALL
             .into_iter()
             .filter(|tab| !disabled.iter().any(|key| key == tab.key()))
@@ -78,6 +93,7 @@ impl AppState {
         if let Err(err) = store.set_setting(keys::DISABLED_FEATURES, &disabled) {
             tracing::warn!("saving features failed: {err:#}");
         }
+        cx.set_global(DisabledTabs(disabled));
         cx.refresh_windows();
     }
 
@@ -99,11 +115,36 @@ impl AppState {
         cx.refresh_windows();
     }
 
-    /// Saves the appearance preference and applies it immediately.
-    pub fn set_appearance(appearance: Appearance, window: &mut Window, cx: &mut App) {
+    /// Saves the theme choice and shows it in every window (a preview
+    /// being designed is dropped).
+    pub fn set_appearance(appearance: Appearance, cx: &mut App) {
         if let Err(err) = Self::store(cx).set_setting(keys::APPEARANCE, &appearance) {
-            tracing::warn!("saving appearance failed: {err:#}");
+            tracing::warn!("saving the theme choice failed: {err:#}");
         }
-        ph_theme::apply_appearance(appearance, Some(window), cx);
+        ph_theme::themes::set_preview(None, cx);
+        Self::refresh_theme(cx);
+    }
+
+    /// Shows the chosen theme (or the preview of one being designed) in
+    /// every window.
+    pub fn refresh_theme(cx: &mut App) {
+        let appearance = Self::appearance(cx);
+        let mut shown = false;
+        for window in cx.windows() {
+            shown |= window
+                .update(cx, |_, window, cx| {
+                    ph_theme::apply_appearance(&appearance, Some(window), cx)
+                })
+                .is_ok();
+        }
+        if !shown {
+            ph_theme::apply_appearance(&appearance, None, cx);
+        }
+        cx.refresh_windows();
     }
 }
+
+/// The tools turned off in Settings, as saved (read once, then kept).
+struct DisabledTabs(Vec<String>);
+
+impl gpui_kit::Global for DisabledTabs {}

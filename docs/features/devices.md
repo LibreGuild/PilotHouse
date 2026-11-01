@@ -27,11 +27,18 @@ Back, Home and Recents are in the toolbar. Esc is Back, typing types, and ⌘V p
 ## Tools in the pane
 
 - **Install an APK** (file picker → `adb install -r -t`) and **Launch** an installed app (from `pm list packages -3`).
-- **Drawer** (drag its top edge to resize): **Logcat**, **Layout** (the uiautomator hierarchy; click a node to outline it) and **Files** (browse, upload, save to Downloads).
+- **Mirroring is asked for.** Choosing a device does not show its screen: a phone may be plugged in only for its log or its files. Without the screen the pane shows the device with **Mirror screen**, **Logcat** and **Files**; the toolbar's **Mirror** / **Stop mirroring** switches it, and the choice is kept for that device (`devices.mirror`). An emulator mirrors unless told not to, since that is what it was started for. Install, Launch, Files and Layout work either way, and so do the agents' device tools.
+- **Drawer** (drag its top edge to resize): **Layout** (the uiautomator hierarchy; click a node to outline it) and **Files** (browse, upload, save to Downloads).
+- **The device in use** shows in the status bar once devices are used: its menu switches devices, connects one, starts an emulator, and opens Logcat or this pane.
+
+## Logcat
+
+A tool of its own (`logcat_panel.rs`), in the bottom panel by default, where its columns have the window's width; **Logcat** in the Devices toolbar or the status bar's device menu opens it, and its header picks the device (the same one the app uses). It needs no screen.
+
 - **Logcat** (`logcat.rs`, `logcat_view.rs`) shows the last 20,000 lines in columns: time, level, tag (a steady colour per tag) and message, coloured by level. Pick the lowest level shown and one app (*All apps* or an installed package; its processes are found with `pidof` and followed through ActivityManager's "Start proc" lines). The filter box takes words (all must match the tag or message, and are highlighted), `tag:Name`, `-tag:Name`, `package:com.app` and `pid:123`. It follows new lines until you scroll back; click a line for its full text, pid and tid, to copy it or send it to chat. **Send to chat** sends the last 80 lines shown.
 - **Live tools**: annotate, the element picker (the smallest UI node under the click, sent with its id, text and bounds), capture, record, before/after. Drag the bar by its grip anywhere over the screen (double-click the grip to put it back), or fold it to one button. See [live-panes.md](live-panes.md).
 
-The screen and logcat run only while the pane is visible.
+The screen streams only while it is mirrored and the pane is visible; logcat runs only while the Logcat tool is visible.
 
 ## Agent tools
 
@@ -46,7 +53,7 @@ The screen and logcat run only while the pane is visible.
 | `manager.rs` | Devices, AVDs, the selected device, starting and stopping emulators |
 | `avd.rs`, `avd_dialog.rs` | System images; making, wiping and deleting AVDs; their dialogs |
 | `screen.rs` | One device's live screen and input |
-| `logcat.rs`, `logcat_view.rs`, `ui_tree.rs` | Live logcat, its query and its drawer; uiautomator XML parsing and hit testing |
+| `logcat.rs`, `logcat_view.rs`, `logcat_panel.rs`, `ui_tree.rs` | Live logcat, its query and view, the Logcat tool; uiautomator XML parsing and hit testing |
 | `h264/` | Cutting the H.264 stream into pictures, and the system decoders |
 | `connect_dialog.rs` | Connecting a device over the network: by address, pairing code, or switching a USB phone to Wi-Fi |
 | `android_project.rs`, `android_run.rs` | App modules and build variants; the Run tab's Android card |

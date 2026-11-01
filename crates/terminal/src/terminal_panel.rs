@@ -1,13 +1,14 @@
 //! The Terminal tab: one or more shells in the workspace's folders, each the
 //! shell the user picks (zsh, bash, PowerShell…). The shells belong to the
 //! workspace ([`WorkspaceTerminals`]); this panel only shows them, with one
-//! [`TerminalView`] per shell made when first shown.
+//! [`TerminalView`] per shell made when first shown. A split shows two to
+//! four shells side by side (each keeps its tab, marked as split); only the
+//! shells on screen are drawn.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui_kit::component::Selectable as _;
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -17,11 +18,12 @@ use gpui_kit::component::{
     tab::{Tab, TabBar},
     v_flex,
 };
+use gpui_kit::component::{Disableable as _, Selectable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext as _, Context, Entity, EntityId, Focusable as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
-    px,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, SharedString,
+    Styled as _, Subscription, Window, div, px,
 };
 use ph_ui::MenuButton as _;
 use ph_ui::{EmptyState, Icons};
@@ -232,6 +234,89 @@ impl TerminalPanel {
         }
     }
 
+    /// A new `shell` (the default for `None`) beside the one in front.
+    fn split(&mut self, shell: Option<ph_env::Shell>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(terminal) = self
+            .terminals
+            .update(cx, |terminals, cx| terminals.split(shell.as_ref(), cx))
+        {
+            self.focus(&terminal, window, cx);
+        }
+    }
+
+    /// The split button: the shells installed here (the default first), the
+    /// new one beside the one in front; *Unsplit* when it is in a split. A
+    /// folder on a network drive gets the server's shell.
+    fn render_split_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let terminals = self.terminals.read(cx);
+        let can_split = terminals.can_split();
+        let in_split = terminals
+            .active()
+            .and_then(|terminal| terminals.split_of(terminal.entity_id()))
+            .and_then(|split| split.first().map(Entity::entity_id));
+        let remote = ph_remote::remote_of(terminals.cwd()).is_some();
+        let button = Button::new("split-terminal")
+            .ghost()
+            .xsmall()
+            .icon(Icons::Columns2)
+            .disabled(!can_split && in_split.is_none())
+            .tooltip(if cfg!(target_os = "macos") {
+                "Split: a shell beside this one (⌘\\)"
+            } else {
+                "Split: a shell beside this one (Ctrl+Shift+5)"
+            })
+            .accessibility_label("Split terminal");
+        if remote && in_split.is_none() {
+            return button
+                .on_click(cx.listener(|this, _, window, cx| this.split(None, window, cx)))
+                .into_any_element();
+        }
+        let panel = cx.weak_entity();
+        button
+            .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                let mut menu = menu;
+                if can_split && !remote {
+                    menu = ph_env::shells().into_iter().fold(
+                        menu.label("Split with"),
+                        |menu, shell| {
+                            let label = if shell.default {
+                                format!("{} (default)", shell.name)
+                            } else {
+                                shell.name.clone()
+                            };
+                            let panel = panel.clone();
+                            menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                                _ = panel.update(cx, |panel, cx| {
+                                    panel.split(Some(shell.clone()), window, cx)
+                                });
+                            }))
+                        },
+                    );
+                } else if can_split {
+                    let panel = panel.clone();
+                    menu = menu.item(PopupMenuItem::new("Split").on_click(move |_, window, cx| {
+                        _ = panel.update(cx, |panel, cx| panel.split(None, window, cx));
+                    }));
+                }
+                if let Some(first) = in_split {
+                    let panel = panel.clone();
+                    menu = menu.separator().item(
+                        PopupMenuItem::new("Unsplit (each in its own tab)").on_click(
+                            move |_, _, cx| {
+                                _ = panel.update(cx, |panel, cx| {
+                                    panel
+                                        .terminals
+                                        .update(cx, |terminals, cx| terminals.unsplit(first, cx))
+                                });
+                            },
+                        ),
+                    );
+                }
+                menu
+            })
+            .into_any_element()
+    }
+
     /// A new `shell` in folder `cwd`.
     fn new_shell(
         &mut self,
@@ -362,6 +447,15 @@ impl TerminalPanel {
     }
 
     fn render_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(terminal) = self.terminals.read(cx).active().cloned()
+            && let Some(split) = self
+                .terminals
+                .read(cx)
+                .split_of(terminal.entity_id())
+                .filter(|split| split.len() > 1)
+        {
+            return self.render_split(&split, terminal.entity_id(), cx);
+        }
         if let Some(terminal) = self.terminals.read(cx).active().cloned() {
             let view = self.view(&terminal, cx);
             let Some(transcript) = self.transcripts.get(&terminal.entity_id()).cloned() else {
@@ -411,39 +505,109 @@ impl TerminalPanel {
     }
 }
 
+impl TerminalPanel {
+    /// The shells of a split side by side, dividers dragging; the one the
+    /// keyboard is in marked above. Pressing in a pane makes its shell the
+    /// one in front (its tab selected).
+    fn render_split(
+        &mut self,
+        split: &[Entity<Terminal>],
+        active: EntityId,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = SharedString::from(format!(
+            "terminal-split-{}",
+            split
+                .iter()
+                .map(|t| t.entity_id().to_string())
+                .collect::<Vec<_>>()
+                .join("-")
+        ));
+        let accent = cx.theme().ring;
+        split
+            .iter()
+            .fold(h_resizable(id), |group, terminal| {
+                let view = self.view(terminal, cx);
+                let terminal_id = terminal.entity_id();
+                let front = terminal_id == active;
+                let pane = v_flex()
+                    .size_full()
+                    // A line on top says which pane the keyboard is in.
+                    .child(
+                        div()
+                            .flex_none()
+                            .h(px(2.))
+                            .when(front, |this| this.bg(accent)),
+                    )
+                    .child(div().flex_1().min_h_0().child(view))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.terminals.update(cx, |terminals, cx| {
+                                terminals.select_terminal(terminal_id, cx)
+                            })
+                        }),
+                    );
+                group.child(
+                    resizable_panel()
+                        .size_range(px(160.)..gpui_kit::Pixels::MAX)
+                        .child(pane),
+                )
+            })
+            .into_any_element()
+    }
+}
+
 impl Render for TerminalPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let terminals = self.terminals.read(cx);
         let active = terminals.active_index();
-        let titles: Vec<(SharedString, Option<crate::AgentBadge>)> = terminals
+        let titles: Vec<(SharedString, Option<crate::AgentBadge>, bool)> = terminals
             .terminals()
             .iter()
-            .map(|terminal| {
-                let terminal = terminal.read(cx);
+            .map(|entity| {
+                let split = terminals.split_of(entity.entity_id()).is_some();
+                let terminal = entity.read(cx);
                 let title = short_title(
                     terminal.title(),
                     terminal.shell(),
                     terminal.label().map(|label| label.as_ref()),
                 );
-                (title, terminal.badge())
+                (title, terminal.badge(), split)
             })
             .collect();
-        let tabs = titles.into_iter().enumerate().map(|(ix, (title, badge))| {
-            Tab::new()
-                .label(title)
-                .when_some(badge, |tab, badge| tab.prefix(badge_glyph(badge, cx)))
-                .suffix(
-                    Button::new(("close-terminal", ix))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .accessibility_label("Close terminal")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.terminals
-                                .update(cx, |terminals, cx| terminals.close_index(ix, cx))
-                        })),
-                )
-        });
+        let muted = cx.theme().muted_foreground;
+        let tabs = titles
+            .into_iter()
+            .enumerate()
+            .map(|(ix, (title, badge, split))| {
+                let prefix = (split || badge.is_some()).then(|| {
+                    h_flex()
+                        .gap_1()
+                        .when(split, |this| {
+                            this.child(
+                                gpui_kit::component::Icon::new(Icons::Columns2)
+                                    .xsmall()
+                                    .text_color(muted),
+                            )
+                        })
+                        .children(badge.map(|badge| badge_glyph(badge, cx)))
+                });
+                Tab::new()
+                    .label(title)
+                    .when_some(prefix, |tab, prefix| tab.prefix(prefix))
+                    .suffix(
+                        Button::new(("close-terminal", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .accessibility_label("Close terminal")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.terminals
+                                    .update(cx, |terminals, cx| terminals.close_index(ix, cx))
+                            })),
+                    )
+            });
         v_flex()
             .size_full()
             .child(
@@ -474,9 +638,15 @@ impl Render for TerminalPanel {
                         ),
                     )
                     .children(self.render_transcript_button(cx))
+                    .child(self.render_split_button(cx))
                     .child(self.render_new_button(cx)),
             )
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
+            .on_action(cx.listener(|this, _: &crate::TerminalSplit, window, cx| {
+                if this.terminals.read(cx).can_split() {
+                    this.split(None, window, cx)
+                }
+            }))
     }
 }
 

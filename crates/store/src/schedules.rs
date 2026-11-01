@@ -268,14 +268,33 @@ impl Store {
     }
 
     /// Enabled schedules of every workspace whose time has come by `now`.
+    /// Runs left "Running…" when the app last closed (they stopped with
+    /// it) say so instead, so their next run is not held back.
+    pub fn end_interrupted_schedules(&self) -> Result<()> {
+        self.conn().execute(
+            "UPDATE schedules SET last_result = 'Stopped when PilotHouse closed.' WHERE last_result = 'Running…'",
+            [],
+        )?;
+        Ok(())
+    }
+
     pub fn due_schedules(&self, now: i64) -> Result<Vec<Schedule>> {
         let conn = self.conn();
         let mut statement = conn.prepare(&format!(
             "SELECT {COLUMNS} FROM schedules WHERE enabled = 1 AND next_run <= ?1 ORDER BY next_run"
         ))?;
+        // A row that cannot be read (written by a newer version, say) is
+        // left out and said, not the reason no schedule ever runs again.
         let schedules = statement
             .query_map(params![now], Schedule::from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .filter_map(|row| match row {
+                Ok(schedule) => Some(schedule),
+                Err(err) => {
+                    tracing::warn!("a schedule cannot be read: {err}");
+                    None
+                }
+            })
+            .collect();
         Ok(schedules)
     }
 

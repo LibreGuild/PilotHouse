@@ -217,6 +217,9 @@ pub struct ChatThread {
     /// PilotHouse's browser, device and test tools run without asking
     /// during the current turn (recording or repairing a UI test).
     app_tools_this_turn: bool,
+    /// They do in every turn (a chat beside a Studio picture, where
+    /// changing it is what the chat is for).
+    app_tools_always: bool,
     /// Stored message ids of user entries, by entry index, so a checkpoint
     /// taken after the message was saved can be added to it.
     user_message_ids: HashMap<usize, i64>,
@@ -291,6 +294,7 @@ impl ChatThread {
             in_folder: false,
             reads_this_turn: false,
             app_tools_this_turn: false,
+            app_tools_always: false,
             user_message_ids: HashMap::new(),
             restoring: false,
             note_for_agent: None,
@@ -354,6 +358,11 @@ impl ChatThread {
     pub fn allow_app_tools_for_turn(&mut self) {
         self.reads_this_turn = true;
         self.app_tools_this_turn = true;
+    }
+
+    /// Lets every turn use PilotHouse's app tools without asking.
+    pub fn trust_app_tools(&mut self) {
+        self.app_tools_always = true;
     }
 
     /// Forwards a review card's requests (open a file, review again).
@@ -635,8 +644,13 @@ impl ChatThread {
 
     /// The text of the agent's newest message.
     pub fn last_reply(&self) -> Option<String> {
+        self.last_reply_text().map(str::to_string)
+    }
+
+    /// The newest reply's text, not copied (a sidebar row asks every frame).
+    pub fn last_reply_text(&self) -> Option<&str> {
         self.entries.iter().rev().find_map(|entry| match entry {
-            Entry::Agent { text, .. } => Some(text.clone()),
+            Entry::Agent { text, .. } => Some(text.as_str()),
             _ => None,
         })
     }
@@ -1409,8 +1423,8 @@ impl ChatThread {
             let escalates = title.contains("with every permission");
             if let Some(allow) = allow
                 && !escalates
-                && (crate::review_policy::allows(kind, raw_input.as_ref(), &title)
-                    || (self.app_tools_this_turn
+                && (crate::review_policy::allows(kind, raw_input.as_ref(), &self.project.path)
+                    || ((self.app_tools_this_turn || self.app_tools_always)
                         && crate::review_policy::is_app_tool(kind, &title, raw_input.as_ref())))
             {
                 respond(Some(allow.option_id.0.to_string()), cx);
@@ -1858,19 +1872,30 @@ impl ChatThread {
         let Some(session) = &self.session else {
             return;
         };
+        // One transaction for all of them; on failure nothing counts as
+        // saved, so the next save tries again.
+        let mut stored = Vec::new();
+        let mut users = Vec::new();
         for (ix, entry) in self.entries.iter().enumerate().skip(self.saved) {
             let Some((role, body)) = entry.to_stored(cx) else {
                 continue;
             };
-            match self.store.append_message(session.id, role, &body) {
-                Ok(id) if matches!(entry, Entry::User { .. }) => {
-                    self.user_message_ids.insert(ix, id);
-                }
-                Ok(_) => {}
-                Err(err) => tracing::warn!("saving chat message failed: {err:#}"),
+            if matches!(entry, Entry::User { .. }) {
+                users.push((ix, stored.len()));
             }
+            stored.push((role, body));
         }
-        self.saved = self.entries.len();
+        match self.store.append_messages(session.id, &stored) {
+            Ok(ids) => {
+                for (ix, at) in users {
+                    if let Some(id) = ids.get(at) {
+                        self.user_message_ids.insert(ix, *id);
+                    }
+                }
+                self.saved = self.entries.len();
+            }
+            Err(err) => tracing::warn!("saving chat messages failed: {err:#}"),
+        }
     }
 
     /// Records the checkpoint taken before user message `ix`.

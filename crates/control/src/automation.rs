@@ -97,6 +97,11 @@ pub fn register(cx: &mut App) {
         cx,
     );
     ControlServer::handle(
+        "ui.pinch",
+        |params, cx| with_window(cx, |window, cx| pinch(params, window, cx)),
+        cx,
+    );
+    ControlServer::handle(
         "ui.input",
         |params, cx| {
             let text = string_param(&params, "text")?;
@@ -365,6 +370,25 @@ fn scroll(params: Value, window: &mut Window, cx: &mut App) -> Result<Value> {
         cx,
     );
     Ok(json!({ "scrolled": dy }))
+}
+
+/// A trackpad pinch at `at`: `delta` 0.1 zooms in by a tenth, negative
+/// zooms out.
+fn pinch(params: Value, window: &mut Window, cx: &mut App) -> Result<Value> {
+    use gpui_kit::InputEvent as _;
+    let at = point_param(&params, "at").context("missing `at: [x, y]`")?;
+    let delta = params.get("delta").and_then(Value::as_f64).unwrap_or(0.1) as f32;
+    window.pointer_move(at, None, cx);
+    window.dispatch_event(
+        gpui_kit::PinchEvent {
+            position: at,
+            delta,
+            ..Default::default()
+        }
+        .to_platform_input(),
+        cx,
+    );
+    Ok(json!({ "pinched": delta }))
 }
 
 fn point_param(params: &Value, key: &str) -> Option<gpui_kit::Point<gpui_kit::Pixels>> {

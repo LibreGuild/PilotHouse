@@ -89,6 +89,8 @@ pub enum FilesPanelEvent {
     ShowHistory(PathBuf, String),
     /// Show this HTML file in the workspace's browser.
     OpenInBrowser(PathBuf),
+    /// Edit this picture or video in Studio.
+    EditMedia(PathBuf),
     /// A file was selected in the tree from its tab: show the Files tool.
     RevealInTree,
     /// Add a folder to the workspace (the folder picker).
@@ -221,7 +223,8 @@ impl FilesPanel {
             .iter()
             .map(|root| {
                 let path = root.path.clone();
-                cx.new(|_| ph_lsp::LspManager::new(path))
+                let trusted = !ph_store::paths::is_untrusted_copy(&path);
+                cx.new(|_| ph_lsp::LspManager::new(path, trusted))
             })
             .collect();
         // Which folders are repositories, for the menu's Git items.
@@ -351,6 +354,9 @@ impl FilesPanel {
                         }
                         crate::file_view::FileViewEvent::OpenInBrowser(path) => {
                             cx.emit(FilesPanelEvent::OpenInBrowser(path.clone()))
+                        }
+                        crate::file_view::FileViewEvent::EditMedia(path) => {
+                            cx.emit(FilesPanelEvent::EditMedia(path.clone()))
                         }
                         crate::file_view::FileViewEvent::RevealInTree => {
                             let path = view.read(cx).relative_path().to_string();
@@ -1184,7 +1190,7 @@ impl FilesPanel {
                 .child(
                     h_flex()
                         .relative()
-                        .h(TREE_ROW_HEIGHT)
+                        .h(TREE_ROW_HEIGHT * ph_theme::density(cx))
                         .min_w_0()
                         .gap_1()
                         .pl(TREE_INDENT * depth)

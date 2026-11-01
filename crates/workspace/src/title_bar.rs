@@ -32,7 +32,6 @@ pub(crate) fn render(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let dark = cx.theme().is_dark();
     let palette_hint =
         Kbd::binding_for_action(&ToggleCommandPalette, Some(WORKSPACE_CONTEXT), window);
     // The search sits in the middle of the window, not of the space left
@@ -89,6 +88,7 @@ pub(crate) fn render(
                 )
                 .when_some(palette_hint, |this, hint| this.child(hint)),
         )
+        .child(div().id("more-button").occlude().child(more_button()))
         .child(
             h_flex()
                 .flex_1()
@@ -108,40 +108,8 @@ pub(crate) fn render(
                         .occlude()
                         .child(agents_button(workspace, cx)),
                 )
-                .child(
-                    Button::new("toggle-appearance")
-                        .occlude()
-                        .ghost()
-                        .small()
-                        .icon(if dark { IconName::Sun } else { IconName::Moon })
-                        .tooltip(if dark {
-                            "Use light appearance"
-                        } else {
-                            "Use dark appearance"
-                        })
-                        .accessibility_label("Toggle appearance")
-                        .on_click(move |_, window, cx| {
-                            if dark {
-                                window.dispatch_action(Box::new(UseLightAppearance), cx);
-                            } else {
-                                window.dispatch_action(Box::new(UseDarkAppearance), cx);
-                            }
-                        }),
-                )
-                .child(
-                    Button::new("open-settings")
-                        .occlude()
-                        .ghost()
-                        .small()
-                        .icon(Icons::Settings)
-                        .tooltip("Settings")
-                        .accessibility_label("Settings")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(OpenSettings), cx)
-                        }),
-                )
-                // The two side panels' switches side by side, as in VS Code.
-                .child(div().w_px().h_4().mx_1().bg(cx.theme().border))
+                // The two side panels' switches side by side, as in VS Code,
+                // then Settings, last.
                 .child(
                     Button::new("toggle-sidebar")
                         .occlude()
@@ -159,18 +127,110 @@ pub(crate) fn render(
                         }),
                 )
                 .child(
+                    Button::new("toggle-bottom-panel")
+                        .occlude()
+                        .ghost()
+                        .small()
+                        .icon(IconName::PanelBottom)
+                        .tooltip("Toggle bottom panel (⌘J)")
+                        .accessibility_label("Toggle bottom panel")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleBottomPanel), cx)
+                        }),
+                )
+                .child(
                     Button::new("toggle-context-panel")
                         .occlude()
                         .ghost()
                         .small()
                         .icon(IconName::PanelRight)
-                        .tooltip("Toggle tools (⌘J)")
+                        .tooltip("Toggle tools (⌥⌘B)")
                         .accessibility_label("Toggle panel")
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(ToggleContextPanel), cx)
                         }),
+                )
+                .child(
+                    Button::new("open-settings")
+                        .occlude()
+                        .ghost()
+                        .small()
+                        .icon(Icons::Settings)
+                        .tooltip("Settings")
+                        .accessibility_label("Settings")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(OpenSettings), cx)
+                        }),
                 ),
         )
+}
+
+/// More (⋯), right of the search: making things (presentations, with the
+/// latest to open again), the tools only the palette otherwise reaches,
+/// and help.
+fn more_button() -> impl IntoElement {
+    Button::new("more-menu")
+        .ghost()
+        .small()
+        .icon(IconName::Ellipsis)
+        .tooltip("More: presentations, tools, help")
+        .accessibility_label("More")
+        .menu(gpui_kit::Anchor::TopLeft, |menu, _, cx| {
+            let item =
+                |label: &'static str, icon: Icons, action: fn() -> Box<dyn gpui_kit::Action>| {
+                    PopupMenuItem::new(label)
+                        .icon(icon)
+                        .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
+                };
+            let mut menu = menu
+                .label("Create")
+                .item(item("New presentation…", Icons::Presentation, || {
+                    Box::new(NewPresentation)
+                }))
+                .item(item("Open presentation…", Icons::FolderOpen, || {
+                    Box::new(OpenPresentation)
+                }));
+            for listed in crate::presentations::listed(cx).iter().take(5) {
+                let folder = listed.space.path.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(listed.title.clone())
+                        .icon(Icons::Presentation)
+                        .on_click(move |_, window, cx| {
+                            crate::presentations::open(folder.clone(), None, window, cx)
+                        }),
+                );
+            }
+            menu.separator()
+                .label("Tools")
+                .item(item("Utilities…", Icons::Wrench, || {
+                    Box::new(ShowUtilities)
+                }))
+                .item(item("Architecture map…", Icons::Network, || {
+                    Box::new(ShowArchitecture)
+                }))
+                .item(item("Parallel runs…", Icons::Columns2, || {
+                    Box::new(ShowParallelRuns)
+                }))
+                .item(item("Schedules…", Icons::CalendarClock, || {
+                    Box::new(ShowSchedules)
+                }))
+                .item(item("Usage…", Icons::ChartPie, || Box::new(ShowUsage)))
+                .item(item("Network drives…", Icons::HardDrive, || {
+                    Box::new(ShowNetworkDrives)
+                }))
+                .item(item("Agent instructions…", Icons::BookOpen, || {
+                    Box::new(ShowInstructions)
+                }))
+                .item(item("Search chats…", Icons::Search, || {
+                    Box::new(SearchChats)
+                }))
+                .separator()
+                .label("Help")
+                .item(item("Keyboard shortcuts", Icons::Keyboard, || {
+                    Box::new(ShowShortcuts)
+                }))
+                .item(item("Settings", Icons::Settings, || Box::new(OpenSettings)))
+        })
 }
 
 /// How much more room each side of the bar gets, so its middle is the

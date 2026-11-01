@@ -95,11 +95,11 @@ fn tidy_folder(store: &Store, projects: &[ph_store::projects::Project], folder: 
         else {
             continue;
         };
-        let age = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        // When it was last worked in: its newest file near the top or its
+        // Git state (a folder's own date changes only with what is right
+        // in it, not with edits in `src/`).
+        let age = last_used(&path)
+            .and_then(|used| SystemTime::now().duration_since(used).ok())
             .unwrap_or_default();
         let project_id = match &copy {
             Copy::Review { project } | Copy::Lane { project, .. } => *project,
@@ -125,6 +125,57 @@ fn tidy_folder(store: &Store, projects: &[ph_store::projects::Project], folder: 
         }
     }
     removed
+}
+
+/// The newest change time in the copy at `path`: its files a few folders
+/// deep (at most a few thousand, skipping what tools build) and its Git
+/// state (index, HEAD).
+fn last_used(path: &Path) -> Option<SystemTime> {
+    const MOST: usize = 5000;
+    let modified = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+    };
+    let mut newest = modified(path);
+    let mut keep = |time: Option<SystemTime>| {
+        if let Some(time) = time
+            && newest.is_none_or(|known| time > known)
+        {
+            newest = Some(time);
+        }
+    };
+    if let Some(entry) = admin_entry(path) {
+        for name in ["index", "HEAD", "logs/HEAD"] {
+            keep(modified(&entry.join(name)));
+        }
+    }
+    let mut seen = 0;
+    let mut folders = vec![(path.to_path_buf(), 0)];
+    while let Some((folder, depth)) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > MOST {
+                return newest;
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            keep(meta.modified().ok());
+            let name = entry.file_name();
+            let skipped = matches!(
+                name.to_str(),
+                Some(".git" | "node_modules" | "target" | "build" | "dist" | ".venv")
+            );
+            if meta.is_dir() && !skipped && depth < 3 {
+                folders.push((entry.path(), depth + 1));
+            }
+        }
+    }
+    newest
 }
 
 /// The lane of `run` (in `project`) for `agent` at `path` was kept or
