@@ -315,21 +315,22 @@ impl DeckDocument {
         let revision = self.revision;
         self._save = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SAVE_DELAY).await;
-            let Ok((space, deck, thumbnail)) = this.update(cx, |this, _| {
+            let Ok((space, deck, thumbnail, stamp)) = this.update(cx, |this, _| {
                 let first = this.deck.slides.first().cloned();
                 let thumbnail = first.filter(|first| {
                     this.thumbnail.as_ref().is_none_or(|(slide, looks)| {
                         !Arc::ptr_eq(slide, first) || *looks != this.looks
                     })
                 });
-                (this.space.clone(), this.deck.clone(), thumbnail)
+                let stamp = super::space::snapshot_stamp();
+                (this.space.clone(), this.deck.clone(), thumbnail, stamp)
             }) else {
                 return;
             };
             let redraw = thumbnail.is_some();
             let written = cx
                 .background_spawn(async move {
-                    space.save(&deck)?;
+                    space.save_stamped(&deck, stamp)?;
                     if redraw {
                         write_thumbnail(&space, &deck);
                     }
@@ -357,7 +358,8 @@ impl DeckDocument {
         if !self.is_dirty() {
             return Ok(());
         }
-        self.space.save(&self.deck)?;
+        self.space
+            .save_stamped(&self.deck, super::space::snapshot_stamp())?;
         write_thumbnail(&self.space, &self.deck);
         self.saved = self.revision;
         self._save = None;
@@ -603,7 +605,7 @@ impl DeckDocument {
         if self.stale.len() > KEEP {
             let extra = self.stale.len() - KEEP;
             for image in self.stale.drain(..extra) {
-                cx.drop_image(image, None);
+                ph_ui::images::release_render_image(image, cx);
             }
         }
     }

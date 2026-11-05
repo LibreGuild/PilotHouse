@@ -260,7 +260,9 @@ fn bring_extras(config: &WorktreeConfig, root: &Path, path: &Path) -> Result<Vec
             continue;
         };
         let from = root.join(&relative);
-        if from.is_file() {
+        // The worktree may hold someone else's tree (a pull request): a
+        // link there would carry the copy outside it.
+        if from.is_file() && no_links(path, &relative) {
             if let Some(parent) = path.join(&relative).parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -274,12 +276,22 @@ fn bring_extras(config: &WorktreeConfig, root: &Path, path: &Path) -> Result<Vec
         };
         let from = root.join(&relative);
         let to = path.join(&relative);
-        if from.is_dir() && !to.exists() {
+        if from.is_dir() && std::fs::symlink_metadata(&to).is_err() && no_links(path, &relative) {
             link(&from, &to)?;
             extras.push(relative);
         }
     }
     Ok(extras)
+}
+
+/// Whether nothing on the way to `base/relative` (it included) is a
+/// symbolic link.
+fn no_links(base: &Path, relative: &Path) -> bool {
+    let mut at = base.to_path_buf();
+    relative.components().all(|part| {
+        at.push(part);
+        std::fs::symlink_metadata(&at).map_or(true, |meta| !meta.file_type().is_symlink())
+    })
 }
 
 /// A path from `pilothouse.toml` when it stays inside the repository.
@@ -388,6 +400,28 @@ pub(crate) fn setup_command(command: &str, port: u16) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn extras_never_go_through_links() {
+        let dir = std::env::temp_dir().join(format!("ph-extras-{}", std::process::id()));
+        let (root, work, outside) = (dir.join("root"), dir.join("work"), dir.join("outside"));
+        for folder in [&root, &work, &outside] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        std::fs::write(root.join(".env"), "SECRET=1").unwrap();
+        std::fs::write(outside.join("target"), "mine").unwrap();
+        std::os::unix::fs::symlink(outside.join("target"), work.join(".env")).unwrap();
+        let config = WorktreeConfig {
+            copy: vec![".env".into()],
+            ..Default::default()
+        };
+        let extras = bring_extras(&config, &root, &work).unwrap();
+        let kept = std::fs::read_to_string(outside.join("target")).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(extras.is_empty());
+        assert_eq!(kept, "mine");
+    }
+
     use super::*;
 
     #[test]

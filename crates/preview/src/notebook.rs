@@ -54,7 +54,14 @@ pub struct NotebookPreview {
 impl EventEmitter<PreviewEvent> for NotebookPreview {}
 
 impl NotebookPreview {
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf, cx: &mut Context<Self>) -> Self {
+        // Closed: its output pictures leave GPUI's caches too.
+        cx.on_release(|this, cx| {
+            if let Some(Ok(notebook)) = this.notebook.take() {
+                release_images(notebook, cx);
+            }
+        })
+        .detach();
         Self {
             path,
             notebook: None,
@@ -69,7 +76,17 @@ impl NotebookPreview {
             let parsed = parse.await;
             _ = this.update(cx, |this, cx| {
                 match parsed {
-                    Ok(notebook) => this.notebook = Some(Ok(notebook)),
+                    Ok(notebook) => {
+                        // Outputs still there keep their pictures (same
+                        // bytes, same cache entry).
+                        let kept: std::collections::HashSet<u64> =
+                            images(&notebook).map(|image| image.id()).collect();
+                        if let Some(Ok(old)) = this.notebook.replace(Ok(notebook)) {
+                            for image in images(&old).filter(|image| !kept.contains(&image.id())) {
+                                ph_ui::images::release_image(image.clone(), cx);
+                            }
+                        }
+                    }
                     // While typing, the last good notebook stays.
                     Err(err) if !matches!(this.notebook, Some(Ok(_))) => {
                         this.notebook = Some(Err(err.into()))
@@ -80,6 +97,27 @@ impl NotebookPreview {
             });
         }));
     }
+}
+
+/// Lets go of `notebook`'s output pictures.
+fn release_images(notebook: Notebook, cx: &mut gpui_kit::App) {
+    for image in images(&notebook) {
+        ph_ui::images::release_image(image.clone(), cx);
+    }
+}
+
+/// `notebook`'s output pictures.
+fn images(notebook: &Notebook) -> impl Iterator<Item = &Arc<Image>> {
+    notebook.cells.iter().flat_map(|cell| match cell {
+        Cell::Code { outputs, .. } => outputs
+            .iter()
+            .filter_map(|output| match output {
+                Output::Image { image, .. } => Some(image),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    })
 }
 
 /// A notebook's text: `source` is a string or a list of lines.

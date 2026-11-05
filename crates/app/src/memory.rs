@@ -16,8 +16,30 @@ const EVERY: Duration = Duration::from_secs(120);
 /// Time in the background before the deeper trim.
 const AWAY: Duration = Duration::from_secs(120);
 const TICK: Duration = Duration::from_secs(30);
+/// How long after pictures are let go their memory is handed back (more
+/// may follow: a closed tab lets several go).
+const SOON: Duration = Duration::from_secs(2);
 
 pub fn start(cx: &mut App) {
+    // Pictures let go (a closed PDF or image) hand their memory back a
+    // moment later, not at the next round.
+    let pending = std::rc::Rc::new(std::cell::Cell::new(false));
+    cx.set_global(ph_ui::images::MemoryTrim(std::rc::Rc::new(
+        move |cx: &mut App| {
+            if pending.replace(true) {
+                return;
+            }
+            let pending = pending.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(SOON).await;
+                pending.set(false);
+                cx.background_executor()
+                    .spawn(async move { release_free_memory(false) })
+                    .await;
+            })
+            .detach();
+        },
+    )));
     cx.spawn(async move |cx| {
         let (mut since_trim, mut away) = (Duration::ZERO, Duration::ZERO);
         loop {

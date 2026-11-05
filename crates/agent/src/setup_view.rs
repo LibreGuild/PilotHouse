@@ -9,8 +9,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClipboardItem, ElementId, IntoElement, ParentElement as _, SharedString,
-    Styled as _, div,
+    AnyElement, App, ElementId, IntoElement, ParentElement as _, SharedString, Styled as _, div,
 };
 
 use crate::agents::AgentSpec;
@@ -131,17 +130,9 @@ fn row(spec: &AgentSpec, ix: usize, check: &Check, cx: &App) -> AnyElement {
                                     .child(command.clone()),
                             )
                             .child(
-                                Button::new(id("copy"))
+                                ph_ui::CopyButton::new(id("copy"), copy.clone())
                                     .small()
-                                    .ghost()
-                                    .icon(IconName::Copy)
-                                    .tooltip("Copy command")
-                                    .accessibility_label("Copy command")
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copy.clone(),
-                                        ))
-                                    }),
+                                    .tooltip("Copy command"),
                             )
                             .into_any_element()
                     }

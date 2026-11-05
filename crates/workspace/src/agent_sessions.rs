@@ -209,6 +209,11 @@ fn gemini_sessions(cwd: &Path) -> Vec<PastSession> {
     let gemini = shell_var("GEMINI_CLI_HOME")
         .unwrap_or_else(home)
         .join(".gemini");
+    gemini_sessions_at(&gemini, cwd)
+}
+
+/// [`gemini_sessions`] with Gemini's folder `gemini`.
+fn gemini_sessions_at(gemini: &Path, cwd: &Path) -> Vec<PastSession> {
     let Some(projects) = std::fs::read_to_string(gemini.join("projects.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
@@ -238,6 +243,7 @@ fn gemini_sessions(cwd: &Path) -> Vec<PastSession> {
                 .iter()
                 .find_map(|row| row["sessionId"].as_str())?
                 .to_string();
+            // Messages come one per row (newer versions), or as a list.
             let title = rows
                 .iter()
                 .flat_map(|row| {
@@ -245,7 +251,7 @@ fn gemini_sessions(cwd: &Path) -> Vec<PastSession> {
                         .as_array()
                         .or_else(|| row["messages"].as_array())
                         .cloned()
-                        .unwrap_or_default()
+                        .unwrap_or_else(|| vec![row.clone()])
                 })
                 .filter(|message| message["type"] == "user")
                 .find_map(|message| {
@@ -492,5 +498,41 @@ mod tests {
         std::fs::write(&empty, r#"{"type":"mode","mode":"normal"}"#).unwrap();
         assert_eq!(title_of(&empty), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod gemini_tests {
+    use super::*;
+
+    #[test]
+    fn gemini_sessions_with_a_message_per_row() {
+        let gemini = std::env::temp_dir().join(format!("ph-gemini-{}", std::process::id()));
+        let chats = gemini.join("tmp/proj/chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        std::fs::write(
+            gemini.join("projects.json"),
+            r#"{"projects": {"/work/proj": "proj"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            chats.join("session-2026-11-01T10-00-abc.jsonl"),
+            concat!(
+                r#"{"sessionId":"abc","kind":"main"}"#,
+                "\n",
+                r#"{"id":"1","type":"user","content":[{"text":"<session_context>x</session_context>"}]}"#,
+                "\n",
+                r#"{"$set":{"lastUpdated":"2026-11-01T10:00:00Z"}}"#,
+                "\n",
+                r#"{"id":"2","type":"user","content":[{"text":"Fix the login bug"}]}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let found = gemini_sessions_at(&gemini, Path::new("/work/proj"));
+        std::fs::remove_dir_all(&gemini).ok();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "abc");
+        assert_eq!(found[0].title, "Fix the login bug");
     }
 }

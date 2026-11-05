@@ -135,25 +135,43 @@ impl DeviceManager {
         Ok(name)
     }
 
-    /// Erases an emulator's data; it must be stopped. Returns bytes freed.
-    pub fn wipe_avd(&mut self, avd: &str) -> Result<u64> {
+    /// Erases an emulator's data (gigabytes of disk images: off the UI
+    /// thread); it must be stopped. Returns bytes freed.
+    pub fn wipe_avd(&mut self, avd: &str, cx: &mut Context<Self>) -> Task<Result<u64>> {
         if self.is_running(avd) {
-            bail!("Stop {} before wiping it.", avd.replace('_', " "));
+            let message = format!("Stop {} before wiping it.", avd.replace('_', " "));
+            return Task::ready(Err(anyhow::anyhow!(message)));
         }
-        let home = crate::avd::avd_home().context("could not find the AVD folder")?;
-        crate::avd::wipe(&home, avd)
+        let avd = avd.to_string();
+        cx.background_spawn(async move {
+            let home = crate::avd::avd_home().context("could not find the AVD folder")?;
+            crate::avd::wipe(&home, &avd)
+        })
     }
 
-    /// Removes an emulator and its disks; it must be stopped.
-    pub fn delete_avd(&mut self, avd: &str, cx: &mut Context<Self>) -> Result<()> {
+    /// Removes an emulator and its disks (off the UI thread); it must be
+    /// stopped.
+    pub fn delete_avd(&mut self, avd: &str, cx: &mut Context<Self>) -> Task<Result<()>> {
         if self.is_running(avd) {
-            bail!("Stop {} before deleting it.", avd.replace('_', " "));
+            let message = format!("Stop {} before deleting it.", avd.replace('_', " "));
+            return Task::ready(Err(anyhow::anyhow!(message)));
         }
-        let home = crate::avd::avd_home().context("could not find the AVD folder")?;
-        crate::avd::delete(&home, avd)?;
-        self.avds.retain(|known| known != avd);
-        self.refresh_avds(cx);
-        Ok(())
+        let avd = avd.to_string();
+        let delete = {
+            let avd = avd.clone();
+            cx.background_spawn(async move {
+                let home = crate::avd::avd_home().context("could not find the AVD folder")?;
+                crate::avd::delete(&home, &avd)
+            })
+        };
+        cx.spawn(async move |this, cx| {
+            delete.await?;
+            _ = this.update(cx, |this, cx| {
+                this.avds.retain(|known| *known != avd);
+                this.refresh_avds(cx);
+            });
+            Ok(())
+        })
     }
 
     pub fn booting(&self) -> &[String] {

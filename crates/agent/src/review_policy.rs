@@ -30,9 +30,22 @@ const GIT: &[&str] = &[
 /// works in): reading or searching files there, or a read-only command.
 pub fn allows(kind: Option<ToolKind>, raw_input: Option<&Value>, root: &Path) -> bool {
     match kind {
-        Some(ToolKind::Read | ToolKind::Search | ToolKind::Think) => paths_of(raw_input)
-            .iter()
-            .all(|path| inside(root, root, path)),
+        // A read names what it reads: one that names nothing asks.
+        Some(ToolKind::Read) => {
+            let paths = paths_of(raw_input);
+            !paths.is_empty() && paths.iter().all(|path| inside(root, root, path))
+        }
+        // A search without a folder searches the chat's own; a pattern
+        // that starts from a root (`/Users/me/.ssh/*`) leaves it.
+        Some(ToolKind::Search | ToolKind::Think) => {
+            paths_of(raw_input)
+                .iter()
+                .all(|path| inside(root, root, path))
+                && patterns_of(raw_input).iter().all(|pattern| {
+                    !(pattern.starts_with('~') || rooted(Path::new(pattern)))
+                        || inside(root, root, pattern)
+                })
+        }
         Some(ToolKind::Execute) => {
             command(raw_input).is_some_and(|command| read_only_command(&command, root))
         }
@@ -83,6 +96,18 @@ fn paths_of(raw_input: Option<&Value>) -> Vec<String> {
     paths
 }
 
+/// The glob or search patterns a search names (a glob can name a folder).
+fn patterns_of(raw_input: Option<&Value>) -> Vec<String> {
+    let Some(input) = raw_input else {
+        return Vec::new();
+    };
+    ["pattern", "glob", "include"]
+        .iter()
+        .filter_map(|key| input.get(*key).and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
 /// `path` (from folder `cwd`) worked out without the file system (`.` and
 /// `..` followed): None when it climbs above the top.
 fn resolve(cwd: &Path, path: &str) -> Option<PathBuf> {
@@ -118,9 +143,27 @@ fn rooted(path: &Path) -> bool {
         .is_some_and(|part| matches!(part, Component::Prefix(_) | Component::RootDir))
 }
 
-/// Whether `path` (from `cwd`) is `root` or inside it.
+/// Whether `path` (from `cwd`) is `root` or inside it, also once links are
+/// followed (a pull request can commit `docs -> /Users/me`).
 fn inside(root: &Path, cwd: &Path, path: &str) -> bool {
-    resolve(cwd, path).is_some_and(|path| path.starts_with(root))
+    resolve(cwd, path).is_some_and(|path| path.starts_with(root) && really_inside(root, &path))
+}
+
+/// Whether the deepest part of `path` that exists is, with links followed,
+/// inside `root` (as it really is).
+fn really_inside(root: &Path, path: &Path) -> bool {
+    let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut probe = path.to_path_buf();
+    // Within the folder only: above it is where the folder itself lives.
+    while probe.starts_with(root) {
+        if let Ok(real) = std::fs::canonicalize(&probe) {
+            return real.starts_with(&real_root);
+        }
+        if !probe.pop() {
+            break;
+        }
+    }
+    true
 }
 
 /// Folders a program may be named from: the system's, never the project's
@@ -266,7 +309,9 @@ pub fn read_only_command(command: &str, root: &Path) -> bool {
             let [_, target] = words.as_slice() else {
                 return false;
             };
-            match resolve(&cwd, target).filter(|path| path.starts_with(root)) {
+            match resolve(&cwd, target)
+                .filter(|path| path.starts_with(root) && really_inside(root, path))
+            {
                 Some(path) => cwd = path,
                 None => return false,
             }
@@ -322,6 +367,16 @@ fn single_command(words: &[String], root: &Path, cwd: &Path) -> bool {
     if !PROGRAMS.contains(&name) {
         return false;
     }
+    // Windows shells look in the current folder first: a pull request's
+    // own `git.bat` would run instead.
+    if cfg!(windows)
+        && program == name
+        && ["exe", "bat", "cmd", "com"]
+            .iter()
+            .any(|ext| cwd.join(format!("{name}.{ext}")).exists())
+    {
+        return false;
+    }
     // Paths it names stay in the folder (a value after `=` too).
     let outside = rest.iter().any(|arg| {
         let value = if arg.starts_with('-') {
@@ -332,9 +387,9 @@ fn single_command(words: &[String], root: &Path, cwd: &Path) -> bool {
         } else {
             arg.as_str()
         };
-        let path = Path::new(value);
-        (rooted(path) || path.components().any(|part| part == Component::ParentDir))
-            && !inside(root, cwd, value)
+        // Every word that could be a path: through a link committed in the
+        // folder, a plain name can lead out of it too.
+        !inside(root, cwd, value)
     });
     if outside {
         return false;
@@ -368,18 +423,20 @@ fn single_command(words: &[String], root: &Path, cwd: &Path) -> bool {
                 && !has_option(&rest[ix..], GIT_DENIED)
         }
         // `--pre` runs a program on every file searched, `--hostname-bin`
-        // one for links.
-        "rg" => !has_option(rest, &["--pre", "--hostname-bin"]),
+        // one for links. Following links (here and below) could leave the
+        // folder through one a pull request committed.
+        "rg" => !has_option(rest, &["--pre", "--hostname-bin", "-L", "--follow"]),
+        "grep" => !has_option(rest, &["-R", "--dereference-recursive"]),
         "find" => !has_option(
             rest,
             &[
                 "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf",
-                "-fls",
+                "-fls", "-L", "-follow",
             ],
         ),
         // `tree -o file` writes the listing to a file, `-R` with `-H`
-        // writes one in every folder.
-        "tree" => !has_option(rest, &["-o", "-R"]),
+        // writes one in every folder; `-l` follows links.
+        "tree" => !has_option(rest, &["-o", "-R", "-l"]),
         // Following a file never ends.
         "tail" => !has_option(rest, &["-f", "-F", "--follow", "--retry"]),
         _ => true,
@@ -435,8 +492,14 @@ pub fn is_app_tool(kind: Option<ToolKind>, title: &str, raw_input: Option<&Value
     .into_iter()
     .flatten()
     .any(|name| app_tool(&name.replace(' ', "_")));
+    // Only an input that is exactly a server, a tool and its arguments: a
+    // model can add `server` and `tool` to another tool's own arguments.
     let structured = raw_input.is_some_and(|input| {
-        input.get("server").and_then(Value::as_str) == Some("pilothouse")
+        input.as_object().is_some_and(|fields| {
+            fields
+                .keys()
+                .all(|key| matches!(key.as_str(), "server" | "tool" | "arguments"))
+        }) && input.get("server").and_then(Value::as_str) == Some("pilothouse")
             && input
                 .get("tool")
                 .and_then(Value::as_str)
@@ -447,6 +510,35 @@ pub fn is_app_tool(kind: Option<ToolKind>, title: &str, raw_input: Option<&Value
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn links_out_of_the_folder_ask() {
+        let dir = std::env::temp_dir().join(format!("ph-policy-{}", std::process::id()));
+        let (root, outside) = (dir.join("pr"), dir.join("home"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(outside.join(".ssh")).unwrap();
+        std::fs::write(outside.join(".ssh/key"), "secret").unwrap();
+        std::fs::write(root.join("README.md"), "hi").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("docs")).unwrap();
+        let read = |path: &str| {
+            allows(
+                Some(ToolKind::Read),
+                Some(&json!({ "file_path": path })),
+                &root,
+            )
+        };
+        let results = (
+            read(&root.join("README.md").to_string_lossy()),
+            read(&root.join("docs/.ssh/key").to_string_lossy()),
+            read_only_command("cat docs/.ssh/key", &root),
+            read_only_command("cd docs && cat .ssh/key", &root),
+            read_only_command("cat README.md", &root),
+            allows(Some(ToolKind::Read), Some(&json!({})), &root),
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(results, (true, false, false, false, true, false));
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -462,7 +554,9 @@ mod tests {
         assert!(read_only_command_here("git --no-pager log -5 --oneline"));
         assert!(!read_only_command_here("git -C sub status"));
         assert!(read_only_command_here("rg -n retry src"));
-        assert!(read_only_command_here("/usr/bin/grep -R TODO ."));
+        assert!(read_only_command_here("/usr/bin/grep -r TODO ."));
+        assert!(!read_only_command_here("/usr/bin/grep -R TODO ."));
+        assert!(!read_only_command_here("rg --follow key ."));
         assert!(!read_only_command_here("git push origin main"));
         assert!(!read_only_command_here("git diff --output=/tmp/x"));
         assert!(!read_only_command_here("rm -rf src"));
@@ -527,7 +621,19 @@ mod tests {
         assert!(allows(Some(ToolKind::Execute), Some(&input), root));
         // A title can be shortened: what runs is not known, so it asks.
         assert!(!allows(Some(ToolKind::Execute), None, root));
-        assert!(allows(Some(ToolKind::Read), None, root));
+        // A read that names no path asks too; a search without a folder
+        // searches the chat's own, but not a pattern from a root.
+        assert!(!allows(Some(ToolKind::Read), None, root));
+        assert!(allows(
+            Some(ToolKind::Search),
+            Some(&json!({"pattern": "fn main"})),
+            root
+        ));
+        assert!(!allows(
+            Some(ToolKind::Search),
+            Some(&json!({"pattern": "/Users/me/.ssh/*"})),
+            root
+        ));
         assert!(allows(
             Some(ToolKind::Read),
             Some(&json!({ "path": "/work/pr/src/a.rs" })),

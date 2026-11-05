@@ -87,7 +87,7 @@ impl PdfView {
         // Closing the tab lets the drawn pages' textures go.
         cx.on_release(|this, cx| {
             for (_, (_, image)) in this.drawn.drain() {
-                cx.drop_image(image, None);
+                ph_ui::images::release_render_image(image, cx);
             }
         })
         .detach();
@@ -110,7 +110,7 @@ impl PdfView {
     /// Lets go of every drawn page (and its GPU texture).
     fn forget_drawn(&mut self, cx: &mut Context<Self>) {
         for (_, (_, image)) in self.drawn.drain() {
-            cx.drop_image(image, None);
+            ph_ui::images::release_render_image(image, cx);
         }
         self.drawing.clear();
         self._draw.clear();
@@ -176,7 +176,7 @@ impl PdfView {
                     this.drawing.remove(&page);
                     if let Some(image) = drawn {
                         if let Some((_, old)) = this.drawn.insert(page, (width, image)) {
-                            cx.drop_image(old, None);
+                            ph_ui::images::release_render_image(old, cx);
                         }
                         this.keep_near(page, cx);
                     }
@@ -203,7 +203,7 @@ impl PdfView {
             }
             if let Some((_, image)) = self.drawn.remove(&other) {
                 total -= bytes(&image);
-                cx.drop_image(image, None);
+                ph_ui::images::release_render_image(image, cx);
             }
         }
     }

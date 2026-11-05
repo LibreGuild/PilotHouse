@@ -337,16 +337,40 @@ pub fn apply_edit(
     }
     let mut open_result = None;
     let files = by_file.len();
+    // Every file is read and changed first, so one that cannot be read
+    // stops the rename before anything is written.
+    let mut writes = Vec::new();
     for (path, edits) in by_file {
         if same_file(&path, open_path) {
             open_result = Some(apply_text_edits(open_text.clone(), edits));
         } else {
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
-            let updated = apply_text_edits(Rope::from(text.as_str()), edits);
-            std::fs::write(&path, updated)
-                .with_context(|| format!("writing {}", path.display()))?;
+            writes.push((path, apply_text_edits(Rope::from(text.as_str()), edits)));
         }
+    }
+    // Each written whole (a temporary file renamed over it): a failure
+    // never leaves a file half written.
+    for (path, updated) in writes {
+        // The file a link points at, so the link stays one.
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let temporary = path.with_file_name(format!(
+            ".{}.rename-{}",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id()
+        ));
+        std::fs::write(&temporary, updated)
+            .and_then(|()| {
+                // Keep the file's permissions (an executable script).
+                if let Ok(metadata) = std::fs::metadata(&path) {
+                    let _ = std::fs::set_permissions(&temporary, metadata.permissions());
+                }
+                std::fs::rename(&temporary, &path)
+            })
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&temporary);
+            })
+            .with_context(|| format!("writing {}", path.display()))?;
     }
     Ok((open_result, files))
 }

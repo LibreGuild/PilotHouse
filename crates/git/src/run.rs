@@ -11,7 +11,24 @@ use anyhow::{Context as _, Result, bail};
 /// are per driver, so every call that shows content passes `--no-textconv`
 /// and `--no-ext-diff` (see the test below). Opening a project should never
 /// execute code from it.
-const SAFE_CONFIG: &[&str] = &["-c", "core.fsmonitor=false", "-c", "diff.external="];
+///
+/// `log.showSignature` would run `gpg.program` on signed commits (and mix
+/// its output into the log). The path settings keep diffs as PilotHouse
+/// reads them: names as written (not C-quoted), with `a/` and `b/`.
+const SAFE_CONFIG: &[&str] = &[
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "diff.external=",
+    "-c",
+    "log.showSignature=false",
+    "-c",
+    "core.quotePath=false",
+    "-c",
+    "diff.noprefix=false",
+    "-c",
+    "diff.mnemonicPrefix=false",
+];
 
 /// Put first in the arguments of a call naming one file: the path is that
 /// name, never a pattern (discarding a file named `[a].rs` leaves `a.rs` alone).
@@ -145,7 +162,7 @@ mod tests {
         crate::blame::blame(&root, "README.md").unwrap();
         crate::stash::push(&root, "work").unwrap();
         crate::stash::show(&root, 0).unwrap();
-        crate::stash::pop(&root, 0).unwrap();
+        crate::stash::pop(&root, 0, "").unwrap();
         run(&["add", "README.md"]);
         crate::status::staged_diff(&root).unwrap();
         let head = run(&["rev-parse", "HEAD"]);

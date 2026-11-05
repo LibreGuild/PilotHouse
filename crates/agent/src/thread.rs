@@ -758,7 +758,9 @@ impl ChatThread {
             },
             cx,
         );
-        self.persist(cx);
+        // Not stored yet: the turn's own entries above it still change
+        // (tools finish, the plan moves on), and what is stored is not
+        // written again. The turn's end stores them all as they ended.
         let ready = connection.read(cx).ready();
         let params = json!({
             "sessionId": session_id,
@@ -778,7 +780,7 @@ impl ChatThread {
             _ = this.update(cx, |this, cx| match result {
                 Ok(reply) if reply["outcome"] == "promptRequired" => {
                     // The turn ended meanwhile: send it as the next prompt.
-                    // Its message is in the transcript (and stored) already.
+                    // Its message is in the transcript already.
                     this.queued.push_front(QueuedPrompt {
                         shown_at: Some(user_ix),
                         ..next
@@ -1384,11 +1386,13 @@ impl ChatThread {
             .unwrap_or_else(|| "Use a tool".to_string());
         // A review, a quick question or a GitHub chat only reads: let it,
         // without waking anyone up.
-        if self.review_id.is_some()
+        // App tools allowed for the turn (or always, in Studio) run too.
+        let reads_only = self.review_id.is_some()
             || self.review_turn.is_some()
             || self.reads_this_turn
-            || self.project.read_only
-        {
+            || self.project.read_only;
+        let app_tools = self.app_tools_this_turn || self.app_tools_always;
+        if reads_only || app_tools {
             let known =
                 self.tool_index(&request.tool_call.tool_call_id.0)
                     .and_then(|ix| match &self.entries[ix] {
@@ -1423,8 +1427,9 @@ impl ChatThread {
             let escalates = title.contains("with every permission");
             if let Some(allow) = allow
                 && !escalates
-                && (crate::review_policy::allows(kind, raw_input.as_ref(), &self.project.path)
-                    || ((self.app_tools_this_turn || self.app_tools_always)
+                && ((reads_only
+                    && crate::review_policy::allows(kind, raw_input.as_ref(), &self.project.path))
+                    || (app_tools
                         && crate::review_policy::is_app_tool(kind, &title, raw_input.as_ref())))
             {
                 respond(Some(allow.option_id.0.to_string()), cx);
@@ -1766,18 +1771,21 @@ impl ChatThread {
     /// carries on by itself after background work. Shown as working until it
     /// goes quiet.
     fn start_background(&mut self, cx: &mut Context<Self>) {
+        self.start_background_from(self.entries.len(), cx)
+    }
+
+    /// [`Self::start_background`], counting tools from entry `started` on as
+    /// work still going.
+    fn start_background_from(&mut self, started: usize, cx: &mut Context<Self>) {
         self.background = true;
         self.status = ThreadStatus::Working;
         self.turn_started = Some(Instant::now());
-        let started = self.entries.len();
         self._quiet = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let done = this.update(cx, |this, cx| {
                     let quiet = this.last_update.elapsed();
-                    let running = this.entries[started.min(this.entries.len())..]
-                        .iter()
-                        .any(|entry| matches!(entry, Entry::Tool(tool) if tool.is_running()));
+                    let running = this.tools_running_from(started);
                     let done = !this.background
                         || (quiet > BACKGROUND_QUIET && !running)
                         || quiet > BACKGROUND_SILENT;
@@ -1810,8 +1818,29 @@ impl ChatThread {
         }
     }
 
+    /// Whether a tool (or a subagent's step) from entry `from` on still runs.
+    fn tools_running_from(&self, from: usize) -> bool {
+        self.entries[from.min(self.entries.len())..]
+            .iter()
+            .any(|entry| matches!(entry, Entry::Tool(tool) if tool.is_busy()))
+    }
+
     fn finish_turn(&mut self, result: Result<StopReason, SharedString>, cx: &mut Context<Self>) {
-        cx.emit(ThreadEvent::TurnEnded);
+        // The reply ended, but subagents or tools sent to the background
+        // still work (Claude Code): the chat stays at work, and is done
+        // only once they are, so "finished" is not said too early.
+        let turn_start = self
+            .entries
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::User { .. }))
+            .unwrap_or(0);
+        let carries_on = matches!(result, Ok(StopReason::EndTurn))
+            && self.agent.id == "claude"
+            && self.connection.is_some()
+            && self.tools_running_from(turn_start);
+        if !carries_on {
+            cx.emit(ThreadEvent::TurnEnded);
+        }
         self.status = ThreadStatus::Idle;
         self.turn_started = None;
         // The working row goes and the turn's summary comes.
@@ -1851,6 +1880,14 @@ impl ChatThread {
                 self.push(notice(&text, true), cx);
             }
         }
+        if carries_on {
+            // Stored when the work ends, as it ended (what is stored is not
+            // written again: a tool stored running would stay running).
+            // Queued messages wait for it too.
+            cx.notify();
+            self.start_background_from(turn_start, cx);
+            return;
+        }
         self.persist(cx);
         cx.notify();
         // Messages written meanwhile go next: after a finished turn, or at
@@ -1868,6 +1905,11 @@ impl ChatThread {
     }
 
     /// Writes entries that are not stored yet (drafts store nothing).
+    /// Stores what is not stored yet (the app quits mid-turn).
+    pub(crate) fn persist_now(&mut self, cx: &mut Context<Self>) {
+        self.persist(cx);
+    }
+
     fn persist(&mut self, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;

@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use gpui_kit::AppContext as _;
 use gpui_kit::base::text::{MarkdownNode, TextView, markdown_ast};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -37,6 +38,7 @@ pub fn markdown_view(
     let images = dir.clone();
     TextView::markdown(id, text)
         .selectable(true)
+        .code_block_actions(ph_ui::markdown::code_actions)
         .image_source(move |uri: &SharedUri| resolve_image(&images, uri))
         .on_link_click(move |url, _, window, cx| match local_target(&dir, url) {
             Some(path) => open(path, window, cx),
@@ -113,15 +115,21 @@ pub fn markdown_view(
 /// beside the document. Other web schemes and files on other computers are
 /// not loaded (an image that does not load shows nothing).
 fn resolve_image(dir: &Path, uri: &SharedUri) -> ImageSource {
+    // Through a loader that refuses drawings that would read files.
+    match image_target(dir, uri) {
+        Some(resource) => ph_ui::images_safe::source(resource),
+        None => refused_image(),
+    }
+}
+
+/// Where a document picture is read from, if it may be.
+fn image_target(dir: &Path, uri: &SharedUri) -> Option<gpui_kit::Resource> {
     let text = uri.as_ref();
     let lower = text.to_ascii_lowercase();
     if lower.starts_with("https://") || lower.starts_with("data:") {
-        return ImageSource::from(uri.clone());
+        return Some(gpui_kit::Resource::Uri(uri.clone()));
     }
-    match local_path(dir, text) {
-        Some(path) => ImageSource::from(path),
-        None => refused_image(),
-    }
+    local_path(dir, text).map(|path| gpui_kit::Resource::Path(path.into()))
 }
 
 /// An image that is not loaded: it shows nothing, quietly.
@@ -186,15 +194,21 @@ fn tidy(path: &Path) -> PathBuf {
     tidy
 }
 
-fn percent_decode(text: &str) -> String {
+pub(crate) fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut ix = 0;
     while ix < bytes.len() {
+        // By bytes: `%` before a multi-byte character is not an escape (and
+        // slicing the text there would split the character).
+        let hex = |byte: u8| (byte as char).to_digit(16);
         if bytes[ix] == b'%'
-            && ix + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(&text[ix + 1..ix + 3], 16)
+            && let (Some(high), Some(low)) = (
+                bytes.get(ix + 1).copied().and_then(hex),
+                bytes.get(ix + 2).copied().and_then(hex),
+            )
         {
+            let byte = (high * 16 + low) as u8;
             out.push(byte);
             ix += 3;
             continue;
@@ -205,12 +219,87 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// A long document cut into pieces that render alone as they do in the
+/// whole: a list or a quote stays one piece (its items keep their spacing
+/// and nesting), and a piece using `[text][label]` links or `[^note]`s
+/// gets the definitions it uses.
+fn chunks(text: &str) -> Vec<String> {
+    use crate::rich::blocks::{Document, Kind};
+    let document = Document::parse(text);
+    let mut chunks: Vec<String> = Vec::new();
+    if !document.leading.trim().is_empty() {
+        chunks.push(document.leading.clone());
+    }
+    let family = |kind: &Kind| {
+        if kind.is_list() {
+            1
+        } else if *kind == Kind::Quote {
+            2
+        } else {
+            0
+        }
+    };
+    let mut last_family = 0;
+    let mut gap = String::new();
+    for block in &document.blocks {
+        let this = family(&block.kind);
+        match chunks.last_mut() {
+            Some(chunk) if this != 0 && this == last_family => {
+                chunk.push_str(&gap);
+                chunk.push_str(&block.source());
+            }
+            _ => chunks.push(block.source()),
+        }
+        last_family = this;
+        gap = block.gap.clone();
+    }
+    // Definitions (`[label]: url`, `[^note]: text`) wherever they are used.
+    let definitions: Vec<(String, &str)> = text
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim_start().strip_prefix('[')?;
+            let (label, after) = rest.split_once("]:")?;
+            (!label.is_empty() && !after.trim().is_empty())
+                .then(|| (format!("[{}]", label.to_lowercase()), line))
+        })
+        .collect();
+    if !definitions.is_empty() {
+        for chunk in &mut chunks {
+            let lower = chunk.to_lowercase();
+            let used: Vec<&str> = definitions
+                .iter()
+                .filter(|(label, line)| lower.contains(label.as_str()) && !chunk.contains(line))
+                .map(|(_, line)| *line)
+                .collect();
+            if !used.is_empty() {
+                chunk.push_str("\n\n");
+                chunk.push_str(&used.join("\n"));
+            }
+        }
+    }
+    chunks
+}
+
 /// A Markdown file, rendered.
 pub struct MarkdownPreview {
     path: PathBuf,
     text: SharedString,
     scroll: ScrollHandle,
+    /// A long document, shown a block at a time as a virtual list (its
+    /// top-level blocks, each rendered on its own): laying out every
+    /// paragraph of a book on each frame froze the app.
+    long: Option<LongDocument>,
+    _parse: Option<gpui_kit::Task<()>>,
 }
+
+/// The blocks of a long document and the list showing them.
+struct LongDocument {
+    blocks: Vec<SharedString>,
+    list: gpui_kit::ListState,
+}
+
+/// Past this size a document is shown as a list of blocks.
+const LONG: usize = 64 * 1024;
 
 impl EventEmitter<PreviewEvent> for MarkdownPreview {}
 
@@ -220,12 +309,104 @@ impl MarkdownPreview {
             path,
             text: SharedString::default(),
             scroll: ScrollHandle::new(),
+            long: None,
+            _parse: None,
         }
     }
 
     pub fn set_text(&mut self, text: Arc<str>, cx: &mut Context<Self>) {
-        self.text = text.to_string().into();
-        cx.notify();
+        crate::mermaid::release_evicted(cx);
+        if text.len() <= LONG {
+            // Each line of a paragraph on its own line, as typed.
+            self.text = ph_ui::markdown::keep_line_breaks(&text).into();
+            self.long = None;
+            self._parse = None;
+            cx.notify();
+            return;
+        }
+        // Split into blocks off the UI thread.
+        let parse = cx.background_spawn(async move {
+            chunks(&text)
+                .into_iter()
+                .map(|chunk| ph_ui::markdown::keep_line_breaks(&chunk).into())
+                .collect::<Vec<SharedString>>()
+        });
+        self._parse = Some(cx.spawn(async move |this, cx| {
+            let blocks = parse.await;
+            _ = this.update(cx, |this, cx| {
+                this.text = SharedString::default();
+                match &mut this.long {
+                    Some(long) => {
+                        // Only the blocks that changed are measured again.
+                        let same_start = long
+                            .blocks
+                            .iter()
+                            .zip(&blocks)
+                            .take_while(|(a, b)| a == b)
+                            .count();
+                        let (old, new) = (long.blocks.len(), blocks.len());
+                        let same_end = long
+                            .blocks
+                            .iter()
+                            .rev()
+                            .zip(blocks.iter().rev())
+                            .take(old.min(new) - same_start)
+                            .take_while(|(a, b)| a == b)
+                            .count();
+                        long.list
+                            .splice(same_start..old - same_end, new - same_end - same_start);
+                        long.blocks = blocks;
+                    }
+                    None => {
+                        let list = gpui_kit::ListState::new(
+                            blocks.len(),
+                            gpui_kit::ListAlignment::Top,
+                            px(1000.),
+                        );
+                        this.long = Some(LongDocument { blocks, list });
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// A long document: its blocks in a virtual list.
+    fn render_long(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let long = self.long.as_ref()?;
+        let dark = cx.theme().is_dark();
+        Some(
+            gpui_kit::list(
+                long.list.clone(),
+                cx.processor(move |this, ix: usize, _, cx| {
+                    let Some(block) = this
+                        .long
+                        .as_ref()
+                        .and_then(|long| long.blocks.get(ix).cloned())
+                    else {
+                        return div().into_any_element();
+                    };
+                    let view = markdown_view(
+                        ("markdown-block", ix),
+                        block,
+                        &this.path,
+                        dark,
+                        opener(cx.weak_entity()),
+                    );
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(div().w_full().max_w(px(READING_WIDTH)).px_8().child(view))
+                        .into_any_element()
+                }),
+            )
+            .size_full()
+            .pt_6()
+            .pb_6()
+            .bg(cx.theme().background)
+            .into_any_element(),
+        )
     }
 }
 
@@ -245,8 +426,14 @@ pub(crate) fn opener<V: EventEmitter<PreviewEvent>>(
 
 impl Render for MarkdownPreview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(long) = self.render_long(cx) {
+            return long;
+        }
         let dark = cx.theme().is_dark();
         let empty = self.text.trim().is_empty();
+        if empty && self._parse.is_some() {
+            return crate::notice("Loading…", cx).into_any_element();
+        }
         let view = markdown_view(
             "markdown-preview",
             self.text.clone(),
@@ -273,12 +460,27 @@ impl Render for MarkdownPreview {
                     })
                     .when(!empty, |this| this.child(view)),
             )
+            .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_documents_cut_where_pieces_stand_alone() {
+        let text = "# Title\n\n- a\n  - nested\n- b\n\n> q1\n\nSee [docs][d].\n\n[d]: https://example.com\n";
+        let pieces = chunks(text);
+        assert_eq!(pieces[0], "# Title");
+        assert_eq!(pieces[1], "- a\n  - nested\n- b");
+        assert!(
+            pieces
+                .iter()
+                .any(|piece| piece.starts_with("See [docs][d].")
+                    && piece.contains("[d]: https://example.com"))
+        );
+    }
 
     #[test]
     fn links_to_files_open_them() {
@@ -307,12 +509,7 @@ mod tests {
         assert_eq!(local_path(dir, "//server/share/a.png"), None);
         assert_eq!(local_path(dir, "file:////server/share/a.png"), None);
         assert_eq!(local_path(dir, "%5C%5Cserver%5Cshare%5Ca.png"), None);
-        let refused = |uri: &str| {
-            matches!(
-                resolve_image(dir, &SharedUri::from(uri.to_string())),
-                ImageSource::Custom(_)
-            )
-        };
+        let refused = |uri: &str| image_target(dir, &SharedUri::from(uri.to_string())).is_none();
         assert!(refused("http://tracker.example/pixel.gif"));
         assert!(refused(r"\\server\share\a.png"));
         assert!(!refused("img/a.png"));
@@ -321,8 +518,10 @@ mod tests {
     #[test]
     fn images_resolve_beside_the_document() {
         let dir = Path::new("/work/docs");
-        let local = resolve_image(dir, &SharedUri::from("img/a%20b.png"));
-        assert!(matches!(local, ImageSource::Resource(_)));
+        let local = image_target(dir, &SharedUri::from("img/a%20b.png"));
+        assert!(matches!(local, Some(gpui_kit::Resource::Path(_))));
         assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("%aé.png"), "%aé.png");
+        assert_eq!(percent_decode("end%41"), "endA");
     }
 }

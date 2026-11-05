@@ -389,20 +389,55 @@ pub fn save(
     let mut theme = theme;
     theme.name = name.clone().into();
     theme.is_default = false;
-    let set = ThemeSet {
-        name: name.clone().into(),
-        themes: vec![theme],
-        ..Default::default()
-    };
-    let mut value = serde_json::to_value(&set)?;
+    let mut entry = serde_json::to_value(&theme)?;
     if let Some(terminal) = &terminal
-        && let Some(theme) = value["themes"].get_mut(0).and_then(Value::as_object_mut)
+        && let Some(entry) = entry.as_object_mut()
     {
-        theme.insert("terminal".into(), terminal_json(terminal));
+        entry.insert("terminal".into(), terminal_json(terminal));
     }
+    // A file holding other themes too (an imported set) keeps them: only
+    // this one's entry changes.
+    let shared = themes(cx)
+        .user
+        .iter()
+        .any(|known| known.path == path && known.config.name != name);
+    let value = match std::fs::read_to_string(&path)
+        .ok()
+        .filter(|_| shared)
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    {
+        Some(mut set) => {
+            let list = set["themes"]
+                .as_array_mut()
+                .context("the theme file has no themes")?;
+            match list
+                .iter_mut()
+                .find(|known| known["name"].as_str() == Some(name.as_str()))
+            {
+                Some(known) => *known = entry,
+                None => list.push(entry),
+            }
+            set
+        }
+        None => {
+            let mut set = serde_json::to_value(ThemeSet {
+                name: name.clone().into(),
+                ..Default::default()
+            })?;
+            set["themes"] = Value::Array(vec![entry]);
+            set
+        }
+    };
     let mut text = serde_json::to_string_pretty(&value)?;
     text.push('\n');
-    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    // Written whole: a temporary file renamed over it.
+    let temporary = path.with_extension("json.saving");
+    std::fs::write(&temporary, text)
+        .and_then(|()| std::fs::rename(&temporary, &path))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&temporary);
+        })
+        .with_context(|| format!("writing {}", path.display()))?;
     reload_user_themes(cx);
     find(&name, cx).context("the saved theme did not read back")
 }

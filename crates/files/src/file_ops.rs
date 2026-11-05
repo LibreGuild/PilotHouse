@@ -88,6 +88,18 @@ pub fn duplicate(path: &Path) -> Result<PathBuf> {
 /// taken gets a numbered "copy" name; a move onto a taken name is refused,
 /// as is putting a folder inside itself. Returns the new paths.
 pub fn paste(sources: &[PathBuf], dir: &Path, cut: bool) -> Result<Vec<PathBuf>> {
+    // A move is checked whole before anything moves: one refused halfway
+    // would leave the others moved and their open tabs on the old paths.
+    for source in sources {
+        if dir.starts_with(source) {
+            bail!("cannot put {} inside itself", source.display());
+        }
+        let name = file_name(source)?;
+        let to = dir.join(&name);
+        if cut && to != *source && to.symlink_metadata().is_ok() {
+            bail!("{name} already exists in {}", dir.display());
+        }
+    }
     let mut pasted = Vec::new();
     for source in sources {
         if dir.starts_with(source) {

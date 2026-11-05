@@ -214,6 +214,8 @@ fn add_todo(params: Value, cx: &mut App) -> Result<Value> {
         .get("remind_in_minutes")
         .and_then(Value::as_i64)
         .filter(|minutes| *minutes > 0)
+        // At most ten years ahead (an agent's number can be anything).
+        .map(|minutes| minutes.min(10 * 365 * 24 * 60))
         .map(|minutes| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

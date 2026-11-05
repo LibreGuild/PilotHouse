@@ -42,7 +42,7 @@ impl ChatHub {
         if let Some(chats) = Self::existing(project.id, cx) {
             return chats;
         }
-        let chats = cx.new(|_| WorkspaceChats::new(store.clone(), ThreadProject::of(project)));
+        let chats = cx.new(|cx| WorkspaceChats::new(store.clone(), ThreadProject::of(project), cx));
         cx.default_global::<Self>()
             .chats
             .insert(project.id, chats.clone());
@@ -138,8 +138,10 @@ pub struct WorkspaceChats {
     /// Counts uses, to know which kept chat was used least lately.
     uses: u64,
     /// Turn-end watches of chats started in the background (each fires
-    /// once: later turns are the user's).
-    _background: Vec<Subscription>,
+    /// once: later turns are the user's), until each ends.
+    _background: HashMap<SessionId, Subscription>,
+    /// Stores the chats' turns under way when the app quits.
+    _quit: Subscription,
     /// The workspace is shown in a window.
     on_screen: bool,
     /// Chats whose turn ended while it was not.
@@ -153,14 +155,23 @@ pub struct WorkspaceChats {
 impl EventEmitter<WorkspaceChatsEvent> for WorkspaceChats {}
 
 impl WorkspaceChats {
-    fn new(store: Store, project: ThreadProject) -> Self {
+    fn new(store: Store, project: ThreadProject, cx: &mut Context<Self>) -> Self {
+        // A turn is stored when it ends: one still going when the app
+        // quits keeps what was said and done so far.
+        let quit = cx.on_app_quit(|this: &mut Self, cx| {
+            for kept in this.threads.values() {
+                kept.thread.update(cx, |thread, cx| thread.persist_now(cx));
+            }
+            async {}
+        });
         Self {
+            _quit: quit,
             store,
             project,
             connections: HashMap::new(),
             threads: HashMap::new(),
             uses: 0,
-            _background: Vec::new(),
+            _background: HashMap::new(),
             on_screen: false,
             unseen: Vec::new(),
             viewing: None,
@@ -280,18 +291,18 @@ impl WorkspaceChats {
         {
             return connection.clone();
         }
-        // Someone else's code (a GitHub clone or a pull request's copy):
-        // the agent's launcher starts outside it, so its `.npmrc` or a
-        // vendored copy of the adapter never runs; each chat still works
-        // in the folder (the session's own folder).
-        let cwd =
-            if self.project.read_only || ph_store::paths::is_untrusted_copy(&self.project.path) {
-                let neutral = ph_store::paths::data_dir().join("agents");
-                let _ = std::fs::create_dir_all(&neutral);
-                neutral
-            } else {
-                self.project.path.clone()
-            };
+        // A copy PilotHouse made (a GitHub clone, a task folder that may
+        // hold a pull request author's tree): the agent's launcher starts
+        // outside it, so its `.npmrc` or a vendored copy of the adapter
+        // never runs; each chat still works in the folder (the session's
+        // own folder).
+        let cwd = if self.project.read_only || ph_store::paths::is_copy(&self.project.path) {
+            let neutral = ph_store::paths::data_dir().join("agents");
+            let _ = std::fs::create_dir_all(&neutral);
+            neutral
+        } else {
+            self.project.path.clone()
+        };
         let connection = cx.new(|cx| AgentConnection::start(spec, cwd, cx));
         self.connections.insert(spec.id, connection.clone());
         connection
@@ -318,7 +329,8 @@ impl WorkspaceChats {
         let session = thread.read(cx).session().map(|session| session.id)?;
         self.keep(session, thread.clone(), cx);
         let mut done = false;
-        self._background.push(
+        self._background.insert(
+            session,
             cx.subscribe(&thread, move |_, thread, event: &ThreadEvent, cx| {
                 // Only the scheduled turn: once the user replies in the chat,
                 // its turns are theirs, not the schedule's.
@@ -331,6 +343,13 @@ impl WorkspaceChats {
                         title: title.clone(),
                         reply: reply.chars().take(400).collect(),
                     });
+                    // Done listening (later, outside its own callback).
+                    cx.spawn(async move |this, cx| {
+                        _ = this.update(cx, |this: &mut Self, _| {
+                            this._background.remove(&session);
+                        });
+                    })
+                    .detach();
                 }
             }),
         );

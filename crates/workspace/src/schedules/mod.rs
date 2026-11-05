@@ -271,7 +271,7 @@ fn open_from_notification(tag: &str, cx: &mut App) {
             let _ = handle.update(cx, |_, window, cx| {
                 window.activate_window();
                 workspace.update(cx, |workspace, cx| {
-                    workspace.open_terminal_agent(project, &pane, window, cx)
+                    workspace.open_terminal_agent(project, &pane, false, window, cx)
                 });
             });
         }

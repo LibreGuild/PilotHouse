@@ -12,9 +12,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, ClipboardItem, Context, Entity, EventEmitter,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Task, Window, div,
+    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Task, Window, div,
 };
 use ph_store::Store;
 use ph_ui::Icons;
@@ -183,6 +183,11 @@ impl RunsPanel {
             &android,
             |_, _, event: &ph_devices::AndroidRunEvent, cx| match event {
                 ph_devices::AndroidRunEvent::Launched => cx.emit(RunsPanelEvent::ShowDevices),
+                ph_devices::AndroidRunEvent::ShowLog { command } => cx.emit(RunsPanelEvent::Run {
+                    name: "Build log".into(),
+                    command: command.clone(),
+                    cwd: None,
+                }),
             },
         )
         .detach();
@@ -337,7 +342,7 @@ impl RunsPanel {
         let Some(server) = self.server.clone() else {
             let url = port.url();
             if copy {
-                cx.write_to_clipboard(ClipboardItem::new_string(url));
+                ph_ui::copy_with_toast(url, "the address", cx);
             } else {
                 cx.emit(RunsPanelEvent::OpenUrl(url));
             }
@@ -361,7 +366,7 @@ impl RunsPanel {
                             format!("Port {number} on {host} is at 127.0.0.1:{local} here.").into(),
                         );
                         if copy {
-                            cx.write_to_clipboard(ClipboardItem::new_string(url));
+                            ph_ui::copy_with_toast(url, "the address", cx);
                         } else {
                             cx.emit(RunsPanelEvent::OpenUrl(url));
                         }

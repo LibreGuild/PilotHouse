@@ -11,9 +11,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Image, ImageFormat, InteractiveElement as _, IntoElement,
-    ObjectFit, ParentElement as _, Render, ScrollHandle, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, Window, div, img, px,
+    App, AppContext as _, Context, Image, ImageFormat, ImageSource, InteractiveElement as _,
+    IntoElement, ObjectFit, ParentElement as _, Render, RenderImage, ScrollEvent, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, Window,
+    div, img, px,
 };
 
 use crate::byte_size;
@@ -40,8 +41,48 @@ pub(crate) fn fits(width: u32, height: u32) -> bool {
     width <= MAX_SIDE && height <= MAX_SIDE && width as u64 * height as u64 <= MAX_PIXELS
 }
 
+/// A picture as it is drawn.
+#[derive(Clone)]
+enum Picture {
+    /// The file's bytes, decoded by GPUI.
+    Encoded(Arc<Image>),
+    /// Pixels decoded here, smaller than the file (a very large picture).
+    Drawn(Arc<RenderImage>),
+}
+
+impl Picture {
+    fn source(&self) -> ImageSource {
+        match self {
+            Picture::Encoded(image) => ImageSource::Image(image.clone()),
+            Picture::Drawn(image) => ImageSource::Render(image.clone()),
+        }
+    }
+
+    fn same(&self, other: &Picture) -> bool {
+        match (self, other) {
+            // The same bytes are the same picture to GPUI (one cache entry).
+            (Picture::Encoded(a), Picture::Encoded(b)) => a.id() == b.id(),
+            (Picture::Drawn(a), Picture::Drawn(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
+    /// Lets go of its pixels and textures.
+    fn release(self, cx: &mut App) {
+        match self {
+            Picture::Encoded(image) => ph_ui::images::release_image(image, cx),
+            Picture::Drawn(image) => ph_ui::images::release_render_image(image, cx),
+        }
+    }
+}
+
+/// Pictures larger than this many pixels are drawn at this size at most:
+/// a 50-megapixel photo takes 200 MB decoded, and as much again on the GPU,
+/// to be shown a pane wide.
+const DRAWN_SIDE: u32 = 4096;
+
 struct Loaded {
-    image: Arc<Image>,
+    image: Picture,
     /// Natural size in pixels.
     size: (f32, f32),
     /// "PNG · 245 KB".
@@ -80,7 +121,7 @@ impl ImagePreview {
         if let Some(old) = self.loaded.take()
             && old.info != "Mermaid diagram"
         {
-            old.image.remove_asset(cx);
+            old.image.release(cx);
         }
     }
 
@@ -109,7 +150,7 @@ impl ImagePreview {
     /// last good drawing, with the reason.
     pub fn set_svg(&mut self, text: Arc<str>, cx: &mut Context<Self>) {
         match svg_size(&text) {
-            _ if links_files(&text) => {
+            _ if ph_ui::images_safe::links_files(&text) => {
                 self.set_loaded(None, cx);
                 self.error =
                     Some("This drawing links to other files, so it is not drawn here.".into());
@@ -121,10 +162,10 @@ impl ImagePreview {
             Some(size) => {
                 self.set_loaded(
                     Some(Loaded {
-                        image: Arc::new(Image::from_bytes(
+                        image: Picture::Encoded(Arc::new(Image::from_bytes(
                             ImageFormat::Svg,
                             text.as_bytes().to_vec(),
-                        )),
+                        ))),
                         size,
                         info: format!("SVG · {}", byte_size(text.len() as u64)),
                     }),
@@ -140,7 +181,7 @@ impl ImagePreview {
     pub fn show_diagram(&mut self, diagram: Diagram, cx: &mut Context<Self>) {
         self.set_loaded(
             Some(Loaded {
-                image: diagram.image,
+                image: Picture::Encoded(diagram.image),
                 size: (diagram.width, diagram.height),
                 info: "Mermaid diagram".into(),
             }),
@@ -159,10 +200,10 @@ impl ImagePreview {
             && self
                 .loaded
                 .as_ref()
-                .is_none_or(|new| !Arc::ptr_eq(&new.image, &old.image))
+                .is_none_or(|new| !new.image.same(&old.image))
             && old.info != "Mermaid diagram"
         {
-            old.image.remove_asset(cx);
+            old.image.release(cx);
         }
     }
 
@@ -194,8 +235,8 @@ impl ImagePreview {
         )
     }
 
-    fn on_wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !event.modifiers.secondary() {
+    fn on_wheel(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !event.modifiers.secondary(cx) {
             return;
         }
         let delta = f32::from(event.delta.pixel_delta(window.line_height()).y);
@@ -207,35 +248,6 @@ impl ImagePreview {
 }
 
 const PADDING: f32 = 24.;
-
-/// Whether an SVG document links a file (an `<image>` or `<use>` naming a
-/// path, on this computer or another, or written with character
-/// references): drawing it would read that file. A device such as
-/// /dev/zero is read forever, and on Windows reading a network path sends
-/// the user's sign-in there.
-fn links_files(svg: &str) -> bool {
-    svg.match_indices("href").any(|(at, _)| {
-        let rest = svg[at + 4..].trim_start();
-        let Some(rest) = rest.strip_prefix('=') else {
-            return false;
-        };
-        let rest = rest.trim_start();
-        let value = match rest.chars().next() {
-            Some(quote @ ('"' | '\'')) => rest[1..].split(quote).next().unwrap_or(""),
-            _ => return false,
-        };
-        let value = value.trim();
-        // Pictures inside it (data:) and links within it (#id) are drawn;
-        // anything else would be read from disk by the renderer (a device
-        // such as /dev/zero never ends; a network path leaks credentials).
-        let lower = value.to_ascii_lowercase();
-        !(lower.starts_with("data:")
-            || lower.starts_with("http://")
-            || lower.starts_with("https://")
-            || value.starts_with('#')
-            || value.is_empty())
-    })
-}
 
 fn read_image(path: &std::path::Path) -> Result<Loaded, String> {
     let too_large = "This image is too large to show here (try Open in Default App).";
@@ -267,13 +279,76 @@ fn read_image(path: &std::path::Path) -> Result<Loaded, String> {
     if !fits(width, height) {
         return Err(format!("{too_large} It is {width} × {height} pixels."));
     }
-    let size = (width as f32, height as f32);
+    // A photo taken turned says so (EXIF); it is shown upright, so its
+    // sides swap.
+    let orientation = ::image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_decoder().ok())
+        .and_then(|mut decoder| {
+            use ::image::ImageDecoder as _;
+            decoder.orientation().ok()
+        })
+        .unwrap_or(::image::metadata::Orientation::NoTransforms);
+    let turned = matches!(
+        orientation,
+        ::image::metadata::Orientation::Rotate90
+            | ::image::metadata::Orientation::Rotate270
+            | ::image::metadata::Orientation::Rotate90FlipH
+            | ::image::metadata::Orientation::Rotate270FlipH
+    );
+    let size = if turned {
+        (height as f32, width as f32)
+    } else {
+        (width as f32, height as f32)
+    };
     let info = format!("{label} · {}", byte_size(bytes.len() as u64));
+    // A very large still picture is drawn smaller (an animated GIF keeps
+    // its frames as they are).
+    if width.max(height) > DRAWN_SIDE
+        && format != ::image::ImageFormat::Gif
+        && let Some(drawn) = draw_smaller(&bytes, format, orientation)
+    {
+        return Ok(Loaded {
+            image: Picture::Drawn(drawn),
+            size,
+            info,
+        });
+    }
     Ok(Loaded {
-        image: Arc::new(Image::from_bytes(gpui_format, bytes)),
+        image: Picture::Encoded(Arc::new(Image::from_bytes(gpui_format, bytes))),
         size,
         info,
     })
+}
+
+/// `bytes` decoded and scaled to fit [`DRAWN_SIDE`], as GPUI draws pixels
+/// (BGRA).
+fn draw_smaller(
+    bytes: &[u8],
+    format: ::image::ImageFormat,
+    orientation: ::image::metadata::Orientation,
+) -> Option<Arc<RenderImage>> {
+    let mut decoded = ::image::load_from_memory_with_format(bytes, format).ok()?;
+    // Upright, as GPUI shows the smaller ones.
+    decoded.apply_orientation(orientation);
+    let decoded = decoded.into_rgba8();
+    let (width, height) = decoded.dimensions();
+    let scale = DRAWN_SIDE as f32 / width.max(height) as f32;
+    let (width, height) = (
+        ((width as f32 * scale).round() as u32).max(1),
+        ((height as f32 * scale).round() as u32).max(1),
+    );
+    // A box filter on whole pixels: no floating-point copy of the picture
+    // (which would take four times its decoded size).
+    let mut pixels = ::image::imageops::thumbnail(&decoded, width, height);
+    drop(decoded);
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    Some(Arc::new(RenderImage::new(vec![::image::Frame::new(
+        pixels,
+    )])))
 }
 
 impl Render for ImagePreview {
@@ -285,7 +360,11 @@ impl Render for ImagePreview {
         };
         // Fitting needs the pane's size, known once it has been laid out.
         if self.zoom == Zoom::Fit && self.scroll.bounds().size.width <= px(0.) {
-            cx.on_next_frame(window, |_, _, cx| cx.notify());
+            // Weak: a closed tab is not kept until the next frame.
+            let this = cx.weak_entity();
+            window.on_next_frame(move |_, cx| {
+                _ = this.update(cx, |_, cx| cx.notify());
+            });
         }
         let scale = self.scale(self.view_size());
         let (width, height) = (loaded.size.0 * scale, loaded.size.1 * scale);
@@ -296,7 +375,7 @@ impl Render for ImagePreview {
             loaded.size.1.round(),
             loaded.info
         );
-        let image = img(loaded.image.clone())
+        let image = img(loaded.image.source())
             .w(px(width))
             .h(px(height))
             .object_fit(ObjectFit::Contain);
@@ -319,7 +398,7 @@ impl Render for ImagePreview {
                     .size_full()
                     .overflow_scroll()
                     .track_scroll(&self.scroll)
-                    .on_scroll_wheel(cx.listener(Self::on_wheel))
+                    .on_scroll(cx.listener(Self::on_wheel))
                     .child(
                         // Centered while smaller than the pane, scrollable
                         // once larger.
@@ -423,15 +502,19 @@ mod tests {
 
     #[test]
     fn drawings_that_link_files_are_not_drawn() {
-        assert!(links_files(r#"<svg><image href="/dev/zero"/></svg>"#));
-        assert!(links_files(
+        assert!(ph_ui::images_safe::links_files(
+            r#"<svg><image href="/dev/zero"/></svg>"#
+        ));
+        assert!(ph_ui::images_safe::links_files(
             r#"<svg><image xlink:href='\\server\s\a.png'/></svg>"#
         ));
-        assert!(links_files(r#"<svg><image href="&#47;etc"/></svg>"#));
-        assert!(!links_files(
+        assert!(ph_ui::images_safe::links_files(
+            r#"<svg><image href="&#47;etc"/></svg>"#
+        ));
+        assert!(!ph_ui::images_safe::links_files(
             r##"<svg><use href="#dot"/><image href="data:image/png;base64,AA"/></svg>"##
         ));
-        assert!(!links_files(
+        assert!(!ph_ui::images_safe::links_files(
             r#"<svg><a href="https://example.com">x</a></svg>"#
         ));
     }

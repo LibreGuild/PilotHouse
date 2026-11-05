@@ -390,7 +390,7 @@ impl ImageDocument {
                 if this.stale.len() > 1 {
                     let keep = this.stale.len() - 1;
                     for image in this.stale.drain(..keep) {
-                        cx.drop_image(image, None);
+                        ph_ui::images::release_render_image(image, cx);
                     }
                 }
                 this.rendering = false;

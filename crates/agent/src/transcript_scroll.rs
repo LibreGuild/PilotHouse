@@ -35,6 +35,9 @@ const BUTTON_FADE: Duration = Duration::from_millis(200);
 pub struct TranscriptScroll {
     list: ListState,
     scrolled_at: Option<Instant>,
+    /// Whether the jump button showed when last drawn: scrolling redraws
+    /// the transcript's owner only when that changes.
+    shown_up: bool,
 }
 
 impl TranscriptScroll {
@@ -49,13 +52,18 @@ impl TranscriptScroll {
             cx.defer(move |cx| {
                 _ = this.update(cx, |this, cx| {
                     this.scrolled_at = Some(Instant::now());
-                    cx.notify();
+                    let up = this.is_scrolled_up();
+                    if up != this.shown_up {
+                        this.shown_up = up;
+                        cx.notify();
+                    }
                 });
             });
         });
         Self {
             list,
             scrolled_at: None,
+            shown_up: false,
         }
     }
 
@@ -201,20 +209,10 @@ impl RenderOnce for TranscriptList {
             .size_full()
             .min_h_0()
             .min_w_0()
-            .child(
-                // The bounce moves the list past its own scroll handler, so
-                // it tells the state itself.
-                gpui_kit::base::ScrollBounce::new((self.id.clone(), "bounce"), &list_state, rows)
-                    .on_scroll({
-                        let state = self.state.downgrade();
-                        move |_, cx| {
-                            _ = state.update(cx, |state, cx| {
-                                state.scrolled_at = Some(Instant::now());
-                                cx.notify();
-                            });
-                        }
-                    }),
-            )
+            // No elastic edge: it measures the end from the rows measured so
+            // far, so in a long chat it took the middle for the end and
+            // stopped the scroll there.
+            .child(rows)
             .vertical_scrollbar(&list_state);
         let theme = cx.theme();
         let (border, background, foreground) = (theme.border, theme.background, theme.foreground);

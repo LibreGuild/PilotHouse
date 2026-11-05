@@ -9,7 +9,7 @@
 //! near 23 KB, inside Linux's 128 KB for one argument and Windows' 32,767
 //! characters for a whole command line.
 
-use std::io::{Read as _, Write as _};
+use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::rc::Rc;
@@ -32,9 +32,21 @@ pub type Writer = Rc<dyn Fn(String, PathBuf, &mut App) -> Task<Result<String>>>;
 pub fn writer(store: Store) -> Writer {
     Rc::new(move |prompt, cwd, cx| {
         let spec = pick_agent(&store);
+        // A thread of its own: the job waits on the agent for minutes, and
+        // the shared executor's threads must stay free for file reads, Git
+        // and previews.
+        let (done, answer) = futures::channel::oneshot::channel();
+        let started = std::thread::Builder::new()
+            .name("one-off-agent".into())
+            .spawn(move || {
+                let result = spec
+                    .context("No coding agent is installed to write this.")
+                    .and_then(|spec| ask(spec, &prompt, &cwd));
+                let _ = done.send(result);
+            });
         cx.background_spawn(async move {
-            let spec = spec.context("No coding agent is installed to write this.")?;
-            ask(spec, &prompt, &cwd)
+            started.context("could not start the job")?;
+            answer.await.context("the job stopped")?
         })
     })
 }
@@ -111,18 +123,25 @@ pub fn ask(spec: &AgentSpec, prompt: &str, cwd: &Path) -> Result<String> {
             let _ = pipe.write_all(text.as_bytes());
         });
     }
-    let mut stdout = child.stdout.take().context("no stdout")?;
-    let mut stderr = child.stderr.take().context("no stderr")?;
-    let out = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stdout.read_to_string(&mut text);
-        text
-    });
-    let err = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
-        text
-    });
+    let stdout = child.stdout.take().context("no stdout")?;
+    let stderr = child.stderr.take().context("no stderr")?;
+    // Read as it comes, so what arrived is there even if the pipe never
+    // closes (see `collect` below).
+    let reader = |mut pipe: Box<dyn Read + Send>| {
+        let read: std::sync::Arc<std::sync::Mutex<Vec<u8>>> = Default::default();
+        let into = read.clone();
+        let thread = std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            while let Ok(n @ 1..) = pipe.read(&mut chunk) {
+                if let Ok(mut read) = into.lock() {
+                    read.extend_from_slice(&chunk[..n]);
+                }
+            }
+        });
+        (thread, read)
+    };
+    let out = reader(Box::new(stdout));
+    let err = reader(Box::new(stderr));
     let started = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -135,8 +154,21 @@ pub fn ask(spec: &AgentSpec, prompt: &str, cwd: &Path) -> Result<String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    let stdout = out.join().unwrap_or_default();
-    let stderr = err.join().unwrap_or_default();
+    // A grandchild the CLI left running can hold its output open: what was
+    // read by then is the answer, without waiting for it.
+    let collect = |(thread, read): (
+        std::thread::JoinHandle<()>,
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    )| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let bytes = read.lock().map(|read| read.clone()).unwrap_or_default();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let stdout = collect(out);
+    let stderr = collect(err);
     let answer = if spec.id == "codex" {
         let text = std::fs::read_to_string(&last_message).unwrap_or_default();
         let _ = std::fs::remove_file(&last_message);

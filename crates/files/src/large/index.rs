@@ -128,10 +128,16 @@ pub fn scan(
         if read == 0 {
             break;
         }
-        index
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .feed(&buf[..read]);
+        {
+            let mut index = index.lock().unwrap_or_else(|e| e.into_inner());
+            // Another scan moved on meanwhile: go on from where it is, and
+            // never feed the same bytes twice.
+            if index.scanned() != offset {
+                offset = index.scanned();
+                continue;
+            }
+            index.feed(&buf[..read]);
+        }
         offset += read as u64;
         progress(offset);
     }

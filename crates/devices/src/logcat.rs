@@ -7,7 +7,6 @@
 //! - `pid:1234` keeps one process.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{BufRead as _, BufReader};
 use std::process::{Child, Stdio};
 use std::rc::Rc;
 
@@ -306,7 +305,7 @@ impl Logcat {
         std::thread::Builder::new()
             .name("logcat".into())
             .spawn(move || {
-                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                for line in ph_env::lossy_lines(stdout) {
                     if lines.send_blocking(line).is_err() {
                         return;
                     }

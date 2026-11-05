@@ -78,8 +78,41 @@ impl<'de> Visitor<'de> for NodeVisitor {
 pub fn parse_json(text: &str) -> Result<Node, String> {
     match serde_json::from_str(text) {
         Ok(node) => Ok(node),
+        // The JSON5 parser has no depth limit: nesting deep enough to stop
+        // the strict one would overflow the stack and end the app.
+        Err(strict) if nesting(text) > 128 => Err(describe_json_error(&strict)),
         Err(strict) => json5::from_str(text).map_err(|_| describe_json_error(&strict)),
     }
+}
+
+/// How deep brackets nest in `text`, outside quoted strings.
+fn nesting(text: &str) -> usize {
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in text.chars() {
+        match quote {
+            Some(open) => {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == open {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '[' | '{' => {
+                    depth += 1;
+                    deepest = deepest.max(depth);
+                }
+                ']' | '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            },
+        }
+    }
+    deepest
 }
 
 /// One value per line; a line that is not JSON says why.
@@ -229,6 +262,13 @@ fn reflow(text: &str, indent: Option<usize>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deep_nesting_is_refused_not_overflowed() {
+        let deep = format!("{}1{}", "[".repeat(20_000), "]".repeat(19_999));
+        assert!(parse_json(&deep).is_err());
+        assert_eq!(nesting(r#"{"a": "[[[", "b": [1, {"c": 2}]}"#), 3);
+    }
+
     use super::*;
 
     #[test]

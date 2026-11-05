@@ -123,58 +123,77 @@ pub(crate) fn bind_keys(cx: &mut App) {
     let context = Some(WORKSPACE_CONTEXT);
     cx.bind_keys([
         // The last binding for an action is the one menus and hints display.
-        KeyBinding::new("secondary-shift-p", ToggleCommandPalette, context),
-        KeyBinding::new("secondary-k", ToggleCommandPalette, context),
-        KeyBinding::new("secondary-o", AddProject, context),
-        KeyBinding::new("secondary-n", NewSession, context),
-        KeyBinding::new("secondary-;", SideChat, context),
-        KeyBinding::new("secondary-shift-k", SearchChats, context),
-        KeyBinding::new("secondary-b", ToggleSidebar, context),
+        KeyBinding::new(
+            ph_ui::keys("secondary-shift-p"),
+            ToggleCommandPalette,
+            context,
+        ),
+        KeyBinding::new(ph_ui::keys("secondary-k"), ToggleCommandPalette, context),
+        KeyBinding::new(ph_ui::keys("secondary-o"), AddProject, context),
+        KeyBinding::new(ph_ui::keys("secondary-n"), NewSession, context),
+        KeyBinding::new(ph_ui::keys("secondary-;"), SideChat, context),
+        KeyBinding::new(ph_ui::keys("secondary-shift-k"), SearchChats, context),
+        KeyBinding::new(ph_ui::keys("secondary-b"), ToggleSidebar, context),
         // As in VS Code: ⌘J the bottom panel, ⌃` the terminal, ⌥⌘B the
         // column of tools beside the chat.
-        KeyBinding::new("secondary-j", ToggleBottomPanel, context),
-        KeyBinding::new("ctrl-`", ToggleTerminal, context),
-        KeyBinding::new("secondary-alt-b", ToggleContextPanel, context),
-        KeyBinding::new("secondary-shift-j", ToggleZoom, context),
-        KeyBinding::new("secondary-1", ShowFiles, context),
-        KeyBinding::new("secondary-2", ShowChanges, context),
-        KeyBinding::new("secondary-3", ShowBoard, context),
-        KeyBinding::new("secondary-4", ShowTerminal, context),
-        KeyBinding::new("secondary-5", ShowBrowser, context),
-        KeyBinding::new("secondary-6", ShowDevices, context),
-        KeyBinding::new("secondary-7", ShowRuns, context),
-        KeyBinding::new("secondary-8", ShowPulls, context),
-        KeyBinding::new("secondary-9", ShowTests, context),
-        KeyBinding::new("secondary-shift-s", CaptureToChat, context),
-        KeyBinding::new("secondary-,", OpenSettings, context),
-        KeyBinding::new("secondary-/", ShowShortcuts, context),
-        KeyBinding::new("secondary-q", Quit, None),
+        KeyBinding::new(ph_ui::keys("secondary-j"), ToggleBottomPanel, context),
+        KeyBinding::new(ph_ui::keys("ctrl-`"), ToggleTerminal, context),
+        KeyBinding::new(ph_ui::keys("secondary-alt-b"), ToggleContextPanel, context),
+        KeyBinding::new(ph_ui::keys("secondary-shift-j"), ToggleZoom, context),
+        KeyBinding::new(ph_ui::keys("secondary-1"), ShowFiles, context),
+        KeyBinding::new(ph_ui::keys("secondary-2"), ShowChanges, context),
+        KeyBinding::new(ph_ui::keys("secondary-3"), ShowBoard, context),
+        KeyBinding::new(ph_ui::keys("secondary-4"), ShowTerminal, context),
+        KeyBinding::new(ph_ui::keys("secondary-5"), ShowBrowser, context),
+        KeyBinding::new(ph_ui::keys("secondary-6"), ShowDevices, context),
+        KeyBinding::new(ph_ui::keys("secondary-7"), ShowRuns, context),
+        KeyBinding::new(ph_ui::keys("secondary-8"), ShowPulls, context),
+        KeyBinding::new(ph_ui::keys("secondary-9"), ShowTests, context),
+        KeyBinding::new(ph_ui::keys("secondary-shift-s"), CaptureToChat, context),
+        KeyBinding::new(ph_ui::keys("secondary-,"), OpenSettings, context),
+        KeyBinding::new(ph_ui::keys("secondary-/"), ShowShortcuts, context),
+        KeyBinding::new(ph_ui::keys("secondary-q"), Quit, None),
         // Zoom, as in VS Code, everywhere in the window. ⌘+ is ⌘⇧= on most
         // keyboards; both work.
-        KeyBinding::new("secondary-=", ZoomIn, None),
-        KeyBinding::new("secondary-+", ZoomIn, None),
-        KeyBinding::new("secondary-shift-=", ZoomIn, None),
-        KeyBinding::new("secondary--", ZoomOut, None),
-        KeyBinding::new("secondary-0", ResetZoom, None),
-        KeyBinding::new("ctrl-tab", PreviousWorkspace, context),
-        KeyBinding::new("secondary-shift-e", ShowWorkspacesView, context),
-        KeyBinding::new("secondary-shift-g", ShowGitHubView, context),
-        KeyBinding::new("secondary-shift-a", ShowAgentsView, context),
+        KeyBinding::new(ph_ui::keys("secondary-="), ZoomIn, None),
+        KeyBinding::new(ph_ui::keys("secondary-+"), ZoomIn, None),
+        KeyBinding::new(ph_ui::keys("secondary-shift-="), ZoomIn, None),
+        KeyBinding::new(ph_ui::keys("secondary--"), ZoomOut, None),
+        KeyBinding::new(ph_ui::keys("secondary-0"), ResetZoom, None),
+        KeyBinding::new(ph_ui::keys("ctrl-tab"), PreviousWorkspace, context),
+        KeyBinding::new(
+            ph_ui::keys("secondary-shift-e"),
+            ShowWorkspacesView,
+            context,
+        ),
+        KeyBinding::new(ph_ui::keys("secondary-shift-g"), ShowGitHubView, context),
+        KeyBinding::new(ph_ui::keys("secondary-shift-a"), ShowAgentsView, context),
     ]);
     // ⌘/Ctrl+digits show tools, so workspaces take the other modifier.
-    let modifier = if cfg!(target_os = "macos") {
-        "ctrl"
+    const KEYS: [&str; 9] = if cfg!(target_os = "macos") {
+        [
+            "ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4", "ctrl-5", "ctrl-6", "ctrl-7", "ctrl-8",
+            "ctrl-9",
+        ]
     } else {
-        "alt"
+        [
+            "alt-1", "alt-2", "alt-3", "alt-4", "alt-5", "alt-6", "alt-7", "alt-8", "alt-9",
+        ]
     };
-    cx.bind_keys((0..9).map(|index| {
-        KeyBinding::new(
-            &format!("{modifier}-{}", index + 1),
-            SwitchToWorkspace { index },
-            context,
-        )
-    }));
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.bind_keys(
+        KEYS.iter()
+            .enumerate()
+            .map(|(index, keys)| KeyBinding::new(keys, SwitchToWorkspace { index }, context)),
+    );
+    cx.on_action(|_: &Quit, cx| {
+        // Studio's unsaved work is saved, or asked about, first; once the
+        // window the key came from is free to ask.
+        cx.defer(|cx| {
+            if crate::studio_window::ready_to_quit(cx) {
+                cx.quit();
+            }
+        });
+    });
     cx.on_action(|_: &ZoomIn, cx| AppState::update_preferences(cx, |p| p.zoom(1)));
     cx.on_action(|_: &ZoomOut, cx| AppState::update_preferences(cx, |p| p.zoom(-1)));
     cx.on_action(|_: &ResetZoom, cx| AppState::update_preferences(cx, |p| p.reset_zoom()));

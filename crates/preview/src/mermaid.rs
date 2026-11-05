@@ -29,6 +29,20 @@ struct Drawn {
 }
 static DRAWN: LazyLock<Mutex<Drawn>> = LazyLock::new(Mutex::default);
 const KEEP: usize = 64;
+/// Diagrams pushed out of [`DRAWN`], whose pictures GPUI still holds until
+/// [`release_evicted`] lets them go (on the UI thread).
+static EVICTED: LazyLock<Mutex<Vec<Arc<Image>>>> = LazyLock::new(Mutex::default);
+
+/// Lets go of the pictures of diagrams no longer cached.
+pub fn release_evicted(cx: &mut gpui_kit::App) {
+    let evicted = EVICTED
+        .lock()
+        .map(|mut evicted| std::mem::take(&mut *evicted))
+        .unwrap_or_default();
+    for image in evicted {
+        ph_ui::images::release_image(image, cx);
+    }
+}
 
 /// The drawing of `source` made before, if one.
 pub fn cached(source: &str, dark: bool) -> Option<Result<Diagram, String>> {
@@ -48,8 +62,11 @@ pub fn draw(source: &str, dark: bool) -> Result<Diagram, String> {
             cache.order.push_back(key);
         }
         while cache.order.len() > KEEP {
-            if let Some(oldest) = cache.order.pop_front() {
-                cache.diagrams.remove(&oldest);
+            if let Some(oldest) = cache.order.pop_front()
+                && let Some(Ok(diagram)) = cache.diagrams.remove(&oldest)
+                && let Ok(mut evicted) = EVICTED.lock()
+            {
+                evicted.push(diagram.image);
             }
         }
     }
@@ -84,7 +101,10 @@ pub fn draw_soon<T: 'static>(source: String, dark: bool, wait: bool, cx: &mut Co
         if let Ok(mut drawing) = DRAWING.lock() {
             drawing.remove(&key);
         }
-        _ = this.update(cx, |_, cx| cx.notify());
+        _ = this.update(cx, |_, cx| {
+            release_evicted(cx);
+            cx.notify()
+        });
     })
     .detach();
 }

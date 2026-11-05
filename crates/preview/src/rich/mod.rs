@@ -32,9 +32,9 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
-    Subscription, Task, Window, div, px,
+    Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, ListAlignment, ListState,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Subscription, Task, Window, div, list, px,
 };
 
 use crate::PreviewEvent;
@@ -61,9 +61,9 @@ const CELL_CONTEXT: &str = "RichCell";
 /// Registers the rich editor's key bindings.
 pub fn init(cx: &mut App) {
     cx.bind_keys([
-        gpui_kit::KeyBinding::new("tab", NextCell, Some(CELL_CONTEXT)),
-        gpui_kit::KeyBinding::new("shift-tab", PreviousCell, Some(CELL_CONTEXT)),
-        gpui_kit::KeyBinding::new("escape", EndCell, Some(CELL_CONTEXT)),
+        gpui_kit::KeyBinding::new(ph_ui::keys("tab"), NextCell, Some(CELL_CONTEXT)),
+        gpui_kit::KeyBinding::new(ph_ui::keys("shift-tab"), PreviousCell, Some(CELL_CONTEXT)),
+        gpui_kit::KeyBinding::new(ph_ui::keys("escape"), EndCell, Some(CELL_CONTEXT)),
     ]);
 }
 
@@ -259,7 +259,11 @@ pub struct RichEditor {
     menu: Option<usize>,
     undo: Vec<String>,
     redo: Vec<String>,
-    scroll: ScrollHandle,
+    /// The blocks as a virtual list (a long document lays out only what
+    /// is in view), and a fingerprint of each as listed, to measure again
+    /// only those that changed. The last row is the space under the blocks.
+    list: ListState,
+    listed: Vec<u64>,
     focus: FocusHandle,
     /// The last press in its window was in this view (so a ⌘C there copied
     /// its text), and that window.
@@ -286,7 +290,8 @@ impl RichEditor {
         let copy = cx.observe_keystrokes(|this, event, window, cx| {
             let keystroke = &event.keystroke;
             let modifiers = keystroke.modifiers;
-            if keystroke.key == "c" && modifiers.secondary() && !modifiers.shift && !modifiers.alt {
+            if keystroke.key == "c" && modifiers.secondary(cx) && !modifiers.shift && !modifiers.alt
+            {
                 this.copy_as_markdown(window, cx);
             }
         });
@@ -299,7 +304,8 @@ impl RichEditor {
             menu: None,
             undo: Vec::new(),
             redo: Vec::new(),
-            scroll: ScrollHandle::new(),
+            list: ListState::new(1, ListAlignment::Top, px(800.)),
+            listed: Vec::new(),
             focus: cx.focus_handle(),
             pressed_here: false,
             window: None,
@@ -800,10 +806,10 @@ impl RichEditor {
         let modifiers = keystroke.modifiers;
         let key = keystroke.key.as_str();
         // A table cell's typing undoes itself (its keys: `CELL_CONTEXT`).
-        if self.cell.is_some() && modifiers.secondary() && key == "z" {
+        if self.cell.is_some() && modifiers.secondary(cx) && key == "z" {
             return;
         }
-        if modifiers.secondary() && !modifiers.alt {
+        if modifiers.secondary(cx) && !modifiers.alt {
             let handled = match (key, modifiers.shift) {
                 ("z", shift) => {
                     // Typing in the block undoes itself first.
@@ -1669,7 +1675,7 @@ impl RichEditor {
     ) -> AnyElement {
         markdown_view(
             ("rich-text", id),
-            source,
+            ph_ui::markdown::keep_line_breaks(&source).into(),
             &self.path,
             dark,
             crate::markdown::opener(cx.weak_entity()),
@@ -1832,18 +1838,35 @@ impl RichEditor {
 }
 
 impl Render for RichEditor {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let blocks: Vec<AnyElement> = self
-            .document
-            .blocks
-            .clone()
-            .iter()
-            .enumerate()
-            .map(|(ix, block)| self.render_block(ix, block, window, cx))
-            .collect();
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_list();
         let toolbar = self.render_toolbar(cx);
         let theme = cx.theme();
-        let empty = self.document.blocks.is_empty();
+        let rows = list(
+            self.list.clone(),
+            cx.processor(|this, ix: usize, window, cx| {
+                let row = match this.document.blocks.get(ix).cloned() {
+                    Some(block) => this.render_block(ix, &block, window, cx),
+                    None => this.render_end(cx),
+                };
+                // Centred in the reading width, as one column.
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(READING_WIDTH + GUTTER))
+                            .pr_8()
+                            .child(row),
+                    )
+                    .into_any_element()
+            }),
+        )
+        .size_full()
+        .pt_6()
+        .pb(px(160.));
         v_flex()
             .id("rich-editor")
             .key_context("RichEditor")
@@ -1860,44 +1883,82 @@ impl Render for RichEditor {
             .size_full()
             .bg(theme.background)
             .child(toolbar)
-            .child(
-                div()
-                    .id("rich-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .max_w(px(READING_WIDTH + GUTTER))
-                            .mx_auto()
-                            .pr_8()
-                            .pt_6()
-                            .pb(px(160.))
-                            .children(blocks)
-                            .child(
-                                // The space under the last block adds one.
-                                div()
-                                    .id("rich-end")
-                                    .ml(px(GUTTER))
-                                    .h(px(120.))
-                                    .cursor_text()
-                                    .when(empty, |this| {
-                                        this.text_color(theme.muted_foreground)
-                                            .child("Click to start writing. Type / for headings, lists, code, tables and diagrams.")
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        let last = this.document.blocks.last();
-                                        let reuse = last.filter(|block| block.kind == Kind::Paragraph && block.body.is_empty()).map(|block| block.id);
-                                        match reuse {
-                                            Some(id) => this.activate(id, None, window, cx),
-                                            None => this.add_after(None, false, window, cx),
-                                        }
-                                    })),
-                            ),
-                    ),
-            )
+            .child(div().id("rich-scroll").flex_1().min_h_0().child(rows))
+    }
+}
+
+impl RichEditor {
+    /// Brings the list up to the blocks: rows whose block changed (or was
+    /// added or removed) are measured again; the block being edited always
+    /// is, since its field grows as it is typed in.
+    fn sync_list(&mut self) {
+        use std::hash::{Hash as _, Hasher as _};
+        let fingerprints: Vec<u64> = self
+            .document
+            .blocks
+            .iter()
+            .map(|block| {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                (&block.kind, &block.body, &block.gap).hash(&mut hasher);
+                hasher.finish()
+            })
+            .collect();
+        let (old, new) = (self.listed.len(), fingerprints.len());
+        let same_start = self
+            .listed
+            .iter()
+            .zip(&fingerprints)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let same_end = self
+            .listed
+            .iter()
+            .rev()
+            .zip(fingerprints.iter().rev())
+            .take(old.min(new) - same_start)
+            .take_while(|(a, b)| a == b)
+            .count();
+        if same_start != old || old != new {
+            self.list
+                .splice(same_start..old - same_end, new - same_end - same_start);
+        }
+        self.listed = fingerprints;
+        let editing = [
+            self.active.as_ref().map(|active| active.id),
+            self.cell.as_ref().map(|cell| cell.block),
+        ];
+        for id in editing.into_iter().flatten() {
+            if let Some(ix) = self.document.index_of(id) {
+                self.list.remeasure_items(ix..ix + 1);
+            }
+        }
+    }
+
+    /// The space under the last block: a click there adds one.
+    fn render_end(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let empty = self.document.blocks.is_empty();
+        div()
+            .id("rich-end")
+            .ml(px(GUTTER))
+            .h(px(120.))
+            .cursor_text()
+            .when(empty, |this| {
+                this.text_color(theme.muted_foreground).child(
+                    "Click to start writing. Type / for headings, lists, code, tables and diagrams.",
+                )
+            })
+            .on_click(cx.listener(|this, _, window, cx| {
+                let last = this.document.blocks.last();
+                let reuse = last
+                    .filter(|block| block.kind == Kind::Paragraph && block.body.is_empty())
+                    .map(|block| block.id);
+                match reuse {
+                    Some(id) => this.activate(id, None, window, cx),
+                    None => this.add_after(None, false, window, cx),
+                }
+            }))
+            .into_any_element()
     }
 }
 

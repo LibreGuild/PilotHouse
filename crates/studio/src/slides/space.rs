@@ -111,6 +111,26 @@ impl Space {
         self.path.join(EXPORTS)
     }
 
+    /// Saves `deck` as taken at `stamp` (from [`snapshot_stamp`]): a save of
+    /// an older copy that ends after a newer one (an autosave still writing
+    /// as the window closes and saves) does not write over it.
+    pub fn save_stamped(&self, deck: &Deck, stamp: u64) -> Result<()> {
+        use std::collections::HashMap;
+        use std::sync::{LazyLock, Mutex};
+        static WRITTEN: LazyLock<Mutex<HashMap<PathBuf, u64>>> = LazyLock::new(Mutex::default);
+        let mut written = WRITTEN.lock().unwrap_or_else(|err| err.into_inner());
+        if written
+            .get(&self.path)
+            .is_some_and(|newest| *newest > stamp)
+        {
+            return Ok(());
+        }
+        // Held while writing: two saves of one document never interleave.
+        self.save(deck)?;
+        written.insert(self.path.clone(), stamp);
+        Ok(())
+    }
+
     /// Writes `deck` (and now and then keeps the one it replaces).
     pub fn save(&self, deck: &Deck) -> Result<()> {
         let file = self.path.join(DECK);
@@ -611,4 +631,10 @@ mod import {
         assert_eq!(files.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+/// Orders copies of decks taken for saving (see [`Space::save_stamped`]).
+pub fn snapshot_stamp() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }

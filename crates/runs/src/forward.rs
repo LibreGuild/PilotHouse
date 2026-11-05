@@ -49,6 +49,10 @@ fn connect_to(address: &str) -> String {
 /// listens on `address`, on `mapping`'s server; a tunnel is opened when there
 /// is none yet. Blocks until it listens.
 pub fn open(mapping: &Mapping, port: u16, address: &str) -> Result<u16> {
+    // One open at a time: two at once for the same port would start two
+    // tunnels.
+    static OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _opening = OPENING.lock().unwrap_or_else(|err| err.into_inner());
     let target = Target {
         host: mapping.host.clone(),
         ssh_port: mapping.port,
@@ -129,6 +133,7 @@ pub fn open(mapping: &Mapping, port: u16, address: &str) -> Result<u16> {
         }
         if Instant::now() > deadline {
             let _ = child.kill();
+            let _ = child.wait();
             bail!("the tunnel to {}:{port} did not open in time", mapping.host);
         }
         std::thread::sleep(Duration::from_millis(100));

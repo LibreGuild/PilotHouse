@@ -108,7 +108,7 @@ impl VideoPlayer {
                 _ => None,
             };
             for image in this.old_images.drain(..).chain(current) {
-                cx.drop_image(image, None);
+                ph_ui::images::release_render_image(image, cx);
             }
         })
         .detach();
@@ -117,7 +117,10 @@ impl VideoPlayer {
 
     pub fn reload(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.engine = Some(Engine::open(&self.path).map_err(Into::into));
-        self.frame = None;
+        // The old frame's texture goes with the others.
+        if let Some(Frame::Image(old)) = self.frame.take() {
+            self.old_images.push(old);
+        }
         self.watch(cx);
         cx.notify();
     }
@@ -131,8 +134,15 @@ impl VideoPlayer {
     fn watch(&mut self, cx: &mut Context<Self>) {
         self._tick = Some(cx.spawn(async move |this, cx| {
             let mut seen = None;
+            // Ticks with nothing new: a paused video is looked at less often.
+            let mut quiet = 0u32;
             loop {
-                cx.background_executor().timer(IDLE_TICK).await;
+                let wait = if quiet > 25 {
+                    std::time::Duration::from_secs(1)
+                } else {
+                    IDLE_TICK
+                };
+                cx.background_executor().timer(wait).await;
                 let alive = this
                     .update(cx, |this, cx| {
                         // Redrawn only when something changed: a frame, the
@@ -147,7 +157,10 @@ impl VideoPlayer {
                         });
                         if new_frame || now != seen {
                             seen = now;
+                            quiet = 0;
                             cx.notify();
+                        } else {
+                            quiet = quiet.saturating_add(1);
                         }
                     })
                     .is_ok();
@@ -169,7 +182,7 @@ impl VideoPlayer {
         // A texture is let go once a newer frame has been drawn.
         if self.old_images.len() > 1 {
             for image in self.old_images.drain(..self.old_images.len() - 1) {
-                cx.drop_image(image, None);
+                ph_ui::images::release_render_image(image, cx);
             }
         }
         true
@@ -189,6 +202,8 @@ impl VideoPlayer {
             }
             engine.play(SPEEDS[self.speed]);
         }
+        // Looked at often again (a paused video is looked at less).
+        self.watch(cx);
         cx.notify();
     }
 
@@ -215,6 +230,7 @@ impl VideoPlayer {
         if let Some(engine) = self.engine() {
             engine.seek(engine.position() + seconds);
         }
+        self.watch(cx);
         cx.notify();
     }
 
@@ -409,12 +425,14 @@ impl Render for VideoPlayer {
                                 cx.listener(|this, event: &MouseDownEvent, _, cx| {
                                     this.dragging = true;
                                     this.seek_to(event.position.x);
+                                    this.watch(cx);
                                     cx.notify();
                                 }),
                             )
                             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                                 if this.dragging && event.dragging() {
                                     this.seek_to(event.position.x);
+                                    this.watch(cx);
                                     cx.notify();
                                 } else {
                                     this.dragging = false;

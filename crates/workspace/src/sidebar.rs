@@ -48,7 +48,7 @@ use crate::workspace::{View, Workspace};
 const NEWEST: usize = 5;
 
 /// Section names, as [`Workspace::folded`] keeps them.
-const CHATS: &str = "chats";
+pub(crate) const CHATS: &str = "chats";
 const WORKSPACES: &str = "workspaces";
 const PINNED: &str = "pinned";
 
@@ -143,6 +143,19 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
             rows.extend(chat_rows(workspace, chats.id, None, cx));
         }
     }
+    // A rule between the two lists, so the last chat never reads as the
+    // first workspace's.
+    if !rows.is_empty() {
+        rows.push(
+            div()
+                .flex_none()
+                .mt_2()
+                .mx_1()
+                .h(px(1.))
+                .bg(cx.theme().sidebar_border)
+                .into_any_element(),
+        );
+    }
     let folded = workspace.folded.contains(WORKSPACES);
     rows.push(workspaces_header(workspace.projects().len(), folded, cx));
     if !folded {
@@ -206,6 +219,7 @@ fn top(cx: &App) -> impl IntoElement {
             .text_sm()
             .text_color(theme.sidebar_foreground)
             .hover(|style| style.bg(theme.sidebar_accent))
+            .active(|style| style.bg(theme.sidebar_accent.opacity(0.7)))
             .child(icon.small().text_color(theme.muted_foreground))
             .child(div().flex_1().child(label))
             .child(
@@ -392,6 +406,7 @@ fn workspace_row(
             this.bg(cx.theme().sidebar_accent.opacity(0.35))
         })
         .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.6)))
+        .active(|style| style.bg(cx.theme().sidebar_accent))
         .tooltip(move |window, cx| {
             gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
         })
@@ -573,8 +588,9 @@ fn chat_rows(
     };
     let entity = cx.entity().downgrade();
     let today = Zoned::now();
-    let mut rows = Vec::new();
-    if own.is_empty() && runs.is_empty() && done.is_empty() {
+    // Agent CLIs at work in the workspace's terminals lead its list.
+    let mut rows = terminal_agent_rows(&entity, project, cx);
+    if rows.is_empty() && own.is_empty() && runs.is_empty() && done.is_empty() {
         let start = entity.clone();
         rows.push(if nested {
             h_flex()
@@ -817,6 +833,7 @@ fn chat_row(
         })
         .when(!selected, |this| {
             this.hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.6)))
+                .active(|style| style.bg(cx.theme().sidebar_accent))
         })
         .on_click(move |_, window, cx| {
             _ = open.update(cx, |workspace, cx| {
@@ -829,15 +846,15 @@ fn chat_row(
                 .text_sm()
                 .child(state_glyph(state, row.pinned, cx))
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .when(
-                            matches!(state, ChatState::Done | ChatState::NeedsYou),
-                            |this| this.font_weight(gpui_kit::FontWeight::MEDIUM),
-                        )
-                        .child(session.title.clone()),
+                    ph_ui::truncated_label(
+                        SharedString::from(format!("chat-title-{id}")),
+                        session.title.clone(),
+                    )
+                    .flex_1()
+                    .when(
+                        matches!(state, ChatState::Done | ChatState::NeedsYou),
+                        |this| this.font_weight(gpui_kit::FontWeight::MEDIUM),
+                    ),
                 )
                 .child(
                     div()
@@ -879,6 +896,81 @@ fn chat_row(
         )
         .test_support()
         .into_any_element()
+}
+
+/// The agent CLIs running in `project`'s terminals: a click shows the
+/// terminal with the agent's transcript beside it (read only, and from
+/// there it continues in a chat).
+fn terminal_agent_rows(
+    workspace: &WeakEntity<Workspace>,
+    project: ProjectId,
+    cx: &mut Context<Workspace>,
+) -> Vec<AnyElement> {
+    crate::terminal_agents::TerminalAgents::all(cx)
+        .into_iter()
+        .filter(|agent| agent.project == project)
+        .map(|agent| {
+            let pane = agent.pane.clone();
+            let open = workspace.clone();
+            let group = SharedString::from(format!("terminal-agent-{pane}"));
+            let title = agent
+                .title
+                .clone()
+                .unwrap_or_else(|| format!("{} in a terminal", agent.agent.name));
+            let line = match &agent.line {
+                Some(line) if !line.is_empty() => format!("Terminal · {line}"),
+                _ => "Terminal".to_string(),
+            };
+            let line_color = match agent.state {
+                ChatState::NeedsYou => cx.theme().warning,
+                ChatState::Failed => cx.theme().danger,
+                _ => cx.theme().muted_foreground,
+            };
+            v_flex()
+                .id(group.clone())
+                .pl(px(6.))
+                .pr_1()
+                .py(ph_theme::dense(0.25, cx))
+                .gap_0p5()
+                .rounded(cx.theme().radius)
+                .cursor_pointer()
+                .hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.6)))
+                .active(|style| style.bg(cx.theme().sidebar_accent))
+                .on_click(move |_, window, cx| {
+                    _ = open.update(cx, |workspace, cx| {
+                        workspace.open_terminal_agent(project, &pane, true, window, cx)
+                    });
+                })
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .text_sm()
+                        .child(state_glyph(agent.state, false, cx))
+                        .child(
+                            ph_ui::truncated_label(
+                                SharedString::from(format!("{group}-title")),
+                                title,
+                            )
+                            .flex_1(),
+                        )
+                        .child(
+                            Icon::new(Icons::Terminal)
+                                .xsmall()
+                                .text_color(cx.theme().muted_foreground),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .pl(px(22.))
+                        .gap_1p5()
+                        .text_xs()
+                        .text_color(line_color)
+                        .child(agent.agent.mark(px(12.)))
+                        .child(div().flex_1().min_w_0().truncate().child(line)),
+                )
+                .into_any_element()
+        })
+        .collect()
 }
 
 /// A chat's state as a 14 px glyph: a spinner while it works, amber when

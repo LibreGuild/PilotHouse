@@ -194,6 +194,13 @@ mod unix {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn lines_go_on_past_text_that_is_not_utf8() {
+            let input: &[u8] = b"one\r\ntw\xffo\nthree";
+            let lines: Vec<String> = crate::lossy_lines(input).collect();
+            assert_eq!(lines, ["one", "tw\u{fffd}o", "three"]);
+        }
+
         use super::*;
 
         #[test]
@@ -210,6 +217,31 @@ mod unix {
             assert!(parse("no marker").is_none());
         }
     }
+}
+
+/// The lines a program writes to `pipe`, as text even where they are not
+/// UTF-8 (a log cut mid-character, output in the system code page):
+/// `BufRead::lines` stops at the first such line, and then the program
+/// writes into a closed pipe. Ends when the pipe does.
+pub fn lossy_lines(pipe: impl std::io::Read) -> impl Iterator<Item = String> {
+    use std::io::BufRead as _;
+    let mut reader = std::io::BufReader::new(pipe);
+    let mut bytes = Vec::new();
+    std::iter::from_fn(move || {
+        bytes.clear();
+        match reader.read_until(b'\n', &mut bytes) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => {
+                if bytes.last() == Some(&b'\n') {
+                    bytes.pop();
+                    if bytes.last() == Some(&b'\r') {
+                        bytes.pop();
+                    }
+                }
+                Some(String::from_utf8_lossy(&bytes).into_owned())
+            }
+        }
+    })
 }
 
 /// A command for a helper program (git, adb, an agent…). On Windows the

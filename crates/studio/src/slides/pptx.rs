@@ -2801,14 +2801,19 @@ pub fn read_deck(path: &Path) -> Result<Option<Deck>> {
     let Ok(mut part) = archive.by_name(DECK_PART) else {
         return Ok(None);
     };
+    // Each part read up to a limit: a crafted file could unpack to any size.
+    const LIMIT: u64 = 256 * 1024 * 1024;
     let mut json = String::new();
-    std::io::Read::read_to_string(&mut part, &mut json)?;
+    std::io::Read::read_to_string(&mut std::io::Read::take(&mut part, LIMIT), &mut json)?;
     drop(part);
     // Saved by another program since: its slides, not the deck kept.
     let written = match archive.by_name(WRITTEN_PART) {
         Ok(mut written) => {
             let mut text = String::new();
-            std::io::Read::read_to_string(&mut written, &mut text)?;
+            std::io::Read::read_to_string(
+                &mut std::io::Read::take(&mut written, LIMIT),
+                &mut text,
+            )?;
             Some(text)
         }
         Err(_) => None,
@@ -2834,7 +2839,7 @@ pub fn read_deck(path: &Path) -> Result<Option<Deck>> {
         for name in names {
             let mut entry = archive.by_name(&name)?;
             let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut entry, &mut bytes)?;
+            std::io::Read::read_to_end(&mut std::io::Read::take(&mut entry, LIMIT), &mut bytes)?;
             parts.push((name, bytes));
         }
         let now = slides_fingerprint(

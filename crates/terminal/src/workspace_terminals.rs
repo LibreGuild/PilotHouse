@@ -167,7 +167,8 @@ pub struct WorkspaceTerminals {
     splits: Vec<Vec<EntityId>>,
     /// Why the last shell could not start.
     error: Option<SharedString>,
-    _subscriptions: Vec<Subscription>,
+    /// Each terminal's events, dropped with its tab.
+    _subscriptions: std::collections::HashMap<gpui_kit::EntityId, Subscription>,
 }
 
 impl WorkspaceTerminals {
@@ -179,7 +180,7 @@ impl WorkspaceTerminals {
             active: 0,
             splits: Vec::new(),
             error: None,
-            _subscriptions: Vec::new(),
+            _subscriptions: Default::default(),
         }
     }
 
@@ -358,20 +359,23 @@ impl WorkspaceTerminals {
             }
         };
         let terminal = cx.new(|cx| Terminal::new(shell, cx));
-        self._subscriptions.push(cx.subscribe(
-            &terminal,
-            |this, terminal, event: &TerminalEvent, cx| match event {
-                // A program that failed (an `ssh` that could not connect)
-                // keeps its tab, so what it said can be read.
-                TerminalEvent::Exited
-                    if terminal.read(cx).exit_code().is_some_and(|code| code != 0) =>
-                {
-                    cx.notify()
-                }
-                TerminalEvent::Exited => this.close(&terminal, cx),
-                TerminalEvent::TitleChanged | TerminalEvent::ProgramStatus => cx.notify(),
-            },
-        ));
+        self._subscriptions.insert(
+            terminal.entity_id(),
+            cx.subscribe(
+                &terminal,
+                |this, terminal, event: &TerminalEvent, cx| match event {
+                    // A program that failed (an `ssh` that could not connect)
+                    // keeps its tab, so what it said can be read.
+                    TerminalEvent::Exited
+                        if terminal.read(cx).exit_code().is_some_and(|code| code != 0) =>
+                    {
+                        cx.notify()
+                    }
+                    TerminalEvent::Exited => this.close(&terminal, cx),
+                    TerminalEvent::TitleChanged | TerminalEvent::ProgramStatus => cx.notify(),
+                },
+            ),
+        );
         self.error = None;
         Some(terminal)
     }
@@ -449,6 +453,7 @@ impl WorkspaceTerminals {
     /// goes on without it; one left alone is a tab again).
     fn remove_at(&mut self, ix: usize) {
         let id = self.terminals.remove(ix).entity_id();
+        self._subscriptions.remove(&id);
         self.active = active_after_close(self.active, ix, self.terminals.len());
         for split in &mut self.splits {
             split.retain(|known| *known != id);

@@ -28,7 +28,7 @@ use ph_theme::layout;
 /// window the Files panel's own ⌘W comes first.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([gpui_kit::KeyBinding::new(
-        "secondary-w",
+        ph_ui::keys("secondary-w"),
         ph_files::CloseFile,
         None,
     )]);

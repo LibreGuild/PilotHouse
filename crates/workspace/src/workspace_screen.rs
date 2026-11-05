@@ -158,6 +158,8 @@ pub struct WorkspaceScreen {
     signals: crate::signals::Signals,
     _signals: gpui_kit::Task<()>,
     _subscriptions: Vec<Subscription>,
+    /// Each shown agent transcript's "Continue in a chat", by terminal.
+    pub(crate) transcript_subscriptions: HashMap<gpui_kit::EntityId, Subscription>,
 }
 
 impl EventEmitter<WorkspaceScreenEvent> for WorkspaceScreen {}
@@ -321,6 +323,7 @@ impl WorkspaceScreen {
             sidebar_shown: true,
             signals: Default::default(),
             _signals: crate::signals::watch(store.clone(), cx),
+            transcript_subscriptions: HashMap::new(),
             _subscriptions: vec![
                 chat_subscription,
                 chats_subscription,

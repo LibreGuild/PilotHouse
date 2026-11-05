@@ -17,9 +17,25 @@ pub struct Hunk {
     pub header: String,
     /// Lines with their ` `/`+`/`-` prefix.
     pub lines: Vec<String>,
+    /// The lines exactly as git printed them, line endings included (a file
+    /// with CRLF endings keeps its `\r`, or `git apply` finds no match).
+    /// Empty for a hunk not read from git.
+    pub raw: String,
 }
 
 impl Hunk {
+    /// Its lines, for a patch.
+    fn write_lines(&self, patch: &mut String) {
+        if self.raw.is_empty() {
+            for line in &self.lines {
+                patch.push_str(line);
+                patch.push('\n');
+            }
+        } else {
+            patch.push_str(&self.raw);
+        }
+    }
+
     pub fn added(&self) -> usize {
         self.lines
             .iter()
@@ -42,10 +58,7 @@ impl FileChange {
         let mut patch = self.header.clone();
         patch.push_str(&hunk.header);
         patch.push('\n');
-        for line in &hunk.lines {
-            patch.push_str(line);
-            patch.push('\n');
-        }
+        hunk.write_lines(&mut patch);
         Some(patch)
     }
 
@@ -63,10 +76,7 @@ impl FileChange {
         for hunk in &self.hunks {
             patch.push_str(&hunk.header);
             patch.push('\n');
-            for line in &hunk.lines {
-                patch.push_str(line);
-                patch.push('\n');
-            }
+            hunk.write_lines(&mut patch);
         }
         patch
     }
@@ -99,7 +109,10 @@ pub enum ChangeKind {
 pub fn parse_diff(diff: &str) -> Vec<FileChange> {
     let mut files: Vec<FileChange> = Vec::new();
     let mut in_hunk = false;
-    for line in diff.lines() {
+    for piece in diff.split_inclusive('\n') {
+        let line = piece.trim_end_matches('\n');
+        // Shown without the carriage return; kept in `raw` for patches.
+        let line = line.strip_suffix('\r').unwrap_or(line);
         if line.starts_with("diff --git ") {
             files.push(FileChange {
                 path: path_from_header(line),
@@ -117,11 +130,16 @@ pub fn parse_diff(diff: &str) -> Vec<FileChange> {
             file.hunks.push(Hunk {
                 header: line.to_string(),
                 lines: Vec::new(),
+                raw: String::new(),
             });
             in_hunk = true;
         } else if in_hunk {
             if let Some(hunk) = file.hunks.last_mut() {
                 hunk.lines.push(line.to_string());
+                hunk.raw.push_str(piece);
+                if !piece.ends_with('\n') {
+                    hunk.raw.push('\n');
+                }
             }
         } else {
             if line.starts_with("Binary files") {
@@ -146,6 +164,20 @@ fn path_from_header(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn crlf_lines_keep_their_endings_in_patches() {
+        let diff =
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\r\n+new\r\n";
+        let files = parse_diff(diff);
+        assert_eq!(files[0].hunks[0].lines, ["-old", "+new"]);
+        assert!(
+            files[0]
+                .hunk_patch(0)
+                .unwrap()
+                .ends_with("@@ -1 +1 @@\n-old\r\n+new\r\n")
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -122,7 +122,7 @@ pub fn register(cx: &mut App) {
             with_window(cx, |window, cx| {
                 for character in text.chars() {
                     let typed = character.to_string();
-                    let mut key = gpui_kit::Keystroke::parse(&typed)
+                    let mut key = gpui_kit::Keystroke::parse_with_os(&typed, cx.platform_info().os)
                         .map_err(|err| anyhow!("cannot type {typed:?}: {err}"))?;
                     key.key_char = Some(typed);
                     window.dispatch_keystroke(key, cx);
@@ -357,7 +357,7 @@ fn scroll(params: Value, window: &mut Window, cx: &mut App) -> Result<Value> {
     let dy = params.get("dy").and_then(Value::as_f64).unwrap_or(300.0) as f32;
     window.pointer_move(at, None, cx);
     window.dispatch_event(
-        gpui_kit::ScrollWheelEvent {
+        gpui_kit::ScrollEvent {
             position: at,
             // A positive wheel delta scrolls up, as on a trackpad.
             delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(

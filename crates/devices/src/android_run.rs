@@ -7,15 +7,13 @@
 //! than for every ABI. The APK and the application id come from the
 //! plugin's `output-metadata.json`, so suffixes per variant need no parsing.
 
-use std::collections::VecDeque;
-use std::io::{BufRead as _, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::PopupMenuItem,
@@ -24,9 +22,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
-    Window, div, px,
+    App, AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Task, Window, div, px,
 };
 use ph_ui::Icons;
 use ph_ui::MenuButton as _;
@@ -34,9 +31,6 @@ use ph_ui::MenuButton as _;
 use crate::adb::{self, Adb};
 use crate::android_project::{self, AndroidModule};
 use crate::manager::DeviceManager;
-
-/// Build output lines kept.
-const LOG_LINES: usize = 2000;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Stage {
@@ -59,6 +53,9 @@ enum Stage {
 pub enum AndroidRunEvent {
     /// The app started on a device: show its screen.
     Launched,
+    /// Show the build log, in the bottom panel's terminal: run `command`
+    /// (it follows the log file as the build writes it).
+    ShowLog { command: String },
 }
 
 /// The Android card of the Run tab, for one Gradle project.
@@ -70,8 +67,9 @@ pub struct AndroidRun {
     variant: Vec<String>,
     manager: Entity<DeviceManager>,
     stage: Stage,
-    log: VecDeque<SharedString>,
-    show_log: bool,
+    /// The build's output, as it comes, for the terminal that shows it.
+    log: Option<std::io::BufWriter<std::fs::File>>,
+    log_path: PathBuf,
     started: Option<Instant>,
     /// The Gradle process while building, to stop it.
     gradle: Arc<Mutex<Option<Child>>>,
@@ -86,8 +84,10 @@ impl Drop for AndroidRun {
     /// A build no card shows any more is not left running.
     fn drop(&mut self) {
         if let Some(mut child) = self.gradle.lock().ok().and_then(|mut slot| slot.take()) {
-            let _ = child.kill();
+            kill_tree(&mut child);
         }
+        self.log = None;
+        let _ = std::fs::remove_file(&self.log_path);
     }
 }
 
@@ -114,8 +114,12 @@ impl AndroidRun {
             variant,
             manager,
             stage: Stage::Idle,
-            log: VecDeque::new(),
-            show_log: false,
+            log: None,
+            log_path: std::env::temp_dir().join(format!(
+                "pilothouse-build-{}-{}.log",
+                std::process::id(),
+                cx.entity_id().as_u64()
+            )),
             started: None,
             gradle: Arc::default(),
             serial: None,
@@ -160,10 +164,23 @@ impl AndroidRun {
     }
 
     fn push_log(&mut self, line: impl Into<SharedString>) {
-        if self.log.len() == LOG_LINES {
-            self.log.pop_front();
+        use std::io::Write as _;
+        if let Some(log) = &mut self.log {
+            let line: SharedString = line.into();
+            if writeln!(log, "{line}").and_then(|_| log.flush()).is_err() {
+                self.log = None;
+            }
         }
-        self.log.push_back(line.into());
+    }
+
+    /// Asks for the build log in the bottom panel's terminal.
+    fn show_log(&mut self, cx: &mut Context<Self>) {
+        if !self.log_path.exists() {
+            return;
+        }
+        cx.emit(AndroidRunEvent::ShowLog {
+            command: follow_command(&self.log_path),
+        });
     }
 
     pub fn run(&mut self, cx: &mut Context<Self>) {
@@ -286,7 +303,10 @@ impl AndroidRun {
         abis: impl FnOnce() -> String + Send + 'static,
         cx: &mut Context<Self>,
     ) -> Task<Result<(), String>> {
-        self.log.clear();
+        // A new log for each build.
+        self.log = std::fs::File::create(&self.log_path)
+            .ok()
+            .map(std::io::BufWriter::new);
         self.push_log(heading);
         self.stage = Stage::Building;
         self.started = Some(Instant::now());
@@ -405,14 +425,14 @@ impl AndroidRun {
         self.push_log(message.clone());
         self.stage = Stage::Failed(message);
         // The log usually says why.
-        self.show_log = true;
+        self.show_log(cx);
         cx.notify();
     }
 
     /// Stops the build, or the running app.
     pub fn stop(&mut self, cx: &mut Context<Self>) {
         if let Some(mut child) = self.gradle.lock().ok().and_then(|mut slot| slot.take()) {
-            let _ = child.kill();
+            kill_tree(&mut child);
         }
         if let (Stage::Running { package, .. }, Some(serial), Some(adb)) = (
             &self.stage,
@@ -578,11 +598,6 @@ impl Render for AndroidRun {
                 .read(cx)
                 .selected()
                 .is_some_and(|device| device.is_ready());
-        let log: Vec<SharedString> = if self.show_log {
-            self.log.iter().rev().take(300).rev().cloned().collect()
-        } else {
-            Vec::new()
-        };
         v_flex()
             .gap_2()
             .p_2()
@@ -609,11 +624,9 @@ impl Render for AndroidRun {
                             .xsmall()
                             .icon(Icons::ScrollText)
                             .label("Build log")
-                            .selected(self.show_log)
-                            .on_click(cx.listener(|run, _, _, cx| {
-                                run.show_log = !run.show_log;
-                                cx.notify();
-                            })),
+                            .disabled(!self.log_path.exists())
+                            .tooltip("Show the build log in the terminal")
+                            .on_click(cx.listener(|run, _, _, cx| run.show_log(cx))),
                     ),
             )
             .child(self.render_pickers(cx))
@@ -656,17 +669,12 @@ impl Render for AndroidRun {
                                 .on_click(move |_, _, cx| cx.reveal_path(&apk)),
                         )
                         .child(
-                            Button::new("android-copy-apk")
-                                .ghost()
-                                .small()
-                                .icon(gpui_kit::component::IconName::Copy)
-                                .tooltip("Copy the APK's path")
-                                .accessibility_label("Copy the APK's path")
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                                        copy.to_string_lossy().into_owned(),
-                                    ))
-                                }),
+                            ph_ui::CopyButton::new(
+                                "android-copy-apk",
+                                copy.to_string_lossy().into_owned(),
+                            )
+                            .small()
+                            .tooltip("Copy the APK's path"),
                         )
                     })
                     .when(busy || running, |this| {
@@ -686,32 +694,6 @@ impl Render for AndroidRun {
                     })
                     .child(self.render_status(cx)),
             )
-            .when(self.show_log, |this| {
-                this.child(
-                    v_flex()
-                        .id("android-build-log")
-                        .max_h(px(260.))
-                        .overflow_y_scroll()
-                        .p_2()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().background)
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_xs()
-                        .when(log.is_empty(), |this| {
-                            this.child(
-                                div()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Nothing built yet."),
-                            )
-                        })
-                        .children(log.into_iter().map(|line| {
-                            let color = log_color(&line, cx);
-                            div()
-                                .when_some(color, |this, color| this.text_color(color))
-                                .child(line)
-                        })),
-                )
-            })
     }
 }
 
@@ -723,25 +705,6 @@ fn default_variant(module: &AndroidModule) -> Option<String> {
         .find(|variant| variant.build_type == "debug")
         .or(module.variants.first())
         .map(|variant| variant.name.clone())
-}
-
-fn log_color(line: &str, cx: &App) -> Option<gpui_kit::Hsla> {
-    let theme = cx.theme();
-    if line.starts_with("e:")
-        || line.contains("error:")
-        || line.starts_with("FAILURE")
-        || line.contains("BUILD FAILED")
-    {
-        Some(theme.danger)
-    } else if line.starts_with("w:") || line.contains("warning:") {
-        Some(theme.warning)
-    } else if line.contains("BUILD SUCCESSFUL") {
-        Some(theme.success)
-    } else if line.starts_with("> Task") {
-        Some(theme.muted_foreground)
-    } else {
-        None
-    }
 }
 
 /// Runs `task` with the project's wrapper, sending its output line by line.
@@ -778,6 +741,9 @@ fn build_with_gradle(
     {
         command.arg(format!("-Pandroid.injected.build.abi={abis}"));
     }
+    // Its own process group, so Stop ends the Java client Gradle starts too.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut child = command
         .spawn()
         .map_err(|err| format!("Gradle did not start: {err}"))?;
@@ -796,7 +762,7 @@ fn build_with_gradle(
     .map(|pipe| {
         let lines = lines.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+            for line in ph_env::lossy_lines(pipe) {
                 if lines.send_blocking(line).is_err() {
                     return;
                 }
@@ -841,4 +807,39 @@ fn install(
     adb.install(serial, &apk)
         .map_err(|err| format!("{err:#}"))?;
     Ok(package)
+}
+
+/// A command that prints the log file at `path` and follows it as it grows.
+fn follow_command(path: &std::path::Path) -> String {
+    let path = path.to_string_lossy();
+    if cfg!(windows) {
+        format!(
+            "powershell -NoProfile -Command \"Get-Content -Wait -Path '{}'\"",
+            path.replace('\'', "''")
+        )
+    } else {
+        format!("tail -n +1 -F '{}'", path.replace('\'', "'\\''"))
+    }
+}
+
+/// Ends `child` and what it started: the wrapper script (`gradlew`,
+/// `gradlew.bat`) starts the Java client that does the build.
+fn kill_tree(child: &mut Child) {
+    let id = child.id().to_string();
+    #[cfg(unix)]
+    let _ = ph_env::command("kill")
+        .args(["-KILL", &format!("-{id}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    #[cfg(windows)]
+    let _ = ph_env::command("taskkill")
+        .args(["/T", "/F", "/PID", &id])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
 }

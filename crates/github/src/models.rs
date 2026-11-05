@@ -123,6 +123,10 @@ pub struct IssueComment {
 pub struct ReviewComment {
     pub id: u64,
     pub user: User,
+    /// How the author relates to the repository (`OWNER`, `MEMBER`,
+    /// `COLLABORATOR`, `CONTRIBUTOR`, `NONE`…).
+    #[serde(default)]
+    pub author_association: String,
     pub body: String,
     pub path: String,
     pub line: Option<u64>,

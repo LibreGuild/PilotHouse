@@ -3,7 +3,7 @@
 //! nothing leaves the machine.
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{InputEvent, Textarea, TextareaState},
@@ -11,7 +11,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _, IntoElement,
+    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, px,
 };
@@ -225,17 +225,10 @@ impl Render for UtilitiesView {
                                 },
                             ))
                             .child(
-                                Button::new("utility-copy")
+                                ph_ui::CopyButton::new("utility-copy", copy.clone())
                                     .xsmall()
-                                    .ghost()
-                                    .icon(IconName::Copy)
                                     .label("Copy")
-                                    .disabled(copy.is_empty())
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copy.clone(),
-                                        ))
-                                    }),
+                                    .disabled(copy.is_empty()),
                             ),
                     )
                     .child(

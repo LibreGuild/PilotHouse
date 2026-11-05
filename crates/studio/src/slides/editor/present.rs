@@ -40,11 +40,11 @@ pub(crate) fn bind_keys(cx: &mut App) {
         bindings.push(gpui_kit::KeyBinding::new(key, Previous, context));
     }
     bindings.extend([
-        gpui_kit::KeyBinding::new("home", First, context),
-        gpui_kit::KeyBinding::new("end", Last, context),
-        gpui_kit::KeyBinding::new("escape", Close, context),
-        gpui_kit::KeyBinding::new("b", Black, context),
-        gpui_kit::KeyBinding::new(".", Black, context),
+        gpui_kit::KeyBinding::new(ph_ui::keys("home"), First, context),
+        gpui_kit::KeyBinding::new(ph_ui::keys("end"), Last, context),
+        gpui_kit::KeyBinding::new(ph_ui::keys("escape"), Close, context),
+        gpui_kit::KeyBinding::new(ph_ui::keys("b"), Black, context),
+        gpui_kit::KeyBinding::new(ph_ui::keys("."), Black, context),
     ]);
     cx.bind_keys(bindings);
 }
