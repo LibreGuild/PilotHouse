@@ -11,7 +11,7 @@ use ph_store::Store;
 use ph_store::projects::{Project, ProjectId};
 use ph_store::sessions::SessionId;
 
-use crate::agents::{self, AGENTS, AgentSpec};
+use crate::agents::{self, AgentSpec};
 use crate::connection::AgentConnection;
 use crate::thread::{ChatThread, ThreadEvent, ThreadProject, ThreadStatus};
 
@@ -22,10 +22,24 @@ const MAX_KEPT: usize = 24;
 /// Settings key for the agent new chats start with.
 pub(crate) const DEFAULT_AGENT_KEY: &str = "agent.default";
 
-/// The agent new chats start with.
+/// The agent new chats start with: the one last chosen while it is
+/// installed, else the first installed ([`agents::pick_default`]).
 pub fn default_agent(store: &Store) -> &'static AgentSpec {
+    agents::pick_default(chosen_agent(store), agents::installed().as_deref())
+}
+
+/// The agent the user last chose, if any.
+fn chosen_agent(store: &Store) -> Option<&'static AgentSpec> {
     let id: String = store.setting(DEFAULT_AGENT_KEY);
-    agents::find(&id).unwrap_or(&AGENTS[0])
+    agents::find(&id)
+}
+
+/// When the agent the user chose is no longer installed and new chats use
+/// another: (the one chosen, the one used).
+pub fn default_fallback(store: &Store) -> Option<(&'static AgentSpec, &'static AgentSpec)> {
+    let chosen = chosen_agent(store)?;
+    let used = default_agent(store);
+    (used.id != chosen.id).then_some((chosen, used))
 }
 
 /// Every workspace's chats, by workspace.

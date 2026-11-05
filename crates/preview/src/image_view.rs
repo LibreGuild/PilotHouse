@@ -1,5 +1,6 @@
 //! Images (and SVG drawings and diagrams): fitted to the pane, zoomable
-//! with the buttons or ⌘/Ctrl and the wheel, with their size and format.
+//! with the buttons, a pinch on the trackpad, or ⌘/Ctrl and the wheel
+//! (around the pointer), with their size and format.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,9 +13,9 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Image, ImageFormat, ImageSource, InteractiveElement as _,
-    IntoElement, ObjectFit, ParentElement as _, Render, RenderImage, ScrollEvent, ScrollHandle,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, Window,
-    div, img, px,
+    IntoElement, ObjectFit, ParentElement as _, PinchEvent, Pixels, Point, Render, RenderImage,
+    ScrollEvent, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Task, Window, div, img, px,
 };
 
 use crate::byte_size;
@@ -218,11 +219,53 @@ impl ImagePreview {
         }
     }
 
-    fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
+    /// Zooms by `factor` around `at` (a point in the window; the middle of
+    /// the pane without one): the part of the picture there stays there.
+    fn zoom_by(&mut self, factor: f32, at: Option<Point<Pixels>>, cx: &mut Context<Self>) {
         let view = self.view_size();
-        let scale = (self.scale(view) * factor).clamp(MIN_SCALE, MAX_SCALE);
+        let before = self.scale(view);
+        let scale = (before * factor).clamp(MIN_SCALE, MAX_SCALE);
+        if let Some(loaded) = &self.loaded {
+            let bounds = self.scroll.bounds();
+            let at = at.map_or(
+                (
+                    f32::from(bounds.size.width) / 2.,
+                    f32::from(bounds.size.height) / 2.,
+                ),
+                |at| {
+                    (
+                        f32::from(at.x - bounds.origin.x),
+                        f32::from(at.y - bounds.origin.y),
+                    )
+                },
+            );
+            let offset = self.scroll.offset();
+            let x = keep_under(
+                at.0,
+                f32::from(offset.x),
+                f32::from(bounds.size.width),
+                loaded.size.0 * before,
+                loaded.size.0 * scale,
+            );
+            let y = keep_under(
+                at.1,
+                f32::from(offset.y),
+                f32::from(bounds.size.height),
+                loaded.size.1 * before,
+                loaded.size.1 * scale,
+            );
+            self.scroll.set_offset(gpui_kit::point(px(x), px(y)));
+        }
         self.zoom = Zoom::Scale(scale);
         cx.notify();
+    }
+
+    /// Two fingers pinched on the trackpad.
+    fn on_pinch(&mut self, event: &PinchEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.loaded.is_some() && event.delta != 0. {
+            self.zoom_by(1. + event.delta, Some(event.position), cx);
+        }
+        cx.stop_propagation();
     }
 
     /// The scroll area's size, less its padding.
@@ -239,12 +282,33 @@ impl ImagePreview {
         if !event.modifiers.secondary(cx) {
             return;
         }
-        let delta = f32::from(event.delta.pixel_delta(window.line_height()).y);
-        if delta != 0. {
-            self.zoom_by(if delta > 0. { 1.1 } else { 1. / 1.1 }, cx);
-            cx.stop_propagation();
+        // ⌘ and the wheel, or Ctrl and a pinch on Windows touchpads.
+        if let Some(factor) = wheel_zoom(event, window) {
+            self.zoom_by(factor, Some(event.position), cx);
         }
+        cx.stop_propagation();
     }
+}
+
+/// How much ⌘/Ctrl and the wheel zoom: in step with how far it turned, so a
+/// touchpad's many small steps (a pinch on Windows) zoom smoothly.
+pub(crate) fn wheel_zoom(event: &ScrollEvent, window: &Window) -> Option<f32> {
+    let dy = f32::from(event.delta.pixel_delta(window.line_height()).y);
+    (dy != 0.).then(|| (dy * 0.004).clamp(-0.4, 0.4).exp())
+}
+
+/// The scroll offset (zero or less) along one side that keeps the point of
+/// a picture under `at` (from the scroll area's edge) in place while its
+/// drawn length goes from `old` to `new`, in a scroll area `view` long that
+/// centers it with [`PADDING`] around it.
+fn keep_under(at: f32, offset: f32, view: f32, old: f32, new: f32) -> f32 {
+    if old <= 0. {
+        return offset;
+    }
+    let lead = |length: f32| (view - length).max(2. * PADDING) / 2.;
+    let fraction = (at - offset - lead(old)) / old;
+    let content = view.max(new + 2. * PADDING);
+    (at - lead(new) - fraction * new).clamp(view - content, 0.)
 }
 
 const PADDING: f32 = 24.;
@@ -399,10 +463,14 @@ impl Render for ImagePreview {
                     .overflow_scroll()
                     .track_scroll(&self.scroll)
                     .on_scroll(cx.listener(Self::on_wheel))
+                    .on_pinch(cx.listener(Self::on_pinch))
                     .child(
                         // Centered while smaller than the pane, scrollable
-                        // once larger.
+                        // once larger: as large as the picture (and its
+                        // frame's border), so all of it can be scrolled to.
                         div()
+                            .w(px(width + 2. + 2. * PADDING))
+                            .h(px(height + 2. + 2. * PADDING))
                             .min_w_full()
                             .min_h_full()
                             .flex()
@@ -446,10 +514,10 @@ impl Render for ImagePreview {
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Minus)
-                                    .tooltip("Zoom out (⌘ and scroll)")
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.zoom_by(1. / 1.25, cx)),
-                                    ),
+                                    .tooltip("Zoom out (pinch, or ⌘ and scroll)")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.zoom_by(1. / 1.25, None, cx)
+                                    })),
                             )
                             .child(
                                 Button::new("image-actual-size")
@@ -467,8 +535,10 @@ impl Render for ImagePreview {
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Plus)
-                                    .tooltip("Zoom in (⌘ and scroll)")
-                                    .on_click(cx.listener(|this, _, _, cx| this.zoom_by(1.25, cx))),
+                                    .tooltip("Zoom in (pinch, or ⌘ and scroll)")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.zoom_by(1.25, None, cx)),
+                                    ),
                             )
                             .child(
                                 Button::new("image-fit")
@@ -498,6 +568,21 @@ mod tests {
         assert_eq!(byte_size(1536), "1.5 KB");
         assert_eq!(byte_size(250 * 1024), "250 KB");
         assert_eq!(byte_size(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    #[test]
+    fn zooming_keeps_the_point_under_the_fingers() {
+        // A 400 px picture in a 1000 px pane is centered (300 px each
+        // side); zoomed to 2000 px around its middle, its middle stays.
+        let offset = keep_under(500., 0., 1000., 400., 2000.);
+        let middle = offset + PADDING + 1000.;
+        assert!((middle - 500.).abs() < 0.01, "{offset}");
+        // Around a quarter of the way in (at 400 px): that point stays.
+        let offset = keep_under(400., 0., 1000., 400., 2000.);
+        assert!((offset + PADDING + 500. - 400.).abs() < 0.01, "{offset}");
+        // Never scrolled past the content's ends.
+        assert_eq!(keep_under(500., -900., 1000., 2000., 400.), 0.);
+        assert!(keep_under(999., 0., 1000., 400., 100_000.) >= 1000. - 100_000. - 2. * PADDING);
     }
 
     #[test]

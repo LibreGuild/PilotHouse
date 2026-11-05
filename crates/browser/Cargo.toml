@@ -1,6 +1,6 @@
 [package]
 name = "ph-browser"
-description = "The embedded browser pane: a headless Chrome per project, driven over the DevTools protocol."
+description = "The embedded browser pane (a headless Chrome per project, driven over the DevTools protocol) and agents' use of the user's Chrome through PilotHouse's extension."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -25,4 +25,7 @@ tracing.workspace = true
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_Threading"] }
+
+[dev-dependencies]
+sha2 = "0.11"

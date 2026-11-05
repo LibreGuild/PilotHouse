@@ -88,10 +88,13 @@ pub fn init(cx: &mut App) {
     attention::install(cx);
     terminal_agents::install(cx);
     ph_agent::rate_limits::RateLimits::watch_codex(cx);
+    // Which agents are installed (new chats start with one), then their
+    // models, so the picker lists them the first time.
+    ph_agent::installed::install(AppState::store(cx).clone(), cx);
     updates::install(cx);
     actions::bind_keys(cx);
     network_drives::install(cx);
-    sidebar::load_width(cx);
+    sidebar::load_sizes(cx);
     ph_files::init(cx, WORKSPACE_CONTEXT);
     file_window::bind_keys(cx);
     ph_studio::bind_keys(cx);

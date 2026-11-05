@@ -1,7 +1,8 @@
 //! PDF documents: every page in a column, drawn as it scrolls into view,
-//! fitted to the pane's width or zoomed. Pages are drawn by a pure-Rust
-//! renderer, so nothing outside the app is needed; text cannot be selected
-//! (Open in Default App for that).
+//! fitted to the pane's width or zoomed (the buttons, a pinch on the
+//! trackpad, or ⌘/Ctrl and the wheel, around the pointer). Pages are drawn
+//! by a pure-Rust renderer, so nothing outside the app is needed; text
+//! cannot be selected (Open in Default App for that).
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -15,8 +16,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AppContext as _, Context, ImageSource, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, RenderImage, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, Window, div, img, px,
+    ParentElement as _, PinchEvent, Pixels, Point, Render, RenderImage, ScrollEvent, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, Window,
+    div, img, px,
 };
 
 use crate::byte_size;
@@ -127,28 +129,65 @@ impl PdfView {
         }
     }
 
-    fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
-        let Some(Ok(document)) = &self.document else {
-            return;
-        };
-        let width = f32::from(self.scroll.bounds().size.width);
-        let scale = (self.scale(width, &document.sizes) * factor).clamp(0.1, 8.);
-        self.set_zoom(Zoom::Scale(scale), cx);
-    }
-
-    /// Zooms to `zoom`, keeping the same place of the document in view.
-    fn set_zoom(&mut self, zoom: Zoom, cx: &mut Context<Self>) {
+    /// Zooms by `factor` around `at` ([`Self::set_zoom`]).
+    fn zoom_by(&mut self, factor: f32, at: Option<Point<Pixels>>, cx: &mut Context<Self>) {
         let Some(Ok(document)) = &self.document else {
             return;
         };
         let width = f32::from(self.scroll.bounds().size.width).max(200.);
+        let scale = (self.scale(width, &document.sizes) * factor).clamp(0.1, 8.);
+        self.set_zoom(Zoom::Scale(scale), at, cx);
+    }
+
+    /// Zooms to `zoom`, keeping the place of the document under `at` (a
+    /// point in the window) where it is; without one, the place at the top
+    /// of the pane, in the middle.
+    fn set_zoom(&mut self, zoom: Zoom, at: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+        let Some(Ok(document)) = &self.document else {
+            return;
+        };
+        let bounds = self.scroll.bounds();
+        let width = f32::from(bounds.size.width).max(200.);
         let before = self.scale(width, &document.sizes);
         self.zoom = zoom;
-        let ratio = self.scale(width, &document.sizes) / before;
+        let after = self.scale(width, &document.sizes);
+        let view = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        let at = at.map_or((view.0 / 2., 0.), |at| {
+            (
+                f32::from(at.x - bounds.origin.x),
+                f32::from(at.y - bounds.origin.y),
+            )
+        });
         let offset = self.scroll.offset();
-        self.scroll
-            .set_offset(gpui_kit::point(offset.x * ratio, offset.y * ratio));
+        let (x, y) = keep_in_place(
+            at,
+            (f32::from(offset.x), f32::from(offset.y)),
+            view,
+            &document.sizes,
+            before,
+            after,
+        );
+        self.scroll.set_offset(gpui_kit::point(px(x), px(y)));
         cx.notify();
+    }
+
+    /// Two fingers pinched on the trackpad.
+    fn on_pinch(&mut self, event: &PinchEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.delta != 0. {
+            self.zoom_by(1. + event.delta, Some(event.position), cx);
+        }
+        cx.stop_propagation();
+    }
+
+    fn on_wheel(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !event.modifiers.secondary(cx) {
+            return;
+        }
+        // ⌘ and the wheel, or Ctrl and a pinch on Windows touchpads.
+        if let Some(factor) = crate::image_view::wheel_zoom(event, window) {
+            self.zoom_by(factor, Some(event.position), cx);
+        }
+        cx.stop_propagation();
     }
 
     /// Starts drawing the pages in `pages` that are not drawn at `pixels`
@@ -207,6 +246,49 @@ impl PdfView {
             }
         }
     }
+}
+
+/// The scroll offset (each zero or less) that keeps the place of the
+/// document under `at` (from the pane's corner) where it is while pages go
+/// from `old` to `new` pixels per point. Pages of `sizes` points stand in a
+/// centered column, [`GAP`] apart and around.
+fn keep_in_place(
+    at: (f32, f32),
+    offset: (f32, f32),
+    view: (f32, f32),
+    sizes: &[(f32, f32)],
+    old: f32,
+    new: f32,
+) -> (f32, f32) {
+    if sizes.is_empty() || old <= 0. {
+        return offset;
+    }
+    // Down: the page there, and how far into it, in points (the gaps stay
+    // GAP at any zoom).
+    let y = at.1 - offset.1;
+    let (mut page, mut above, mut top) = (sizes.len() - 1, 0., GAP);
+    for (ix, (_, height)) in sizes.iter().enumerate() {
+        let bottom = top + height * old;
+        if y < bottom + GAP || ix + 1 == sizes.len() {
+            page = ix;
+            break;
+        }
+        above += height;
+        top = bottom + GAP;
+    }
+    let into = (y - top) / old;
+    let new_y = (page + 1) as f32 * GAP + new * (above + into);
+    let tall = (sizes.len() + 1) as f32 * GAP + new * sizes.iter().map(|size| size.1).sum::<f32>();
+    let y = (at.1 - new_y).clamp((view.1 - tall).min(0.), 0.);
+    // Across: each page is centered in the column, as wide as the widest.
+    let widest = sizes.iter().map(|size| size.0).fold(1., f32::max);
+    let wide = |scale: f32| view.0.max(widest * scale + 2. * GAP);
+    let page_width = sizes[page].0.max(1.);
+    let left = |scale: f32| (wide(scale) - page_width * scale) / 2.;
+    let fraction = (at.0 - offset.0 - left(old)) / (page_width * old);
+    let new_x = left(new) + fraction * page_width * new;
+    let x = (at.0 - new_x).clamp((view.0 - wide(new)).min(0.), 0.);
+    (x, y)
 }
 
 fn open(path: &std::path::Path) -> Result<Document, String> {
@@ -336,6 +418,7 @@ impl Render for PdfView {
         let wanted = visible.start.saturating_sub(1)..(visible.end + 1).min(sizes.len());
         self.draw(wanted, scale * window.scale_factor(), cx);
         let current = visible.start + 1;
+        let widest = sizes.iter().map(|size| size.0).fold(1., f32::max);
         let theme = cx.theme();
 
         let pages = sizes.iter().enumerate().map(|(ix, (width, height))| {
@@ -368,8 +451,13 @@ impl Render for PdfView {
                     .size_full()
                     .overflow_scroll()
                     .track_scroll(&self.scroll)
+                    .on_scroll(cx.listener(Self::on_wheel))
+                    .on_pinch(cx.listener(Self::on_pinch))
                     .child(
+                        // As wide as the widest page, so zoomed in, all of
+                        // it can be scrolled to.
                         div()
+                            .w(px(widest * scale + 2. * GAP))
                             .min_w_full()
                             .flex()
                             .flex_col()
@@ -407,8 +495,10 @@ impl Render for PdfView {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Minus)
-                            .tooltip("Zoom out")
-                            .on_click(cx.listener(|this, _, _, cx| this.zoom_by(1. / 1.2, cx))),
+                            .tooltip("Zoom out (pinch, or ⌘ and scroll)")
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.zoom_by(1. / 1.2, None, cx)),
+                            ),
                     )
                     .child(
                         Button::new("pdf-fit")
@@ -417,17 +507,17 @@ impl Render for PdfView {
                             .label(label)
                             .selected(self.zoom == Zoom::FitWidth)
                             .tooltip("Fit the pages to the pane's width")
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.set_zoom(Zoom::FitWidth, cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_zoom(Zoom::FitWidth, None, cx)
+                            })),
                     )
                     .child(
                         Button::new("pdf-zoom-in")
                             .ghost()
                             .xsmall()
                             .icon(IconName::Plus)
-                            .tooltip("Zoom in")
-                            .on_click(cx.listener(|this, _, _, cx| this.zoom_by(1.2, cx))),
+                            .tooltip("Zoom in (pinch, or ⌘ and scroll)")
+                            .on_click(cx.listener(|this, _, _, cx| this.zoom_by(1.2, None, cx))),
                     ),
             )
             .into_any_element()
@@ -479,6 +569,26 @@ mod tests {
             .as_bytes(),
         );
         out
+    }
+
+    #[test]
+    fn zooming_keeps_the_place_under_the_fingers() {
+        // Two 100 × 200 pages at 1 px a point in a 400 × 300 pane: page 2
+        // starts at 16 + 200 + 16 = 232. A point 50 points into it, in the
+        // middle across (the column is 400 wide), stays put when zoomed to
+        // 5 px a point.
+        let sizes = [(100., 200.), (100., 200.)];
+        let (at, offset) = ((200., 82.), (0., -200.));
+        let (x, y) = keep_in_place(at, offset, (400., 300.), &sizes, 1., 5.);
+        let new_y = 2. * GAP + 5. * (200. + 50.);
+        assert!((y + new_y - at.1).abs() < 0.01, "{y}");
+        let left = (500. + 2. * GAP - 500.) / 2.;
+        assert!((x + left + 0.5 * 500. - at.0).abs() < 0.01, "{x}");
+        // Zoomed out far, it rests at the top.
+        assert_eq!(
+            keep_in_place(at, offset, (400., 300.), &sizes, 1., 0.1),
+            (0., 0.)
+        );
     }
 
     #[test]

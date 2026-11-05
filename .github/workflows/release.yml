@@ -13,6 +13,8 @@ concurrency:
   cancel-in-progress: false
 
 # Read-only by default; the build jobs may attest, only `publish` writes.
+# `publish` and `mirror` run in the `release` environment, whose secrets (the
+# update signing key, the R2 upload token) only `v*` tags can use.
 permissions:
   contents: read
 
@@ -160,6 +162,7 @@ jobs:
     needs: [plan, macos, windows, linux]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
     env:
@@ -181,6 +184,12 @@ jobs:
       # What PilotHouse's updater reads: the version and each install's file.
       - name: Update manifest
         run: python3 source/scripts/package/latest-json.py "$VERSION" "$GITHUB_REF_NAME" "$GH_REPO" dist > dist/latest.json && cat dist/latest.json
+      # The updater uses latest.json only with the release key's signature,
+      # wherever it is fetched from (GitHub or a mirror).
+      - name: Sign manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: source/scripts/package/sign-manifest.sh dist/latest.json
       - name: Release notes
         run: |
           set -euo pipefail
@@ -196,12 +205,14 @@ jobs:
           | Ubuntu 22.04+ / Debian 12+ | `PilotHouse-Linux-amd64.deb`: `sudo apt install ./PilotHouse-Linux-amd64.deb` |
           | Any Linux (x86-64) | `PilotHouse-Linux-x86_64.AppImage` (`chmod +x` and run) or `PilotHouse-Linux-x86_64.tar.gz` |
 
-          PilotHouse updates itself from these releases (`latest.json`, and `PilotHouse-macOS-universal.zip` on macOS); the `.deb` is updated by installing the new one.
+          PilotHouse updates itself from these releases or the mirrors below (`latest.json`, signed with the release key in `latest.json.sig`, and `PilotHouse-macOS-universal.zip` on macOS); the `.deb` is updated by installing the new one.
 
           The builds are not code-signed. **macOS:** the first open is blocked; open System Settings → Privacy & Security → **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/PilotHouse.app`. **Windows:** if SmartScreen appears, choose **More info → Run anyway**.
 
           Check a download: `SHA256SUMS` lists every file's checksum, and `gh attestation verify <file> -R LibreGuild/PilotHouse` shows it was built by this repository's workflow.
           NOTES
+          printf '\n**Mirrors:**\n\n- `https://libreguild.skatech.org/pilothouse/releases/%s/<file>`\n- `https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/releases/%s/<file>`\n' \
+            "$GITHUB_REF_NAME" "$GITHUB_REF_NAME" >> notes.md
       - name: Publish
         run: |
           set -euo pipefail
@@ -213,3 +224,66 @@ jobs:
             gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --latest \
               --title "PilotHouse $VERSION" --notes-file notes.md
           fi
+
+  # The same files on Cloudflare R2, for networks where GitHub is blocked:
+  # `pilothouse/releases/<tag>/` keeps every release (where latest.json points
+  # the updater), `pilothouse/latest/` the newest one (what the site links to,
+  # and the updater's latest.json). Served at libreguild.skatech.org and the
+  # bucket's r2.dev address. The upload token can only write this bucket.
+  mirror:
+    name: Mirror to R2
+    needs: [plan, publish]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      BUCKET: s3://libreguild/pilothouse
+    steps:
+      # What is mirrored is exactly what GitHub has, checked against its checksums.
+      - name: Release files
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" --dir dist
+          cd dist
+          sha256sum --check --strict SHA256SUMS
+          test -s latest.json.sig
+          ls -l
+      - name: Upload
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          AWS_DEFAULT_REGION: auto
+          # R2 does not take the newer default checksum headers of the AWS CLI.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          set -euo pipefail
+          # A release's own files never change.
+          aws s3 cp dist "$BUCKET/releases/$GITHUB_REF_NAME/" --recursive --no-progress \
+            --cache-control "public, max-age=31536000, immutable"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "A pre-release: pilothouse/latest/ stays on the newest release."
+            exit 0
+          fi
+          # The newest release, its manifest last: the files it names are
+          # already in place when the updater reads it.
+          aws s3 cp dist "$BUCKET/latest/" --recursive --no-progress \
+            --exclude "latest.json" --exclude "latest.json.sig" \
+            --cache-control "public, max-age=300"
+          aws s3 cp dist/latest.json.sig "$BUCKET/latest/latest.json.sig" --no-progress \
+            --cache-control "no-cache"
+          aws s3 cp dist/latest.json "$BUCKET/latest/latest.json" --no-progress \
+            --cache-control "no-cache" --content-type "application/json"
+      - name: Check the mirrors
+        run: |
+          set -euo pipefail
+          for host in https://libreguild.skatech.org https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev; do
+            curl -fsS -o /dev/null "$host/pilothouse/releases/$GITHUB_REF_NAME/SHA256SUMS"
+            echo "$host serves $GITHUB_REF_NAME"
+          done

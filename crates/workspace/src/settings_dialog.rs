@@ -27,6 +27,7 @@ use crate::context_panel::ContextTab;
 #[derive(Clone, Copy)]
 pub(crate) enum Page {
     First,
+    Chrome,
     GitHub,
     Storage,
 }
@@ -36,8 +37,9 @@ impl Page {
     fn index(self) -> usize {
         match self {
             Page::First => 0,
-            Page::GitHub => 6,
-            Page::Storage => 9,
+            Page::Chrome => 5,
+            Page::GitHub => 7,
+            Page::Storage => 10,
         }
     }
 }
@@ -69,6 +71,7 @@ pub(crate) fn open(
     let tools =
         cx.new(|cx| ph_agent::tools_view::ToolsView::new(store, project, open_file, window, cx));
     let storage = cx.new(crate::storage::StorageView::new);
+    let chrome = cx.new(ph_browser::ChromeExtensionView::new);
     let viewport = window.viewport_size();
     let width = (viewport.width - px(80.)).clamp(px(560.), px(960.));
     let height = (viewport.height - px(120.)).clamp(px(420.), px(680.));
@@ -144,6 +147,7 @@ pub(crate) fn open(
                                         terminal_page(),
                                         chat_page(),
                                         agents_page(),
+                                        chrome_page(chrome.clone()),
                                         tools_page(tools.clone()),
                                         github_page(accounts.clone()),
                                         templates_page(templates.clone()),
@@ -703,6 +707,25 @@ fn drives_page(view: gpui_kit::Entity<crate::network_drives::NetworkDrivesView>)
         )
 }
 
+/// Settings → Chrome extension (see [`ph_browser::ChromeExtensionView`]).
+fn chrome_page(view: gpui_kit::Entity<ph_browser::ChromeExtensionView>) -> SettingPage {
+    SettingPage::new("Chrome extension")
+        .icon(Icon::new(IconName::Globe))
+        .group(SettingGroup::new().item(
+            SettingItem::render(move |_, _, _| div().w_full().py_1().child(view.clone())).keywords(
+                [
+                    "chrome",
+                    "edge",
+                    "brave",
+                    "browser",
+                    "extension",
+                    "tab group",
+                    "agents",
+                ],
+            ),
+        ))
+}
+
 /// Each agent's setup status, checked when the page renders.
 fn agents_page() -> SettingPage {
     SettingPage::new("Agents")
@@ -858,6 +881,25 @@ fn about_page() -> SettingPage {
             SettingGroup::new()
                 .title("Updates")
                 .item(SettingItem::render(|_, _, cx| update_status(cx)))
+                .item(SettingItem::render(|_, _, cx| {
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .gap_3()
+                        .child(note(
+                            "Release notes, every download and the source are on GitHub."
+                                .to_string(),
+                            cx,
+                        ))
+                        .child(
+                            Button::new("open-repository")
+                                .small()
+                                .outline()
+                                .icon(Icons::Github)
+                                .label("GitHub")
+                                .on_click(|_, _, cx| cx.open_url(crate::updates::REPOSITORY_URL)),
+                        )
+                }))
                 .item(
                     SettingItem::new(
                         "Check for updates",
@@ -866,8 +908,8 @@ fn about_page() -> SettingPage {
                             crate::updates::set_auto_check,
                         ),
                     )
-                    .description("Looks at the project's GitHub releases at start and every six hours. Nothing is sent.")
-                    .keywords(["update", "version", "release"]),
+                    .description("Looks at the project's GitHub releases, or its mirrors, at start and every six hours. Nothing is sent.")
+                    .keywords(["update", "version", "release", "github", "mirror"]),
                 )
                 .item(
                     SettingItem::new(
@@ -877,7 +919,7 @@ fn about_page() -> SettingPage {
                             crate::updates::set_auto_install,
                         ),
                     )
-                    .description("A new version downloads in the background and installs when you quit (or at once with Restart to update). Each download is checked against the release's SHA-256.")
+                    .description("A new version downloads in the background and installs when you quit (or at once with Restart to update). Each download is checked against the SHA-256 in the release's signed manifest.")
                     .keywords(["update", "install", "download"]),
                 ),
         )

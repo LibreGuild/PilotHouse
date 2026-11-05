@@ -394,10 +394,13 @@ impl BrowserPanel {
                             })
                             .separator()
                             .item(
-                                PopupMenuItem::new("Open PilotHouse Chrome (for agents)")
+                                PopupMenuItem::new("Let agents use your Chrome…")
                                     .icon(IconName::Globe)
                                     .on_click(|_, window, cx| {
-                                        window.dispatch_action(Box::new(crate::OpenAgentChrome), cx)
+                                        window.dispatch_action(
+                                            Box::new(crate::OpenChromeExtensionSettings),
+                                            cx,
+                                        )
                                     }),
                             )
                             .item(

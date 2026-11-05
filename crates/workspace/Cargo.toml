@@ -41,6 +41,9 @@ toml.workspace = true
 rusqlite.workspace = true
 ureq = { version = "3.5", default-features = false, features = ["native-tls-no-default", "gzip"] }
 sha2 = "0.11"
+# The updater checks the release key's signature on `latest.json`.
+ring = "0.17"
+base64 = "0.23"
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]

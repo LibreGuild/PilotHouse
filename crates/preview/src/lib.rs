@@ -216,6 +216,13 @@ impl FilePreview {
             Kind::Font => FileBody::Font(cx.new(|cx| font::FontPreview::new(path.clone(), cx))),
             _ => FileBody::Binary(cx.new(|cx| hex::HexView::new(path.clone(), cx))),
         };
+        // A video left full screen goes with its file's tab.
+        cx.on_release(|this: &mut Self, cx| {
+            if let FileBody::Video(player) = &this.body {
+                player.update(cx, |player, cx| player.close_fullscreen(cx));
+            }
+        })
+        .detach();
         Self { path, body }
     }
 

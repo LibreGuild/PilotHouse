@@ -6,6 +6,9 @@
 //! (restarts), and a resumed one reports totals that include turns already
 //! counted, so each report is compared with the last one from the same
 //! agent session and only the difference is added.
+//!
+//! What each report adds is also kept by local day and model
+//! (`usage_days`), for the usage dashboard's charts and breakdowns.
 
 use anyhow::Result;
 use rusqlite::{OptionalExtension as _, params};
@@ -36,6 +39,27 @@ pub struct UsageReport {
     pub cached_tokens: Option<u64>,
     pub cost: Option<(f64, String)>,
     pub context: Option<(u64, u64)>,
+    /// The model the chat used when the report came, when known.
+    pub model: Option<String>,
+}
+
+/// What one chat used on one (local) day with one model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageDay {
+    pub session_id: SessionId,
+    /// The workspace the chat is in.
+    pub project_id: crate::projects::ProjectId,
+    /// The agent id the chat runs.
+    pub agent: String,
+    /// `YYYY-MM-DD`, local time.
+    pub day: String,
+    /// Empty when not known.
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    pub cost: f64,
+    pub currency: Option<String>,
 }
 
 /// Totals for one agent or project.
@@ -121,26 +145,54 @@ impl Store {
         }
         let (base_input, base_output, base_cached, base_cost) = &mut row.base;
         let usage = &mut row.usage;
+        // What this report adds, for the day's row.
+        let mut added = (0u64, 0u64, 0u64, 0f64);
         if let Some(input) = report.input_tokens {
-            usage.input_tokens += grew(input, *base_input);
+            added.0 = grew(input, *base_input);
+            usage.input_tokens += added.0;
             *base_input = input;
         }
         if let Some(output) = report.output_tokens {
-            usage.output_tokens += grew(output, *base_output);
+            added.1 = grew(output, *base_output);
+            usage.output_tokens += added.1;
             *base_output = output;
         }
         if let Some(cached) = report.cached_tokens {
-            usage.cached_tokens += grew(cached, *base_cached);
+            added.2 = grew(cached, *base_cached);
+            usage.cached_tokens += added.2;
             *base_cached = cached;
         }
         if let Some((cost, currency)) = &report.cost {
-            usage.cost += if *cost >= *base_cost {
+            added.3 = if *cost >= *base_cost {
                 cost - *base_cost
             } else {
                 *cost
             };
+            usage.cost += added.3;
             *base_cost = *cost;
             usage.currency = Some(currency.clone());
+        }
+        if added != (0, 0, 0, 0.0) {
+            self.conn().execute(
+                "INSERT INTO usage_days
+                    (session_id, day, model, input_tokens, output_tokens, cached_tokens, cost, currency)
+                 VALUES (?1, date('now', 'localtime'), ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT (session_id, day, model) DO UPDATE SET
+                    input_tokens = input_tokens + excluded.input_tokens,
+                    output_tokens = output_tokens + excluded.output_tokens,
+                    cached_tokens = cached_tokens + excluded.cached_tokens,
+                    cost = cost + excluded.cost,
+                    currency = coalesce(excluded.currency, currency)",
+                params![
+                    session_id,
+                    report.model.as_deref().unwrap_or_default(),
+                    added.0 as i64,
+                    added.1 as i64,
+                    added.2 as i64,
+                    added.3,
+                    report.cost.as_ref().map(|(_, currency)| currency.as_str()),
+                ],
+            )?;
         }
         if report.context.is_some() {
             usage.context = report.context;
@@ -205,6 +257,38 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(totals)
     }
+
+    /// Every chat's usage by day and model from `since` (`YYYY-MM-DD`, local)
+    /// on, oldest first.
+    pub fn usage_days(&self, since: &str) -> Result<Vec<UsageDay>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare(
+            "SELECT d.session_id, s.agent_id, d.day, d.model, d.input_tokens, d.output_tokens,
+                    d.cached_tokens, d.cost, d.currency, s.project_id
+             FROM usage_days d
+             JOIN sessions s ON s.id = d.session_id
+             WHERE d.day >= ?1
+             ORDER BY d.day, d.session_id",
+        )?;
+        let days = statement
+            .query_map(params![since], |row| {
+                let number = |ix| row.get::<_, i64>(ix).map(|n| n.max(0) as u64);
+                Ok(UsageDay {
+                    session_id: row.get(0)?,
+                    project_id: row.get(9)?,
+                    agent: row.get(1)?,
+                    day: row.get(2)?,
+                    model: row.get(3)?,
+                    input_tokens: number(4)?,
+                    output_tokens: number(5)?,
+                    cached_tokens: number(6)?,
+                    cost: row.get(7)?,
+                    currency: row.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(days)
+    }
 }
 
 #[cfg(test)]
@@ -266,6 +350,42 @@ mod tests {
             .record_usage(chat.id, &report("b", 200, 0.002))
             .unwrap();
         assert_eq!(usage.input_tokens, 1_700);
+    }
+
+    #[test]
+    fn what_each_report_adds_is_kept_by_day_and_model() {
+        let store = Store::open_in_memory().unwrap();
+        let folder = std::env::temp_dir().join(format!("ph-usage-days-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let project = store.add_project(&folder).unwrap();
+        let chat = store.create_session(project.id, "One", "claude").unwrap();
+        let with_model = |input, cost, model: &str| UsageReport {
+            model: Some(model.into()),
+            ..report("a", input, cost)
+        };
+        store
+            .record_usage(chat.id, &with_model(1_000, 0.10, "opus"))
+            .unwrap();
+        store
+            .record_usage(chat.id, &with_model(1_500, 0.15, "opus"))
+            .unwrap();
+        store
+            .record_usage(chat.id, &with_model(1_800, 0.20, "sonnet"))
+            .unwrap();
+        // Nothing new: no row is touched.
+        store
+            .record_usage(chat.id, &with_model(1_800, 0.20, "haiku"))
+            .unwrap();
+
+        let days = store.usage_days("2000-01-01").unwrap();
+        assert_eq!(days.len(), 2, "{days:?}");
+        let opus = days.iter().find(|day| day.model == "opus").unwrap();
+        assert_eq!((opus.agent.as_str(), opus.input_tokens), ("claude", 1_500));
+        assert!((opus.cost - 0.15).abs() < 1e-9);
+        let sonnet = days.iter().find(|day| day.model == "sonnet").unwrap();
+        assert_eq!(sonnet.input_tokens, 300);
+        assert_eq!(opus.day.len(), 10, "a local date: {}", opus.day);
+        assert!(store.usage_days("9999-01-01").unwrap().is_empty());
     }
 
     #[test]

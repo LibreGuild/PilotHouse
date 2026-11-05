@@ -1,31 +1,39 @@
-//! Agents' Chrome: a real, visible Chrome (or Edge) that PilotHouse starts
-//! with a profile of its own, for agents to use websites as a person would.
+//! Agents' Chrome: the user's own Chrome (or Edge, Brave, Chromium), reached
+//! through PilotHouse's Chrome extension, for agents to use websites as a
+//! person would, with the user's sign-ins.
 //!
-//! - **One browser, one profile** for every workspace and chat
-//!   ([`chrome::agent_profile_dir`]): a site signed in to once stays signed
-//!   in for all of them, and across restarts.
-//! - **A tab per agent** (each agent session is an *owner*): the first takes
-//!   the window's first tab, the others open windows of their own, so they
-//!   never act in each other's pages. Tabs a page opens (a sign-in popup)
-//!   become the agent's current tab; a tab the user closes is forgotten.
+//! - **Only the PilotHouse tab group.** Agents open their tabs in a tab group
+//!   named "PilotHouse"; the user shares a tab of theirs by putting it in that
+//!   group (or with the extension's toolbar button). Tabs outside it are never
+//!   listed, read or touched, and a tab taken out of the group is let go.
+//! - **A tab per agent** (each agent session is an *owner*): tabs it opens are
+//!   its own; a tab one of its pages opens (a sign-in popup) becomes its
+//!   current tab; a shared tab it takes over is given back, not closed.
 //! - **Visible control**: while an agent acts, its tab glows, a pointer goes
 //!   where it clicks, and a bar names the agent with a Stop button. Stop
 //!   pauses that agent here until the user lets it continue.
-//! - **Logs** per tab: console messages and errors with where they came
-//!   from, and every request with its headers (credentials hidden), timing,
-//!   size and, on request, its body.
+//! - **Attached only while used.** The extension attaches Chrome's debugger
+//!   to a tab when an agent acts in it, and lets go once it has been idle a
+//!   while ([`IDLE_AFTER`]), so Chrome's "started debugging this browser" bar
+//!   is not up all the time.
+//! - **Logs** per tab, while attached: console messages and errors with where
+//!   they came from, and every request with its headers (credentials hidden),
+//!   timing, size and, on request, its body.
 //!
-//! Chrome is driven over its private debugging pipe (no port another
-//! program could use) and ends when PilotHouse does. If the user quits it,
-//! the next agent action starts it again; logins stay in the profile.
+//! The extension reaches the app only through Chrome's native messaging and
+//! the local bridge ([`crate::extension`], [`crate::bridge`]): there is no
+//! network port, and it passes on only the DevTools methods used here.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use futures::FutureExt as _;
+use futures::future::Shared;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use futures::FutureExt as _;
-use futures::future::Shared;
 use gpui_kit::{
     App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Global, SharedString, Task,
     WeakEntity,
@@ -34,8 +42,9 @@ use ph_store::Store;
 use serde_json::{Value, json};
 
 use crate::agent_scripts::{self, AGENT, BINDING, OVERLAY, WORLD};
-use crate::cdp::{Cdp, CdpEvent};
-use crate::chrome::{self, Chrome};
+use crate::bridge::{self, BridgeEvent};
+use crate::cdp::{Cdp, CdpEvent, CdpInbox};
+use crate::extension;
 use crate::logs::{Level, Logs};
 
 /// How long navigation waits for the page's load event.
@@ -43,6 +52,8 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// The glow stays this long after an agent's last action: long enough to
 /// stay on while the agent thinks between steps, so it does not flicker.
 const GLOW_AFTER: Duration = Duration::from_secs(20);
+/// The debugger lets go of a tab idle this long (and not paused).
+const IDLE_AFTER: Duration = Duration::from_secs(30);
 /// The pointer's glide to where it clicks (the overlay animates it).
 const POINTER_GLIDE: Duration = Duration::from_millis(230);
 /// The longest a screenshot may take before the tab is brought forward.
@@ -54,13 +65,16 @@ const MAX_VALUE: usize = 100 * 1024;
 /// Elements listed when reading a page.
 const SNAPSHOT_ELEMENTS: usize = 250;
 
+/// What agents are told when a page wants something only the user does.
+const ASK_TO_SIGN_IN: &str = "That is a password field: agents do not type passwords. Ask the user to sign in themselves in that tab of their Chrome, then go on.";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentChromeStatus {
-    Stopped,
-    Starting,
-    Running,
-    /// No Chromium-family browser is installed.
-    NoBrowser,
+    /// No browser's extension is connected.
+    Disconnected,
+    /// The extension in this browser is connected (`Chrome 131`).
+    Connected { browser: SharedString },
+    /// The bridge could not listen (it says why).
     Failed(SharedString),
 }
 
@@ -102,21 +116,29 @@ impl PageDialog {
     }
 }
 
+/// A file an agent's page downloaded. Chrome saves it where it saves the
+/// user's downloads.
 #[derive(Debug, Clone)]
 pub struct Download {
     pub url: String,
     pub name: String,
-    pub path: PathBuf,
+    /// Where it was saved, once found there.
+    pub path: Option<PathBuf>,
     /// `inProgress`, `completed` or `canceled`.
     pub state: String,
     pub received: u64,
     pub total: u64,
+    /// When it began: only a file written since then can be it.
+    pub started: std::time::SystemTime,
 }
 
-struct Running {
-    /// Kept for the connection's lifetime; dropping it ends Chrome.
-    _chrome: Chrome,
+/// A connected extension: one native messaging host, in one browser.
+struct Link {
+    /// The browser connection; a tab's session is `for_session(tab id)`.
     browser: Cdp,
+    inbox: CdpInbox,
+    writer: bridge::Writer,
+    _events: Task<()>,
 }
 
 struct Owner {
@@ -126,18 +148,22 @@ struct Owner {
     current: Option<String>,
     /// The user pressed Stop on its tab.
     paused: bool,
-    /// Chrome was quit with its tabs open.
+    /// The browser went away with its tabs open.
     lost: bool,
     /// Said with the next result (a popup became the current tab…).
     notes: Vec<String>,
 }
 
 struct Tab {
+    /// Chrome's tab id, which is also its session with the extension.
     target: String,
-    session: String,
-    /// A tab the user opened that the agent took over: given back, not
+    /// A tab the user shared that the agent took over: given back, not
     /// closed, when the agent is done with it.
-    user: bool,
+    shared: bool,
+    /// Chrome's debugger is attached to it (let go when idle).
+    attached: bool,
+    /// Actions running in it now: the debugger stays meanwhile.
+    busy: Arc<AtomicUsize>,
     cdp: Cdp,
     owner: String,
     url: String,
@@ -157,24 +183,26 @@ struct Tab {
     network_seen: u64,
     /// Records already counted in an action's result.
     hinted: u64,
+    /// When its page last opened a window (a link to a new tab, a popup):
+    /// only then is a new tab from it the agent's.
+    opened_window: Option<Instant>,
+    /// The debugger being let go of (idle): attaching again waits for it,
+    /// or its detach, arriving after, would undo the attach.
+    letting_go: Option<Shared<Task<()>>>,
     _glow: Option<Task<()>>,
+    _idle: Option<Task<()>>,
 }
-
-type StartTask = Shared<Task<Result<Cdp, SharedString>>>;
 
 pub struct AgentChrome {
     store: Store,
     status: AgentChromeStatus,
-    running: Option<Running>,
-    starting: Option<StartTask>,
-    /// Counts stops, so a start that finishes after one is dropped.
-    generation: u64,
+    links: HashMap<u64, Link>,
+    /// The link agents use: the first to say hello. One browser at a time.
+    active: Option<u64>,
     tabs: Vec<Tab>,
     owners: HashMap<String, Owner>,
-    /// The first window's tab, not given to an agent yet.
-    spare: Option<String>,
     downloads: Vec<(String, Download)>,
-    _events: Option<Task<()>>,
+    _bridge: Option<Task<()>>,
 }
 
 impl EventEmitter<AgentChromeEvent> for AgentChrome {}
@@ -183,7 +211,8 @@ struct AgentChromeHub(Entity<AgentChrome>);
 
 impl Global for AgentChromeHub {}
 
-/// What an action works on: the agent's tab and its connection.
+/// What an action works on: the agent's tab and its connection. While it
+/// lives, the tab counts as in use.
 #[derive(Clone)]
 struct Page {
     cdp: Cdp,
@@ -191,23 +220,78 @@ struct Page {
     /// The agent session it is for.
     owner: String,
     label: String,
+    _busy: Arc<Busy>,
+}
+
+/// Counts an action in its tab for as long as it lives.
+struct Busy(Arc<AtomicUsize>);
+
+impl Busy {
+    fn new(count: &Arc<AtomicUsize>) -> Arc<Self> {
+        count.fetch_add(1, Ordering::SeqCst);
+        Arc::new(Self(count.clone()))
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Tab {
+    fn page(&self, owner: &str, label: &str) -> Page {
+        Page {
+            cdp: self.cdp.clone(),
+            target: self.target.clone(),
+            owner: owner.to_string(),
+            label: label.to_string(),
+            _busy: Busy::new(&self.busy),
+        }
+    }
 }
 
 impl AgentChrome {
     pub fn init(store: Store, cx: &mut App) {
-        let chrome = cx.new(|_| Self {
-            store,
-            status: AgentChromeStatus::Stopped,
-            running: None,
-            starting: None,
-            generation: 0,
-            tabs: Vec::new(),
-            owners: HashMap::new(),
-            spare: None,
-            downloads: Vec::new(),
-            _events: None,
+        let chrome = cx.new(|cx: &mut Context<Self>| {
+            let mut this = Self {
+                store,
+                status: AgentChromeStatus::Disconnected,
+                links: HashMap::new(),
+                active: None,
+                tabs: Vec::new(),
+                owners: HashMap::new(),
+                downloads: Vec::new(),
+                _bridge: None,
+            };
+            match bridge::listen() {
+                Ok(events) => {
+                    this._bridge = Some(cx.spawn(async move |this, cx| {
+                        while let Ok(event) = events.recv().await {
+                            if this
+                                .update(cx, |this: &mut Self, cx| this.bridge_event(event, cx))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }));
+                }
+                Err(err) => {
+                    tracing::warn!("agents' Chrome: the extension's channel: {err:#}");
+                    this.status = AgentChromeStatus::Failed(format!("{err:#}").into());
+                }
+            }
+            this
         });
         cx.set_global(AgentChromeHub(chrome));
+        // The extension's files, for the user to load (Settings says where).
+        cx.background_spawn(async {
+            if let Err(err) = extension::write_extension() {
+                tracing::warn!("writing PilotHouse's Chrome extension: {err:#}");
+            }
+        })
+        .detach();
     }
 
     pub fn global(cx: &App) -> Option<Entity<Self>> {
@@ -241,19 +325,6 @@ impl AgentChrome {
             .collect()
     }
 
-    /// Where downloads go: a folder of the user's Downloads.
-    pub fn downloads_dir() -> PathBuf {
-        let home = ph_env::var("HOME")
-            .or_else(|| ph_env::var("USERPROFILE"))
-            .map(PathBuf::from);
-        match home {
-            Some(home) if home.join("Downloads").is_dir() => {
-                home.join("Downloads").join("PilotHouse")
-            }
-            _ => ph_store::paths::data_dir().join("downloads"),
-        }
-    }
-
     fn tab(&self, target: &str) -> Option<&Tab> {
         self.tabs.iter().find(|tab| tab.target == target)
     }
@@ -262,182 +333,128 @@ impl AgentChrome {
         self.tabs.iter_mut().find(|tab| tab.target == target)
     }
 
-    // ---- Starting --------------------------------------------------------
+    // ---- The extension ---------------------------------------------------
 
-    /// The browser connection, starting Chrome first if needed. Callers that
-    /// come while it starts share the same start.
-    fn connection(&mut self, cx: &mut Context<Self>) -> Task<Result<Cdp>> {
-        if let Some(running) = &self.running {
-            return Task::ready(Ok(running.browser.clone()));
-        }
-        let start = match &self.starting {
-            Some(start) => start.clone(),
-            None => {
-                let chosen: String = self.store.setting(chrome::CHOSEN_SETTING);
-                let chosen = (!chosen.is_empty()).then(|| PathBuf::from(chosen));
-                let Some(binary) = chrome::find_chrome(chosen.as_deref()) else {
-                    self.status = AgentChromeStatus::NoBrowser;
-                    cx.notify();
-                    cx.emit(AgentChromeEvent::Changed);
-                    return Task::ready(Err(anyhow!(
-                        "No Chrome or Edge was found on this computer. Ask the user to install Chrome (or Edge, Brave, Chromium), or to choose one in PilotHouse's Browser pane."
-                    )));
-                };
-                let start = self.start(binary, cx);
-                self.starting = Some(start.clone());
-                start
-            }
-        };
-        cx.spawn(async move |_, _| start.await.map_err(|err| anyhow!("{err}")))
-    }
-
-    fn start(&mut self, binary: PathBuf, cx: &mut Context<Self>) -> StartTask {
-        self.status = AgentChromeStatus::Starting;
-        cx.notify();
-        cx.emit(AgentChromeEvent::Changed);
-        let generation = self.generation;
-        let downloads = Self::downloads_dir();
-        cx.spawn(async move |this, cx| {
-            let launched = cx
-                .background_spawn(async move {
-                    let mut chrome = Chrome::launch_visible(
-                        &binary,
-                        &chrome::agent_profile_dir(),
-                        &start_page(),
-                    )?;
-                    let (reader, writer) = (chrome.reader.take(), chrome.writer.take());
-                    let (browser, events) = Cdp::connect(
-                        reader.context("Chrome pipe")?,
-                        writer.context("Chrome pipe")?,
-                    )?;
-                    anyhow::Ok((chrome, browser, events))
-                })
-                .await;
-            let prepared = match launched {
-                Ok((chrome, browser, events)) => {
-                    match prepare_browser(&browser, &downloads).await {
-                        Ok(spare) => Ok((chrome, browser, events, spare)),
-                        Err(err) => Err(err),
-                    }
-                }
-                Err(err) => Err(err),
-            };
-            let result = match prepared {
-                Ok((chrome, browser, events, spare)) => this
-                    .update(cx, |this, cx| {
-                        if this.generation != generation {
-                            return Err(anyhow!("the browser was stopped"));
+    fn bridge_event(&mut self, event: BridgeEvent, cx: &mut Context<Self>) {
+        match event {
+            BridgeEvent::Opened { id, writer } => {
+                let out = writer.clone();
+                let sink: crate::cdp::Sink = Arc::new(move |text| bridge::send(&out, text));
+                let (browser, inbox, events) = Cdp::with_sink(sink);
+                let pump = cx.spawn(async move |this, cx| {
+                    while let Ok(event) = events.recv().await {
+                        if this
+                            .update(cx, |this, cx| this.link_event(id, event, cx))
+                            .is_err()
+                        {
+                            return;
                         }
-                        this.started(chrome, browser.clone(), events, spare, cx);
-                        Ok(browser)
-                    })
-                    .map_err(|err| anyhow!("{err}"))
-                    .and_then(|started| started),
-                Err(err) => Err(err),
-            };
-            result.map_err(|err| {
-                let message: SharedString = format!("{err:#}").into();
-                let _ = this.update(cx, |this, cx| {
-                    if this.generation != generation {
-                        return;
                     }
-                    this.starting = None;
-                    this.status = AgentChromeStatus::Failed(message.clone());
-                    cx.notify();
-                    cx.emit(AgentChromeEvent::Changed);
                 });
-                message
-            })
-        })
-        .shared()
-    }
-
-    fn started(
-        &mut self,
-        chrome: Chrome,
-        browser: Cdp,
-        events: smol::channel::Receiver<CdpEvent>,
-        spare: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.running = Some(Running {
-            _chrome: chrome,
-            browser,
-        });
-        self.starting = None;
-        self.spare = spare;
-        self.status = AgentChromeStatus::Running;
-        let generation = self.generation;
-        self._events = Some(cx.spawn(async move |this, cx| {
-            while let Ok(event) = events.recv().await {
-                if this
-                    .update(cx, |this, cx| this.handle_event(event, cx))
-                    .is_err()
-                {
-                    return;
+                self.links.insert(
+                    id,
+                    Link {
+                        browser,
+                        inbox,
+                        writer,
+                        _events: pump,
+                    },
+                );
+            }
+            BridgeEvent::Message { id, message } => {
+                if let Some(link) = self.links.get(&id) {
+                    link.inbox.deliver(message);
                 }
             }
-            // Chrome closed (the user quit it): start again on next use.
-            let _ = this.update(cx, |this, cx| {
-                if this.generation == generation {
-                    this.forget_browser(cx);
+            BridgeEvent::Closed { id } => {
+                if let Some(link) = self.links.remove(&id) {
+                    link.inbox.close();
                 }
-            });
-        }));
-        cx.notify();
-        cx.emit(AgentChromeEvent::Changed);
+                if self.active == Some(id) {
+                    self.active = None;
+                    self.forget_browser(cx);
+                }
+            }
+        }
+    }
+
+    fn link_event(&mut self, id: u64, event: CdpEvent, cx: &mut Context<Self>) {
+        if event.session.is_none() && event.method == "PilotHouse.hello" {
+            let browser: String = event.params["browser"]
+                .as_str()
+                .unwrap_or("Chrome")
+                .chars()
+                .take(60)
+                .collect();
+            match self.active {
+                None => {
+                    self.active = Some(id);
+                    self.status = AgentChromeStatus::Connected {
+                        browser: browser.into(),
+                    };
+                    cx.notify();
+                    cx.emit(AgentChromeEvent::Changed);
+                }
+                // The same browser again, before its old link's close was
+                // heard (its extension reloaded, its worker restarted): the
+                // old link is stale, and the new one takes over.
+                Some(active)
+                    if active != id
+                        && matches!(
+                            &self.status,
+                            AgentChromeStatus::Connected { browser: known } if known.as_ref() == browser.as_str()
+                        ) =>
+                {
+                    if let Some(old) = self.links.remove(&active) {
+                        old.inbox.close();
+                    }
+                    self.forget_browser(cx);
+                    self.active = Some(id);
+                    self.status = AgentChromeStatus::Connected {
+                        browser: browser.into(),
+                    };
+                    cx.notify();
+                    cx.emit(AgentChromeEvent::Changed);
+                }
+                // One browser at a time: another one's extension waits.
+                Some(active) if active != id => {
+                    if let Some(link) = self.links.remove(&id) {
+                        let _ = bridge::send(
+                            &link.writer,
+                            json!({ "method": "PilotHouse.busy" }).to_string(),
+                        );
+                        link.inbox.close();
+                    }
+                }
+                Some(_) => {}
+            }
+            return;
+        }
+        if self.active == Some(id) {
+            self.handle_event(event, cx);
+        }
+    }
+
+    /// The connection to the browser, when an extension is connected.
+    fn browser(&self) -> Result<Cdp> {
+        self.active
+            .and_then(|id| self.links.get(&id))
+            .map(|link| link.browser.clone())
+            .ok_or_else(extension::not_connected)
     }
 
     fn forget_browser(&mut self, cx: &mut Context<Self>) {
-        self.generation += 1;
-        self.running = None;
-        self.starting = None;
-        self._events = None;
         self.tabs.clear();
-        self.spare = None;
         for owner in self.owners.values_mut() {
             owner.lost |= !owner.tabs.is_empty();
             owner.tabs.clear();
             owner.current = None;
         }
-        self.status = AgentChromeStatus::Stopped;
+        if !matches!(self.status, AgentChromeStatus::Failed(_)) {
+            self.status = AgentChromeStatus::Disconnected;
+        }
         cx.notify();
         cx.emit(AgentChromeEvent::Changed);
-    }
-
-    /// Shows the browser to the user (to sign in to sites, or to watch),
-    /// starting it if needed.
-    pub fn show(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
-        let connection = self.connection(cx);
-        cx.spawn(async move |this, cx| {
-            let browser = connection.await?;
-            let target = this.update(cx, |this, _| {
-                this.spare
-                    .clone()
-                    .or_else(|| this.tabs.last().map(|tab| tab.target.clone()))
-            })?;
-            let target = match target {
-                Some(target) => target,
-                None => {
-                    let created = browser
-                        .call(
-                            "Target.createTarget",
-                            json!({ "url": start_page(), "newWindow": true }),
-                        )
-                        .await?;
-                    let target = created["targetId"]
-                        .as_str()
-                        .context("Chrome did not open a window")?
-                        .to_string();
-                    this.update(cx, |this, _| this.spare = Some(target.clone()))?;
-                    target
-                }
-            };
-            browser
-                .call("Target.activateTarget", json!({ "targetId": target }))
-                .await?;
-            Ok(())
-        })
     }
 
     // ---- Events ----------------------------------------------------------
@@ -447,7 +464,7 @@ impl AgentChrome {
             self.handle_browser_event(&event, cx);
             return;
         };
-        let Some(index) = self.tabs.iter().position(|tab| tab.session == session) else {
+        let Some(index) = self.tabs.iter().position(|tab| tab.target == session) else {
             return;
         };
         let params = &event.params;
@@ -531,98 +548,39 @@ impl AgentChrome {
                 tab.dialog = Some(dialog);
             }
             "Page.javascriptDialogClosed" => self.tabs[index].dialog = None,
+            "Page.windowOpen" => {
+                self.tabs[index].opened_window = Some(Instant::now());
+                return;
+            }
             "Runtime.bindingCalled" if params["name"] == BINDING => {
                 let stop = params["payload"] == "stop";
                 let owner = self.tabs[index].owner.clone();
                 self.set_paused(&owner, stop, cx);
             }
-            // Logs: kept for the agent to ask about; nothing to redraw.
-            method => {
-                self.tabs[index].logs.record(method, params);
-                return;
-            }
-        }
-        cx.notify();
-    }
-
-    fn handle_browser_event(&mut self, event: &CdpEvent, cx: &mut Context<Self>) {
-        let params = &event.params;
-        match event.method.as_str() {
-            "Target.targetCreated" => {
-                // A page an agent's page opened (a link to a new tab, a
-                // sign-in popup) becomes that agent's current tab.
-                let info = &params["targetInfo"];
-                let opener = info["openerId"].as_str();
-                if info["type"] != "page" {
-                    return;
-                }
-                let Some(owner) = opener
-                    .and_then(|opener| self.tab(opener))
-                    .map(|tab| tab.owner.clone())
-                else {
-                    return;
-                };
-                let Some(target) = info["targetId"].as_str().map(str::to_string) else {
-                    return;
-                };
-                if self.tab(&target).is_some() {
-                    return;
-                }
-                let (url, title) = (
-                    info["url"].as_str().unwrap_or_default().to_string(),
-                    info["title"].as_str().unwrap_or_default().to_string(),
-                );
-                self.adopt(owner, target, url, title, cx);
-            }
-            "Target.targetInfoChanged" => {
-                let info = &params["targetInfo"];
-                if let Some(tab) = info["targetId"]
-                    .as_str()
-                    .and_then(|target| self.tabs.iter_mut().find(|tab| tab.target == target))
-                {
-                    tab.title = info["title"].as_str().unwrap_or_default().to_string();
-                    if let Some(url) = info["url"].as_str() {
-                        tab.url = url.to_string();
-                    }
-                    cx.notify();
-                    cx.emit(AgentChromeEvent::Changed);
-                }
-            }
-            "Target.targetDestroyed" | "Target.targetCrashed" => {
-                if let Some(target) = params["targetId"].as_str() {
-                    let crashed = event.method == "Target.targetCrashed";
-                    self.forget_tab(target, crashed, cx);
-                }
-            }
-            "Target.detachedFromTarget" => {
-                if let Some(target) = params["sessionId"]
-                    .as_str()
-                    .and_then(|session| self.tabs.iter().find(|tab| tab.session == session))
-                    .map(|tab| tab.target.clone())
-                {
-                    self.forget_tab(&target, false, cx);
-                }
-            }
-            "Browser.downloadWillBegin" => {
+            // Downloads an agent's page started; Chrome saves them where it
+            // saves the user's.
+            "Page.downloadWillBegin" => {
                 let guid = params["guid"].as_str().unwrap_or_default().to_string();
                 let name =
                     sanitize_name(params["suggestedFilename"].as_str().unwrap_or("download"));
                 self.downloads.push((
-                    guid.clone(),
+                    guid,
                     Download {
                         url: params["url"].as_str().unwrap_or_default().to_string(),
-                        path: Self::downloads_dir().join(&guid),
                         name,
+                        path: None,
                         state: "inProgress".into(),
                         received: 0,
                         total: 0,
+                        started: std::time::SystemTime::now(),
                     },
                 ));
                 if self.downloads.len() > 100 {
                     self.downloads.remove(0);
                 }
+                return;
             }
-            "Browser.downloadProgress" => {
+            "Page.downloadProgress" => {
                 let Some(guid) = params["guid"].as_str() else {
                     return;
                 };
@@ -635,32 +593,117 @@ impl AgentChrome {
                 download.received = params["receivedBytes"].as_f64().unwrap_or(0.0) as u64;
                 download.total = params["totalBytes"].as_f64().unwrap_or(0.0) as u64;
                 if download.state == "completed" {
-                    // Saved under its id; named as the site named it.
-                    let named = unique_path(&Self::downloads_dir(), &download.name);
-                    if std::fs::rename(&download.path, &named).is_ok() {
-                        download.path = named;
-                    }
+                    download.path = downloads_folder().and_then(|folder| {
+                        saved_download(&folder, &download.name, download.started, download.received)
+                    });
                 }
+                return;
+            }
+            // Logs: kept for the agent to ask about; nothing to redraw.
+            method => {
+                self.tabs[index].logs.record(method, params);
+                return;
+            }
+        }
+        cx.notify();
+    }
+
+    /// What the extension tells of the PilotHouse group's tabs.
+    fn handle_browser_event(&mut self, event: &CdpEvent, cx: &mut Context<Self>) {
+        let params = &event.params;
+        let Some(target) = params["tabId"].as_u64().map(|id| id.to_string()) else {
+            return;
+        };
+        match event.method.as_str() {
+            // A tab an agent's page opened (a link to a new tab, a sign-in
+            // popup) becomes that agent's current tab.
+            "PilotHouse.tabCreated" => {
+                // Only a tab the agent's page itself just opened: a tab the
+                // user opens next to it stays a shared tab of the group.
+                let Some(opener) = params["openerTabId"]
+                    .as_u64()
+                    .and_then(|opener| self.tab_mut(&opener.to_string()))
+                    .filter(|tab| {
+                        tab.opened_window
+                            .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+                    })
+                else {
+                    cx.emit(AgentChromeEvent::Changed);
+                    return;
+                };
+                opener.opened_window = None;
+                let owner = opener.owner.clone();
+                if self.tab(&target).is_some() {
+                    return;
+                }
+                let (url, title) = (
+                    params["url"].as_str().unwrap_or_default().to_string(),
+                    params["title"].as_str().unwrap_or_default().to_string(),
+                );
+                self.adopt(owner, target, url, title, cx);
+            }
+            "PilotHouse.tabUpdated" => {
+                if let Some(tab) = self.tab_mut(&target) {
+                    tab.title = params["title"].as_str().unwrap_or_default().to_string();
+                    if let Some(url) = params["url"].as_str() {
+                        tab.url = url.to_string();
+                    }
+                    cx.notify();
+                    cx.emit(AgentChromeEvent::Changed);
+                }
+            }
+            "PilotHouse.tabRemoved" => self.forget_tab(&target, cx),
+            // The user took the tab out of the group: it is theirs again.
+            "PilotHouse.tabLeft" => {
+                let Some((tab, _)) = self.remove_tab(&target) else {
+                    return;
+                };
+                if let Some(owner) = self.owners.get_mut(&tab.owner) {
+                    owner.notes.push(format!(
+                        "The user took your tab ({}) out of the PilotHouse group, so you can no longer use it.",
+                        tab.url
+                    ));
+                }
+                cx.notify();
+                cx.emit(AgentChromeEvent::Changed);
+            }
+            "PilotHouse.tabJoined" => cx.emit(AgentChromeEvent::Changed),
+            "PilotHouse.detached" => {
+                let reason = params["reason"].as_str().unwrap_or_default().to_string();
+                let Some(tab) = self.tab_mut(&target) else {
+                    return;
+                };
+                tab.attached = false;
+                tab.world = None;
+                tab.main_frame = None;
+                tab.loading = false;
+                tab._idle = None;
+                let (owner, url) = (tab.owner.clone(), tab.url.clone());
+                // The user closed Chrome's "started debugging" bar.
+                if reason == "canceled_by_user"
+                    && let Some(owner) = self.owners.get_mut(&owner)
+                {
+                    owner.notes.push(format!(
+                        "The user cancelled PilotHouse's control of your tab ({url}) in Chrome. Ask the user before you use the browser again."
+                    ));
+                }
+                cx.notify();
             }
             _ => {}
         }
     }
 
-    fn forget_tab(&mut self, target: &str, crashed: bool, cx: &mut Context<Self>) {
-        if self.spare.as_deref() == Some(target) {
-            self.spare = None;
-        }
+    fn forget_tab(&mut self, target: &str, cx: &mut Context<Self>) {
         let Some((tab, was_current)) = self.remove_tab(target) else {
             return;
         };
         if was_current && let Some(owner) = self.owners.get_mut(&tab.owner) {
-            owner.notes.push(match (crashed, &owner.current) {
-                (true, _) => format!("Your tab ({}) crashed.", tab.url),
-                (false, Some(_)) => format!(
+            owner.notes.push(match &owner.current {
+                Some(_) => format!(
                     "Your tab ({}) was closed; the one before it is current again.",
                     tab.url
                 ),
-                (false, None) => format!("Your tab ({}) was closed.", tab.url),
+                None => format!("Your tab ({}) was closed.", tab.url),
             });
         }
         cx.notify();
@@ -677,7 +720,7 @@ impl AgentChrome {
             .filter(|owner| owner_pid(owner).is_some_and(|pid| !process_alive(pid)))
             .cloned()
             .collect();
-        let browser = self.running.as_ref().map(|running| running.browser.clone());
+        let browser = self.browser().ok();
         for owner in ended {
             let Some(state) = self.owners.remove(&owner) else {
                 continue;
@@ -689,23 +732,10 @@ impl AgentChrome {
                 let Some(browser) = browser.clone() else {
                     continue;
                 };
-                let (cdp, world, session) = (tab.cdp.clone(), tab.world, tab.session.clone());
-                cx.background_spawn(async move {
-                    if let Some(id) = world {
-                        let hide = agent_scripts::call("__phOverlay", "hide", &[]);
-                        cdp.call(
-                            "Runtime.evaluate",
-                            json!({ "expression": hide, "contextId": id }),
-                        )
-                        .await
-                        .ok();
-                    }
-                    browser
-                        .call("Target.detachFromTarget", json!({ "sessionId": session }))
-                        .await
-                        .ok();
-                })
-                .detach();
+                if tab.attached {
+                    cx.background_spawn(let_go(browser, tab.cdp.clone(), tab.world, target))
+                        .detach();
+                }
             }
         }
     }
@@ -737,12 +767,10 @@ impl AgentChrome {
         let targets = state.tabs.clone();
         for target in targets {
             if let Some(tab) = self.tab_mut(&target) {
-                let page = Page {
-                    cdp: tab.cdp.clone(),
-                    target: target.clone(),
-                    owner: owner.to_string(),
-                    label: label.clone(),
-                };
+                if !tab.attached {
+                    continue;
+                }
+                let page = tab.page(owner, &label);
                 tab._glow = None;
                 let call = if paused {
                     agent_scripts::call("__phOverlay", "show", &[json!(label), json!(true)])
@@ -777,8 +805,9 @@ impl AgentChrome {
         owner
     }
 
-    /// The agent's current page; with `open`, one is opened when it has
-    /// none (or `fresh`: a new one anyway).
+    /// The agent's current page (the debugger attached again when it let go
+    /// while idle); with `open`, one is opened when it has none (or `fresh`:
+    /// a new one anyway).
     fn page(
         &mut self,
         who: &Who,
@@ -802,73 +831,77 @@ impl AgentChrome {
             if let Some(dialog) = &tab.dialog {
                 return Task::ready(Err(dialog.waiting()));
             }
-            return Task::ready(Ok(Page {
-                cdp: tab.cdp.clone(),
-                target,
-                owner: who.owner.clone(),
-                label,
-            }));
+            let page = tab.page(&who.owner, &label);
+            if tab.attached {
+                self.idle_later(&target, cx);
+                return Task::ready(Ok(page));
+            }
+            let letting_go = tab.letting_go.clone();
+            let browser = match self.browser() {
+                Ok(browser) => browser,
+                Err(err) => return Task::ready(Err(err)),
+            };
+            return cx.spawn(async move |this, cx| {
+                if let Some(letting_go) = letting_go {
+                    letting_go.await;
+                }
+                attach(&browser, &page.target).await?;
+                this.update(cx, |this, cx| {
+                    if let Some(tab) = this.tab_mut(&page.target) {
+                        tab.attached = true;
+                        tab.letting_go = None;
+                        tab.world = None;
+                        tab.main_frame = None;
+                        tab.loading = false;
+                    }
+                    this.idle_later(&page.target, cx);
+                })?;
+                Ok(page)
+            });
         }
         if !open {
+            let notes = std::mem::take(&mut self.owner_mut(who).notes);
             return Task::ready(Err(if lost {
                 anyhow!(
-                    "Chrome was closed (perhaps by the user), so your tab is gone: open the page again with chrome_open (sign-ins are kept)."
+                    "Chrome or its PilotHouse extension went away (perhaps the user quit Chrome), so your tab is gone: open the page again with chrome_open (sign-ins are kept)."
                 )
+            } else if !notes.is_empty() {
+                // Its tabs closed (Chrome quitting closes them first).
+                anyhow!("{} Open a page with chrome_open.", notes.join(" "))
             } else {
                 anyhow!("You have no page open in Chrome yet: open one with chrome_open.")
             }));
         }
+        let browser = match self.browser() {
+            Ok(browser) => browser,
+            Err(err) => return Task::ready(Err(err)),
+        };
         self.owner_mut(who).lost = false;
-        let first =
-            self.tabs.iter().all(|tab| tab.owner == who.owner) && owner_has_no_tabs(self, who);
-        // Others' tabs are in front: a window of its own.
-        let new_window = !self.tabs.iter().all(|tab| tab.owner == who.owner);
-        let connection = self.connection(cx);
         let owner = who.owner.clone();
         cx.spawn(async move |this, cx| {
-            let browser = connection.await?;
-            // The first agent works in the first window's tab while it is
-            // still blank; one the user went to a page in stays theirs.
-            let spare = if first {
-                blank_tab(&browser).await
-            } else {
-                None
-            };
-            let target = match spare {
-                Some(target) => target,
-                None => {
-                    let created = browser
-                        .call(
-                            "Target.createTarget",
-                            json!({ "url": "about:blank", "newWindow": new_window }),
-                        )
-                        .await?;
-                    created["targetId"]
-                        .as_str()
-                        .context("Chrome did not open a tab")?
-                        .to_string()
-                }
-            };
-            let (session, cdp) = attach(&browser, &target).await?;
-            this.update(cx, |this, _| {
-                if this.spare.as_deref() == Some(target.as_str()) {
-                    this.spare = None;
-                }
-                this.add_tab(&owner, target.clone(), session, cdp.clone());
-            })?;
-            Ok(Page {
-                cdp,
-                target,
-                owner,
-                label,
-            })
+            let opened = browser
+                .call("PilotHouse.openTab", json!({ "url": "about:blank" }))
+                .await?;
+            let target = opened["tabId"]
+                .as_u64()
+                .context("Chrome did not open a tab")?
+                .to_string();
+            let cdp = attach(&browser, &target).await?;
+            this.update(cx, |this, cx| {
+                this.add_tab(&owner, target.clone(), cdp, false);
+                this.idle_later(&target, cx);
+                let tab = this.tab(&target).context("the tab closed")?;
+                Ok(tab.page(&owner, &label))
+            })?
         })
     }
 
-    fn add_tab(&mut self, owner: &str, target: String, session: String, cdp: Cdp) {
+    fn add_tab(&mut self, owner: &str, target: String, cdp: Cdp, shared: bool) {
         self.tabs.push(Tab {
             target: target.clone(),
-            session,
+            shared,
+            attached: true,
+            busy: Arc::default(),
             cdp,
             owner: owner.to_string(),
             url: String::new(),
@@ -884,8 +917,10 @@ impl AgentChrome {
             console_seen: 0,
             network_seen: 0,
             hinted: 0,
-            user: false,
+            opened_window: None,
+            letting_go: None,
             _glow: None,
+            _idle: None,
         });
         if let Some(state) = self.owners.get_mut(owner) {
             state.tabs.push(target.clone());
@@ -902,18 +937,25 @@ impl AgentChrome {
         title: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(browser) = self.running.as_ref().map(|running| running.browser.clone()) else {
+        let Ok(browser) = self.browser() else {
             return;
         };
         cx.spawn(async move |this, cx| {
-            let Ok((session, cdp)) = attach(&browser, &target).await else {
+            let Ok(cdp) = attach(&browser, &target).await else {
                 return;
             };
+            // What it shows now: changes while it was being attached were
+            // not followed.
+            let now = evaluate_main(&cdp, "[location.href, document.title]")
+                .await
+                .unwrap_or_default();
+            let url = now[0].as_str().filter(|url| !url.is_empty()).map_or(url, str::to_string);
+            let title = now[1].as_str().map_or(title, str::to_string);
             let _ = this.update(cx, |this, cx| {
                 if this.tab(&target).is_some() {
                     return;
                 }
-                this.add_tab(&owner, target.clone(), session, cdp);
+                this.add_tab(&owner, target.clone(), cdp, false);
                 if let Some(tab) = this.tab_mut(&target) {
                     tab.url = url;
                     tab.title = title;
@@ -923,6 +965,7 @@ impl AgentChrome {
                         "Your page opened a new tab; it is now your current tab (chrome_tabs lists them).".into(),
                     );
                 }
+                this.idle_later(&target, cx);
                 cx.notify();
                 cx.emit(AgentChromeEvent::Changed);
             });
@@ -940,6 +983,58 @@ impl AgentChrome {
             cx.background_executor().timer(GLOW_AFTER).await;
             let call = agent_scripts::call("__phOverlay", "hide", &[]);
             let _ = in_world(&this, &page, &call, cx).await;
+        }));
+    }
+
+    /// Lets go of the tab (Chrome's debugger detaches, its bar goes) once
+    /// nothing has happened in it for [`IDLE_AFTER`], unless its agent is
+    /// stopped (the Stop bar's "Let it continue" needs the debugger) or a
+    /// dialog in it waits for an answer (`chrome_dialog` answers through the
+    /// debugger, and only it hears the dialog close).
+    fn idle_later(&mut self, target: &str, cx: &mut Context<Self>) {
+        let Some(tab) = self.tab_mut(target) else {
+            return;
+        };
+        let target = target.to_string();
+        tab._idle = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(IDLE_AFTER).await;
+                let ready = this.update(cx, |this, _| {
+                    let tab = this.tab(&target)?;
+                    let paused = this
+                        .owners
+                        .get(&tab.owner)
+                        .is_some_and(|owner| owner.paused);
+                    let idle = tab.attached
+                        && !paused
+                        && tab.dialog.is_none()
+                        && tab.busy.load(Ordering::SeqCst) == 0;
+                    Some(idle.then(|| (this.browser().ok(), tab.cdp.clone(), tab.world)))
+                });
+                match ready {
+                    Ok(Some(Some((Some(browser), cdp, world)))) => {
+                        let going = {
+                            let target = target.clone();
+                            cx.spawn(async move |_| let_go(browser, cdp, world, target).await)
+                                .shared()
+                        };
+                        let _ = this.update(cx, |this, _| {
+                            if let Some(tab) = this.tab_mut(&target) {
+                                tab.attached = false;
+                                tab.world = None;
+                                tab.main_frame = None;
+                                tab.loading = false;
+                                tab.letting_go = Some(going.clone());
+                            }
+                        });
+                        going.await;
+                        return;
+                    }
+                    // Still in use: look again later.
+                    Ok(Some(None)) => continue,
+                    _ => return,
+                }
+            }
         }));
     }
 
@@ -1028,10 +1123,10 @@ impl AgentChrome {
         })
     }
 
-    /// The agent's tabs: `list` (with the tabs the user opened), `new`
-    /// (optionally at `url`), `switch` to or `close` the tab at `index`
-    /// (a tab taken from the user is given back, not closed), and `take`
-    /// the user's tab `tab` (by id; without one, the tab on screen).
+    /// The agent's tabs: `list` (with the tabs the user shared), `new`
+    /// (optionally at `url`), `switch` to or `close` the tab at `index` (a
+    /// shared tab is given back, not closed), and `take` a tab the user
+    /// shared, `tab` (by id; without one, the shared tab on screen).
     pub fn tabs(
         &mut self,
         who: &Who,
@@ -1055,19 +1150,22 @@ impl AgentChrome {
             "take" => self.take(who, tab, cx),
             "list" => {
                 let mine = self.tab_list(who);
-                let Some(browser) = self.running.as_ref().map(|running| running.browser.clone())
-                else {
+                let Ok(browser) = self.browser() else {
                     return Task::ready(Ok(json!({ "text": mine })));
                 };
                 let agents: Vec<String> = self.tabs.iter().map(|tab| tab.target.clone()).collect();
                 cx.background_spawn(async move {
-                    let users = user_tabs(&browser, &agents).await.unwrap_or_default();
+                    let shared = shared_tabs(&browser, &agents).await.unwrap_or_default();
                     let mut text = mine;
-                    if !users.is_empty() {
+                    if shared.is_empty() {
                         text.push_str(
-                            "\n\nThe user's tabs (chrome_tabs take with the id works in one; without an id, the one on screen):",
+                            "\n\nThe user has shared no other tabs. They can share one by putting it in the PilotHouse tab group (or with the PilotHouse button in Chrome's toolbar).",
                         );
-                        for tab in &users {
+                    } else {
+                        text.push_str(
+                            "\n\nTabs the user shared (in the PilotHouse group; chrome_tabs take with the id works in one, without an id the one on screen):",
+                        );
+                        for tab in &shared {
                             let place = match (tab.showing, tab.focused) {
                                 (_, true) => " (on screen, the user is in it)",
                                 (true, false) => " (on screen)",
@@ -1075,9 +1173,7 @@ impl AgentChrome {
                             };
                             text.push_str(&format!(
                                 "\n[{}] {} — {}{place}",
-                                tab.id(),
-                                tab.title,
-                                tab.url
+                                tab.target, tab.title, tab.url
                             ));
                         }
                     }
@@ -1104,31 +1200,32 @@ impl AgentChrome {
                     self.owner_mut(who).current = Some(target);
                     return Task::ready(Ok(json!({ "text": self.tab_list(who) })));
                 }
-                let Some(browser) = self.running.as_ref().map(|running| running.browser.clone())
-                else {
-                    return Task::ready(Err(anyhow!("Chrome is not running")));
+                let browser = match self.browser() {
+                    Ok(browser) => browser,
+                    Err(err) => return Task::ready(Err(err)),
                 };
-                let given_back = self.tab(&target).filter(|tab| tab.user).map(|tab| Page {
-                    cdp: tab.cdp.clone(),
-                    target: target.clone(),
-                    owner: who.owner.clone(),
-                    label,
-                });
+                let given_back = self
+                    .tab(&target)
+                    .filter(|tab| tab.shared)
+                    .map(|tab| (tab.page(&who.owner, &label), tab.attached));
                 cx.spawn(async move |this, cx| {
                     // The user's tab stays open: the overlay goes, and the
                     // agent lets go of it.
-                    if let Some(page) = given_back {
-                        let hide = agent_scripts::call("__phOverlay", "hide", &[]);
-                        let _ = in_world(&this, &page, &hide, cx).await;
-                        let session = this.update(cx, |this, cx| {
-                            let removed = this.remove_tab(&target);
+                    if let Some((page, attached)) = given_back {
+                        if attached {
+                            let hide = agent_scripts::call("__phOverlay", "hide", &[]);
+                            let _ = in_world(&this, &page, &hide, cx).await;
+                        }
+                        let target = page.target.clone();
+                        drop(page);
+                        this.update(cx, |this, cx| {
+                            this.remove_tab(&target);
                             cx.notify();
                             cx.emit(AgentChromeEvent::Changed);
-                            removed.map(|(tab, _)| tab.session)
                         })?;
-                        if let Some(session) = session {
+                        if attached {
                             browser
-                                .call("Target.detachFromTarget", json!({ "sessionId": session }))
+                                .call("PilotHouse.detach", json!({ "tabId": tab_id(&target)? }))
                                 .await
                                 .ok();
                         }
@@ -1137,10 +1234,10 @@ impl AgentChrome {
                         );
                     }
                     browser
-                        .call("Target.closeTarget", json!({ "targetId": target }))
+                        .call("PilotHouse.closeTab", json!({ "tabId": tab_id(&target)? }))
                         .await?;
                     this.update(cx, |this, cx| {
-                        this.forget_tab(&target, false, cx);
+                        this.forget_tab(&target, cx);
                     })?;
                     Ok(json!({ "text": "Closed." }))
                 })
@@ -1151,8 +1248,8 @@ impl AgentChrome {
         }
     }
 
-    /// Takes over a tab the user opened (by `id` from the list; without
-    /// one, the tab on screen): it becomes the agent's current tab, with
+    /// Takes over a tab the user shared (by `id` from the list; without one,
+    /// the shared tab on screen): it becomes the agent's current tab, with
     /// what the user typed in it kept.
     fn take(
         &mut self,
@@ -1165,13 +1262,10 @@ impl AgentChrome {
                 "The user pressed Stop on your Chrome tab. Do not use the browser until they say to go on."
             )));
         }
-        let id = id.map(|id| id.trim().trim_matches(['[', ']']).to_ascii_uppercase());
+        let id = id.map(|id| id.trim().trim_matches(['[', ']']).to_string());
         // A tab an agent already works in.
         if let Some(id) = &id
-            && let Some(tab) = self
-                .tabs
-                .iter()
-                .find(|tab| tab.target.starts_with(id.as_str()))
+            && let Some(tab) = self.tab(id)
         {
             if tab.owner != who.owner {
                 let other = self
@@ -1189,63 +1283,49 @@ impl AgentChrome {
                 json!({ "text": "That tab is already yours; it is now your current tab." }),
             ));
         }
-        let Some(browser) = self.running.as_ref().map(|running| running.browser.clone()) else {
-            return Task::ready(Err(anyhow!(
-                "Chrome is not open, so the user has no tabs in it: ask them to open the page in the PilotHouse Chrome window first."
-            )));
+        let browser = match self.browser() {
+            Ok(browser) => browser,
+            Err(err) => return Task::ready(Err(err)),
         };
         let agents: Vec<String> = self.tabs.iter().map(|tab| tab.target.clone()).collect();
         let (owner, label) = (who.owner.clone(), who.label.clone());
         cx.spawn(async move |this, cx| {
-            let users = user_tabs(&browser, &agents).await?;
+            let shared = shared_tabs(&browser, &agents).await?;
             let chosen = match &id {
-                Some(id) => users
+                Some(id) => shared
                     .iter()
-                    .find(|tab| tab.target.starts_with(id.as_str()))
-                    .with_context(|| format!("the user has no tab [{id}] (chrome_tabs list shows them)"))?,
-                None => users.iter().find(|tab| tab.showing).context(
-                    "no tab of the user's is on screen: ask which one, or give its id from chrome_tabs list",
+                    .find(|tab| tab.target == *id)
+                    .with_context(|| format!("the user has shared no tab [{id}] (chrome_tabs list shows the shared ones)"))?,
+                None => shared.iter().find(|tab| tab.showing).context(
+                    "no shared tab is on screen: ask the user which one, or to put the tab in the PilotHouse group (chrome_tabs list shows the shared ones)",
                 )?,
             };
             let (target, url, title) = (chosen.target.clone(), chosen.url.clone(), chosen.title.clone());
-            let (session, cdp) = attach(&browser, &target).await?;
-            let taken = this.update(cx, |this, cx| {
+            let cdp = attach(&browser, &target).await?;
+            let page = this.update(cx, |this, cx| {
                 // Another agent took it meanwhile.
                 if this.tab(&target).is_some() {
-                    return false;
+                    return None;
                 }
-                this.add_tab(&owner, target.clone(), session.clone(), cdp.clone());
+                this.add_tab(&owner, target.clone(), cdp, true);
                 if let Some(tab) = this.tab_mut(&target) {
-                    tab.user = true;
                     tab.url = url;
                     tab.title = title;
                 }
-                if this.spare.as_deref() == Some(target.as_str()) {
-                    this.spare = None;
-                }
+                this.idle_later(&target, cx);
                 cx.notify();
                 cx.emit(AgentChromeEvent::Changed);
-                true
+                this.tab(&target).map(|tab| tab.page(&owner, &label))
             })?;
-            if !taken {
-                browser
-                    .call("Target.detachFromTarget", json!({ "sessionId": session }))
-                    .await
-                    .ok();
+            let Some(page) = page else {
                 bail!("another agent took that tab just now");
-            }
-            let page = Page {
-                cdp,
-                target,
-                owner,
-                label,
             };
             begin(&this, &page, cx).await;
             let mut result = summary(&this, &page, cx).await?;
             if let Some(notes) = result["notes"].as_array_mut() {
                 notes.insert(
                     0,
-                    json!("You took over the user's tab; it is your current tab. Keep what the user already typed or chose: fill only what they asked you to. chrome_tabs close gives it back without closing it."),
+                    json!("You took over a tab the user shared; it is your current tab. Keep what the user already typed or chose: fill only what they asked you to. chrome_tabs close gives it back without closing it."),
                 );
             }
             Ok(result)
@@ -1267,9 +1347,13 @@ impl AgentChrome {
                 } else {
                     ""
                 };
-                let user = if tab.user { " (the user's)" } else { "" };
+                let shared = if tab.shared {
+                    " (shared by the user)"
+                } else {
+                    ""
+                };
                 Some(format!(
-                    "{index}: {} — {}{current}{user}",
+                    "{index}: {} — {}{current}{shared}",
                     tab.title, tab.url
                 ))
             })
@@ -1496,9 +1580,7 @@ impl AgentChrome {
                 None => in_world(&this, &page, "window.__phAgent.focusedIsPassword()", cx).await? == json!(true),
             };
             if password {
-                bail!(
-                    "That is a password field: agents do not type passwords. Ask the user to sign in in the PilotHouse Chrome window (it keeps them signed in), then go on."
-                );
+                bail!("{ASK_TO_SIGN_IN}");
             }
             let cdp = page.cdp.clone();
             let typing = async move {
@@ -1573,9 +1655,7 @@ impl AgentChrome {
                 && in_world(&this, &page, "window.__phAgent.focusedIsPassword()", cx).await?
                     == json!(true)
             {
-                bail!(
-                    "That is a password field: agents do not type passwords. Ask the user to sign in in the PilotHouse Chrome window (it keeps them signed in), then go on."
-                );
+                bail!("{ASK_TO_SIGN_IN}");
             }
             let cdp = page.cdp.clone();
             let pressing = async move {
@@ -1977,12 +2057,7 @@ impl AgentChrome {
         let Some(dialog) = tab.dialog.clone() else {
             return Task::ready(Err(anyhow!("No dialog is open on your page.")));
         };
-        let page = Page {
-            cdp: tab.cdp.clone(),
-            target: tab.target.clone(),
-            owner: who.owner.clone(),
-            label: who.label.clone(),
-        };
+        let page = tab.page(&who.owner, &who.label);
         cx.spawn(async move |this, cx| {
             let mut params = json!({ "accept": accept });
             if let Some(text) = text.or_else(|| accept.then_some(dialog.default_prompt.clone())) {
@@ -1999,8 +2074,8 @@ impl AgentChrome {
         })
     }
 
-    /// Puts files in a file field. Only files of the workspace's folders or
-    /// of the downloads folder can be given.
+    /// Puts files in a file field. Only files of the workspace's folders, or
+    /// ones an agent's page downloaded, can be given.
     pub fn upload(
         &mut self,
         who: &Who,
@@ -2010,7 +2085,12 @@ impl AgentChrome {
         cx: &mut Context<Self>,
     ) -> Task<Result<Value>> {
         let allowed = self.allowed_folders(project_id);
-        let files = match checked_files(&paths, &allowed) {
+        let downloaded: Vec<PathBuf> = self
+            .downloads
+            .iter()
+            .filter_map(|(_, download)| download.path.clone())
+            .collect();
+        let files = match checked_files(&paths, &allowed, &downloaded) {
             Ok(files) => files,
             Err(err) => return Task::ready(Err(err)),
         };
@@ -2042,21 +2122,28 @@ impl AgentChrome {
                     json!({ "files": files, "objectId": object }),
                 )
                 .await
-                .context("that is not a file field (input type=file)")?;
+                .map_err(|err| {
+                    if err.to_string().contains("Not allowed") {
+                        anyhow!(
+                            "Chrome did not let PilotHouse's extension give files to the page: ask the user to turn on “Allow access to file URLs” for the PilotHouse extension (chrome://extensions → PilotHouse → Details), then try again."
+                        )
+                    } else {
+                        err.context("that is not a file field (input type=file)")
+                    }
+                })?;
             settle(cx).await;
             summary(&this, &page, cx).await
         })
     }
 
     fn allowed_folders(&self, project_id: Option<i64>) -> Vec<PathBuf> {
-        let mut folders = vec![Self::downloads_dir()];
-        if let Some(project) = project_id.and_then(|id| self.store.project(id).ok().flatten()) {
-            folders.extend(project.folders());
-        }
-        folders
+        project_id
+            .and_then(|id| self.store.project(id).ok().flatten())
+            .map(|project| project.folders())
+            .unwrap_or_default()
     }
 
-    /// Files downloaded in this browser, newest last.
+    /// Files agents' pages downloaded, newest last.
     pub fn downloads_text(&self) -> Value {
         let lines: Vec<String> = self
             .downloads
@@ -2070,16 +2157,18 @@ impl AgentChrome {
                     }
                     _ => format!("{} so far", human_size(download.received)),
                 };
+                let place = match &download.path {
+                    Some(path) => path.display().to_string(),
+                    None => "where Chrome saves downloads".to_string(),
+                };
                 format!(
-                    "{} ({progress}) → {}\n    from {}",
-                    download.name,
-                    download.path.display(),
-                    download.url
+                    "{} ({progress}) → {place}\n    from {}",
+                    download.name, download.url
                 )
             })
             .collect();
         json!({ "text": if lines.is_empty() {
-            format!("Nothing downloaded yet. Downloads go to {}.", Self::downloads_dir().display())
+            "Nothing downloaded yet. Chrome saves downloads where it saves the user's (usually their Downloads folder).".to_string()
         } else {
             lines.join("\n")
         } })
@@ -2094,197 +2183,56 @@ impl AgentChrome {
     }
 }
 
-fn owner_has_no_tabs(chrome: &AgentChrome, who: &Who) -> bool {
-    chrome
-        .owners
-        .get(&who.owner)
-        .is_none_or(|owner| owner.tabs.is_empty())
+/// A tab's id as the extension takes it.
+fn tab_id(target: &str) -> Result<u64> {
+    target
+        .parse()
+        .with_context(|| format!("not a Chrome tab: {target}"))
 }
 
-/// Discovers targets, sends downloads to `downloads`, and returns the first
-/// window's tab, for the first agent.
-async fn prepare_browser(browser: &Cdp, downloads: &std::path::Path) -> Result<Option<String>> {
-    browser
-        .call("Target.setDiscoverTargets", json!({ "discover": true }))
-        .await?;
-    if std::fs::create_dir_all(downloads).is_ok() {
-        browser
-            .call(
-                "Browser.setDownloadBehavior",
-                json!({ "behavior": "allowAndName", "downloadPath": downloads, "eventsEnabled": true }),
-            )
-            .await
-            .ok();
-    }
-    let targets = browser.call("Target.getTargets", json!({})).await?;
-    Ok(targets["targetInfos"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|target| target["type"] == "page")
-        .and_then(|target| target["targetId"].as_str())
-        .map(str::to_string))
-}
-
-/// PilotHouse's page in the agents' Chrome: what it is for, shown in its
-/// first tab and in windows opened for the user.
-const START_PAGE: &str = include_str!("agent_start.html");
-
-fn start_page_path() -> PathBuf {
-    ph_store::paths::data_dir()
-        .join("browser")
-        .join("pilothouse-chrome.html")
-}
-
-/// The start page's address.
-fn start_url() -> &'static str {
-    static URL: std::sync::LazyLock<String> =
-        std::sync::LazyLock::new(|| ph_ui::platform::file_url(&start_page_path()));
-    &URL
-}
-
-/// The start page's address, written once a run (when it changed); a
-/// blank tab when it cannot be written.
-fn start_page() -> String {
-    static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    PAGE.get_or_init(|| {
-        let path = start_page_path();
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(START_PAGE)
-            && let Err(err) = std::fs::write(&path, START_PAGE)
-        {
-            tracing::warn!("writing the agents' Chrome start page: {err:#}");
-            return "about:blank".into();
-        }
-        start_url().to_string()
-    })
-    .clone()
-}
-
-/// A tab the user opened, that no agent works in.
-struct UserTab {
+/// A tab the user shared (in the PilotHouse group) that no agent works in.
+struct SharedTab {
     target: String,
     title: String,
     url: String,
-    /// The tab on screen in its window.
+    /// The tab in front in its window.
     showing: bool,
     /// In the window the user is in.
     focused: bool,
 }
 
-impl UserTab {
-    /// How agents name it: the start of its target id.
-    fn id(&self) -> &str {
-        &self.target[..self.target.len().min(8)]
-    }
-}
-
-/// The tabs the user opened (not `agents`'), the one they are in first.
-async fn user_tabs(browser: &Cdp, agents: &[String]) -> Result<Vec<UserTab>> {
-    let targets = browser.call("Target.getTargets", json!({})).await?;
-    let mut tabs = Vec::new();
-    for info in targets["targetInfos"].as_array().into_iter().flatten() {
-        let Some(target) = info["targetId"].as_str() else {
-            continue;
-        };
-        let url = info["url"].as_str().unwrap_or_default();
-        // PilotHouse's own start page is nobody's work.
-        if info["type"] != "page"
-            || url.starts_with("devtools://")
-            || url == start_url()
-            || agents.iter().any(|known| known == target)
-        {
-            continue;
-        }
-        tabs.push(UserTab {
-            target: target.to_string(),
-            title: info["title"].as_str().unwrap_or_default().to_string(),
-            url: url.to_string(),
-            showing: false,
-            focused: false,
-        });
-    }
-    // Asked of every tab at once: a slow one does not hold up the others.
-    let places =
-        futures::future::join_all(tabs.iter().map(|tab| on_screen(browser, &tab.target))).await;
-    for (tab, (showing, focused)) in tabs.iter_mut().zip(places) {
-        (tab.showing, tab.focused) = (showing, focused);
-    }
-    tabs.sort_by_key(|tab| (!tab.focused, !tab.showing));
+/// The tabs of the PilotHouse group that are not `agents'`, the one the
+/// user is in first. The extension lists no other tabs.
+async fn shared_tabs(browser: &Cdp, agents: &[String]) -> Result<Vec<SharedTab>> {
+    let listed = browser.call("PilotHouse.listTabs", json!({})).await?;
+    let mut tabs: Vec<SharedTab> = listed["tabs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tab| {
+            let target = tab["tabId"].as_u64()?.to_string();
+            (!agents.contains(&target)).then(|| SharedTab {
+                target,
+                title: tab["title"].as_str().unwrap_or_default().to_string(),
+                url: tab["url"].as_str().unwrap_or_default().to_string(),
+                showing: tab["active"] == json!(true),
+                focused: tab["focused"] == json!(true),
+            })
+        })
+        .collect();
+    tabs.sort_by_key(|tab| (!(tab.showing && tab.focused), !tab.showing));
     Ok(tabs)
 }
 
-/// Whether a tab is on screen in its window, and whether that window is the
-/// one the user is in: asked of the page through a short attachment.
-async fn on_screen(browser: &Cdp, target: &str) -> (bool, bool) {
-    let Ok(attached) = browser
-        .call(
-            "Target.attachToTarget",
-            json!({ "targetId": target, "flatten": true }),
-        )
-        .await
-    else {
-        return (false, false);
-    };
-    let Some(session) = attached["sessionId"].as_str().map(str::to_string) else {
-        return (false, false);
-    };
-    let page = browser.for_session(&session);
-    let ask = page.call(
-        "Runtime.evaluate",
-        json!({ "expression": "[document.visibilityState === 'visible', document.hasFocus()]", "returnByValue": true }),
-    );
-    // A page held by a dialog does not answer.
-    let late = async {
-        smol::Timer::after(Duration::from_secs(2)).await;
-        Err(anyhow!("no answer"))
-    };
-    let state = smol::future::or(ask, late).await.ok();
-    // Let go of it either way.
+/// Attaches Chrome's debugger to a tab of the group (the extension refuses
+/// any other): its events, the overlay and helpers on every page, and the
+/// Stop button's binding.
+async fn attach(browser: &Cdp, target: &str) -> Result<Cdp> {
     browser
-        .call("Target.detachFromTarget", json!({ "sessionId": session }))
+        .call("PilotHouse.attach", json!({ "tabId": tab_id(target)? }))
         .await
-        .ok();
-    let value = state.as_ref().map(|state| &state["result"]["value"]);
-    value.map_or((false, false), |value| {
-        (value[0] == json!(true), value[1] == json!(true))
-    })
-}
-
-/// A blank tab nobody is attached to (the first window's, when Chrome was
-/// slow to open it).
-async fn blank_tab(browser: &Cdp) -> Option<String> {
-    let targets = browser.call("Target.getTargets", json!({})).await.ok()?;
-    targets["targetInfos"]
-        .as_array()?
-        .iter()
-        .find(|target| {
-            target["type"] == "page"
-                && target["attached"] != json!(true)
-                && target["url"].as_str().is_some_and(|url| {
-                    matches!(
-                        url,
-                        "about:blank" | "chrome://newtab/" | "chrome://new-tab-page/"
-                    ) || url == start_url()
-                })
-        })
-        .and_then(|target| target["targetId"].as_str())
-        .map(str::to_string)
-}
-
-/// Attaches to a tab: its events, the overlay and helpers on every page,
-/// and the Stop button's binding.
-async fn attach(browser: &Cdp, target: &str) -> Result<(String, Cdp)> {
-    let attached = browser
-        .call(
-            "Target.attachToTarget",
-            json!({ "targetId": target, "flatten": true }),
-        )
-        .await?;
-    let session = attached["sessionId"]
-        .as_str()
-        .context("could not attach to the tab")?
-        .to_string();
-    let page = browser.for_session(&session);
+        .context("could not reach the tab")?;
+    let page = browser.for_session(target);
     for domain in [
         "Page.enable",
         "Runtime.enable",
@@ -2295,13 +2243,6 @@ async fn attach(browser: &Cdp, target: &str) -> Result<(String, Cdp)> {
     }
     page.call("Page.setLifecycleEventsEnabled", json!({ "enabled": true }))
         .await?;
-    // Sites see the browser as a person's: no `navigator.webdriver` (the
-    // launch flag that does it shows a warning bar in a visible Chrome).
-    page.call(
-        "Page.addScriptToEvaluateOnNewDocument",
-        json!({ "source": agent_scripts::NOT_AUTOMATED }),
-    )
-    .await?;
     page.call(
         "Page.addScriptToEvaluateOnNewDocument",
         json!({ "source": format!("{OVERLAY};{AGENT}"), "worldName": WORLD }),
@@ -2312,7 +2253,66 @@ async fn attach(browser: &Cdp, target: &str) -> Result<(String, Cdp)> {
         json!({ "name": BINDING, "executionContextName": WORLD }),
     )
     .await?;
-    Ok((session, page))
+    Ok(page)
+}
+
+/// Lets go of a tab: the overlay goes, then the debugger.
+async fn let_go(browser: Cdp, page: Cdp, world: Option<i64>, target: String) {
+    if let Some(id) = world {
+        let hide = agent_scripts::call("__phOverlay", "hide", &[]);
+        page.call(
+            "Runtime.evaluate",
+            json!({ "expression": hide, "contextId": id }),
+        )
+        .await
+        .ok();
+    }
+    if let Ok(id) = tab_id(&target) {
+        browser
+            .call("PilotHouse.detach", json!({ "tabId": id }))
+            .await
+            .ok();
+    }
+}
+
+/// The user's Downloads folder, where Chrome saves by default.
+fn downloads_folder() -> Option<PathBuf> {
+    ph_env::var("HOME")
+        .or_else(|| ph_env::var("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join("Downloads"))
+}
+
+/// Where Chrome saved a finished download of `name` in `folder`: the file
+/// by that name, or by the name Chrome gives when it is taken (`name (1).ext`
+/// …), written since the download `started` and holding exactly `size`
+/// bytes. Only such a file is the download: a file the user already had
+/// under that name never is, so an agent can never be pointed at it (it is
+/// what chrome_upload lets go back up). `None` when there is no such file
+/// (Chrome saving elsewhere, say).
+fn saved_download(
+    folder: &std::path::Path,
+    name: &str,
+    started: std::time::SystemTime,
+    size: u64,
+) -> Option<PathBuf> {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (name, String::new()),
+    };
+    // A second's slack for file systems that keep times coarsely.
+    let since = started
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap_or(started);
+    std::iter::once(name.to_string())
+        .chain((1..=50).map(|n| format!("{stem} ({n}){ext}")))
+        .map(|candidate| folder.join(candidate))
+        .filter_map(|path| {
+            let meta = std::fs::symlink_metadata(&path).ok()?;
+            let written = meta.modified().ok()?;
+            (meta.is_file() && meta.len() == size && written >= since).then_some((written, path))
+        })
+        .max_by_key(|(written, _)| *written)
+        .map(|(_, path)| path)
 }
 
 /// The isolated world of the page's current document, made (with the
@@ -2567,7 +2567,13 @@ async fn capture(page: &Page, options: &Value, cx: &mut AsyncApp) -> Result<Valu
             Ok(shot) => return Ok(shot),
             Err(err) if attempt == 0 => {
                 tracing::debug!("screenshot: {err:#}; bringing the tab forward");
-                page.cdp.call("Page.bringToFront", json!({})).await.ok();
+                if let Ok(id) = tab_id(&page.target) {
+                    page.cdp
+                        .browser()
+                        .call("PilotHouse.activate", json!({ "tabId": id }))
+                        .await
+                        .ok();
+                }
             }
             Err(err) => {
                 return Err(err.context(
@@ -2606,12 +2612,7 @@ async fn summary(this: &WeakEntity<AgentChrome>, page: &Page, cx: &mut AsyncApp)
         let current = this.update(cx, |this, _| {
             let target = this.owners.get(&page.owner)?.current.clone()?;
             let tab = this.tab(&target)?;
-            Some(Page {
-                cdp: tab.cdp.clone(),
-                target,
-                owner: page.owner.clone(),
-                label: page.label.clone(),
-            })
+            Some(tab.page(&page.owner, &page.label))
         })?;
         match current {
             Some(current) => current,
@@ -2652,7 +2653,7 @@ async fn summary(this: &WeakEntity<AgentChrome>, page: &Page, cx: &mut AsyncApp)
     if human_check && let Some(notes) = notes.as_array_mut() {
         notes.push(json!(
             "The page asks to prove a person is here (a CAPTCHA or similar check). Do not try to \
-             solve it: ask the user to complete it in the PilotHouse Chrome window, then go on."
+             solve it: ask the user to complete it in that tab of their Chrome, then go on."
         ));
     }
     this.update(cx, |this, _| {
@@ -2751,24 +2752,13 @@ fn sanitize_name(name: &str) -> String {
     }
 }
 
-/// `name` in `dir`, or `name (2)`… when taken.
-fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
-    let candidate = dir.join(name);
-    if !candidate.exists() {
-        return candidate;
-    }
-    let (stem, extension) = match name.rsplit_once('.') {
-        Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
-        _ => (name, String::new()),
-    };
-    (2..)
-        .map(|n| dir.join(format!("{stem} ({n}){extension}")))
-        .find(|path| !path.exists())
-        .expect("some name is free")
-}
-
-/// The files to upload: absolute, existing, and inside `allowed` folders.
-fn checked_files(paths: &[String], allowed: &[PathBuf]) -> Result<Vec<String>> {
+/// The files to upload: absolute, existing, and inside `allowed` folders or
+/// among `downloaded` files.
+fn checked_files(
+    paths: &[String],
+    allowed: &[PathBuf],
+    downloaded: &[PathBuf],
+) -> Result<Vec<String>> {
     if paths.is_empty() {
         bail!("give the files to upload (`paths`)");
     }
@@ -2786,10 +2776,12 @@ fn checked_files(paths: &[String], allowed: &[PathBuf]) -> Result<Vec<String>> {
                 folder
                     .canonicalize()
                     .is_ok_and(|folder| real.starts_with(folder))
-            });
+            }) || downloaded
+                .iter()
+                .any(|file| file.canonicalize().is_ok_and(|file| file == real));
             if !inside {
                 bail!(
-                    "{} is outside the workspace's folders and the downloads folder; only those files can be uploaded",
+                    "{} is outside the workspace's folders and is not a file you downloaded; only those can be uploaded",
                     path.display()
                 );
             }
@@ -2971,6 +2963,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_download_is_only_the_file_it_wrote() {
+        let folder = std::env::temp_dir().join(format!("ph-downloads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        // The user's own file, from before, under the name a page suggests.
+        let theirs = folder.join("Statement.pdf");
+        std::fs::write(&theirs, b"12345").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&theirs)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+        let started = std::time::SystemTime::now();
+        // Not the download: older than it, even at the size it had.
+        assert_eq!(saved_download(&folder, "Statement.pdf", started, 5), None);
+        // Chrome saved the download beside it, renamed.
+        let ours = folder.join("Statement (1).pdf");
+        std::fs::write(&ours, b"0123456789").unwrap();
+        assert_eq!(
+            saved_download(&folder, "Statement.pdf", started, 10),
+            Some(ours.clone())
+        );
+        // The wrong size is not it either.
+        assert_eq!(saved_download(&folder, "Statement.pdf", started, 11), None);
+        // A name without an extension, saved as it is.
+        std::fs::write(folder.join("notes"), b"abc").unwrap();
+        assert_eq!(
+            saved_download(&folder, "notes", started, 3),
+            Some(folder.join("notes"))
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
     fn ended_agent_sessions_are_told_by_their_process() {
         assert_eq!(owner_pid("claude-code-4242"), Some(4242));
         assert_eq!(owner_pid("codex"), None);
@@ -3017,15 +3045,9 @@ mod tests {
     }
 
     #[test]
-    fn downloads_get_safe_unique_names() {
+    fn downloads_get_safe_names() {
         assert_eq!(sanitize_name("../a:b?.pdf"), "_a_b_.pdf");
         assert_eq!(sanitize_name("  "), "download");
-        let dir = std::env::temp_dir().join(format!("ph-downloads-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("report.pdf"), "").unwrap();
-        assert_eq!(unique_path(&dir, "report.pdf"), dir.join("report (2).pdf"));
-        assert_eq!(unique_path(&dir, "new.txt"), dir.join("new.txt"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3039,19 +3061,30 @@ mod tests {
         assert!(
             checked_files(
                 &[inside.join("a.png").to_string_lossy().into_owned()],
-                &allowed
+                &allowed,
+                &[]
             )
             .is_ok()
         );
-        let outside = checked_files(
-            &[root.join("secret.txt").to_string_lossy().into_owned()],
-            &allowed,
-        );
+        let secret = root.join("secret.txt").to_string_lossy().into_owned();
+        let outside = checked_files(std::slice::from_ref(&secret), &allowed, &[]);
         assert!(outside.unwrap_err().to_string().contains("outside"));
         // A way out through `..` is still outside.
         let sneaky = inside.join("../secret.txt").to_string_lossy().into_owned();
-        assert!(checked_files(&[sneaky], &allowed).is_err());
-        assert!(checked_files(&[], &allowed).is_err());
+        assert!(checked_files(&[sneaky], &allowed, &[]).is_err());
+        assert!(checked_files(&[], &allowed, &[]).is_err());
+        // A file the agent downloaded may go back up; its neighbours may not.
+        std::fs::write(root.join("report.pdf"), "x").unwrap();
+        let downloaded = vec![root.join("report.pdf")];
+        assert!(
+            checked_files(
+                &[root.join("report.pdf").to_string_lossy().into_owned()],
+                &allowed,
+                &downloaded
+            )
+            .is_ok()
+        );
+        assert!(checked_files(&[secret], &allowed, &downloaded).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

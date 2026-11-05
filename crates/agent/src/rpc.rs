@@ -63,7 +63,8 @@ pub struct RpcProcess {
     closed: Arc<std::sync::atomic::AtomicBool>,
     next_id: AtomicU64,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
-    child: Mutex<Child>,
+    /// Taken when the process is stopped.
+    child: Mutex<Option<Child>>,
 }
 
 impl RpcProcess {
@@ -176,7 +177,7 @@ impl RpcProcess {
             closed,
             next_id: AtomicU64::new(1),
             stderr_tail,
-            child: Mutex::new(child),
+            child: Mutex::new(Some(child)),
         });
         Ok((process, incoming))
     }
@@ -250,24 +251,34 @@ impl RpcProcess {
 impl Drop for RpcProcess {
     fn drop(&mut self) {
         // Agents are children of the app; never leave them running.
-        if let Ok(mut child) = self.child.lock() {
-            // The whole group (or tree): its children too.
-            #[cfg(unix)]
+        let Some(mut child) = self.child.lock().ok().and_then(|mut child| child.take()) else {
+            return;
+        };
+        // The whole group: its children too.
+        #[cfg(unix)]
+        {
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
-            }
-            #[cfg(windows)]
-            {
-                let _ = ph_env::command("taskkill")
-                    .args(["/T", "/F", "/PID", &child.id().to_string()])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
             }
             let _ = child.kill();
             let _ = child.wait();
         }
+        // The whole tree. `taskkill /T` finds it from the process at its
+        // top, so that one is killed only after (or the tree is left
+        // running: an agent's adapter, its MCP server, a copy of PilotHouse
+        // that keeps its program file open). It can take a while: on a
+        // thread of its own, not whichever one let the agent go.
+        #[cfg(windows)]
+        std::thread::spawn(move || {
+            let _ = ph_env::command("taskkill")
+                .args(["/T", "/F", "/PID", &child.id().to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = child.kill();
+            let _ = child.wait();
+        });
     }
 }
 

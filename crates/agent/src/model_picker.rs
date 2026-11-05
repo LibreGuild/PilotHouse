@@ -6,8 +6,10 @@
 //! composer.
 //!
 //! Models come from each agent's own ACP config options. The current chat's
-//! agent is live; other agents show what was cached the last time they ran
-//! (an agent never started offers to load its models). Picking another
+//! agent is live; other agents show what was cached the last time they ran,
+//! or loaded in the background after start ([`crate::preload`]; meanwhile
+//! "Loading models…"). An agent whose models are still unknown offers to
+//! load them. Picking another
 //! agent's model switches a fresh chat to it, or opens a new chat if this one
 //! already started (an agent cannot change mid-conversation).
 
@@ -27,6 +29,7 @@ use ph_ui::Icons;
 use crate::agents::{AgentSpec, Availability};
 use crate::chat_panel::ChatPanel;
 use crate::options::{AgentOption, OptionCategory, OptionChoice, OptionKind};
+use crate::preload::LoadState;
 
 /// Everything the picker shows, gathered by the chat panel.
 pub struct PickerData {
@@ -207,24 +210,37 @@ pub fn render(
                 .into_any_element(),
         );
         let Some(model) = section.model else {
-            let reason = match agent.availability() {
-                Availability::Ready { .. } => "Load its models".to_string(),
-                Availability::Missing(reason) => format!("Set up: {reason}"),
-            };
-            rows.push(
-                model_row(
-                    SharedString::from(format!("picker-load-{}", agent.id)),
-                    agent,
-                    reason,
-                    None,
+            // Being loaded in the background ([`crate::preload`]), or why
+            // that failed; else what picking it does.
+            let (label, why, loading) = match (
+                agent.availability(),
+                crate::preload::ModelLoads::state(agent.id, cx),
+            ) {
+                (Availability::Missing(reason), _) => (format!("Set up: {reason}"), None, false),
+                (_, Some(LoadState::Loading)) => ("Loading models…".to_string(), None, true),
+                (_, Some(LoadState::Failed(reason))) => (
+                    "Load its models".to_string(),
+                    Some(reason.to_string()),
                     false,
-                    row == highlight,
-                    cx,
-                )
-                .on_click(pick(Pick::Agent(agent)))
-                .test_support()
-                .into_any_element(),
-            );
+                ),
+                (_, None) => ("Load its models".to_string(), None, false),
+            };
+            let element = model_row(
+                SharedString::from(format!("picker-load-{}", agent.id)),
+                agent,
+                label,
+                why,
+                false,
+                row == highlight,
+                cx,
+            )
+            .when(loading, |this| {
+                this.child(gpui_kit::component::spinner::Spinner::new().xsmall())
+            })
+            .on_click(pick(Pick::Agent(agent)))
+            .test_support()
+            .into_any_element();
+            rows.push(element);
             row += 1;
             continue;
         };

@@ -1,9 +1,17 @@
-//! A minimal Chrome DevTools Protocol client over Chrome's debugging pipe.
+//! A minimal Chrome DevTools Protocol client.
 //!
-//! Messages are JSON, each ended by a NUL byte. A reader thread blocks on
-//! the pipe (no polling, so an idle browser costs no CPU) and writes go
-//! through a mutex from any thread. The connection is to the browser; page
-//! commands carry the page's `sessionId` (see [`Cdp::for_session`]).
+//! Two transports carry it:
+//!
+//! - **Chrome's debugging pipe** ([`Cdp::connect`], the Browser pane's
+//!   headless Chrome): messages are JSON, each ended by a NUL byte. A reader
+//!   thread blocks on the pipe (no polling, so an idle browser costs no CPU).
+//! - **The Chrome extension** ([`Cdp::with_sink`], agents' Chrome): messages
+//!   go out through a sink, and the extension bridge hands what comes back to
+//!   the [`CdpInbox`].
+//!
+//! Writes go through the sink from any thread. The connection is to the
+//! browser; page commands carry the page's `sessionId` (see
+//! [`Cdp::for_session`]).
 
 use std::collections::HashMap;
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -14,6 +22,9 @@ use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
 type Replies = Arc<Mutex<HashMap<u64, smol::channel::Sender<Result<Value>>>>>;
+
+/// Sends one message (a JSON object's text) on the transport.
+pub type Sink = Arc<dyn Fn(String) -> std::io::Result<()> + Send + Sync>;
 
 /// The longest a command may take.
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -29,10 +40,61 @@ pub struct CdpEvent {
 
 #[derive(Clone)]
 pub struct Cdp {
-    writer: Arc<Mutex<std::io::PipeWriter>>,
+    sink: Sink,
     replies: Replies,
     next_id: Arc<AtomicU64>,
     session: Option<Arc<str>>,
+}
+
+/// Where a transport delivers what the browser sends: answers go to the
+/// calls waiting for them, events to the event channel.
+pub struct CdpInbox {
+    replies: Replies,
+    events: smol::channel::Sender<CdpEvent>,
+}
+
+impl CdpInbox {
+    /// Routes one message. False once nobody listens for events any more.
+    pub fn deliver(&self, message: Value) -> bool {
+        if let Some(id) = message.get("id").and_then(Value::as_u64) {
+            let Some(reply) = self.replies.lock().expect("cdp replies").remove(&id) else {
+                return true;
+            };
+            let result = match message.get("error") {
+                Some(error) => Err(anyhow!(
+                    "{}",
+                    error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("DevTools error")
+                )),
+                None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
+            };
+            let _ = reply.try_send(result);
+            return true;
+        }
+        let Some(method) = message.get("method").and_then(Value::as_str) else {
+            return true;
+        };
+        let event = CdpEvent {
+            method: method.to_string(),
+            params: message.get("params").cloned().unwrap_or(Value::Null),
+            session: message
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        };
+        self.events.send_blocking(event).is_ok()
+    }
+
+    /// The transport closed: everything still waiting fails, so callers do
+    /// not hang, and the event channel ends.
+    pub fn close(&self) {
+        for (_, reply) in self.replies.lock().expect("cdp replies").drain() {
+            let _ = reply.try_send(Err(anyhow!("the browser closed")));
+        }
+        self.events.close();
+    }
 }
 
 impl Cdp {
@@ -42,27 +104,51 @@ impl Cdp {
         reader: std::io::PipeReader,
         writer: std::io::PipeWriter,
     ) -> Result<(Self, smol::channel::Receiver<CdpEvent>)> {
-        let replies: Replies = Arc::default();
-        let (events, receiver) = smol::channel::unbounded();
-        let thread_replies = replies.clone();
+        let writer = Mutex::new(writer);
+        let sink: Sink = Arc::new(move |text: String| {
+            let mut bytes = text.into_bytes();
+            bytes.push(0);
+            writer
+                .lock()
+                .map_err(|_| std::io::Error::other("cdp writer poisoned"))?
+                .write_all(&bytes)
+        });
+        let (cdp, inbox, events) = Self::with_sink(sink);
         std::thread::Builder::new()
             .name("cdp-reader".into())
-            .spawn(move || read_loop(reader, thread_replies, events))?;
-        Ok((
+            .spawn(move || read_loop(reader, inbox))?;
+        Ok((cdp, events))
+    }
+
+    /// A client that sends through `sink`; the transport delivers what comes
+    /// back to the returned inbox.
+    pub fn with_sink(sink: Sink) -> (Self, CdpInbox, smol::channel::Receiver<CdpEvent>) {
+        let replies: Replies = Arc::default();
+        let (events, receiver) = smol::channel::unbounded();
+        (
             Self {
-                writer: Arc::new(Mutex::new(writer)),
-                replies,
+                sink,
+                replies: replies.clone(),
                 next_id: Arc::new(AtomicU64::new(1)),
                 session: None,
             },
+            CdpInbox { replies, events },
             receiver,
-        ))
+        )
     }
 
     /// The same connection, sending to one target's session.
     pub fn for_session(&self, session: &str) -> Self {
         Self {
             session: Some(session.into()),
+            ..self.clone()
+        }
+    }
+
+    /// The same connection, at the browser rather than a page.
+    pub fn browser(&self) -> Self {
+        Self {
+            session: None,
             ..self.clone()
         }
     }
@@ -115,13 +201,7 @@ impl Cdp {
         if let Some(session) = &self.session {
             message["sessionId"] = json!(session.as_ref());
         }
-        let mut bytes = message.to_string().into_bytes();
-        bytes.push(0);
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow!("cdp writer poisoned"))?;
-        writer.write_all(&bytes).map_err(|err| {
+        (self.sink)(message.to_string()).map_err(|err| {
             self.replies.lock().expect("cdp replies").remove(&id);
             anyhow!("sending {method}: {err}")
         })?;
@@ -129,11 +209,7 @@ impl Cdp {
     }
 }
 
-fn read_loop(
-    reader: std::io::PipeReader,
-    replies: Replies,
-    events: smol::channel::Sender<CdpEvent>,
-) {
+fn read_loop(reader: std::io::PipeReader, inbox: CdpInbox) {
     let mut reader = BufReader::with_capacity(1 << 20, reader);
     let mut buffer = Vec::new();
     loop {
@@ -148,37 +224,61 @@ fn read_loop(
         let Ok(message) = serde_json::from_slice::<Value>(&buffer) else {
             continue;
         };
-        if let Some(id) = message.get("id").and_then(Value::as_u64) {
-            let Some(reply) = replies.lock().expect("cdp replies").remove(&id) else {
-                continue;
-            };
-            let result = match message.get("error") {
-                Some(error) => Err(anyhow!(
-                    "{}",
-                    error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("DevTools error")
-                )),
-                None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
-            };
-            let _ = reply.try_send(result);
-        } else if let Some(method) = message.get("method").and_then(Value::as_str) {
-            let event = CdpEvent {
-                method: method.to_string(),
-                params: message.get("params").cloned().unwrap_or(Value::Null),
-                session: message
-                    .get("sessionId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            };
-            if events.send_blocking(event).is_err() {
-                break;
-            }
+        if !inbox.deliver(message) {
+            break;
         }
     }
-    // Fail everything still waiting, so callers do not hang.
-    for (_, reply) in replies.lock().expect("cdp replies").drain() {
-        let _ = reply.try_send(Err(anyhow!("the browser closed")));
+    inbox.close();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sink_carries_calls_and_the_inbox_answers_them() {
+        let sent: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let log = sent.clone();
+        let sink: Sink = Arc::new(move |text| {
+            log.lock()
+                .unwrap()
+                .push(serde_json::from_str(&text).unwrap());
+            Ok(())
+        });
+        let (cdp, inbox, events) = Cdp::with_sink(sink);
+        let page = cdp.for_session("42");
+        let call =
+            smol::spawn(async move { page.call("Page.navigate", json!({ "url": "x" })).await });
+        // Wait until the call went out, then answer it.
+        let id = loop {
+            if let Some(message) = sent.lock().unwrap().first().cloned() {
+                assert_eq!(message["sessionId"], "42");
+                assert_eq!(message["method"], "Page.navigate");
+                break message["id"].as_u64().unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert!(inbox.deliver(json!({ "id": id, "result": { "frameId": "f" } })));
+        assert_eq!(smol::block_on(call).unwrap()["frameId"], "f");
+        assert!(
+            inbox.deliver(
+                json!({ "method": "Page.loadEventFired", "params": {}, "sessionId": "42" })
+            )
+        );
+        let event = smol::block_on(events.recv()).unwrap();
+        assert_eq!(
+            (event.method.as_str(), event.session.as_deref()),
+            ("Page.loadEventFired", Some("42"))
+        );
+        // Closing fails what still waits.
+        let waiting = smol::spawn({
+            let cdp = cdp.clone();
+            async move { cdp.call("Runtime.evaluate", json!({})).await }
+        });
+        while sent.lock().unwrap().len() < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        inbox.close();
+        assert!(smol::block_on(waiting).is_err());
     }
 }

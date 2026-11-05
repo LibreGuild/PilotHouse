@@ -45,6 +45,9 @@ pub enum View {
 /// actions to whichever project is active.
 pub struct Workspace {
     focus_handle: FocusHandle,
+    /// The sidebar's pane headers (Chats, Workspaces), focusable from the
+    /// keyboard to collapse or open their pane.
+    pub(crate) pane_focus: [FocusHandle; 2],
     /// This window.
     handle: gpui_kit::AnyWindowHandle,
     /// The workspaces, newest first (the sidebar's order, and ⌃1–⌃9's).
@@ -65,7 +68,8 @@ pub struct Workspace {
     pub(crate) pinned: Vec<ph_store::sessions::Session>,
     /// Chats marked done.
     settled: HashSet<ph_store::sessions::SessionId>,
-    /// Sidebar sections folded away (`chats`, `workspaces`).
+    /// Sidebar panes collapsed and sections folded away (`chats`,
+    /// `workspaces`, `pinned`).
     pub(crate) folded: HashSet<String>,
     /// What the agent CLIs in terminals looked like at the last check.
     terminal_agents_seen: u64,
@@ -148,6 +152,7 @@ impl Workspace {
         );
         let mut workspace = Self {
             focus_handle,
+            pane_focus: [cx.focus_handle(), cx.focus_handle()],
             handle: window.window_handle(),
             projects,
             chats_space,
@@ -1737,6 +1742,24 @@ impl Workspace {
         );
     }
 
+    fn open_chrome_extension_settings(
+        &mut self,
+        _: &ph_browser::OpenChromeExtensionSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let project = self
+            .active_space()
+            .map(|space| space.read(cx).project().path.clone());
+        settings_dialog::open(
+            project,
+            settings_dialog::Page::Chrome,
+            cx.entity().downgrade(),
+            window,
+            cx,
+        );
+    }
+
     fn open_github_settings(
         &mut self,
         _: &OpenGitHubSettings,
@@ -1937,6 +1960,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::open_github_settings))
             .on_action(cx.listener(Self::open_storage_settings))
+            .on_action(cx.listener(Self::open_chrome_extension_settings))
             .on_action(cx.listener(|_, _: &UseSystemAppearance, _, cx| {
                 AppState::set_appearance(Appearance::System, cx)
             }))

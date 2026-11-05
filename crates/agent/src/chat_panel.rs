@@ -57,6 +57,9 @@ mod render;
 /// The composer's hint in a workspace's chat.
 const PLACEHOLDER: &str = "Ask anything. @file, #12 for a card, @screenshot, @log";
 
+/// Each agent with its setup checks (the first-run card).
+type AgentChecks = Vec<(&'static AgentSpec, Vec<setup::Check>)>;
+
 /// Session titles are cut to this many characters.
 const TITLE_CHARS: usize = 48;
 
@@ -203,6 +206,10 @@ pub struct ChatPanel {
     setup: Option<(&'static str, std::time::Instant, Vec<setup::Check>)>,
     /// Checks the setup again off the UI thread (they search the PATH).
     _setup_refresh: Option<Task<()>>,
+    /// Every agent's setup checks, for the first-run card shown while none
+    /// is installed; refreshed like [`Self::setup`].
+    welcome: Option<(std::time::Instant, AgentChecks)>,
+    _welcome_refresh: Option<Task<()>>,
     /// Attached to the next message.
     attachments: Vec<Attachment>,
     /// Title for the chat the next send creates, instead of its text.
@@ -296,6 +303,8 @@ impl ChatPanel {
             pulls_asked: false,
             setup: None,
             _setup_refresh: None,
+            welcome: None,
+            _welcome_refresh: None,
             attachments: Vec::new(),
             next_title: None,
             live: None,
@@ -307,7 +316,18 @@ impl ChatPanel {
             side: None,
             failed: None,
             _prepare: None,
-            _subscriptions: vec![subscription, picker_subscription],
+            _subscriptions: vec![
+                subscription,
+                picker_subscription,
+                // The agents were looked for, or their models loaded in the
+                // background.
+                cx.observe_global::<crate::installed::Installed>(|this, cx| this.agents_found(cx)),
+                cx.observe_global::<crate::preload::ModelLoads>(|this, cx| {
+                    this.active
+                        .update(cx, |thread, cx| thread.reload_cached_options(cx));
+                    cx.notify();
+                }),
+            ],
             _active_subscriptions: Vec::new(),
         };
         panel.watch_active(cx);
@@ -825,6 +845,27 @@ impl ChatPanel {
         self.warm_up(cx);
     }
 
+    /// The agents were looked for (at start, or again): a new chat whose
+    /// agent is not installed takes the default one, the first installed,
+    /// and its setup checks are made again (the first-run card's refresh on
+    /// their own).
+    fn agents_found(&mut self, cx: &mut Context<Self>) {
+        self.setup = None;
+        let thread = self.active.read(cx);
+        let current = thread.agent();
+        let untouched = !thread.has_started() && thread.session().is_none();
+        let installed = agents::installed().unwrap_or_default();
+        let default = default_agent(&self.store);
+        if untouched
+            && default.id != current.id
+            && !installed.iter().any(|spec| spec.id == current.id)
+        {
+            self.active
+                .update(cx, |thread, cx| thread.set_agent(default, cx));
+        }
+        cx.notify();
+    }
+
     fn warm_up(&mut self, cx: &mut Context<Self>) {
         // A folder still to be made (a clone) has nothing to start in yet.
         if self
@@ -923,7 +964,10 @@ impl ChatPanel {
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
-        if self.busy.is_some() {
+        // No agent installed yet: the message stays in the box, and the
+        // welcome card and the line under the box say what to do.
+        if self.busy.is_some() || agents::installed().is_some_and(|installed| installed.is_empty())
+        {
             return;
         }
         // While the agent works, the message waits its turn.

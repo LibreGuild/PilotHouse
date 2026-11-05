@@ -175,10 +175,65 @@ impl AgentSpec {
             _ => None,
         }
     }
+
+    /// The CLI's own page: its npm package for those installed with npm,
+    /// else the site its installer comes from.
+    pub fn home_page(&self) -> &'static str {
+        match self.id {
+            "claude" => "https://www.npmjs.com/package/@anthropic-ai/claude-code",
+            "codex" => "https://www.npmjs.com/package/@openai/codex",
+            "gemini" => "https://www.npmjs.com/package/@google/gemini-cli",
+            _ => "https://antigravity.google",
+        }
+    }
 }
 
 pub fn find(id: &str) -> Option<&'static AgentSpec> {
     AGENTS.iter().find(|agent| agent.id == id)
+}
+
+/// The agents found ready to start by the last [`detect`], by id; `None`
+/// until it first ran (it waits for the login shell's environment).
+static INSTALLED: std::sync::RwLock<Option<Vec<&'static str>>> = std::sync::RwLock::new(None);
+
+/// Finds which agents can start on this machine (their CLI, and what their
+/// launch needs, on the login shell's `PATH`), in [`AGENTS`] order, and
+/// remembers it for [`installed`]. Blocking: it may wait seconds for the
+/// login shell, so call it off the UI thread.
+pub fn detect() -> Vec<&'static AgentSpec> {
+    let found: Vec<&'static AgentSpec> = AGENTS
+        .iter()
+        .filter(|spec| matches!(spec.availability(), Availability::Ready { .. }))
+        .collect();
+    if let Ok(mut installed) = INSTALLED.write() {
+        *installed = Some(found.iter().map(|spec| spec.id).collect());
+    }
+    found
+}
+
+/// What the last [`detect`] found, in [`AGENTS`] order; `None` before it ran.
+pub fn installed() -> Option<Vec<&'static AgentSpec>> {
+    let installed = INSTALLED.read().ok()?;
+    installed
+        .as_ref()
+        .map(|ids| ids.iter().filter_map(|id| find(id)).collect())
+}
+
+/// The agent new chats start with: the one the user chose while it is
+/// installed, else the first installed one, else (none installed, or not
+/// looked for yet) the one chosen, else the first known.
+pub fn pick_default(
+    chosen: Option<&'static AgentSpec>,
+    installed: Option<&[&'static AgentSpec]>,
+) -> &'static AgentSpec {
+    match installed {
+        Some(installed) => chosen
+            .filter(|chosen| installed.iter().any(|spec| spec.id == chosen.id))
+            .or_else(|| installed.first().copied())
+            .or(chosen)
+            .unwrap_or(&AGENTS[0]),
+        None => chosen.unwrap_or(&AGENTS[0]),
+    }
 }
 
 /// The command to start an agent, or why it cannot start on this machine.
@@ -222,6 +277,43 @@ impl AgentSpec {
                 },
                 Err(err) => Availability::Missing(format!("PilotHouse cannot find itself: {err}")),
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_chats_start_with_an_installed_agent() {
+        let (claude, codex, gemini) = (
+            find("claude").unwrap(),
+            find("codex").unwrap(),
+            find("gemini").unwrap(),
+        );
+        // Not looked for yet: the choice, else the first known.
+        assert_eq!(pick_default(None, None).id, "claude");
+        assert_eq!(pick_default(Some(codex), None).id, "codex");
+        // The choice while it is installed.
+        assert_eq!(
+            pick_default(Some(codex), Some(&[claude, codex])).id,
+            "codex"
+        );
+        // Nothing chosen: the first installed, not the first known.
+        assert_eq!(pick_default(None, Some(&[codex, gemini])).id, "codex");
+        // The chosen one went away: the first installed instead.
+        assert_eq!(pick_default(Some(claude), Some(&[gemini])).id, "gemini");
+        // Nothing installed: the choice still names the chat's agent (its
+        // setup card says how to install it), else the first known.
+        assert_eq!(pick_default(Some(codex), Some(&[])).id, "codex");
+        assert_eq!(pick_default(None, Some(&[])).id, "claude");
+    }
+
+    #[test]
+    fn every_agent_has_a_page() {
+        for spec in AGENTS {
+            assert!(spec.home_page().starts_with("https://"), "{}", spec.id);
         }
     }
 }

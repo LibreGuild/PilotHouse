@@ -22,6 +22,9 @@ toml.workspace = true
 ph-review.workspace = true
 ph-ui.workspace = true
 dirs.workspace = true
+jiff.workspace = true
+# Lines of the agents' usage files matched as bytes before parsing.
+memchr.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true

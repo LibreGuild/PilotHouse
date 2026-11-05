@@ -59,9 +59,14 @@ Download the build for your system from [Releases](https://github.com/LibreGuild
 | Windows 10/11 (x64) | `PilotHouse-Windows-Setup-x64.exe`, or `PilotHouse-Windows-Portable-x64.zip` |
 | Linux (x86-64) | `PilotHouse-Linux-x86_64.AppImage`, `PilotHouse-Linux-amd64.deb`, or `PilotHouse-Linux-x86_64.tar.gz` |
 
+Mirrors of the newest release, with `SHA256SUMS` beside the files:
+
+- `https://libreguild.skatech.org/pilothouse/latest/<file>`
+- `https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/latest/<file>`
+
 The builds are not code-signed. **macOS:** the first open is blocked; open System Settings → Privacy & Security → **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/PilotHouse.app`. **Windows:** if SmartScreen appears, choose **More info → Run anyway**. Every release lists SHA-256 checksums and has [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations) you can check with `gh attestation verify <file> -R LibreGuild/PilotHouse`.
 
-For agents, install the agent CLIs you want to use (`claude`, `codex`, `gemini`, `agy`) and sign in to them; Claude Code and Codex also need Node.js. PilotHouse shows what is missing for each agent.
+For agents, install the agent CLIs you want to use (`claude`, `codex`, `gemini`, `agy`) and sign in to them; Claude Code and Codex also need Node.js. New chats start with one that is installed; with none, the first chat lists them with their install commands and picks one up as soon as it is installed. Their models load in the background after start, so the model picker is ready the first time.
 
 ## Build from source
 
