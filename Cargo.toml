@@ -16,7 +16,7 @@ gpui-kit = { version = "=0.8.1", features = ["syntect"] }
 anyhow = "1"
 dirs = "7"
 dunce = "1"
-agent-client-protocol-schema = { version = "=1.13.0", default-features = false }
+agent-client-protocol-schema = { version = "=1.15.1", default-features = false }
 futures = "0.3"
 grep-regex = "0.1"
 grep-searcher = "0.1"
