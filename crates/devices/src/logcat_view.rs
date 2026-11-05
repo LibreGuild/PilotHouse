@@ -16,10 +16,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FontWeight,
-    HighlightStyle, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText,
-    Subscription, UniformListScrollHandle, Window, div, px, uniform_list,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FontWeight, HighlightStyle,
+    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollStrategy,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, Subscription,
+    UniformListScrollHandle, Window, div, px, uniform_list,
 };
 use ph_media::ToChat;
 use ph_ui::Icons;
@@ -346,15 +346,18 @@ impl LogcatView {
             .text_xs()
             .child(div().flex_1().child(format!("{count} lines selected")))
             .child(
-                Button::new("logcat-copy-lines")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Copy)
-                    .label("Copy")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let text = this.selected_text(cx).join("\n");
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    })),
+                ph_ui::CopyButton::with("logcat-copy-lines", {
+                    let view = cx.weak_entity();
+                    move |_, cx| {
+                        view.upgrade()
+                            .map(|view| {
+                                view.update(cx, |view, cx| view.selected_text(cx).join("\n"))
+                            })
+                            .unwrap_or_default()
+                    }
+                })
+                .xsmall()
+                .label("Copy"),
             )
             .child(
                 Button::new("logcat-send-lines")
@@ -428,15 +431,9 @@ impl LogcatView {
                     ),
             )
             .child(
-                Button::new("logcat-copy-line")
-                    .ghost()
+                ph_ui::CopyButton::new("logcat-copy-line", text.clone())
                     .xsmall()
-                    .icon(IconName::Copy)
-                    .tooltip("Copy the line")
-                    .accessibility_label("Copy the line")
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
-                    }),
+                    .tooltip("Copy the line"),
             )
             .child(
                 Button::new("logcat-send-line")
@@ -527,8 +524,8 @@ impl Render for LogcatView {
             })
             .track_scroll(&self.scroll)
             .flex_1()
-            .on_scroll_wheel(
-                cx.listener(|this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
+            .on_scroll(
+                cx.listener(|this, event: &gpui_kit::ScrollEvent, window, cx| {
                     // Scrolling back stops following; reaching the end again resumes it.
                     let delta = event.delta.pixel_delta(window.line_height()).y;
                     if delta > px(0.) && this.follow {

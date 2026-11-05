@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use gpui_kit::{App, Entity, Global, WeakEntity};
+use gpui_kit::{App, AppContext as _, Entity, Global, WeakEntity};
 use ph_agent::ChatState;
 use ph_agent::agents::AgentSpec;
 use ph_store::paths;
@@ -587,15 +587,55 @@ fn apply(pane: &str, event: &Value, cx: &mut App) {
         }
         "Stop" => {
             agent.state = ChatState::Done;
-            agent.line = event["last_assistant_message"]
+            match event["last_assistant_message"]
                 .as_str()
                 .and_then(first_line)
-                .or_else(|| agent.transcript.as_deref().and_then(last_reply))
-                .or(agent.line.take());
+            {
+                Some(line) => agent.line = Some(line),
+                // Read from its session file off the UI thread (its last
+                // 256 KB, parsed line by line).
+                None => {
+                    if let Some(path) = agent.transcript.clone() {
+                        let pane = pane.to_string();
+                        cx.spawn(async move |cx| {
+                            let Some(line) =
+                                cx.background_spawn(async move { last_reply(&path) }).await
+                            else {
+                                return;
+                            };
+                            cx.update(|cx| {
+                                if let Some(agent) = cx
+                                    .default_global::<TerminalAgents>()
+                                    .agents
+                                    .iter_mut()
+                                    .find(|agent| agent.pane == pane)
+                                {
+                                    agent.line = Some(line);
+                                }
+                            });
+                        })
+                        .detach();
+                    }
+                    return finish(pane, cx);
+                }
+            }
         }
         "SessionEnd" => agent.state = ChatState::Idle,
         _ => {}
     }
+    finish(pane, cx);
+}
+
+/// Shows agent `pane`'s state on its terminal tab.
+fn finish(pane: &str, cx: &mut App) {
+    let Some(agent) = cx
+        .default_global::<TerminalAgents>()
+        .agents
+        .iter()
+        .find(|agent| agent.pane == pane)
+    else {
+        return;
+    };
     let badge = match agent.state {
         ChatState::Working => Some(AgentBadge::Working),
         ChatState::NeedsYou => Some(AgentBadge::NeedsYou),

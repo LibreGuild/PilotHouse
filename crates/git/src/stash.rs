@@ -9,13 +9,15 @@ use crate::run::git;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stash {
     pub index: usize,
+    /// Its commit, to act on this stash even if others were added since.
+    pub hash: String,
     pub message: String,
     /// Unix time it was made.
     pub created: i64,
 }
 
 pub fn list(root: &Path) -> Result<Vec<Stash>> {
-    let out = git(root, &["stash", "list", "--format=%gd%x00%ct%x00%gs"])?;
+    let out = git(root, &["stash", "list", "--format=%gd%x00%H%x00%ct%x00%gs"])?;
     Ok(out
         .lines()
         .filter_map(|line| {
@@ -28,6 +30,7 @@ pub fn list(root: &Path) -> Result<Vec<Stash>> {
                 .ok()?;
             Some(Stash {
                 index,
+                hash: fields.next()?.to_string(),
                 created: fields.next()?.parse().unwrap_or(0),
                 message: fields.next().unwrap_or_default().to_string(),
             })
@@ -44,16 +47,26 @@ pub fn push(root: &Path, message: &str) -> Result<()> {
     git(root, &args).map(|_| ())
 }
 
-pub fn apply(root: &Path, index: usize) -> Result<()> {
-    git(root, &["stash", "apply", &reference(index)]).map(|_| ())
+/// `stash@{index}`, once it is still the stash `hash` names (an agent or
+/// a terminal may have stashed since the list was read; empty: unchecked).
+fn checked(root: &Path, index: usize, hash: &str) -> Result<String> {
+    let reference = reference(index);
+    if !hash.is_empty() && git(root, &["rev-parse", &reference])?.trim() != hash {
+        anyhow::bail!("the stashes changed meanwhile: look again and retry");
+    }
+    Ok(reference)
 }
 
-pub fn pop(root: &Path, index: usize) -> Result<()> {
-    git(root, &["stash", "pop", &reference(index)]).map(|_| ())
+pub fn apply(root: &Path, index: usize, hash: &str) -> Result<()> {
+    git(root, &["stash", "apply", &checked(root, index, hash)?]).map(|_| ())
 }
 
-pub fn drop(root: &Path, index: usize) -> Result<()> {
-    git(root, &["stash", "drop", &reference(index)]).map(|_| ())
+pub fn pop(root: &Path, index: usize, hash: &str) -> Result<()> {
+    git(root, &["stash", "pop", &checked(root, index, hash)?]).map(|_| ())
+}
+
+pub fn drop(root: &Path, index: usize, hash: &str) -> Result<()> {
+    git(root, &["stash", "drop", &checked(root, index, hash)?]).map(|_| ())
 }
 
 /// The stash's changes as a patch.
@@ -96,7 +109,9 @@ mod tests {
         assert_eq!(stashes.len(), 1);
         assert!(stashes[0].message.contains("work in progress"));
         assert!(show(&root, 0).unwrap().contains("# Changed"));
-        pop(&root, 0).unwrap();
+        // A stash that is not the one listed any more is left alone.
+        assert!(drop(&root, 0, "0000000000000000000000000000000000000000").is_err());
+        pop(&root, 0, &stashes[0].hash).unwrap();
         assert!(root.join("new.txt").exists());
         assert!(list(&root).unwrap().is_empty());
     }

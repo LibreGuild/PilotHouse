@@ -185,9 +185,26 @@ struct Part {
     key: String,
 }
 
+/// `parts` with each `..` taking away the part before it (never the first
+/// of a Windows path: its drive or server), as the path means locally;
+/// passed on as written, the server would read it from another folder.
+fn fold_parents(parts: Vec<Part>, keep_first: bool) -> Vec<Part> {
+    let mut out: Vec<Part> = Vec::with_capacity(parts.len());
+    for part in parts {
+        if part.text == ".." {
+            if out.len() > usize::from(keep_first) {
+                out.pop();
+            }
+        } else {
+            out.push(part);
+        }
+    }
+    out
+}
+
 fn local_parts(path: &str, windows: bool) -> Vec<Part> {
     if !windows {
-        return path
+        let parts = path
             .split('/')
             .filter(|part| !part.is_empty() && *part != ".")
             .map(|part| Part {
@@ -195,6 +212,7 @@ fn local_parts(path: &str, windows: bool) -> Vec<Part> {
                 key: part.to_string(),
             })
             .collect();
+        return fold_parents(parts, false);
     }
     let mut path = path.replace('/', "\\");
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
@@ -215,13 +233,22 @@ fn local_parts(path: &str, windows: bool) -> Vec<Part> {
     if unc && let Some(first) = parts.first_mut() {
         first.key = format!(r"\\{}", first.key);
     }
-    parts
+    fold_parents(parts, true)
 }
 
 fn remote_parts(path: &str) -> Vec<&str> {
-    path.split('/')
+    let mut out = Vec::new();
+    for part in path
+        .split('/')
         .filter(|part| !part.is_empty() && *part != ".")
-        .collect()
+    {
+        if part == ".." {
+            out.pop();
+        } else {
+            out.push(part);
+        }
+    }
+    out
 }
 
 fn join_remote(base: &str, rest: &[&str]) -> String {

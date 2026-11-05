@@ -9,8 +9,8 @@ use gpui_kit::component::{
     h_flex, v_flex,
 };
 use gpui_kit::{
-    ClipboardItem, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -144,14 +144,9 @@ impl Render for EnvPreview {
                             })),
                     )
                     .child(
-                        Button::new(("env-copy", ix))
-                            .ghost()
+                        ph_ui::CopyButton::new(("env-copy", ix), copy.clone())
                             .xsmall()
-                            .icon(IconName::Copy)
-                            .tooltip("Copy the value")
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
-                            }),
+                            .tooltip("Copy the value"),
                     )
                     .into_any_element()
             }

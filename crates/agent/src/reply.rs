@@ -79,6 +79,8 @@ enum Part {
     Markdown {
         text: String,
         view: Entity<TextViewState>,
+        /// Keeps the lines of its paragraphs apart as more text arrives.
+        breaks: ph_ui::markdown::LineBreaks,
     },
     Diagram(Entity<Diagram>),
 }
@@ -110,13 +112,15 @@ impl Reply {
         let fence_near = self.text[tail_from..].contains('`') || chunk.contains('`');
         if !fence_near
             && self.parts.len() == 1
-            && let Some(Part::Markdown { text, view }) = self.parts.last_mut()
+            && let Some(Part::Markdown { text, view, breaks }) = self.parts.last_mut()
             // (The one part is all of it: same length is enough to know.)
             && text.len() == self.text.len()
         {
             self.text.push_str(chunk);
             text.push_str(chunk);
-            view.update(cx, |view, cx| view.push_str(chunk, cx));
+            let mut shown = String::with_capacity(chunk.len() + 8);
+            breaks.push(chunk, &mut shown);
+            view.update(cx, |view, cx| view.push_str(&shown, cx));
             cx.notify();
             return;
         }
@@ -148,11 +152,12 @@ impl Reply {
                     _ => false,
                 });
         if same_shape {
-            if let (Some(Piece::Markdown(new)), Some(Part::Markdown { text, view })) =
+            if let (Some(Piece::Markdown(new)), Some(Part::Markdown { text, view, breaks })) =
                 (wanted.last(), self.parts.last_mut())
                 && new.len() > text.len()
             {
-                let added = new[text.len()..].to_string();
+                let mut added = String::new();
+                breaks.push(&new[text.len()..], &mut added);
                 view.update(cx, |view, cx| view.push_str(&added, cx));
                 *text = new.clone();
             }
@@ -174,8 +179,11 @@ impl Reply {
             .into_iter()
             .map(|piece| match piece {
                 Piece::Markdown(text) => {
-                    let view = cx.new(|cx| TextViewState::markdown(&text, cx));
-                    Part::Markdown { text, view }
+                    let mut breaks = ph_ui::markdown::LineBreaks::default();
+                    let mut shown = String::with_capacity(text.len() + text.len() / 16);
+                    breaks.push(&text, &mut shown);
+                    let view = cx.new(|cx| TextViewState::markdown(&shown, cx));
+                    Part::Markdown { text, view, breaks }
                 }
                 Piece::Mermaid(source) => {
                     let kept = old
@@ -202,6 +210,10 @@ impl Render for Reply {
                     Part::Markdown { view, .. } => TextView::new(view)
                         .selectable(true)
                         .w_full()
+                        .code_block_actions(ph_ui::markdown::code_actions)
+                        // An agent wrote it: no files on this computer, and
+                        // no drawing that would read them.
+                        .image_source(ph_ui::images_safe::web_only)
                         .on_link_click(|url, _, _, cx| crate::entry_view::open_link(url, cx))
                         .into_any_element(),
                     Part::Diagram(diagram) => diagram.clone().into_any_element(),
@@ -230,6 +242,15 @@ pub struct Diagram {
 
 impl Diagram {
     fn new(source: String, dark: bool, cx: &mut Context<Self>) -> Self {
+        // Gone with its reply (a chat closed or trimmed): the picture too.
+        cx.on_release(|this, cx| {
+            if let Drawing::Ready { image, .. } =
+                std::mem::replace(&mut this.drawing, Drawing::Pending)
+            {
+                ph_ui::images::release_image(image, cx);
+            }
+        })
+        .detach();
         let text = source.clone();
         let draw = cx.background_spawn(async move { draw(&text, dark) });
         let task = cx.spawn(async move |this, cx| {

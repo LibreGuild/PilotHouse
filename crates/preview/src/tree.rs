@@ -12,8 +12,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, ClipboardItem, Context, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
+    App, AppContext as _, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
     UniformListScrollHandle, Window, div, px, uniform_list,
 };
 
@@ -389,29 +389,15 @@ impl Render for TreePreview {
                                 .child(path),
                         )
                         .child(
-                            Button::new("tree-copy-path")
-                                .ghost()
+                            ph_ui::CopyButton::new("tree-copy-path", copy_path.clone())
                                 .xsmall()
-                                .icon(IconName::Copy)
-                                .label("Path")
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        copy_path.clone(),
-                                    ))
-                                }),
+                                .label("Path"),
                         )
                         .when_some(value, |this, value| {
                             this.child(
-                                Button::new("tree-copy-value")
-                                    .ghost()
+                                ph_ui::CopyButton::new("tree-copy-value", value.clone())
                                     .xsmall()
-                                    .icon(IconName::Copy)
-                                    .label("Value")
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            value.clone(),
-                                        ))
-                                    }),
+                                    .label("Value"),
                             )
                         }),
                 )

@@ -12,9 +12,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
-    Window, div,
+    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Task, Window, div,
 };
 use ph_git::conflicts::{self, Resolution, Segment};
 
@@ -66,15 +66,25 @@ impl ConflictView {
         self.repo.read(cx).root().join(&self.path)
     }
 
+    /// Reads the file off the UI thread.
     fn load(&mut self, cx: &mut Context<Self>) {
-        match std::fs::read_to_string(self.file(cx)) {
-            Ok(text) => {
-                self.segments = conflicts::parse(&text);
-                self.resolutions = vec![None; conflicts::conflicts(&self.segments).len()];
-            }
-            Err(err) => self.error = Some(format!("Cannot read {}: {err}", self.path).into()),
-        }
-        cx.notify();
+        let file = self.file(cx);
+        let read = cx.background_spawn(async move { std::fs::read_to_string(file) });
+        self._task = Some(cx.spawn(async move |this, cx| {
+            let result = read.await;
+            _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(text) => {
+                        this.segments = conflicts::parse(&text);
+                        this.resolutions = vec![None; conflicts::conflicts(&this.segments).len()];
+                    }
+                    Err(err) => {
+                        this.error = Some(format!("Cannot read {}: {err}", this.path).into())
+                    }
+                }
+                cx.notify();
+            });
+        }));
     }
 
     fn resolve(&mut self, ix: usize, resolution: Resolution, cx: &mut Context<Self>) {
@@ -133,10 +143,15 @@ impl ConflictView {
 
     /// Writes the file with the chosen resolutions and stages it.
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = conflicts::render(&self.segments, &self.resolutions);
-        if let Err(err) = std::fs::write(self.file(cx), text) {
-            window.push_notification(Notification::error(format!("Cannot save: {err}")), cx);
-            return;
+        // A file not read as text (binary, or deleted on both sides) is
+        // only marked resolved as it is: writing the empty text would
+        // empty it.
+        if self.error.is_none() && !self.segments.is_empty() {
+            let text = conflicts::render(&self.segments, &self.resolutions);
+            if let Err(err) = std::fs::write(self.file(cx), text) {
+                window.push_notification(Notification::error(format!("Cannot save: {err}")), cx);
+                return;
+            }
         }
         let path = self.path.clone();
         self.repo.update(cx, |repo, cx| {

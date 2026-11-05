@@ -177,10 +177,20 @@ impl ChatPanel {
             .ghost()
             .xsmall()
             .icon(Icons::MoveUpRight)
-            .tooltip("Continue this chat with another agent")
-            .accessibility_label("Continue with another agent")
+            .tooltip("Compact this chat, or continue it with another agent")
+            .accessibility_label("Compact or continue with another agent")
             .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-                let menu = menu.label("Continue with…");
+                let compact = panel.clone();
+                let menu = menu
+                    .item(
+                        PopupMenuItem::new("Compact chat")
+                            .icon(Icons::FoldVertical)
+                            .on_click(move |_, window, cx| {
+                                _ = compact.update(cx, |panel, cx| panel.compact(window, cx));
+                            }),
+                    )
+                    .separator()
+                    .label("Continue with…");
                 agents::AGENTS
                     .iter()
                     .filter(|agent| agent.id != current)

@@ -24,6 +24,7 @@ icon_assets!(
         Play,
         Plug,
         FolderDown,
+        FoldVertical,
         Package,
         House,
         CircleStop,

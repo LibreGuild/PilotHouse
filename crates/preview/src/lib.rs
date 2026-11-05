@@ -110,7 +110,7 @@ impl TextPreview {
                 None,
             ),
             Kind::Notebook => {
-                let view = cx.new(|_| notebook::NotebookPreview::new(path));
+                let view = cx.new(|cx| notebook::NotebookPreview::new(path, cx));
                 let subscription = forward(&view, cx);
                 (TextBody::Notebook(view), Some(subscription))
             }

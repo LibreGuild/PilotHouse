@@ -84,6 +84,12 @@ pub fn is_untrusted_copy(path: &Path) -> bool {
         .any(|dir| path.starts_with(dir.join("github")))
 }
 
+/// Whether `path` is any copy PilotHouse made (GitHub clones and task
+/// folders, which may hold a pull request author's files).
+pub fn is_copy(path: &Path) -> bool {
+    copies_dirs().iter().any(|dir| path.starts_with(dir))
+}
+
 /// The absolute, symlink-free form of `path`. Unlike `fs::canonicalize`, it
 /// gives `C:\\work\\app` on Windows, not `\\\\?\\C:\\work\\app`, which many
 /// programs refuse as a working directory. A path on a mapped network drive

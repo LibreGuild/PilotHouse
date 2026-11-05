@@ -3,7 +3,7 @@
 //! `workspace/configuration`) and routes replies and notifications.
 
 use std::collections::HashMap;
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::{BufReader, Write as _};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -60,7 +60,7 @@ impl Transport {
             }
         });
         std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            for line in ph_env::lossy_lines(stderr) {
                 tracing::debug!("language server: {line}");
                 let line = line.trim();
                 if !line.is_empty() {
@@ -170,6 +170,12 @@ fn read_message(reader: &mut impl std::io::BufRead) -> Option<Value> {
             }
         }
         let Some(length) = length else { continue };
+        // A broken server can claim any length: past this one, it is
+        // stopped rather than trusted with the memory.
+        if length > 256 * 1024 * 1024 {
+            tracing::warn!("a language server sent a {length}-byte message: stopped reading");
+            return None;
+        }
         let mut body = vec![0; length];
         reader.read_exact(&mut body).ok()?;
         match serde_json::from_slice(&body) {

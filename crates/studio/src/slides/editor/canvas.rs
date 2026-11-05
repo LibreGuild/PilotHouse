@@ -11,7 +11,7 @@ use gpui_kit::component::{
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, Hsla, InteractiveElement as _,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, ParentElement as _, PathBuilder, PinchEvent, Pixels, Point, ScrollWheelEvent,
+    ObjectFit, ParentElement as _, PathBuilder, PinchEvent, Pixels, Point, ScrollEvent,
     Styled as _, StyledImage as _, Window, canvas, div, fill, img, point, px,
 };
 use ph_ui::Icons;
@@ -713,7 +713,7 @@ impl SlidesEditor {
         cx.notify();
     }
 
-    fn on_wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_wheel(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         let delta = event.delta.pixel_delta(window.line_height());
         if event.modifiers.platform || event.modifiers.control {
             let factor = (1. - f32::from(delta.y) / 300.).clamp(0.8, 1.25);
@@ -1066,7 +1066,7 @@ impl SlidesEditor {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
-            .on_scroll_wheel(cx.listener(Self::on_wheel))
+            .on_scroll(cx.listener(Self::on_wheel))
             .on_pinch(cx.listener(Self::on_pinch))
             .into_any_element()
     }

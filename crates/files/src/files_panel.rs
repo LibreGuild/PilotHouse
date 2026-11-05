@@ -164,6 +164,11 @@ pub struct FilesPanel {
     pub(crate) clipboard: Option<crate::tree_menu::Clipboard>,
     /// The file picked with Select for Compare.
     pub(crate) compare: Option<String>,
+    /// Rows picked with Ctrl/⌘+click or Shift+click (tree paths, in the
+    /// order picked), which the menu and keys then act on together.
+    pub(crate) marked: Vec<String>,
+    /// Where a Shift+click range starts.
+    pub(crate) mark_anchor: Option<String>,
     /// File list for the finder; rebuilt lazily after file-system changes.
     index: Option<FileList>,
     index_stale: bool,
@@ -264,6 +269,8 @@ impl FilesPanel {
             file_subscriptions: HashMap::new(),
             clipboard: None,
             compare: None,
+            marked: Vec::new(),
+            mark_anchor: None,
             staged: Rc::default(),
             index: None,
             index_stale: true,
@@ -334,9 +341,16 @@ impl FilesPanel {
                 let lsp = self.lsps.get(root_ix).cloned();
                 let panel = cx.weak_entity();
                 let open: crate::code_intel::OpenLocation =
+                    // Deferred: the editor calls this from inside its own
+                    // update (go to definition), and opening the file reads
+                    // the editors (the Back history), which would panic.
                     Rc::new(move |path, line, window, cx| {
-                        _ = panel
-                            .update(cx, |panel, cx| panel.open_location(&path, line, window, cx));
+                        let panel = panel.clone();
+                        window.defer(cx, move |window, cx| {
+                            _ = panel.update(cx, |panel, cx| {
+                                panel.open_location(&path, line, window, cx)
+                            });
+                        });
                     });
                 let view = cx.new(|cx| {
                     let mut view = FileView::new(&root, &within, lsp, Some(open), window, cx);
@@ -815,6 +829,60 @@ impl FilesPanel {
         !self.open_files.is_empty() || self.diff.is_some()
     }
 
+    /// Ctrl/⌘+click (`range` false) adds `path` to the picked rows or takes
+    /// it out; Shift+click picks every row from the last one picked to it.
+    pub(crate) fn mark(&mut self, path: &str, range: bool, cx: &mut Context<Self>) {
+        let selected = self
+            .tree_state
+            .read(cx)
+            .selected_item()
+            .map(|item| item.id.to_string());
+        // The row already selected counts as picked.
+        if self.marked.is_empty()
+            && let Some(selected) = selected.clone()
+            && selected != path
+        {
+            self.marked.push(selected);
+        }
+        if range {
+            let anchor = self.mark_anchor.clone().or(selected);
+            let state = self.tree_state.read(cx);
+            let at = |id: &str| state.index_of(&SharedString::from(id.to_string()));
+            let range: Option<Vec<String>> = match (anchor.as_deref().and_then(at), at(path)) {
+                (Some(from), Some(to)) => Some(
+                    (from.min(to)..=from.max(to))
+                        .filter_map(|ix| state.entry(ix))
+                        .filter(|entry| !entry.is_disabled())
+                        .map(|entry| entry.item().id.to_string())
+                        .collect(),
+                ),
+                _ => None,
+            };
+            match range {
+                Some(range) => self.marked = range,
+                None => return self.mark(path, false, cx),
+            }
+        } else {
+            match self.marked.iter().position(|marked| marked == path) {
+                Some(ix) => {
+                    self.marked.remove(ix);
+                }
+                None => self.marked.push(path.to_string()),
+            }
+            self.mark_anchor = Some(path.to_string());
+        }
+        cx.notify();
+    }
+
+    /// A plain click: back to one row, which starts the next range.
+    pub(crate) fn clear_marks(&mut self, anchor: &str, cx: &mut Context<Self>) {
+        self.mark_anchor = Some(anchor.to_string());
+        if !self.marked.is_empty() {
+            self.marked.clear();
+            cx.notify();
+        }
+    }
+
     /// Opens the file selected in the tree (folders fold with the arrows).
     pub fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self
@@ -834,7 +902,27 @@ impl FilesPanel {
             Browse::Tree => v_flex()
                 .size_full()
                 .child(self.render_tree_toolbar(cx))
-                .child(div().flex_1().min_h_0().child(self.render_tree(cx)))
+                .child({
+                    // The space under the rows has the folder's own menu
+                    // (new file, paste…), as in VS Code; a row's menu
+                    // stops the click before it gets here.
+                    let panel = cx.weak_entity();
+                    div()
+                        .id("files-tree-area")
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.render_tree(cx))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if !this.marked.is_empty() {
+                                this.marked.clear();
+                                cx.notify();
+                            }
+                        }))
+                        .context_menu(move |menu, _, cx| match panel.upgrade() {
+                            Some(panel) => panel.read(cx).background_menu(menu),
+                            None => menu,
+                        })
+                })
                 .into_any_element(),
             Browse::Search => self.render_search(cx),
         }
@@ -1138,6 +1226,7 @@ impl FilesPanel {
         let multi = self.roots.list().len() > 1;
         let primary = self.roots.list().first().map(|root| root.name.clone());
         let compare = self.compare.clone();
+        let marked: Rc<HashSet<String>> = Rc::new(self.marked.iter().cloned().collect());
         let cut: Rc<HashSet<String>> = Rc::new(
             self.clipboard
                 .as_ref()
@@ -1163,7 +1252,11 @@ impl FilesPanel {
             // Ignored files, and what Cut picked, are dimmed.
             let is_ignored = ignored.contains(&path) || cut.contains(&path);
             let is_compared = compare.as_deref() == Some(path.as_str());
-            let icon = if is_file {
+            // "Loading…" or "Empty" under a folder: words, not a file.
+            let placeholder = DirTree::is_placeholder(&path);
+            let icon = if placeholder {
+                div().flex_none().w(px(16.)).into_any_element()
+            } else if is_file {
                 ph_ui::file_icon_element(&item.label, px(16.))
             } else {
                 ph_ui::folder_icon_element(&item.label, px(16.))
@@ -1182,8 +1275,15 @@ impl FilesPanel {
             };
             let is_primary_root = multi && depth == 0 && primary.as_deref() == Some(&path);
             let panel = panel.clone();
+            // Picked with Ctrl/⌘ or Shift: shown as selected (the tree
+            // only knows its one selected row).
+            let picked = !selected && marked.contains(&path);
             ListItem::new(ix)
                 .selected(selected)
+                .when(picked, |this| {
+                    this.bg(cx.theme().list_active)
+                        .border_color(cx.theme().list_active_border)
+                })
                 .py_0()
                 .pl(px(6.))
                 .pr_2()
@@ -1196,6 +1296,9 @@ impl FilesPanel {
                         .pl(TREE_INDENT * depth)
                         .text_sm()
                         .when(is_ignored, |this| this.opacity(0.5))
+                        .when(placeholder, |this| {
+                            this.italic().text_color(theme.muted_foreground)
+                        })
                         // A line per level, through the rows, under each
                         // folder's chevron.
                         .children((0..depth).map(|level| {
@@ -1210,13 +1313,11 @@ impl FilesPanel {
                         .child(chevron)
                         .child(icon)
                         .child(
-                            div()
-                                .truncate()
+                            ph_ui::truncated_label(("tree-label", ix), item.label.clone())
                                 .when_some(tint, |this, tint| this.text_color(tint))
                                 .when(holds_changes, |this| {
                                     this.text_color(theme.warning.opacity(0.9))
-                                })
-                                .child(item.label.clone()),
+                                }),
                         )
                         .when(is_primary_root, |this| {
                             this.child(
@@ -1254,10 +1355,23 @@ impl FilesPanel {
                             .bg(cx.theme().warning.opacity(0.8))
                     })
                 })
-                .when(is_file, |this| {
-                    this.on_click(move |_, window, cx| {
-                        _ = panel.update(cx, |panel, cx| panel.open_file(&path, None, window, cx));
-                    })
+                .on_click(move |event, window, cx| {
+                    let modifiers = event.modifiers();
+                    // Ctrl/⌘ picks one more (or one less), Shift a range:
+                    // neither opens nor folds, as in VS Code.
+                    if modifiers.secondary(cx) || modifiers.shift {
+                        cx.stop_propagation();
+                        _ = panel.update(cx, |panel, cx| {
+                            panel.mark(&path, modifiers.shift, cx);
+                        });
+                        return;
+                    }
+                    _ = panel.update(cx, |panel, cx| {
+                        panel.clear_marks(&path, cx);
+                        if is_file {
+                            panel.open_file(&path, None, window, cx);
+                        }
+                    });
                 })
         })
         // Every row has the file menu; with several folders, a folder's
@@ -1806,9 +1920,7 @@ fn tab_menu(
             .tab_path(ix, cx)
             .and_then(|path| panel.roots.absolute(&path))
         {
-            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                path.to_string_lossy().into_owned(),
-            ));
+            ph_ui::copy_with_toast(path.to_string_lossy().into_owned(), "the path", cx);
         }
     }))
     .item(item("Copy Relative Path", |panel, ix, _, cx| {
@@ -1818,7 +1930,7 @@ fn tab_menu(
                 .split(&path)
                 .map(|(_, within)| within.to_string())
                 .unwrap_or(path);
-            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(within));
+            ph_ui::copy_with_toast(within, "the relative path", cx);
         }
     }))
     .separator()

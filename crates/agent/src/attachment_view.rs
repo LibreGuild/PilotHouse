@@ -9,15 +9,11 @@ use std::time::Duration;
 
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    hover_card::HoverCard,
-    v_flex,
+    ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, hover_card::HoverCard, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClipboardItem, ElementId, InteractiveElement as _, IntoElement, ObjectFit,
+    AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ObjectFit,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     StyledImage as _, Window, div, img, px,
 };
@@ -298,14 +294,9 @@ fn full_text(text: SharedString, cut: Option<&PathBuf>, cx: &App) -> AnyElement 
                     None => "",
                 })
                 .child(
-                    Button::new("copy-attachment")
+                    ph_ui::CopyButton::new("copy-attachment", copy.to_string())
                         .small()
-                        .ghost()
-                        .icon(IconName::Copy)
-                        .label("Copy")
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copy.to_string()))
-                        }),
+                        .label("Copy"),
                 ),
         )
         .into_any_element()

@@ -128,26 +128,31 @@ impl GithubView {
                 &store, project.id, &hosting, &pull, &template, kind, agent.name,
             )
         });
-        self._work.push(cx.spawn_in(window, async move |this, cx| {
-            let result = work.await;
-            _ = this.update_in(cx, |_, window, cx| {
-                chat.update(cx, |chat, cx| match result {
-                    Ok(prepared) => chat.start_review_turn(
-                        Some(prepared.review_id),
-                        Some(ReviewTurn::Round),
-                        Some(agent),
-                        prepared.worktree,
-                        prepared.title,
-                        prepared.display,
-                        prepared.prompt,
-                        window,
-                        cx,
-                    ),
-                    Err(err) => chat.set_failed(format!("Could not start the review: {err:#}"), cx),
+        super::push_work(
+            &mut self._work,
+            cx.spawn_in(window, async move |this, cx| {
+                let result = work.await;
+                _ = this.update_in(cx, |_, window, cx| {
+                    chat.update(cx, |chat, cx| match result {
+                        Ok(prepared) => chat.start_review_turn(
+                            Some(prepared.review_id),
+                            Some(ReviewTurn::Round),
+                            Some(agent),
+                            prepared.worktree,
+                            prepared.title,
+                            prepared.display,
+                            prepared.prompt,
+                            window,
+                            cx,
+                        ),
+                        Err(err) => {
+                            chat.set_failed(format!("Could not start the review: {err:#}"), cx)
+                        }
+                    });
+                    cx.notify();
                 });
-                cx.notify();
-            });
-        }));
+            }),
+        );
     }
 
     /// Checks the fixes for review `review_id`: a new round on its pull
@@ -199,13 +204,18 @@ impl GithubView {
             let pull = ph_github::pulls::get(&hosting.client, &hosting.repo, review.pull.number)?;
             anyhow::Ok((hosting, pull))
         });
-        self._work.push(cx.spawn_in(window, async move |this, cx| {
-            let result = find.await;
-            _ = this.update_in(cx, |this, window, cx| match result {
-                Ok((hosting, pull)) => then(this, hosting, pull, window, cx),
-                Err(err) => window.push_notification(Notification::error(format!("{err:#}")), cx),
-            });
-        }));
+        super::push_work(
+            &mut self._work,
+            cx.spawn_in(window, async move |this, cx| {
+                let result = find.await;
+                _ = this.update_in(cx, |this, window, cx| match result {
+                    Ok((hosting, pull)) => then(this, hosting, pull, window, cx),
+                    Err(err) => {
+                        window.push_notification(Notification::error(format!("{err:#}")), cx)
+                    }
+                });
+            }),
+        );
     }
 
     /// Asks an agent whether the author's answer on finding `finding_id`
@@ -251,23 +261,26 @@ impl GithubView {
             "Is {who} right about {} (“{}”)? They said: {claim}",
             finding.label, finding.title
         );
-        self._work.push(cx.spawn_in(window, async move |_, cx| {
-            let result = work.await;
-            _ = chat.update_in(cx, |chat, window, cx| match result {
-                Ok(worktree) => chat.start_review_turn(
-                    None,
-                    Some(ReviewTurn::Claim { finding_id }),
-                    None,
-                    worktree,
-                    title,
-                    display,
-                    prompt,
-                    window,
-                    cx,
-                ),
-                Err(err) => chat.set_failed(format!("{err:#}"), cx),
-            });
-        }));
+        super::push_work(
+            &mut self._work,
+            cx.spawn_in(window, async move |_, cx| {
+                let result = work.await;
+                _ = chat.update_in(cx, |chat, window, cx| match result {
+                    Ok(worktree) => chat.start_review_turn(
+                        None,
+                        Some(ReviewTurn::Claim { finding_id }),
+                        None,
+                        worktree,
+                        title,
+                        display,
+                        prompt,
+                        window,
+                        cx,
+                    ),
+                    Err(err) => chat.set_failed(format!("{err:#}"), cx),
+                });
+            }),
+        );
     }
 
     /// Asks an agent for a walkthrough of `pull`, shown in its Walkthrough
@@ -321,23 +334,26 @@ impl GithubView {
                 prompt,
             ))
         });
-        self._work.push(cx.spawn_in(window, async move |_, cx| {
-            let result = work.await;
-            _ = chat.update_in(cx, |chat, window, cx| match result {
-                Ok((run_id, worktree, title, display, prompt)) => chat.start_review_turn(
-                    None,
-                    Some(ReviewTurn::Walkthrough { run_id }),
-                    Some(agent),
-                    worktree,
-                    title,
-                    display,
-                    prompt,
-                    window,
-                    cx,
-                ),
-                Err(err) => chat.set_failed(format!("{err:#}"), cx),
-            });
-        }));
+        super::push_work(
+            &mut self._work,
+            cx.spawn_in(window, async move |_, cx| {
+                let result = work.await;
+                _ = chat.update_in(cx, |chat, window, cx| match result {
+                    Ok((run_id, worktree, title, display, prompt)) => chat.start_review_turn(
+                        None,
+                        Some(ReviewTurn::Walkthrough { run_id }),
+                        Some(agent),
+                        worktree,
+                        title,
+                        display,
+                        prompt,
+                        window,
+                        cx,
+                    ),
+                    Err(err) => chat.set_failed(format!("{err:#}"), cx),
+                });
+            }),
+        );
     }
 
     /// Asks `question` about lines `start..=end` of `path` in `pull`, in a
@@ -380,15 +396,18 @@ impl GithubView {
                 prompt,
             ))
         });
-        self._work.push(cx.spawn_in(window, async move |_, cx| {
-            let result = work.await;
-            _ = chat.update_in(cx, |chat, window, cx| match result {
-                Ok((worktree, title, display, prompt)) => {
-                    chat.start_question(worktree, title, display, prompt, window, cx)
-                }
-                Err(err) => chat.set_failed(format!("{err:#}"), cx),
-            });
-        }));
+        super::push_work(
+            &mut self._work,
+            cx.spawn_in(window, async move |_, cx| {
+                let result = work.await;
+                _ = chat.update_in(cx, |chat, window, cx| match result {
+                    Ok((worktree, title, display, prompt)) => {
+                        chat.start_question(worktree, title, display, prompt, window, cx)
+                    }
+                    Err(err) => chat.set_failed(format!("{err:#}"), cx),
+                });
+            }),
+        );
     }
 
     /// The chat beside pull request `number` of repository `id`, shown and

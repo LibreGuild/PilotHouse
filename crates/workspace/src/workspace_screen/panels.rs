@@ -330,17 +330,34 @@ impl WorkspaceScreen {
                     this.open_link(link, Some(cwd), window, cx)
                 }
                 ph_terminal::TerminalPanelEvent::ToggleTranscript(terminal) => {
-                    this.toggle_transcript(terminal.clone(), cx)
+                    this.toggle_transcript(terminal.clone(), window, cx)
                 }
             },
         ));
     }
 
     /// Shows the session of the agent in `terminal` beside it, as a chat
+    /// (read only), unless it shows already.
+    pub(crate) fn show_transcript(
+        &mut self,
+        terminal: &Entity<ph_terminal::Terminal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self
+            .terminal
+            .as_ref()
+            .is_some_and(|panel| panel.read(cx).shows_transcript(terminal.entity_id()));
+        if !shown {
+            self.toggle_transcript(terminal.clone(), window, cx);
+        }
+    }
+
     /// (read only), or hides it.
     fn toggle_transcript(
         &mut self,
         terminal: Entity<ph_terminal::Terminal>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(panel) = self.terminal.clone() else {
@@ -349,6 +366,7 @@ impl WorkspaceScreen {
         let id = terminal.entity_id();
         if panel.read(cx).shows_transcript(id) {
             panel.update(cx, |panel, cx| panel.set_transcript(id, None, cx));
+            self.transcript_subscriptions.remove(&id);
             return;
         }
         let Some(agent) = crate::terminal_agents::TerminalAgents::of_terminal(&terminal, cx)
@@ -367,6 +385,28 @@ impl WorkspaceScreen {
         let view = cx.new(|cx| {
             ph_agent::cli_transcript::TranscriptView::new(store, &project, agent, format, find, cx)
         });
+        // "Continue in a chat": a new chat here, from a recap of the session.
+        let from = format!("{} in a terminal", agent.name);
+        let subscription = cx.subscribe_in(
+            &view,
+            window,
+            move |this, _, event: &ph_agent::cli_transcript::TranscriptViewEvent, window, cx| {
+                let ph_agent::cli_transcript::TranscriptViewEvent::Continue {
+                    agent,
+                    recap,
+                    title,
+                } = event;
+                this.show_chat(window, cx);
+                this.chat.update(cx, |chat, cx| {
+                    chat.continue_with(agent, recap.clone(), title.clone(), &from, window, cx)
+                });
+            },
+        );
+        // Terminals closed since have nothing to continue from.
+        let shown = panel.read(cx);
+        self.transcript_subscriptions
+            .retain(|terminal, _| shown.shows_transcript(*terminal));
+        self.transcript_subscriptions.insert(id, subscription);
         panel.update(cx, |panel, cx| {
             panel.set_transcript(id, Some(view.into()), cx)
         });

@@ -149,36 +149,56 @@ pub const FILE_TREE_CONTEXT: &str = "FileTree";
 pub fn init(cx: &mut App, workspace_context: &'static str) {
     ph_preview::rich::init(cx);
     cx.bind_keys([
-        KeyBinding::new("secondary-p", QuickOpen, Some(workspace_context)),
-        KeyBinding::new("secondary-t", GoToSymbol, Some(workspace_context)),
-        KeyBinding::new("enter", OpenSelected, Some("Tree")),
-        KeyBinding::new("secondary-shift-f", FindInProject, Some(workspace_context)),
-        KeyBinding::new("secondary-s", SaveFile, Some(file_view::FILE_VIEW_CONTEXT)),
         KeyBinding::new(
-            "shift-f12",
+            ph_ui::keys("secondary-p"),
+            QuickOpen,
+            Some(workspace_context),
+        ),
+        KeyBinding::new(
+            ph_ui::keys("secondary-t"),
+            GoToSymbol,
+            Some(workspace_context),
+        ),
+        KeyBinding::new(ph_ui::keys("enter"), OpenSelected, Some("Tree")),
+        KeyBinding::new(
+            ph_ui::keys("secondary-shift-f"),
+            FindInProject,
+            Some(workspace_context),
+        ),
+        KeyBinding::new(
+            ph_ui::keys("secondary-s"),
+            SaveFile,
+            Some(file_view::FILE_VIEW_CONTEXT),
+        ),
+        KeyBinding::new(
+            ph_ui::keys("shift-f12"),
             FindReferences,
             Some(file_view::FILE_VIEW_CONTEXT),
         ),
-        KeyBinding::new("f2", RenameSymbol, Some(file_view::FILE_VIEW_CONTEXT)),
         KeyBinding::new(
-            "secondary-shift-o",
+            ph_ui::keys("f2"),
+            RenameSymbol,
+            Some(file_view::FILE_VIEW_CONTEXT),
+        ),
+        KeyBinding::new(
+            ph_ui::keys("secondary-shift-o"),
             ShowOutline,
             Some(file_view::FILE_VIEW_CONTEXT),
         ),
         KeyBinding::new(
-            "secondary-l",
+            ph_ui::keys("secondary-l"),
             AskAboutSelection,
             Some(file_view::FILE_VIEW_CONTEXT),
         ),
         KeyBinding::new(
-            "secondary-w",
+            ph_ui::keys("secondary-w"),
             CloseFile,
             Some(files_panel::FILES_PANEL_CONTEXT),
         ),
         // In the editor, ⌘N makes a file (beside the open one), as in VS
         // Code; elsewhere it starts a chat.
         KeyBinding::new(
-            "secondary-n",
+            ph_ui::keys("secondary-n"),
             NewFile,
             Some(files_panel::FILES_PANEL_CONTEXT),
         ),
@@ -212,18 +232,18 @@ pub fn init(cx: &mut App, workspace_context: &'static str) {
         "ctrl-delete"
     };
     cx.bind_keys([
-        KeyBinding::new("secondary-/", ToggleComment, text),
+        KeyBinding::new(ph_ui::keys("secondary-/"), ToggleComment, text),
         KeyBinding::new(word_left, DeleteWordLeft, text),
         KeyBinding::new(word_right, DeleteWordRight, text),
-        KeyBinding::new("alt-up", MoveLineUp, text),
-        KeyBinding::new("alt-down", MoveLineDown, text),
-        KeyBinding::new("shift-alt-up", CopyLineUp, text),
-        KeyBinding::new("shift-alt-down", CopyLineDown, text),
-        KeyBinding::new("secondary-shift-k", DeleteLine, text),
-        KeyBinding::new("secondary-enter", InsertLineBelow, text),
-        KeyBinding::new("secondary-shift-enter", InsertLineAbove, text),
-        KeyBinding::new("secondary-d", SelectNextOccurrence, text),
-        KeyBinding::new("ctrl-g", GoToLine, text),
+        KeyBinding::new(ph_ui::keys("alt-up"), MoveLineUp, text),
+        KeyBinding::new(ph_ui::keys("alt-down"), MoveLineDown, text),
+        KeyBinding::new(ph_ui::keys("shift-alt-up"), CopyLineUp, text),
+        KeyBinding::new(ph_ui::keys("shift-alt-down"), CopyLineDown, text),
+        KeyBinding::new(ph_ui::keys("secondary-shift-k"), DeleteLine, text),
+        KeyBinding::new(ph_ui::keys("secondary-enter"), InsertLineBelow, text),
+        KeyBinding::new(ph_ui::keys("secondary-shift-enter"), InsertLineAbove, text),
+        KeyBinding::new(ph_ui::keys("secondary-d"), SelectNextOccurrence, text),
+        KeyBinding::new(ph_ui::keys("ctrl-g"), GoToLine, text),
     ]);
     let tree = Some(FILE_TREE_CONTEXT);
     let trash = if cfg!(target_os = "macos") {
@@ -232,14 +252,14 @@ pub fn init(cx: &mut App, workspace_context: &'static str) {
         "delete"
     };
     cx.bind_keys([
-        KeyBinding::new("f2", RenameEntry, tree),
-        KeyBinding::new(trash, TrashEntry, tree),
-        KeyBinding::new("secondary-c", CopyEntry, tree),
-        KeyBinding::new("secondary-x", CutEntry, tree),
-        KeyBinding::new("secondary-v", PasteEntry, tree),
-        KeyBinding::new("secondary-d", DuplicateEntry, tree),
-        KeyBinding::new("alt-secondary-r", RevealEntry, tree),
-        KeyBinding::new("alt-secondary-c", CopyEntryPath, tree),
-        KeyBinding::new("alt-shift-secondary-c", CopyRelativePath, tree),
+        KeyBinding::new(ph_ui::keys("f2"), RenameEntry, tree),
+        KeyBinding::new(ph_ui::keys(trash), TrashEntry, tree),
+        KeyBinding::new(ph_ui::keys("secondary-c"), CopyEntry, tree),
+        KeyBinding::new(ph_ui::keys("secondary-x"), CutEntry, tree),
+        KeyBinding::new(ph_ui::keys("secondary-v"), PasteEntry, tree),
+        KeyBinding::new(ph_ui::keys("secondary-d"), DuplicateEntry, tree),
+        KeyBinding::new(ph_ui::keys("alt-secondary-r"), RevealEntry, tree),
+        KeyBinding::new(ph_ui::keys("alt-secondary-c"), CopyEntryPath, tree),
+        KeyBinding::new(ph_ui::keys("alt-shift-secondary-c"), CopyRelativePath, tree),
     ]);
 }

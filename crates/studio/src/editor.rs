@@ -25,7 +25,7 @@ use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, Entity, FocusHandle,
     Focusable, Hsla, Image, ImageFormat, InteractiveElement as _, IntoElement, KeyDownEvent,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _,
-    PathBuilder, PinchEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString,
+    PathBuilder, PinchEvent, Pixels, Point, Render, ScrollEvent, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Window, actions,
     canvas, div, img, point, px,
 };
@@ -61,14 +61,14 @@ pub(crate) const CONTEXT: &str = "ImageEditor";
 pub fn bind_keys(cx: &mut App) {
     let context = Some(CONTEXT);
     cx.bind_keys([
-        gpui_kit::KeyBinding::new("secondary-z", Undo, context),
-        gpui_kit::KeyBinding::new("secondary-shift-z", Redo, context),
-        gpui_kit::KeyBinding::new("ctrl-y", Redo, context),
-        gpui_kit::KeyBinding::new("backspace", DeleteMark, context),
-        gpui_kit::KeyBinding::new("delete", DeleteMark, context),
-        gpui_kit::KeyBinding::new("escape", Cancel, context),
-        gpui_kit::KeyBinding::new("secondary-s", SaveCopy, context),
-        gpui_kit::KeyBinding::new("secondary-shift-c", CopyImage, context),
+        gpui_kit::KeyBinding::new(ph_ui::keys("secondary-z"), Undo, context),
+        gpui_kit::KeyBinding::new(ph_ui::keys("secondary-shift-z"), Redo, context),
+        gpui_kit::KeyBinding::new(ph_ui::keys("ctrl-y"), Redo, context),
+        gpui_kit::KeyBinding::new(ph_ui::keys("backspace"), DeleteMark, context),
+        gpui_kit::KeyBinding::new(ph_ui::keys("delete"), DeleteMark, context),
+        gpui_kit::KeyBinding::new(ph_ui::keys("escape"), Cancel, context),
+        gpui_kit::KeyBinding::new(ph_ui::keys("secondary-s"), SaveCopy, context),
+        gpui_kit::KeyBinding::new(ph_ui::keys("secondary-shift-c"), CopyImage, context),
     ]);
     crate::slides::editor::bind_keys(cx);
 }
@@ -469,7 +469,9 @@ impl ImageEditor {
             return;
         }
         let keystroke = &event.keystroke;
-        if keystroke.modifiers.secondary() || keystroke.modifiers.alt || keystroke.modifiers.control
+        if keystroke.modifiers.secondary(cx)
+            || keystroke.modifiers.alt
+            || keystroke.modifiers.control
         {
             return;
         }
@@ -538,9 +540,9 @@ impl ImageEditor {
         cx.notify();
     }
 
-    fn on_wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_wheel(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         let delta = event.delta.pixel_delta(window.line_height());
-        if event.modifiers.secondary() {
+        if event.modifiers.secondary(cx) {
             // ⌘ and the wheel, or Ctrl and a pinch on Windows touchpads.
             let dy = f32::from(delta.y);
             if dy != 0. {
@@ -1386,7 +1388,7 @@ impl ImageEditor {
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
-            .on_scroll_wheel(cx.listener(Self::on_wheel))
+            .on_scroll(cx.listener(Self::on_wheel))
             .on_pinch(cx.listener(Self::on_pinch))
             .child(self.render_zoom(cx))
             .into_any_element()

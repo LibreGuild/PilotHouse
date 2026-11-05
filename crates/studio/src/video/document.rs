@@ -302,7 +302,7 @@ impl VideoDocument {
         let extra = self.thumbs.len() - MOST;
         for key in keys.into_iter().take(extra) {
             if let Some(frame) = self.thumbs.remove(&key) {
-                cx.drop_image(frame.render_image(), None);
+                ph_ui::images::release_render_image(frame.render_image(), cx);
             }
         }
     }

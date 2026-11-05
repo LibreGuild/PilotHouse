@@ -239,6 +239,8 @@ pub struct FileView {
     disk: Option<(std::time::SystemTime, u64)>,
     /// Keeps the unsaved text a second after the last change.
     _keep: Option<Task<()>>,
+    /// The file being read again (the newest read only).
+    _load: Option<Task<()>>,
     /// Line to reveal once loading finishes (0-based).
     pending_line: Option<u32>,
     /// How Files names the file (its folder's name first in a multi-folder
@@ -355,6 +357,7 @@ impl FileView {
             save_error: None,
             disk: None,
             _keep: None,
+            _load: None,
             pending_line: None,
             asks: true,
             kind,
@@ -669,12 +672,12 @@ impl FileView {
             language_for(&self.relative),
             code.trim_end_matches('\n')
         );
-        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+        ph_ui::copy_with_toast(text, "as Markdown", cx);
     }
 
     fn copy_reference(&mut self, _: &CopyReference, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(reference) = self.reference(cx) {
-            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(reference));
+            ph_ui::copy_with_toast(reference, "the reference", cx);
         }
     }
 
@@ -703,7 +706,7 @@ impl FileView {
         cx.spawn_in(window, async move |_, cx| {
             let link = find.await;
             _ = cx.update(|window, cx| match link {
-                Some(link) => cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(link)),
+                Some(link) => ph_ui::copy_with_toast(link, "the link", cx),
                 None => window.push_notification(
                     Notification::info("This file is not in a repository on GitHub or GitLab."),
                     cx,
@@ -1033,7 +1036,9 @@ impl FileView {
             }
             Ok((text, kept, not_utf8, disk))
         });
-        cx.spawn_in(window, async move |this, cx| {
+        // The newest read wins: an older one still under way is dropped,
+        // so two quick writes cannot land out of order.
+        self._load = Some(cx.spawn_in(window, async move |this, cx| {
             let result = read.await;
             _ = this.update_in(cx, |this, window, cx| {
                 match result {
@@ -1069,8 +1074,7 @@ impl FileView {
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        }));
     }
 
     /// Shows the file with its viewer (`Kind::Text`: as bytes).
@@ -2003,12 +2007,10 @@ impl Render for FileView {
             .on_action(cx.listener(Self::ask_go_to_line))
             .on_action(cx.listener(|this, _: &CopyFilePath, _, cx| {
                 let path = this.absolute.to_string_lossy().into_owned();
-                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path));
+                ph_ui::copy_with_toast(path, "the path", cx);
             }))
             .on_action(cx.listener(|this, _: &CopyFileRelativePath, _, cx| {
-                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                    this.relative.to_string(),
-                ));
+                ph_ui::copy_with_toast(this.relative.to_string(), "the relative path", cx);
             }))
             .on_action(cx.listener(|this, _: &RevealFile, _, cx| cx.reveal_path(&this.absolute)))
             .on_action(
@@ -2038,7 +2040,7 @@ impl FileView {
                     gpui_kit::MouseButton::Left,
                     cx.listener(|this, event: &gpui_kit::MouseUpEvent, window, cx| {
                         let modifiers = event.modifiers;
-                        if !modifiers.secondary()
+                        if !modifiers.secondary(cx)
                             || modifiers.alt
                             || modifiers.shift
                             || event.click_count != 1

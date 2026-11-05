@@ -39,6 +39,8 @@ use ph_ui::Icons;
 #[derive(Default)]
 struct StudioWindows {
     open: HashMap<PathBuf, AnyWindowHandle>,
+    /// Their views, to ask about unsaved work before the app quits.
+    views: HashMap<PathBuf, gpui_kit::WeakEntity<StudioWindow>>,
     /// Whether the chat shows in new windows, and how wide: as it was
     /// last left.
     chat_shown: Option<bool>,
@@ -140,16 +142,43 @@ fn open_window_for(path: PathBuf, opening: Opening, cx: &mut App) -> Result<()> 
         let (x, y) = layout::TRAFFIC_LIGHTS;
         titlebar.traffic_light_position = Some(gpui_kit::point(x, y));
     }
-    let (handle, _) = gpui_kit::open_window(options, cx, |window, cx| {
+    let (handle, view) = gpui_kit::open_window(options, cx, |window, cx| {
         ph_theme::apply_appearance(&crate::AppState::appearance(cx), Some(window), cx);
         let path = path.clone();
         cx.new(|cx| StudioWindow::new(path, opening, window, cx))
     })
     .context("opening Studio")?;
-    cx.default_global::<StudioWindows>()
-        .open
-        .insert(path, handle);
+    let windows = cx.default_global::<StudioWindows>();
+    windows.views.insert(path.clone(), view.downgrade());
+    windows.open.insert(path, handle);
     Ok(())
+}
+
+/// Before the app quits: each Studio window saves its presentation, or asks
+/// about edits that are not saved (as closing it does). `false` when one
+/// asked: the app stays, and the window closes if the user says so.
+pub fn ready_to_quit(cx: &mut App) -> bool {
+    let windows: Vec<(AnyWindowHandle, gpui_kit::WeakEntity<StudioWindow>)> = cx
+        .try_global::<StudioWindows>()
+        .map(|windows| {
+            windows
+                .open
+                .iter()
+                .filter_map(|(path, handle)| Some((*handle, windows.views.get(path)?.clone())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut ready = true;
+    for (handle, view) in windows {
+        let closes = handle
+            .update(cx, |_, window, cx| {
+                view.update(cx, |view, cx| view.should_close(window, cx))
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+        ready &= closes;
+    }
+    ready
 }
 
 /// The chat a Studio window has: its space and what it is told.
@@ -461,7 +490,9 @@ impl StudioWindow {
             cx.on_release({
                 let path = path.clone();
                 move |_, cx| {
-                    cx.default_global::<StudioWindows>().open.remove(&path);
+                    let windows = cx.default_global::<StudioWindows>();
+                    windows.open.remove(&path);
+                    windows.views.remove(&path);
                 }
             }),
         );

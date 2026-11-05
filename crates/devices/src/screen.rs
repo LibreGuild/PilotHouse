@@ -145,6 +145,8 @@ pub struct DeviceScreen {
     adb: Adb,
     quality: StreamQuality,
     emulator: Option<EmulatorControl>,
+    /// The emulator's wheel steps, as one touch drag at a time.
+    touch_scroll: Option<TouchScroller>,
     /// Display size in device pixels, for mapping frame pixels to touches.
     display: Option<(u32, u32)>,
     frame_size: (u32, u32),
@@ -197,6 +199,7 @@ impl DeviceScreen {
             adb,
             quality,
             emulator: None,
+            touch_scroll: None,
             display: None,
             frame_size: (0, 0),
             stop: Arc::default(),
@@ -248,6 +251,7 @@ impl DeviceScreen {
                 .await;
             let _ = this.update(cx, |screen, _| {
                 screen.emulator = control.clone();
+                screen.touch_scroll = None;
                 screen.display = display;
             });
             std::thread::Builder::new()
@@ -330,7 +334,10 @@ impl DeviceScreen {
                 PointerKind::Up => control.touch(x, y, false),
                 PointerKind::Scroll { dy, .. } => {
                     let (_, dy) = self.to_device(0.0, dy);
-                    scroll_with_touch(control.clone(), (x, y), dy);
+                    let control = control.clone();
+                    self.touch_scroll
+                        .get_or_insert_with(|| TouchScroller::new(control))
+                        .scroll((x, y), dy);
                 }
             }
             return;
@@ -955,17 +962,50 @@ impl Ready {
     }
 }
 
-/// A scroll wheel step as a short touch drag.
-fn scroll_with_touch(control: EmulatorControl, (x, y): (i32, i32), dy: i32) {
-    std::thread::spawn(move || {
-        let steps = 6;
-        control.touch(x, y, true);
-        for step in 1..=steps {
-            std::thread::sleep(Duration::from_millis(12));
-            control.touch(x, y - dy * 3 * step / steps, true);
+/// Wheel steps on an emulator as short touch drags, one at a time on one
+/// thread: steps that come while a drag runs are added up into the next
+/// (a trackpad sends dozens a second; drags sent side by side read as
+/// stray taps).
+/// Where the next drag starts, and how far it goes.
+type NextDrag = Arc<Mutex<Option<((i32, i32), i32)>>>;
+
+struct TouchScroller {
+    pending: NextDrag,
+    wake: smol::channel::Sender<()>,
+}
+
+impl TouchScroller {
+    fn new(control: EmulatorControl) -> Self {
+        let pending: NextDrag = Arc::default();
+        let (wake, woken) = smol::channel::bounded::<()>(1);
+        let next = pending.clone();
+        // Ends with the screen (its sender goes).
+        std::thread::spawn(move || {
+            while woken.recv_blocking().is_ok() {
+                let Some(((x, y), dy)) = next.lock().ok().and_then(|mut next| next.take()) else {
+                    continue;
+                };
+                // At most about half a screen per drag.
+                let distance = (dy * 3).clamp(-900, 900);
+                let steps = 6;
+                control.touch(x, y, true);
+                for step in 1..=steps {
+                    std::thread::sleep(Duration::from_millis(12));
+                    control.touch(x, y - distance * step / steps, true);
+                }
+                control.touch(x, y - distance, false);
+            }
+        });
+        Self { pending, wake }
+    }
+
+    fn scroll(&self, at: (i32, i32), dy: i32) {
+        if let Ok(mut pending) = self.pending.lock() {
+            let total = pending.map_or(0, |(_, sum)| sum) + dy;
+            *pending = Some((at, total));
         }
-        control.touch(x, y - dy * 3, false);
-    });
+        let _ = self.wake.try_send(());
+    }
 }
 
 #[cfg(test)]

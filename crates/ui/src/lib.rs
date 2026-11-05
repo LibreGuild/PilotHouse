@@ -6,26 +6,35 @@
 
 mod agent_logos;
 mod assets;
+mod copy_button;
 mod dialog_buttons;
 mod empty_state;
 mod file_icons;
+pub mod images;
+pub mod images_safe;
+mod keys;
+pub mod markdown;
 mod menu;
 mod pane_header;
 pub mod platform;
 mod surface;
 pub mod time;
+mod truncated;
 mod workspace_colors;
 
 pub use agent_logos::{agent_logo, app_icon, logo_mark};
 pub use assets::PilotHouseAssets;
+pub use copy_button::{CopyButton, copy_with_toast};
 pub use dialog_buttons::dialog_buttons;
 pub use empty_state::EmptyState;
 pub use file_icons::{
     file_icon, file_icon_element, file_svg_name, folder_icon_element, folder_svg_name,
 };
+pub use keys::keys;
 pub use menu::{MenuButton, POPUP_GAP, SpacedMenu};
 pub use pane_header::PaneHeader;
 pub use surface::Surface;
+pub use truncated::truncated_label;
 pub use workspace_colors::{WORKSPACE_COLORS, workspace_color};
 
 /// The complete Lucide icon catalog. Only the icons listed in

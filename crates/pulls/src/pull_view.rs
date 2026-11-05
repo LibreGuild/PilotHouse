@@ -818,57 +818,62 @@ impl PullView {
             .child(card(
                 format!("{} opened this", data.pull.user.login),
                 &data.pull.created_at,
-                self.description
-                    .clone()
-                    .map(|view| TextView::new(&view).into_any_element()),
+                self.description.clone().map(|view| {
+                    TextView::new(&view)
+                        .image_source(ph_ui::images_safe::web_only)
+                        .into_any_element()
+                }),
                 cx,
             ))
-            .children(items.into_iter().map(|(_, item)| {
-                match item {
-                    Item::Comment(comment) => card(
-                        comment.user.login.clone(),
-                        &comment.created_at,
-                        self.bodies
-                            .get(&comment.id)
-                            .map(|view| TextView::new(view).into_any_element()),
-                        cx,
-                    ),
-                    Item::Review(review) => {
-                        let (verb, color) = review_state(&review.state, cx);
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .text_sm()
-                                    .child(pill(verb, color))
-                                    .child(review.user.login.clone())
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(short_date(
-                                                review.submitted_at.as_deref().unwrap_or_default(),
-                                            )),
-                                    ),
-                            )
-                            .when(
-                                review
-                                    .body
-                                    .as_deref()
-                                    .is_some_and(|body| !body.trim().is_empty()),
-                                |this| {
-                                    this.children(self.bodies.get(&review.id).map(|view| {
-                                        div()
-                                            .pl_3()
-                                            .border_l_2()
-                                            .border_color(color.opacity(0.5))
-                                            .child(TextView::new(view))
-                                    }))
-                                },
-                            )
+            .children(items.into_iter().map(|(_, item)| match item {
+                Item::Comment(comment) => card(
+                    comment.user.login.clone(),
+                    &comment.created_at,
+                    self.bodies.get(&comment.id).map(|view| {
+                        TextView::new(view)
+                            .image_source(ph_ui::images_safe::web_only)
                             .into_any_element()
-                    }
+                    }),
+                    cx,
+                ),
+                Item::Review(review) => {
+                    let (verb, color) = review_state(&review.state, cx);
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .text_sm()
+                                .child(pill(verb, color))
+                                .child(review.user.login.clone())
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(short_date(
+                                            review.submitted_at.as_deref().unwrap_or_default(),
+                                        )),
+                                ),
+                        )
+                        .when(
+                            review
+                                .body
+                                .as_deref()
+                                .is_some_and(|body| !body.trim().is_empty()),
+                            |this| {
+                                this.children(self.bodies.get(&review.id).map(|view| {
+                                    div()
+                                        .pl_3()
+                                        .border_l_2()
+                                        .border_color(color.opacity(0.5))
+                                        .child(
+                                            TextView::new(view)
+                                                .image_source(ph_ui::images_safe::web_only),
+                                        )
+                                }))
+                            },
+                        )
+                        .into_any_element()
                 }
             }))
             .when(open, |this| this.child(self.render_actions(data, cx)))

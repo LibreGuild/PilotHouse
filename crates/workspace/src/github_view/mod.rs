@@ -172,31 +172,34 @@ impl GithubView {
     /// answers to findings are announced (and the answers applied).
     fn watch(&mut self, cx: &mut Context<Self>) {
         let store = self.store.clone();
-        self._work.push(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(WATCH_EVERY).await;
-                let store = store.clone();
-                let news = cx
-                    .background_spawn(async move {
-                        ph_review::github::watched(&store)
-                            .into_iter()
-                            .filter_map(|pull| {
-                                let news = ph_review::github::check_watched(&store, &pull)
-                                    .map_err(|err| {
-                                        tracing::info!("watching #{}: {err:#}", pull.number)
-                                    })
-                                    .ok()?;
-                                Some((pull, news))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .await;
-                let alive = this.update(cx, |this, cx| this.announce(news, cx)).is_ok();
-                if !alive {
-                    break;
+        push_work(
+            &mut self._work,
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(WATCH_EVERY).await;
+                    let store = store.clone();
+                    let news = cx
+                        .background_spawn(async move {
+                            ph_review::github::watched(&store)
+                                .into_iter()
+                                .filter_map(|pull| {
+                                    let news = ph_review::github::check_watched(&store, &pull)
+                                        .map_err(|err| {
+                                            tracing::info!("watching #{}: {err:#}", pull.number)
+                                        })
+                                        .ok()?;
+                                    Some((pull, news))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .await;
+                    let alive = this.update(cx, |this, cx| this.announce(news, cx)).is_ok();
+                    if !alive {
+                        break;
+                    }
                 }
-            }
-        }));
+            }),
+        );
     }
 
     /// Tells the user what changed on watched pull requests.
@@ -794,20 +797,23 @@ impl GithubView {
             let pull = ph_github::pulls::get(&hosting.client, &hosting.repo, number)?;
             anyhow::Ok((hosting, pull))
         });
-        self._work.push(cx.spawn_in(window, async move |this, cx| {
-            let result = find.await;
-            _ = this.update_in(cx, |this, window, cx| match result {
-                Ok((hosting, pull)) => match template.kind {
-                    ph_review::templates::TemplateKind::Review => {
-                        this.review(hosting, pull, template, "full", window, cx)
-                    }
-                    ph_review::templates::TemplateKind::Prompt => {
-                        this.ask(hosting, pull, template, window, cx)
-                    }
-                },
-                Err(err) => chat.update(cx, |chat, cx| chat.set_failed(format!("{err:#}"), cx)),
-            });
-        }));
+        push_work(
+            &mut self._work,
+            cx.spawn_in(window, async move |this, cx| {
+                let result = find.await;
+                _ = this.update_in(cx, |this, window, cx| match result {
+                    Ok((hosting, pull)) => match template.kind {
+                        ph_review::templates::TemplateKind::Review => {
+                            this.review(hosting, pull, template, "full", window, cx)
+                        }
+                        ph_review::templates::TemplateKind::Prompt => {
+                            this.ask(hosting, pull, template, window, cx)
+                        }
+                    },
+                    Err(err) => chat.update(cx, |chat, cx| chat.set_failed(format!("{err:#}"), cx)),
+                });
+            }),
+        );
     }
 
     /// Asks prompt `template`'s request about `pull` in a new chat, once
@@ -844,15 +850,18 @@ impl GithubView {
                 prompt,
             ))
         });
-        self._work.push(cx.spawn_in(window, async move |_, cx| {
-            let result = work.await;
-            _ = chat.update_in(cx, |chat, window, cx| match result {
-                Ok((title, display, prompt)) => {
-                    chat.start_prompt(title, display, prompt, window, cx)
-                }
-                Err(err) => chat.set_failed(format!("{err:#}"), cx),
-            });
-        }));
+        push_work(
+            &mut self._work,
+            cx.spawn_in(window, async move |_, cx| {
+                let result = work.await;
+                _ = chat.update_in(cx, |chat, window, cx| match result {
+                    Ok((title, display, prompt)) => {
+                        chat.start_prompt(title, display, prompt, window, cx)
+                    }
+                    Err(err) => chat.set_failed(format!("{err:#}"), cx),
+                });
+            }),
+        );
     }
 
     /// Shows chat `session` of repository space `project`, beside its pull
@@ -940,26 +949,30 @@ impl GithubView {
             ph_github::pulls::repository(&hosting.client, &hosting.repo)?;
             anyhow::Ok(id)
         });
-        self._work.push(cx.spawn_in(window, async move |this, cx| {
-            let result = check.await;
-            _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(id) => {
-                    let mut added: Vec<String> = this.store.setting(ADDED_KEY);
-                    if !added.contains(&id.key()) {
-                        added.push(id.key());
-                        if let Err(err) = this.store.set_setting(ADDED_KEY, &added) {
-                            tracing::warn!("saving the repositories failed: {err:#}");
+        push_work(
+            &mut self._work,
+            cx.spawn_in(window, async move |this, cx| {
+                let result = check.await;
+                _ = this.update_in(cx, |this, window, cx| match result {
+                    Ok(id) => {
+                        let mut added: Vec<String> = this.store.setting(ADDED_KEY);
+                        if !added.contains(&id.key()) {
+                            added.push(id.key());
+                            if let Err(err) = this.store.set_setting(ADDED_KEY, &added) {
+                                tracing::warn!("saving the repositories failed: {err:#}");
+                            }
                         }
+                        this.adding = None;
+                        this.show_repo(id, window, cx);
                     }
-                    this.adding = None;
-                    this.show_repo(id, window, cx);
-                }
-                Err(err) => window.push_notification(
-                    Notification::error(format!("{err:#}")).title("Could not add the repository"),
-                    cx,
-                ),
-            });
-        }));
+                    Err(err) => window.push_notification(
+                        Notification::error(format!("{err:#}"))
+                            .title("Could not add the repository"),
+                        cx,
+                    ),
+                });
+            }),
+        );
     }
 
     /// Takes an added repository out of the list (its clone stays until
@@ -1048,6 +1061,13 @@ fn parse_repository(text: &str, accounts: &[Account]) -> Option<RepoId> {
         }
     };
     RepoId::parse(&format!("{}/{owner}/{name}", host.to_ascii_lowercase()))
+}
+
+/// Keeps `task` running with the view's other work, letting go of what
+/// already finished (the list would grow with every action otherwise).
+pub(super) fn push_work(work: &mut Vec<Task<()>>, task: Task<()>) {
+    work.retain(|task| !task.is_ready());
+    work.push(task);
 }
 
 #[cfg(test)]

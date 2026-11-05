@@ -76,7 +76,10 @@ mod tests {
     use super::*;
 
     fn bytes(key: &str) -> Option<Vec<u8>> {
-        to_bytes(&Keystroke::parse(key).unwrap(), false)
+        to_bytes(
+            &Keystroke::parse_with_os(key, gpui_kit::OperatingSystem::Mac).unwrap(),
+            false,
+        )
     }
 
     #[test]

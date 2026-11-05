@@ -15,10 +15,14 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::PopupMenuItem;
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Task,
-    Window, div,
+    AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
+    Styled as _, Task, Window, div,
 };
+use ph_ui::{Icons, MenuButton as _};
 use serde_json::Value;
 
 use crate::agents::AgentSpec;
@@ -331,7 +335,40 @@ pub struct TranscriptView {
     _poll: Task<()>,
 }
 
+/// The user wants the session to go on in a chat.
+pub enum TranscriptViewEvent {
+    /// A new chat with `agent`, which gets `recap` with the first message.
+    Continue {
+        agent: &'static AgentSpec,
+        recap: String,
+        title: String,
+    },
+}
+
+impl EventEmitter<TranscriptViewEvent> for TranscriptView {}
+
 impl TranscriptView {
+    /// "Continue in a chat" with `agent`: a recap of the session so far.
+    fn continue_with(&mut self, agent: &'static AgentSpec, cx: &mut Context<Self>) {
+        let thread = self.thread.read(cx);
+        let Some(recap) = thread.handoff_recap(cx) else {
+            return;
+        };
+        let title = thread
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::User { text, .. } => text.lines().next().map(str::to_string),
+                _ => None,
+            })
+            .unwrap_or_else(|| "Terminal session".into());
+        cx.emit(TranscriptViewEvent::Continue {
+            agent,
+            recap,
+            title,
+        });
+    }
+
     pub fn new(
         store: ph_store::Store,
         project: &ph_store::projects::Project,
@@ -536,11 +573,44 @@ impl Render for TranscriptView {
         let mode = crate::view_mode::ViewMode::current(cx);
         thread.update(cx, |thread, cx| thread.set_view_mode(mode, cx));
         let scroller = thread.read(cx).scroller().clone();
-        TranscriptList::new("cli-transcript", scroller, move |ix, _, cx| {
+        let list = TranscriptList::new("cli-transcript", scroller, move |ix, _, cx| {
             thread.update(cx, |thread, cx| thread.prepare_entry(ix, cx));
             crate::entry_view::render_entry(&thread, ix, cx)
-        })
-        .into_any_element()
+        });
+        let view = cx.weak_entity();
+        // Read only: to say more, the session goes on in a chat, with this
+        // agent or another.
+        let bar = h_flex()
+            .flex_none()
+            .px_2()
+            .py_1()
+            .gap_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(div().flex_1().child("Read only"))
+            .child(
+                Button::new("cli-transcript-continue")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icons::MessageSquare)
+                    .label("Continue in a chat")
+                    .tooltip("A new chat that starts from this session, with any agent")
+                    .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                        crate::agents::AGENTS.iter().fold(menu, |menu, agent| {
+                            let view = view.clone();
+                            menu.item(PopupMenuItem::new(agent.name).on_click(move |_, _, cx| {
+                                _ = view.update(cx, |view, cx| view.continue_with(agent, cx));
+                            }))
+                        })
+                    }),
+            );
+        v_flex()
+            .size_full()
+            .child(bar)
+            .child(div().flex_1().min_h_0().child(list))
+            .into_any_element()
     }
 }
 

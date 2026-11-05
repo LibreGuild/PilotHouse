@@ -39,6 +39,8 @@ pub struct ToolsView {
     env: Entity<TextareaState>,
     skill_name: Entity<InputState>,
     error: Option<SharedString>,
+    /// Reading the agents' own configs (`~/.claude.json` can be large).
+    _load: Option<gpui_kit::Task<()>>,
 }
 
 impl ToolsView {
@@ -72,17 +74,31 @@ impl ToolsView {
             }),
             skill_name: input("New skill's name", window, cx),
             error: None,
+            _load: None,
         };
-        view.reload();
+        view.reload(cx);
         view
     }
 
-    fn reload(&mut self) {
+    /// Reads the servers and skills again, off the UI thread.
+    fn reload(&mut self, cx: &mut Context<Self>) {
         self.servers = mcp_config::load(&self.store);
         let home = dirs::home_dir().unwrap_or_default();
         let project = self.project.clone().unwrap_or_default();
-        self.found = mcp_config::discover(&home, &project);
-        self.skills = skills::discover(&home, &project);
+        let read = cx.background_spawn(async move {
+            (
+                mcp_config::discover(&home, &project),
+                skills::discover(&home, &project),
+            )
+        });
+        self._load = Some(cx.spawn(async move |this, cx| {
+            let (found, skills) = read.await;
+            _ = this.update(cx, |this, cx| {
+                this.found = found;
+                this.skills = skills;
+                cx.notify();
+            });
+        }));
     }
 
     fn save(&mut self, servers: Vec<McpServerConfig>, cx: &mut Context<Self>) {
@@ -145,7 +161,7 @@ impl ToolsView {
                 self.error = None;
                 self.skill_name
                     .update(cx, |input, cx| input.set_value("", window, cx));
-                self.reload();
+                self.reload(cx);
                 (self.open_file)(path, window, cx);
             }
             Err(err) => self.error = Some(err.to_string().into()),

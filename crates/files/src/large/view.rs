@@ -25,8 +25,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Bounds, ClipboardItem, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ParentElement as _, Pixels, Render, ScrollWheelEvent, SharedString,
-    Styled as _, Subscription, Task, Window, canvas, div, px,
+    MouseMoveEvent, ParentElement as _, Pixels, Render, ScrollEvent, SharedString, Styled as _,
+    Subscription, Task, Window, canvas, div, px,
 };
 
 use super::index::{self, Line, LineIndex, Query};
@@ -175,6 +175,10 @@ impl LargeFileView {
         self.file = Some(file.clone());
         self.len = len;
         self.shown = None;
+        // One scan at a time: the one running stops, the new one goes on
+        // from where the index is.
+        self.cancel_scan.store(true, Ordering::Relaxed);
+        self.cancel_scan = Arc::default();
         self.start_scan(file, cx);
         cx.notify();
     }
@@ -279,7 +283,7 @@ impl LargeFileView {
         index::read_lines(file, self.len, anchor, first, count).ok()
     }
 
-    fn scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         let pixels = event.delta.pixel_delta(px(ROW));
         // Sideways: a trackpad's x, or shift with a wheel.
         let sideways = if event.modifiers.shift {
@@ -741,7 +745,7 @@ impl Render for LargeFileView {
                             .font_family(mono)
                             .text_size(px(13.))
                             .line_height(px(ROW))
-                            .on_scroll_wheel(cx.listener(Self::scroll))
+                            .on_scroll(cx.listener(Self::scroll))
                             .child(measure)
                             .child(v_flex().children(rows)),
                     )

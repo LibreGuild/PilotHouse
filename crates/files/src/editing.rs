@@ -135,18 +135,25 @@ pub fn toggle_comment(text: &str, selection: Range<usize>, comment: Comment) -> 
     let block = &text[lines.clone()];
     let rows: Vec<&str> = block.split('\n').collect();
     let has_text = |row: &str| !row.trim().is_empty();
+    // Indentation is spaces and tabs only: slicing by bytes stays on
+    // character boundaries (a no-break space is text, not indentation).
+    let lead_of = |row: &str| row.len() - row.trim_start_matches([' ', '\t']).len();
     let indent = rows
         .iter()
         .filter(|row| has_text(row))
-        .map(|row| row.len() - row.trim_start().len())
+        .map(|row| lead_of(row))
         .min()
         .unwrap_or(0);
     let commented = |row: &str| {
-        let body = row.trim_start();
+        let body = &row[lead_of(row)..];
         match comment {
             Comment::Line(token) => body.starts_with(token),
             Comment::Block(open, close) => {
-                body.starts_with(open) && body.trim_end_matches('\r').trim_end().ends_with(close)
+                let body = body.trim_end_matches('\r').trim_end();
+                // `<!-->` opens and closes at once: not a whole comment.
+                body.len() >= open.len() + close.len()
+                    && body.starts_with(open)
+                    && body.ends_with(close)
             }
         }
     };
@@ -165,7 +172,7 @@ pub fn toggle_comment(text: &str, selection: Range<usize>, comment: Comment) -> 
                 Some(row) => (row, "\r"),
                 None => (*row, ""),
             };
-            let lead = row.len() - row.trim_start().len();
+            let lead = lead_of(row);
             let body = &row[lead..];
             let changed = match (comment, remove) {
                 (Comment::Line(token), true) => {
@@ -408,6 +415,18 @@ mod tests {
         );
         assert_eq!(delete_word_right(text, third + 4), None);
         assert_eq!(delete_word_right(text, text.len()), None);
+    }
+
+    #[test]
+    fn comments_with_odd_whitespace_and_tiny_block_comments() {
+        // A no-break space is text, not indentation: no slicing inside it.
+        let text = " a\n\u{a0}b\n";
+        let edit = toggle_comment(text, 0..text.len() - 1, Comment::Line("//"));
+        assert_eq!(apply(text, &edit), "//  a\n// \u{a0}b\n");
+        // `<!-->` is not a whole comment, so it is commented, not cut.
+        let text = "<!-->\n";
+        let edit = toggle_comment(text, 0..0, Comment::Block("<!--", "-->"));
+        assert_eq!(apply(text, &edit), "<!-- <!--> -->\n");
     }
 
     #[test]

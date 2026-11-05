@@ -172,6 +172,20 @@ impl ChatPanel {
             )
         };
         let Some(recap) = recap else { return };
+        self.continue_with(agent, recap, title.to_string(), from, window, cx);
+    }
+
+    /// A new chat with `agent` that goes on from `recap` (of the chat or
+    /// terminal session `title`, which `from` had).
+    pub fn continue_with(
+        &mut self,
+        agent: &'static AgentSpec,
+        recap: String,
+        title: String,
+        from: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let _ = self.store.set_setting(DEFAULT_AGENT_KEY, &agent.id);
         self.set_session(None, cx);
         self.choose_agent(agent, cx);
@@ -184,6 +198,50 @@ impl ChatPanel {
         self.next_title = Some(format!("{title} · {}", agent.name));
         self.composer.update(cx, |composer, cx| {
             composer.set_value("Continue where the previous agent left off.", window, cx)
+        });
+        cx.emit(ChatPanelEvent::SessionsChanged);
+        self.warm_up(cx);
+        self.focus_composer(window, cx);
+    }
+
+    /// Compacts the chat: the agent's own `/compact` when it has one (Claude
+    /// Code), which keeps the chat and its session; otherwise a new chat
+    /// with the same agent that starts from a recap of this one.
+    pub(super) fn compact(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let thread = self.active.read(cx);
+        if !thread.has_started() {
+            return;
+        }
+        let own = thread.commands().iter().any(|(name, _)| name == "compact");
+        if own {
+            // Like any message: sent now, or queued while the agent works.
+            let composer_text = self.composer.read(cx).value().to_string();
+            self.send_text("/compact".into(), None, window, cx);
+            if !composer_text.is_empty() {
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_value(composer_text, window, cx)
+                });
+            }
+            return;
+        }
+        let (recap, agent, title) = (thread.handoff_recap(cx), thread.agent(), thread.title());
+        let Some(recap) = recap else { return };
+        let recap = recap.replacen(
+            "you are taking over work the user started with another coding agent",
+            "this chat was compacted; it continues work the user started with a coding agent",
+            1,
+        );
+        self.set_session(None, cx);
+        self.choose_agent(agent, cx);
+        let origin = format!(
+            "A compacted continuation of “{title}”: {} gets a recap of it with your first message.",
+            agent.name
+        );
+        self.active
+            .update(cx, |thread, cx| thread.continue_from(recap, origin, cx));
+        self.next_title = Some(format!("{title} (compacted)"));
+        self.composer.update(cx, |composer, cx| {
+            composer.set_value("Continue where we left off.", window, cx)
         });
         cx.emit(ChatPanelEvent::SessionsChanged);
         self.warm_up(cx);

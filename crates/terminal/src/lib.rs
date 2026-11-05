@@ -64,9 +64,9 @@ pub fn init(cx: &mut App) {
         "ctrl-shift-c"
     };
     cx.bind_keys([
-        KeyBinding::new("secondary-v", TerminalPaste, context),
+        KeyBinding::new(ph_ui::keys("secondary-v"), TerminalPaste, context),
         KeyBinding::new(copy, TerminalCopy, context),
-        KeyBinding::new("secondary-l", TerminalAsk, context),
+        KeyBinding::new(ph_ui::keys("secondary-l"), TerminalAsk, context),
         KeyBinding::new(
             if cfg!(target_os = "macos") {
                 "cmd-\\"

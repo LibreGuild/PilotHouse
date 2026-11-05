@@ -212,9 +212,12 @@ impl ApprovalInbox {
         let inbox = Self::global(cx);
         let weak = request.downgrade();
         inbox.update(cx, |inbox, cx| {
-            inbox
-                .requests
-                .retain(|existing| existing.upgrade().is_some());
+            // Answered requests go (a chat keeps them for its transcript).
+            inbox.requests.retain(|existing| {
+                existing
+                    .upgrade()
+                    .is_some_and(|request| request.read(cx).is_pending())
+            });
             inbox.requests.push(weak);
             cx.notify();
         });

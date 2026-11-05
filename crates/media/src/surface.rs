@@ -19,8 +19,8 @@ use gpui_kit::{
     App, Bounds, Context, EventEmitter, FocusHandle, Focusable, ImageSource,
     InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _, PathBuilder, Pixels, Point,
-    Render, RenderImage, ScrollWheelEvent, SharedString, Styled as _, StyledImage as _, Window,
-    canvas, div, img, point, px, size,
+    Render, RenderImage, ScrollEvent, SharedString, Styled as _, StyledImage as _, Window, canvas,
+    div, img, point, px, size,
 };
 
 use crate::annotate::{self, Shape, Tool};
@@ -119,7 +119,7 @@ impl SurfaceView {
         if self.stale.len() > 1 {
             let keep = self.stale.len() - 1;
             for image in self.stale.drain(..keep) {
-                cx.drop_image(image, None);
+                ph_ui::images::release_render_image(image, cx);
             }
         }
         let now = Instant::now();
@@ -299,7 +299,7 @@ impl SurfaceView {
         }
     }
 
-    fn scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.mode != SurfaceMode::Interact {
             return;
         }
@@ -472,7 +472,7 @@ impl Render for SurfaceView {
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
-            .on_scroll_wheel(cx.listener(Self::scroll))
+            .on_scroll(cx.listener(Self::scroll))
             .on_key_down(cx.listener(Self::key_down))
             .child(measure)
             .map(|this| match self.frame.as_ref().map(Frame::render_image) {

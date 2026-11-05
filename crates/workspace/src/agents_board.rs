@@ -273,9 +273,8 @@ pub(crate) fn popup(workspace: &Workspace, entity: WeakEntity<Workspace>, cx: &A
                                     Target::Chat(session) => {
                                         workspace.open_chat(project, *session, window, cx)
                                     }
-                                    Target::Terminal(pane) => {
-                                        workspace.open_terminal_agent(project, pane, window, cx)
-                                    }
+                                    Target::Terminal(pane) => workspace
+                                        .open_terminal_agent(project, pane, false, window, cx),
                                 }
                             });
                         })

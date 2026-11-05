@@ -75,6 +75,15 @@ impl DirTree {
         self.expanded.clear();
     }
 
+    /// Whether `path` is a folder, as its folder's listing says.
+    pub fn is_dir(&self, path: &str) -> bool {
+        let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+        self.listings
+            .get(dir)
+            .and_then(|entries| entries.iter().find(|entry| entry.name == name))
+            .is_some_and(|entry| entry.is_dir)
+    }
+
     pub fn is_placeholder(id: &str) -> bool {
         id.ends_with(PLACEHOLDER)
     }
@@ -98,10 +107,14 @@ impl DirTree {
                 }
                 let children = self.children_of(&path);
                 let item = if children.is_empty() {
-                    // Unlisted or empty folder: keep it expandable.
-                    item.child(
-                        TreeItem::new(format!("{path}{PLACEHOLDER}"), "Loading…").disabled(true),
-                    )
+                    // Unlisted or empty folder: keep it expandable, saying
+                    // which it is.
+                    let label = if self.listings.contains_key(&path) {
+                        "Empty"
+                    } else {
+                        "Loading…"
+                    };
+                    item.child(TreeItem::new(format!("{path}{PLACEHOLDER}"), label).disabled(true))
                 } else {
                     item.children(children)
                 };

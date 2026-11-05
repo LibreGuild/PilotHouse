@@ -887,7 +887,11 @@ impl FindingsView {
         v_flex()
             .gap_1p5()
             .pl_5()
-            .children(self.bodies.get(&label).map(|body| TextView::new(body).text_sm()))
+            .children(self.bodies.get(&label).map(|body| {
+                TextView::new(body)
+                    .text_sm()
+                    .image_source(ph_ui::images_safe::web_only)
+            }))
             .when(!finding.note.trim().is_empty(), |this| {
                 this.child(
                     div()

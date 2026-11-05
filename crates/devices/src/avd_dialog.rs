@@ -193,14 +193,20 @@ pub fn confirm_wipe(
             .description("Its apps, files and settings are erased, and it starts like new. Its configuration stays. This cannot be undone.")
             .button_props(DialogButtonProps::default().ok_text("Wipe data"))
             .on_ok(move |_, window, cx| {
-                let notice = match manager.update(cx, |manager, _| manager.wipe_avd(&avd)) {
-                    Ok(freed) => Notification::success(format!(
-                        "Wiped {shown} ({} freed).",
-                        crate::devices_panel::human_size(freed)
-                    )),
-                    Err(err) => Notification::error(format!("{err:#}")),
-                };
-                window.push_notification(notice, cx);
+                let wipe = manager.update(cx, |manager, cx| manager.wipe_avd(&avd, cx));
+                let shown = shown.clone();
+                window
+                    .spawn(cx, async move |cx| {
+                        let notice = match wipe.await {
+                            Ok(freed) => Notification::success(format!(
+                                "Wiped {shown} ({} freed).",
+                                crate::devices_panel::human_size(freed)
+                            )),
+                            Err(err) => Notification::error(format!("{err:#}")),
+                        };
+                        _ = cx.update(|window, cx| window.push_notification(notice, cx));
+                    })
+                    .detach();
                 true
             })
     });
@@ -222,11 +228,17 @@ pub fn confirm_delete(
             .description("The emulator and everything on it are removed from this computer. The system image stays installed. This cannot be undone.")
             .button_props(DialogButtonProps::default().ok_text("Delete emulator"))
             .on_ok(move |_, window, cx| {
-                let notice = match manager.update(cx, |manager, cx| manager.delete_avd(&avd, cx)) {
-                    Ok(()) => Notification::success(format!("Deleted {shown}.")),
-                    Err(err) => Notification::error(format!("{err:#}")),
-                };
-                window.push_notification(notice, cx);
+                let delete = manager.update(cx, |manager, cx| manager.delete_avd(&avd, cx));
+                let shown = shown.clone();
+                window
+                    .spawn(cx, async move |cx| {
+                        let notice = match delete.await {
+                            Ok(()) => Notification::success(format!("Deleted {shown}.")),
+                            Err(err) => Notification::error(format!("{err:#}")),
+                        };
+                        _ = cx.update(|window, cx| window.push_notification(notice, cx));
+                    })
+                    .detach();
                 true
             })
     });

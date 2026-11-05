@@ -384,9 +384,11 @@ impl BrowserPanel {
                                     PopupMenuItem::new("Copy DevTools address")
                                         .icon(Icons::Plug)
                                         .on_click(move |_, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                            ph_ui::copy_with_toast(
                                                 endpoint.clone(),
-                                            ))
+                                                "the DevTools address",
+                                                cx,
+                                            )
                                         }),
                                 )
                             })

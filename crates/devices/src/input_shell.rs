@@ -11,7 +11,7 @@
 //! when the shell is free: whatever scrolled meanwhile goes as the next
 //! one, the moment the last ends.
 
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::Write as _;
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -73,8 +73,7 @@ impl InputShell {
             .name("adb-input".into())
             .spawn(move || {
                 // Ends when the shell does.
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { break };
+                for line in ph_env::lossy_lines(stdout) {
                     if line.trim() != DONE {
                         continue;
                     }

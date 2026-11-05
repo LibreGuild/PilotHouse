@@ -13,7 +13,7 @@ use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{IconName, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{Action, App, AppContext as _, ClipboardItem, Context, WeakEntity, Window};
+use gpui_kit::{Action, App, AppContext as _, Context, WeakEntity, Window};
 use ph_ui::Icons;
 
 use crate::file_ops;
@@ -55,6 +55,20 @@ impl Target {
             parent_of(&self.path)
         }
     }
+}
+
+/// `targets` without those inside another of them (a folder picked with
+/// something in it: the folder brings it along).
+fn outermost(targets: Vec<Target>) -> Vec<Target> {
+    targets
+        .iter()
+        .filter(|target| {
+            !targets.iter().any(|other| {
+                other.absolute != target.absolute && target.absolute.starts_with(&other.absolute)
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// The tree path of the folder holding `path` (`""` at the top).
@@ -528,52 +542,76 @@ impl FilesPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if target.is_root {
+        self.trash_entries(vec![target.clone()], window, cx)
+    }
+
+    /// Moves `targets` to the trash after asking; their open tabs close.
+    pub(crate) fn trash_entries(
+        &mut self,
+        targets: Vec<Target>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let targets: Vec<Target> = outermost(targets.into_iter().filter(|t| !t.is_root).collect());
+        let Some(first) = targets.first() else {
             return;
-        }
+        };
         let panel = self.weak.clone();
-        let target = target.clone();
-        let unsaved = self.unsaved_under(&target.path, cx);
-        let name = target.name();
-        let what = if target.is_folder {
-            "The folder and everything in it go"
-        } else {
-            "It goes"
+        let unsaved = targets
+            .iter()
+            .find_map(|target| self.unsaved_under(&target.path, cx));
+        let (title, what) = match targets.len() {
+            1 if first.is_folder => (
+                format!("Move “{}” to the Trash?", first.name()),
+                "The folder and everything in it go",
+            ),
+            1 => (format!("Move “{}” to the Trash?", first.name()), "It goes"),
+            n => (format!("Move {n} items to the Trash?"), "They go"),
         };
         let mut description = format!("{what} to the Trash, where you can restore it.");
         if let Some(unsaved) = unsaved {
             description.push_str(&format!(" Unsaved changes to {unsaved} will be lost."));
         }
         window.open_alert_dialog(cx, move |dialog, _, _| {
-            let (panel, target) = (panel.clone(), target.clone());
+            let (panel, targets) = (panel.clone(), targets.clone());
             dialog
                 .confirm()
-                .title(format!("Move “{name}” to the Trash?"))
+                .title(title.clone())
                 .description(description.clone())
                 .button_props(
                     gpui_kit::component::dialog::DialogButtonProps::default()
                         .ok_text("Move to Trash"),
                 )
                 .on_ok(move |_, window, cx| {
-                    _ = panel.update(cx, |panel, cx| panel.trash_now(target.clone(), window, cx));
+                    _ = panel.update(cx, |panel, cx| panel.trash_now(targets.clone(), window, cx));
                     true
                 })
         });
     }
 
-    fn trash_now(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_under(&target.path, cx);
-        let paths = vec![target.absolute.clone()];
-        let work = cx.background_spawn(async move { file_ops::trash(&paths) });
-        let parent = parent_of(&target.path);
+    fn trash_now(&mut self, targets: Vec<Target>, window: &mut Window, cx: &mut Context<Self>) {
+        for target in &targets {
+            self.close_under(&target.path, cx);
+        }
+        self.marked.clear();
+        let paths: Vec<PathBuf> = targets.iter().map(|t| t.absolute.clone()).collect();
+        let work = {
+            let paths = paths.clone();
+            cx.background_spawn(async move { file_ops::trash(&paths) })
+        };
+        let mut parents: Vec<String> = targets.iter().map(|t| parent_of(&t.path)).collect();
+        parents.sort();
+        parents.dedup();
         cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
             _ = this.update_in(cx, |this, window, cx| {
-                this.refresh_dir(parent, cx);
+                for parent in parents {
+                    this.refresh_dir(parent, cx);
+                }
                 if this
                     .clipboard
                     .as_ref()
-                    .is_some_and(|clip| clip.paths.contains(&target.absolute))
+                    .is_some_and(|clip| clip.paths.iter().any(|path| paths.contains(path)))
                 {
                     this.clipboard = None;
                 }
@@ -609,14 +647,193 @@ impl FilesPanel {
     }
 
     pub(crate) fn set_clipboard(&mut self, target: &Target, cut: bool, cx: &mut Context<Self>) {
-        if target.is_root {
+        self.set_clipboard_many(std::slice::from_ref(target), cut, cx)
+    }
+
+    /// Copy or Cut of several rows at once, for Paste.
+    pub(crate) fn set_clipboard_many(
+        &mut self,
+        targets: &[Target],
+        cut: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let paths: Vec<PathBuf> = outermost(
+            targets
+                .iter()
+                .filter(|target| !target.is_root)
+                .cloned()
+                .collect(),
+        )
+        .into_iter()
+        .map(|target| target.absolute)
+        .collect();
+        if paths.is_empty() {
             return;
         }
-        self.clipboard = Some(crate::tree_menu::Clipboard {
-            paths: vec![target.absolute.clone()],
-            cut,
-        });
+        self.clipboard = Some(crate::tree_menu::Clipboard { paths, cut });
         cx.notify();
+    }
+
+    /// The rows picked together, when `path` is one of several picked.
+    pub(crate) fn marked_targets(&self, path: &str, cx: &App) -> Option<Vec<Target>> {
+        if self.marked.len() < 2 || !self.marked.iter().any(|marked| marked == path) {
+            return None;
+        }
+        // Not from the tree's state: the menu is built while it updates.
+        let _ = cx;
+        let targets: Vec<Target> = self
+            .marked
+            .iter()
+            .filter_map(|marked| self.target(marked, self.tree.is_dir(marked)))
+            .collect();
+        (targets.len() > 1).then_some(targets)
+    }
+
+    /// The menu for several picked rows.
+    pub(crate) fn marked_menu(&self, targets: Vec<Target>, menu: PopupMenu) -> PopupMenu {
+        let panel = self.weak.clone();
+        let run = |f: fn(&mut FilesPanel, &[Target], &mut Window, &mut Context<FilesPanel>)| {
+            let (panel, targets) = (panel.clone(), targets.clone());
+            move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut App| {
+                _ = panel.update(cx, |panel, cx| f(panel, &targets, window, cx));
+            }
+        };
+        let files = targets.iter().filter(|target| !target.is_folder).count();
+        menu.label(format!("{} items", targets.len()))
+            .separator()
+            .when(files > 0, |menu| {
+                menu.item(
+                    PopupMenuItem::new("Add to Chat")
+                        .icon(Icons::MessageSquare)
+                        .on_click(run(|_, targets, _, cx| {
+                            for target in targets.iter().filter(|target| !target.is_folder) {
+                                cx.emit(FilesPanelEvent::AddToChat(target.path.clone()))
+                            }
+                        })),
+                )
+                .separator()
+            })
+            .item(
+                PopupMenuItem::new("Cut")
+                    .action(Box::new(crate::CutEntry))
+                    .on_click(run(|panel, targets, _, cx| {
+                        panel.set_clipboard_many(targets, true, cx)
+                    })),
+            )
+            .item(
+                PopupMenuItem::new("Copy")
+                    .action(Box::new(crate::CopyEntry))
+                    .on_click(run(|panel, targets, _, cx| {
+                        panel.set_clipboard_many(targets, false, cx)
+                    })),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new("Copy Paths")
+                    .action(Box::new(crate::CopyEntryPath))
+                    .on_click(run(|panel, targets, _, cx| {
+                        copy_text(panel.paths_text(targets, false), cx)
+                    })),
+            )
+            .item(
+                PopupMenuItem::new("Copy Relative Paths")
+                    .action(Box::new(crate::CopyRelativePath))
+                    .on_click(run(|panel, targets, _, cx| {
+                        copy_text(panel.paths_text(targets, true), cx)
+                    })),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new("Move to Trash")
+                    .icon(IconName::Delete)
+                    .action(Box::new(crate::TrashEntry))
+                    .on_click(run(|panel, targets, window, cx| {
+                        panel.trash_entries(targets.to_vec(), window, cx)
+                    })),
+            )
+    }
+
+    /// The menu of the tree's empty space: the workspace's (first) folder.
+    pub(crate) fn background_menu(&self, menu: PopupMenu) -> PopupMenu {
+        let panel = self.weak.clone();
+        let folder = if self.roots.is_multi() {
+            self.roots
+                .list()
+                .first()
+                .map(|root| root.name.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let Some(absolute) = self.roots.absolute(&folder) else {
+            return menu;
+        };
+        let run = |f: fn(&mut FilesPanel, &str, &Path, &mut Window, &mut Context<FilesPanel>)| {
+            let (panel, folder, absolute) = (panel.clone(), folder.clone(), absolute.clone());
+            move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut App| {
+                _ = panel.update(cx, |panel, cx| f(panel, &folder, &absolute, window, cx));
+            }
+        };
+        menu.item(
+            PopupMenuItem::new("New File…")
+                .icon(Icons::FilePlus)
+                .on_click(run(|panel, folder, _, window, cx| {
+                    panel.new_entry(folder.to_string(), false, window, cx)
+                })),
+        )
+        .item(
+            PopupMenuItem::new("New Folder…")
+                .icon(Icons::FolderPlus)
+                .on_click(run(|panel, folder, _, window, cx| {
+                    panel.new_entry(folder.to_string(), true, window, cx)
+                })),
+        )
+        .item(
+            PopupMenuItem::new("Paste")
+                .disabled(self.clipboard.is_none())
+                .on_click(run(|panel, folder, _, window, cx| {
+                    panel.paste_into(folder.to_string(), window, cx)
+                })),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new(ph_ui::platform::reveal_label())
+                .on_click(run(|_, _, absolute, _, cx| cx.reveal_path(absolute))),
+        )
+        .item(
+            PopupMenuItem::new("Open in Terminal")
+                .icon(Icons::Terminal)
+                .on_click(run(|_, _, absolute, _, cx| {
+                    cx.emit(FilesPanelEvent::OpenInTerminal(absolute.to_path_buf()))
+                })),
+        )
+        .item(
+            PopupMenuItem::new("Find in Workspace…")
+                .icon(IconName::Search)
+                .on_click(run(|panel, _, _, window, cx| {
+                    panel.find_in_folder(String::new(), window, cx)
+                })),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new("Collapse All")
+                .on_click(run(|panel, _, _, _, cx| panel.collapse_all(cx))),
+        )
+    }
+
+    /// `targets`' paths, one per line.
+    fn paths_text(&self, targets: &[Target], relative: bool) -> String {
+        targets
+            .iter()
+            .map(|target| {
+                if relative {
+                    self.relative_in_folder(&target.path)
+                } else {
+                    target.absolute.to_string_lossy().into_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Copies or moves what Copy or Cut picked into `dir`.
@@ -895,6 +1112,25 @@ impl FilesPanel {
         if any.is::<crate::PasteEntry>() {
             return self.paste_into(folder, window, cx);
         }
+        // Several rows picked: what can act on all of them does.
+        // (Only when the selected row is one of them: keys act on what the
+        // user is looking at.)
+        if let Some(targets) = target
+            .as_ref()
+            .and_then(|target| self.marked_targets(&target.path, cx))
+        {
+            if any.is::<crate::TrashEntry>() {
+                return self.trash_entries(targets, window, cx);
+            } else if any.is::<crate::CopyEntry>() {
+                return self.set_clipboard_many(&targets, false, cx);
+            } else if any.is::<crate::CutEntry>() {
+                return self.set_clipboard_many(&targets, true, cx);
+            } else if any.is::<crate::CopyEntryPath>() {
+                return copy_text(self.paths_text(&targets, false), cx);
+            } else if any.is::<crate::CopyRelativePath>() {
+                return copy_text(self.paths_text(&targets, true), cx);
+            }
+        }
         let Some(target) = target else {
             return;
         };
@@ -928,7 +1164,7 @@ pub(crate) enum GitOp {
 }
 
 fn copy_text(text: String, cx: &mut App) {
-    cx.write_to_clipboard(ClipboardItem::new_string(text));
+    ph_ui::copy_with_toast(text, "to the clipboard", cx);
 }
 
 /// Shows why a file operation failed, if it did.
@@ -950,6 +1186,9 @@ pub(crate) fn build(
         return menu;
     };
     let panel = panel.read(cx);
+    if let Some(targets) = panel.marked_targets(path, cx) {
+        return panel.marked_menu(targets, menu);
+    }
     match panel.target(path, is_folder) {
         Some(target) => panel.entry_menu(target, menu),
         None => menu,

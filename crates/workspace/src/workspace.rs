@@ -67,6 +67,10 @@ pub struct Workspace {
     settled: HashSet<ph_store::sessions::SessionId>,
     /// Sidebar sections folded away (`chats`, `workspaces`).
     pub(crate) folded: HashSet<String>,
+    /// What the agent CLIs in terminals looked like at the last check.
+    terminal_agents_seen: u64,
+    /// Status checks so far (one a second).
+    status_ticks: u32,
     /// The chats of unfolded workspaces whose screen is closed, read again
     /// each second (a schedule may add one).
     sessions: HashMap<ProjectId, Vec<ph_store::sessions::Session>>,
@@ -164,6 +168,8 @@ impl Workspace {
                     .collect()
             },
             folded: folded.into_iter().collect(),
+            terminal_agents_seen: 0,
+            status_ticks: 0,
             sessions: HashMap::new(),
             spaces: HashMap::new(),
             active_project: None,
@@ -215,6 +221,9 @@ impl Workspace {
         if let Some(id) = initial {
             workspace.open_project(id, window, cx);
         }
+        // The sidebar lists the chats of spaces whose screen is not open
+        // from the store, from the start.
+        workspace.read_sessions(cx);
         workspace
     }
 
@@ -337,6 +346,7 @@ impl Workspace {
         &mut self,
         project: ProjectId,
         pane: &str,
+        transcript: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -347,7 +357,12 @@ impl Workspace {
         let terminal = crate::terminal_agents::TerminalAgents::find(pane, cx)
             .and_then(|agent| agent.terminal.upgrade());
         if let (Some(space), Some(terminal)) = (self.spaces.get(&project).cloned(), terminal) {
-            space.update(cx, |space, cx| space.show_terminal(&terminal, window, cx));
+            space.update(cx, |space, cx| {
+                space.show_terminal(&terminal, window, cx);
+                if transcript {
+                    space.show_transcript(&terminal, window, cx);
+                }
+            });
         }
         crate::terminal_agents::TerminalAgents::seen(pane, cx);
         cx.notify();
@@ -389,14 +404,21 @@ impl Workspace {
         let _ = AppState::store(cx).set_setting(keys::SIDEBAR_EXPANDED, &ids);
     }
 
-    /// Reads the chats of unfolded workspaces without a screen.
+    /// Reads the chats of unfolded workspaces without a screen, and of the
+    /// Chats space (listed whenever its section is not folded away).
     fn read_sessions(&mut self, cx: &mut Context<Self>) -> bool {
         let store = AppState::store(cx).clone();
         let mut changed = self.read_pinned(cx);
+        let chats = self
+            .chats_space
+            .as_ref()
+            .filter(|_| !self.folded.contains(crate::sidebar::CHATS))
+            .map(|chats| chats.id);
         let wanted: Vec<ProjectId> = self
             .expanded
             .iter()
             .copied()
+            .chain(chats)
             .filter(|id| !self.spaces.contains_key(id))
             .collect();
         self.sessions.retain(|id, _| wanted.contains(id));
@@ -481,6 +503,7 @@ impl Workspace {
         let mut names: Vec<&String> = self.folded.iter().collect();
         names.sort();
         let _ = AppState::store(cx).set_setting(keys::SIDEBAR_FOLDED, &names);
+        self.read_sessions(cx);
         cx.notify();
     }
 
@@ -773,8 +796,21 @@ impl Workspace {
             .chain(self.chats_space.as_ref())
             .map(|project| (project.id, WorkspaceStatus::of(project.id, cx)))
             .collect();
-        let sessions_changed = self.read_sessions(cx);
-        if statuses != self.statuses || sessions_changed {
+        // The store, for chats of spaces without a screen (changed by
+        // schedules or another window): every few seconds, not each one.
+        self.status_ticks = self.status_ticks.wrapping_add(1);
+        let sessions_changed = self.status_ticks.is_multiple_of(5) && self.read_sessions(cx);
+        // The sidebar lists agent CLIs in terminals: redrawn when they change.
+        let agents = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for agent in crate::terminal_agents::TerminalAgents::all(cx) {
+                (&agent.pane, agent.state as u8, &agent.title, &agent.line).hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        let agents_changed = std::mem::replace(&mut self.terminal_agents_seen, agents) != agents;
+        if statuses != self.statuses || sessions_changed || agents_changed {
             self.statuses = statuses;
             cx.notify();
         }

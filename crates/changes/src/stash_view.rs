@@ -72,20 +72,28 @@ impl StashView {
     }
 
     fn act(&mut self, index: usize, action: Action, cx: &mut Context<Self>) {
+        let hash = self
+            .stashes
+            .iter()
+            .find(|stash| stash.index == index)
+            .map(|stash| stash.hash.clone())
+            .unwrap_or_default();
         self.repo.update(cx, |repo, cx| match action {
             Action::Apply => repo.run(
                 "Applying stash",
-                move |root| stash::apply(root, index).map(|_| "Stash applied".into()),
+                move |root| stash::apply(root, index, &hash).map(|_| "Stash applied".into()),
                 cx,
             ),
             Action::Pop => repo.run(
                 "Popping stash",
-                move |root| stash::pop(root, index).map(|_| "Stash applied and removed".into()),
+                move |root| {
+                    stash::pop(root, index, &hash).map(|_| "Stash applied and removed".into())
+                },
                 cx,
             ),
             Action::Drop => repo.run(
                 "Dropping stash",
-                move |root| stash::drop(root, index).map(|_| "Stash dropped".into()),
+                move |root| stash::drop(root, index, &hash).map(|_| "Stash dropped".into()),
                 cx,
             ),
         });

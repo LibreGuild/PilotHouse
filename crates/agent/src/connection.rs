@@ -141,6 +141,8 @@ impl AgentConnection {
     }
 
     pub fn register_thread(&mut self, acp_session_id: String, thread: WeakEntity<ChatThread>) {
+        // Chats closed since are forgotten.
+        self.threads.retain(|_, known| known.upgrade().is_some());
         self.threads.insert(acp_session_id, thread);
     }
 

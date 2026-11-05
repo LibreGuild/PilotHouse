@@ -137,7 +137,10 @@ pub fn export(
         // A GIF over its limit is made again, smaller.
         let mut tries = 0;
         loop {
-            write_gif(source, info, edit, &plan, &partial, progress)?;
+            // A failure leaves the loop, so the partial file goes below.
+            if let Err(err) = write_gif(source, info, edit, &plan, &partial, progress) {
+                break Err(err);
+            }
             let bytes = std::fs::metadata(&partial)
                 .map(|meta| meta.len())
                 .unwrap_or(0);
@@ -168,8 +171,8 @@ pub fn export(
                 codec,
                 audio: plan.audio.clone(),
             },
-        )?;
-        write_frames(source, info, edit, &plan, encoder, progress)
+        );
+        encoder.and_then(|encoder| write_frames(source, info, edit, &plan, encoder, progress))
     };
     if let Err(err) = result {
         let _ = std::fs::remove_file(&partial);

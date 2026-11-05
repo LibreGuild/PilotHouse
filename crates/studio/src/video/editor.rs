@@ -308,7 +308,7 @@ impl VideoEditor {
                 _ => None,
             };
             for image in this.old_images.drain(..).chain(current) {
-                cx.drop_image(image, None);
+                ph_ui::images::release_render_image(image, cx);
             }
         })
         .detach();
@@ -418,7 +418,7 @@ impl VideoEditor {
             }
             if self.old_images.len() > 1 {
                 for image in self.old_images.drain(..self.old_images.len() - 1) {
-                    cx.drop_image(image, None);
+                    ph_ui::images::release_render_image(image, cx);
                 }
             }
             changed = true;
@@ -695,7 +695,7 @@ impl VideoEditor {
         }
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
-        if modifiers.secondary() || modifiers.alt || modifiers.control {
+        if modifiers.secondary(cx) || modifiers.alt || modifiers.control {
             return;
         }
         let handled = match keystroke.key.as_str() {

@@ -205,7 +205,13 @@ fn ignore_rules(root: &Path) -> ignore::gitignore::Gitignore {
 
 fn is_ignored(rules: &ignore::gitignore::Gitignore, git_dir: &Path, path: &Path) -> bool {
     // `.git` itself is filtered by `is_relevant`; never treat it as ignored.
-    !path.starts_with(git_dir) && rules.matched_path_or_any_parents(path, false).is_ignore()
+    // A path outside the rules' folder (the system reporting the real path
+    // of a folder reached through a link) is not matched: the matcher
+    // asserts it is inside, and this runs in the watcher's callback, where
+    // a panic would end the app.
+    !path.starts_with(git_dir)
+        && path.starts_with(rules.path())
+        && rules.matched_path_or_any_parents(path, false).is_ignore()
 }
 
 /// Inside `.git/`, only the files that mean "staging, branch, refs or a

@@ -111,8 +111,27 @@ pub fn sync(store: &Store, pull: &PullRef) -> Result<Synced> {
             }
         }
     }
-    let line_comments = pulls::line_comments(&client, &repo, pull.number).unwrap_or_default();
-    let conversation = pulls::conversation(&client, &repo, pull.number).unwrap_or_default();
+    // A reply settles a finding only from the pull request's author, this
+    // account, or someone who can write to the repository: on a public one
+    // anyone can comment.
+    let author = pulls::get(&client, &repo, pull.number)
+        .map(|pull| pull.user.login)
+        .unwrap_or_default();
+    let may_answer = |login: &str, association: &str| {
+        login == me
+            || (!author.is_empty() && login == author)
+            || matches!(association, "OWNER" | "MEMBER" | "COLLABORATOR")
+    };
+    let line_comments: Vec<_> = pulls::line_comments(&client, &repo, pull.number)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|comment| may_answer(&comment.user.login, &comment.author_association))
+        .collect();
+    let conversation: Vec<_> = pulls::conversation(&client, &repo, pull.number)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|comment| may_answer(&comment.user.login, &comment.author_association))
+        .collect();
     let mut seen: std::collections::BTreeMap<String, u64> = store.setting(CONVERSATION_SEEN_KEY);
     let key = watch_key(pull);
     let conversation_after = seen.get(&key).copied().unwrap_or(0);

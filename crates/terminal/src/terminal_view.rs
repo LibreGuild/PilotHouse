@@ -20,7 +20,7 @@ use gpui_kit::{
     App, Bounds, ClipboardItem, Context, ElementInputHandler, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, Hsla,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Pixels,
-    Render, ScrollWheelEvent, StrikethroughStyle, Styled as _, StyledText, Subscription, TextRun,
+    Render, ScrollEvent, StrikethroughStyle, Styled as _, StyledText, Subscription, TextRun,
     UTF16Selection, UnderlineStyle, Window, canvas, div, font, point, px, size,
 };
 
@@ -55,6 +55,9 @@ pub struct TerminalView {
     typed: String,
     /// The find bar, while open.
     find: Option<FindBar>,
+    /// Wheel movement smaller than a line, kept until it adds up to one
+    /// (a trackpad sends many small steps).
+    scroll_rest: f32,
     _observe: Subscription,
 }
 
@@ -79,6 +82,7 @@ impl TerminalView {
             composing: String::new(),
             typed: String::new(),
             find: None,
+            scroll_rest: 0.,
         }
     }
 
@@ -238,7 +242,9 @@ impl TerminalView {
             return;
         }
         self.typed.clear();
-        if let Ok(keystroke) = gpui_kit::Keystroke::parse(&action.key) {
+        if let Ok(keystroke) =
+            gpui_kit::Keystroke::parse_with_os(&action.key, cx.platform_info().os)
+        {
             self.send_keystroke(&keystroke, cx);
         }
     }
@@ -373,17 +379,54 @@ impl TerminalView {
         }
     }
 
-    fn scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    /// The wheel: to a program that asked for the mouse (Codex, Claude Code,
+    /// vim…) as wheel clicks; on a full-screen program's screen without
+    /// one, as arrow keys (as other terminals do); otherwise it scrolls back
+    /// through the history.
+    fn scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         let line_height =
             line_height(px(ph_theme::preferences::preferences(cx).terminal_font_size));
         let delta = event.delta.pixel_delta(line_height).y;
-        let lines = (delta / line_height).round() as i32;
-        if lines != 0 {
-            self.terminal
-                .read(cx)
-                .term()
-                .lock()
-                .scroll_display(Scroll::Delta(lines));
+        if matches!(event.touch_phase, gpui_kit::TouchPhase::Started) {
+            self.scroll_rest = 0.;
+        }
+        self.scroll_rest += delta / line_height;
+        let lines = self.scroll_rest.trunc() as i32;
+        if lines == 0 {
+            return;
+        }
+        self.scroll_rest -= lines as f32;
+        cx.stop_propagation();
+        let cell = self.cell_at(event.position, cx);
+        let terminal = self.terminal.read(cx);
+        let mode = *terminal.term().lock().mode();
+        if mode.intersects(TermMode::MOUSE_MODE) {
+            // Up is button 64, down 65; at most a screenful per event.
+            let button = if lines > 0 { 64 } else { 65 };
+            let (column, row) = cell
+                .map(|(point, _)| {
+                    let offset = terminal.term().lock().grid().display_offset() as i32;
+                    (
+                        point.column.0 + 1,
+                        (point.line.0 + offset).max(0) as usize + 1,
+                    )
+                })
+                .unwrap_or((1, 1));
+            let mut bytes = Vec::new();
+            for _ in 0..lines.unsigned_abs().min(50) {
+                bytes.extend(wheel_report(button, column, row, mode));
+            }
+            terminal.write(bytes);
+        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+            let key: &[u8] = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
+                (true, true) => b"\x1bOA",
+                (true, false) => b"\x1b[A",
+                (false, true) => b"\x1bOB",
+                (false, false) => b"\x1b[B",
+            };
+            terminal.write(key.repeat(lines.unsigned_abs().min(50) as usize));
+        } else {
+            terminal.term().lock().scroll_display(Scroll::Delta(lines));
             cx.notify();
         }
     }
@@ -597,7 +640,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::ask))
             .on_action(cx.listener(Self::open_find))
-            .on_scroll_wheel(cx.listener(Self::scroll))
+            .on_scroll(cx.listener(Self::scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
@@ -789,7 +832,7 @@ mod input_tests {
     #[test]
     fn text_keys_go_to_the_text_input() {
         let key = |text: &str| {
-            gpui_kit::Keystroke::parse(text)
+            gpui_kit::Keystroke::parse_with_os(text, gpui_kit::OperatingSystem::Mac)
                 .unwrap()
                 .with_simulated_ime()
         };
@@ -798,5 +841,34 @@ mod input_tests {
         assert!(!is_text(&key("enter")));
         assert!(!is_text(&key("ctrl-c")));
         assert!(!is_text(&key("cmd-v")));
+    }
+}
+
+/// A wheel click as the program asked for mouse reports: SGR
+/// (`ESC [ < b ; x ; y M`) or the old form (`ESC [ M` and three bytes,
+/// for cells up to 223).
+fn wheel_report(button: u8, column: usize, row: usize, mode: TermMode) -> Vec<u8> {
+    if mode.contains(TermMode::SGR_MOUSE) {
+        format!("\x1b[<{button};{column};{row}M").into_bytes()
+    } else {
+        let at = |n: usize| (n.min(223) + 32) as u8;
+        vec![0x1b, b'[', b'M', button + 32, at(column), at(row)]
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+
+    #[test]
+    fn wheel_reports() {
+        assert_eq!(
+            wheel_report(64, 3, 4, TermMode::SGR_MOUSE),
+            b"\x1b[<64;3;4M"
+        );
+        assert_eq!(
+            wheel_report(65, 1, 1, TermMode::empty()),
+            vec![0x1b, b'[', b'M', 97, 33, 33]
+        );
     }
 }

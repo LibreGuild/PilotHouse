@@ -1,7 +1,7 @@
 //! One running `agy` process in headless stream-json mode.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Stdio};
@@ -53,7 +53,7 @@ impl Agy {
 
         let (sender, events) = mpsc::channel();
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            for line in ph_env::lossy_lines(stdout) {
                 match serde_json::from_str::<Value>(&line) {
                     Ok(event) => {
                         if sender.send(event).is_err() {
@@ -67,7 +67,7 @@ impl Agy {
         let stderr = Arc::new(Mutex::new(VecDeque::new()));
         let tail = stderr.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(stderr_pipe).lines().map_while(Result::ok) {
+            for line in ph_env::lossy_lines(stderr_pipe) {
                 let mut tail = tail.lock().unwrap();
                 if tail.len() == STDERR_LINES {
                     tail.pop_front();

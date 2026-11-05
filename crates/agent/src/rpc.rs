@@ -7,7 +7,7 @@
 //! (notifications and its own requests) is delivered as [`Incoming`].
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::Write as _;
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -58,6 +58,9 @@ type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>
 pub struct RpcProcess {
     writer: smol::channel::Sender<String>,
     pending: Pending,
+    /// The agent's output ended: no answer will come (set with `pending`
+    /// locked, so a request either sees it or is failed with the rest).
+    closed: Arc<std::sync::atomic::AtomicBool>,
     next_id: AtomicU64,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     child: Mutex<Child>,
@@ -121,12 +124,13 @@ impl RpcProcess {
                 }
             })?;
 
+        let closed: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let read_closed = closed.clone();
         let read_pending = pending.clone();
         std::thread::Builder::new()
             .name("acp-read".into())
             .spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { break };
+                for line in ph_env::lossy_lines(stdout) {
                     if line.trim().is_empty() {
                         continue;
                     }
@@ -140,16 +144,15 @@ impl RpcProcess {
                     }
                 }
                 // Fail requests still waiting, so callers are not stuck forever.
-                for (_, waiter) in read_pending
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .drain()
-                {
+                let mut waiting = read_pending.lock().unwrap_or_else(|e| e.into_inner());
+                read_closed.store(true, Ordering::Relaxed);
+                for (_, waiter) in waiting.drain() {
                     let _ = waiter.send(Err(RpcError {
                         code: -32000,
                         message: "the agent process exited".into(),
                     }));
                 }
+                drop(waiting);
                 let _ = incoming_sender.send_blocking(Incoming::Closed);
             })?;
 
@@ -157,7 +160,7 @@ impl RpcProcess {
         std::thread::Builder::new()
             .name("acp-stderr".into())
             .spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                for line in ph_env::lossy_lines(stderr) {
                     tracing::debug!(target: "ph_agent::stderr", "{line}");
                     let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
                     if tail.len() == STDERR_TAIL_LINES {
@@ -170,6 +173,7 @@ impl RpcProcess {
         let process = Arc::new(Self {
             writer,
             pending,
+            closed,
             next_id: AtomicU64::new(1),
             stderr_tail,
             child: Mutex::new(child),
@@ -185,20 +189,26 @@ impl RpcProcess {
     ) -> impl std::future::Future<Output = Result<Value>> + use<> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
-        self.pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id, sender);
+        {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            if self.closed.load(Ordering::Relaxed) {
+                drop(pending);
+                return futures::future::Either::Left(std::future::ready(Err(anyhow!(
+                    "the agent process exited"
+                ))));
+            }
+            pending.insert(id, sender);
+        }
         let sent =
             self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
-        async move {
+        futures::future::Either::Right(async move {
             sent?;
             match receiver.await {
                 Ok(Ok(result)) => Ok(result),
                 Ok(Err(err)) => Err(err.into()),
                 Err(_) => Err(anyhow!("the agent process exited")),
             }
-        }
+        })
     }
 
     pub fn notify(&self, method: &str, params: Value) -> Result<()> {

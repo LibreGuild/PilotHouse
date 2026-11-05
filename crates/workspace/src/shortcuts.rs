@@ -207,7 +207,9 @@ pub(crate) fn render(one_column: bool, window: &mut Window, cx: &mut App) -> Any
                         .children(
                             strokes
                                 .iter()
-                                .filter_map(|stroke| Keystroke::parse(stroke).ok())
+                                .filter_map(|stroke| {
+                                    Keystroke::parse_with_os(stroke, cx.platform_info().os).ok()
+                                })
                                 .map(Kbd::new),
                         )
                         .into_any_element(),
