@@ -251,6 +251,10 @@ fn prefs_key(agent_id: &str) -> String {
     format!("agent.{agent_id}.prefs")
 }
 
+fn cached_at_key(agent_id: &str) -> String {
+    format!("agent.{agent_id}.options_at")
+}
+
 /// The options the agent offered last time (for the picker before it starts).
 pub fn cached(store: &Store, agent_id: &str) -> Vec<AgentOption> {
     store.setting(&cache_key(agent_id))
@@ -260,6 +264,19 @@ pub fn cache(store: &Store, agent_id: &str, options: &[AgentOption]) {
     if let Err(err) = store.set_setting(&cache_key(agent_id), &options) {
         tracing::warn!("caching agent options failed: {err:#}");
     }
+    let _ = store.set_setting(&cached_at_key(agent_id), &Some(unix_millis()));
+}
+
+/// When [`cache`] last ran for the agent (Unix milliseconds).
+pub fn cached_at(store: &Store, agent_id: &str) -> Option<i64> {
+    store.setting(&cached_at_key(agent_id))
+}
+
+pub(crate) fn unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
 }
 
 /// The user's chosen values, by option id.

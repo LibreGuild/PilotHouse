@@ -175,19 +175,39 @@ pub fn database_path() -> PathBuf {
 /// On Windows it is a file in the data folder holding the name of the
 /// app's named pipe (random for each run).
 pub fn control_socket_path() -> PathBuf {
+    local_endpoint("control")
+}
+
+/// Where the app listens for its Chrome extension's native messaging host
+/// (`pilothouse chrome-host`): a local endpoint like the control socket's,
+/// owner-only, never a network port.
+pub fn chrome_bridge_path() -> PathBuf {
+    local_endpoint("chrome-bridge")
+}
+
+/// A local endpoint named `name` for this data folder: `<name>.pipe` (the
+/// file naming a named pipe) on Windows, `<name>.sock` elsewhere, in the
+/// private temp folder when the data folder's path is too long for a socket.
+fn local_endpoint(name: &str) -> PathBuf {
     let dir = data_dir();
     if cfg!(windows) {
-        return dir.join("control.pipe");
+        return dir.join(format!("{name}.pipe"));
     }
     const MAX_SOCKET_PATH: usize = 100;
-    let preferred = dir.join("control.sock");
+    let preferred = dir.join(format!("{name}.sock"));
     if preferred.as_os_str().len() < MAX_SOCKET_PATH {
         return preferred;
     }
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     dir.hash(&mut hasher);
-    private_temp_dir().join(format!("pilothouse-{:016x}.sock", hasher.finish()))
+    // In the per-user `pilothouse-<user>` folder: short, since a socket's
+    // whole path must fit in ~104 bytes and macOS's temp folder is long.
+    let prefix = match name {
+        "control" => "pilothouse",
+        other => other.split('-').next().unwrap_or(other),
+    };
+    private_temp_dir().join(format!("{prefix}-{:016x}.sock", hasher.finish()))
 }
 
 /// A private folder named `name` for sockets: in the data folder when its

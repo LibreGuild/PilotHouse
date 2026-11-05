@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PilotHouse: steer every coding agent from one window</title>
   <meta name="description" content="A fast, native app where Claude Code, Codex, Gemini CLI and Antigravity work beside your code, Git, terminals, a browser and Android devices, with a studio for pictures, videos and slides. Free and open source.">
-  <meta name="theme-color" content="#0b0820">
+  <meta name="theme-color" content="#000000">
   <meta property="og:title" content="PilotHouse">
   <meta property="og:description" content="Steer every coding agent from one window. Native, private, open source.">
   <meta property="og:image" content="shots/hero.webp">
@@ -14,7 +14,6 @@
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
-  <div class="glow-cursor" aria-hidden="true"></div>
   <div class="progress" aria-hidden="true"></div>
 
   <header class="nav">
@@ -25,75 +24,84 @@
     <nav aria-label="Sections">
       <a href="#agents">Agents</a>
       <a href="#tour">Tour</a>
+      <a href="#workbench">Workbench</a>
       <a href="#studio">Studio</a>
+      <a href="#automation">Automation</a>
       <a href="#themes">Themes</a>
-      <a href="#features">Features</a>
       <a href="#private">Privacy</a>
     </nav>
-    <a class="btn small primary magnetic" href="#download">Download</a>
+    <a class="btn small primary" href="#download">Download</a>
   </header>
 
   <main id="main">
-    <!-- Hero: a live sea of light under the app. -->
+    <!-- Hero: a radar of agents under the headline; the app rises as you scroll. -->
     <section class="hero" id="top">
-      <canvas class="sea" aria-hidden="true"></canvas>
+      <div class="radar" aria-hidden="true">
+        <i class="ring"></i><i class="ring"></i><i class="ring"></i><i class="ring"></i>
+        <i class="cross"></i>
+        <i class="sweep"></i>
+        <b class="blip amber" style="--x:68%;--y:30%;--d:0.7s"><span>needs you</span></b>
+        <b class="blip green" style="--x:76%;--y:72%;--d:2.17s"><span>finished</span></b>
+        <b class="blip violet" style="--x:18%;--y:70%;--d:4.13s"><span>working</span></b>
+        <b class="blip violet" style="--x:36%;--y:24%;--d:5.53s"></b>
+      </div>
       <div class="hero-copy">
-        <img class="hero-mark" src="mark.svg" alt="" width="84" height="84">
-        <p class="eyebrow reveal">Version 0.5.1 · free and open source</p>
+        <p class="eyebrow">Version 0.6.0 · free and open source</p>
         <h1 class="headline" aria-label="Steer every coding agent from one window.">
           <span class="row"><span class="w">Steer</span> <span class="w">every</span> <span class="w">coding</span> <span class="w">agent</span></span>
           <span class="row"><span class="w hl">from</span> <span class="w hl">one</span> <span class="w hl">window.</span></span>
         </h1>
-        <p class="lede reveal">One fast, native app where Claude Code, Codex, Gemini CLI and Antigravity work beside your code, Git, terminals, a browser and Android devices, and help you make the pictures, videos and slides that go with it. You steer; the agents see what you see.</p>
-        <div class="ctas reveal">
-          <a class="btn primary magnetic" id="download-main" href="#download">Download PilotHouse</a>
-          <a class="btn ghost magnetic" href="https://github.com/LibreGuild/PilotHouse">Source on GitHub</a>
+        <p class="lede">One fast, native app where Claude Code, Codex, Gemini CLI and Antigravity work beside your code, Git, terminals, a browser and Android devices, and help you make the pictures, videos and slides that go with it. You steer; the agents see what you see.</p>
+        <div class="ctas">
+          <a class="btn primary" id="download-main" href="#download">Download PilotHouse</a>
+          <a class="btn ghost" href="https://github.com/LibreGuild/PilotHouse">Source on GitHub</a>
         </div>
-        <ul class="facts reveal">
+        <ul class="facts">
           <li>macOS, Windows and Linux</li>
           <li>No account, no telemetry</li>
           <li>Apache-2.0</li>
         </ul>
       </div>
 
-      <div class="hero-stage" aria-label="PilotHouse with three workspaces: one agent finished, one waits for approval, one is working.">
-        <div class="tilt">
-          <figure class="window">
-            <img src="shots/hero.webp" alt="PilotHouse: workspaces in the sidebar, a finished agent turn with its plan in the chat, and the Git tab with five changed files." width="1600" height="1000">
-          </figure>
-          <!-- Pieces of the interface, floating at different depths. -->
-          <div class="chip chip-a" aria-hidden="true"><span class="q">?</span> tidewatch-android <b>needs you</b></div>
-          <div class="chip chip-b" aria-hidden="true"><span class="spin"></span> harbour-office <b>1 working</b></div>
-          <div class="chip chip-c" aria-hidden="true"><span class="ok">✓</span> Plan 4/4 · <i class="plus">+32</i> <i class="minus">−0</i></div>
-        </div>
+      <div class="hero-stage">
+        <figure class="window hero-window sd sd-tilt" style="--a:0%;--b:42%">
+          <img src="shots/hero.webp" alt="PilotHouse with three workspaces in the sidebar: harbor, where Claude Code finished a turn and its plan shows in the chat; tidewatch-android, where Codex waits for approval; and harbour-office, where Antigravity is working. The Git tab shows the changed files." width="1600" height="1000">
+        </figure>
+        <div class="chip chip-a sd sd-float" style="--depth:0.6" aria-hidden="true"><span class="spin"></span> Antigravity · harbour-office <b>working</b></div>
+        <div class="chip chip-b sd sd-float" style="--depth:-0.5" aria-hidden="true"><span class="q">?</span> Codex · tidewatch-android <b>needs you</b></div>
+        <div class="chip chip-c sd sd-float" style="--depth:0.7" aria-hidden="true"><span class="ok">✓</span> Claude Code · harbor · <b>9 tests pass</b></div>
       </div>
     </section>
 
-    <section class="marquee" aria-label="Works with the agents you already use">
-      <p class="marquee-title">Works with the agents you already use</p>
-      <div class="marquee-track" aria-hidden="true">
-        <span>Claude Code</span><span>Codex</span><span>Gemini CLI</span><span>Antigravity</span>
-        <span>Claude Code</span><span>Codex</span><span>Gemini CLI</span><span>Antigravity</span>
-        <span>Claude Code</span><span>Codex</span><span>Gemini CLI</span><span>Antigravity</span>
+    <!-- The agents, in letters that run past like a ticker. -->
+    <section class="strip" aria-label="Works with the agents you already use">
+      <p class="strip-title">Works with the agents you already use, with your own installs and sign-ins</p>
+      <div class="strip-row" aria-hidden="true">
+        <span>Claude Code</span><span class="o">Codex</span><span>Gemini CLI</span><span class="o">Antigravity</span><span>Claude Code</span><span class="o">Codex</span><span>Gemini CLI</span><span class="o">Antigravity</span>
+      </div>
+      <div class="strip-row rev" aria-hidden="true">
+        <span class="o">Antigravity</span><span>Gemini CLI</span><span class="o">Codex</span><span>Claude Code</span><span class="o">Antigravity</span><span>Gemini CLI</span><span class="o">Codex</span><span>Claude Code</span>
       </div>
       <p class="sr-only">Claude Code, Codex, Gemini CLI and Antigravity.</p>
     </section>
 
-    <!-- A live rebuild of the Agents panel: chats change state as you watch. -->
+    <!-- Steering: a live rebuild of the Agents panel. -->
     <section class="split" id="agents">
       <div class="split-copy">
-        <p class="kicker reveal">Steering, not babysitting</p>
+        <p class="kicker reveal"><i>01</i> Steer</p>
         <h2 class="reveal">Every agent, every workspace, at a glance.</h2>
-        <p class="reveal">Run agents in many repositories at once. The Agents panel says which one waits for an answer, which are working and which just finished, and a click takes you there. No more checking every terminal and tab.</p>
+        <p class="reveal">Run agents in many repositories at once. The Agents panel (⌘⇧A) says which one waits for an answer, which are working and which just finished, and a click takes you there. No more checking every terminal and tab.</p>
         <ul class="ticks reveal">
           <li><b>Needs you</b> rises to the top, amber, with the question it asks.</li>
           <li><b>Working</b> shows what the agent is doing right now.</li>
           <li><b>Finished</b> stays green until you have looked.</li>
+          <li><b>The inbox</b> gathers approvals, your reminders and schedules that ran; the system tells you when a chat needs you.</li>
+          <li><b>While you were away</b>: coming back to a workspace shows what finished, one click each.</li>
         </ul>
       </div>
       <div class="panel-demo reveal" aria-label="An example of the Agents panel" role="img">
         <div class="panel">
-          <div class="panel-title">Agents</div>
+          <div class="panel-title">Agents <kbd>⌘⇧A</kbd></div>
           <div class="panel-sec" data-sec="needs"><span>Needs you</span><i class="count">1</i></div>
           <div class="panel-list" data-list="needs"></div>
           <div class="panel-sec" data-sec="working"><span>Working</span><i class="count">2</i></div>
@@ -104,143 +112,285 @@
       </div>
     </section>
 
-    <!-- Scroll tour: the real app, zoomed in where it matters. -->
-    <section class="tour" id="tour">
+    <!-- Scroll tour: the real app, pinned, zoomed in where each step is. -->
+    <section class="tour" id="tour" aria-label="A tour of the window">
       <div class="tour-sticky">
-        <div class="tour-stage">
-          <figure class="window tour-window">
-            <img class="layer" data-layer="hero" src="shots/hero.webp" alt="" width="1600" height="1000">
-            <img class="layer" data-layer="diff" src="shots/diff.webp" alt="" width="1600" height="1000" loading="lazy">
-            <img class="layer" data-layer="markdown" src="shots/markdown.webp" alt="" width="1600" height="1000" loading="lazy">
-            <img class="layer" data-layer="needs" src="shots/needs-you.webp" alt="" width="1600" height="1000" loading="lazy">
-            <div class="spotlight"></div>
-          </figure>
-        </div>
+        <figure class="window tour-window">
+          <img class="layer" data-layer="hero" src="shots/hero.webp" alt="" width="1600" height="1000">
+          <img class="layer" data-layer="diff" src="shots/diff.webp" alt="" width="1600" height="1000" loading="lazy">
+          <img class="layer" data-layer="markdown" src="shots/markdown.webp" alt="" width="1600" height="1000" loading="lazy">
+          <img class="layer" data-layer="needs" src="shots/needs-you.webp" alt="" width="1600" height="1000" loading="lazy">
+          <div class="spotlight"></div>
+          <div class="tour-dots" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        </figure>
       </div>
       <ol class="tour-steps">
         <li class="step" data-layer="hero" data-x="-45" data-y="-6" data-s="1.9" data-spot="19% 46%">
-          <span class="step-no">01</span>
+          <span class="step-no">02 · 1</span>
           <h3>Workspaces that say what they are doing.</h3>
-          <p>Every folder or repository is a workspace with its own chats, colour and status: <em>needs you</em>, <em>working</em>, <em>failing</em>, <em>done</em>. Fold one, pin a chat, open another in its own window.</p>
+          <p>Every folder or repository is a workspace with its own chats, colour and status: <em>needs you</em>, <em>working</em>, <em>failing</em>, <em>done</em>. One workspace can hold several folders. Fold one, pin a chat, open another in its own window.</p>
         </li>
         <li class="step" data-layer="hero" data-x="-2" data-y="-4" data-s="1.8" data-spot="47% 45%">
-          <span class="step-no">02</span>
+          <span class="step-no">02 · 2</span>
           <h3>See the plan, the steps and the result.</h3>
-          <p>Agents speak the Agent Client Protocol: their plan ticks off as they go, every read, search, edit and command shows in place, and the turn ends with what changed and a way to undo it.</p>
+          <p>Agents speak the Agent Client Protocol: their plan ticks off as they go, every read, search, edit and command shows in place, and the turn ends with what changed, <em>Review changes</em> and <em>Undo turn</em>.</p>
         </li>
         <li class="step" data-layer="hero" data-x="35" data-y="-6" data-s="1.8" data-spot="80% 52%">
-          <span class="step-no">03</span>
+          <span class="step-no">02 · 3</span>
           <h3>Git beside the chat.</h3>
           <p>Each changed file with its lines added and removed and what happened to it. Keep or discard a hunk, write the commit message with an agent, or have one review the changes before you push.</p>
         </li>
         <li class="step" data-layer="diff" data-x="-6" data-y="-4" data-s="1.35" data-spot="45% 45%">
-          <span class="step-no">04</span>
+          <span class="step-no">02 · 4</span>
           <h3>Every change, side by side.</h3>
           <p>One file or all of them open as a diff in the editor, unified or split, new files included, with syntax colours. Thousands of files scroll without a stutter.</p>
         </li>
         <li class="step" data-layer="markdown" data-x="-4" data-y="0" data-s="1.35" data-spot="48% 48%">
-          <span class="step-no">05</span>
+          <span class="step-no">02 · 5</span>
           <h3>Plans that read like documents.</h3>
-          <p>Markdown opens formatted and edits in place: double-click a heading or a table cell and type. Mermaid diagrams draw as you write, and copying gives you the Markdown back.</p>
+          <p>Markdown opens formatted and edits in place, a block at a time: double-click a heading or a table cell and type. Mermaid diagrams draw as you write, and copying gives you the Markdown back.</p>
         </li>
-        <li class="step" data-layer="needs" data-x="-27" data-y="-10" data-s="1.55" data-spot="60% 64%">
-          <span class="step-no">06</span>
+        <li class="step" data-layer="needs" data-x="-17" data-y="-12" data-s="1.45" data-spot="48% 62%">
+          <span class="step-no">02 · 6</span>
           <h3>Nothing runs without you.</h3>
-          <p>Commands and edits ask first when you want them to. The question waits in the chat, in the sidebar and in the Agents panel until you answer.</p>
+          <p>Commands and edits ask first when you want them to. Here Codex waits to run <code>./scripts/deploy.sh staging</code>: the question waits in the chat, in the sidebar and in the Agents panel until you answer, and the Mode button sets how much an agent may do on its own.</p>
         </li>
       </ol>
     </section>
 
-    <!-- Mention demo: typing an @ in the chat box. -->
-    <section class="split reverse">
-      <div class="split-copy">
-        <p class="kicker reveal">Context, one @ away</p>
-        <h2 class="reveal">Point at anything. The agent gets it whole.</h2>
-        <p class="reveal">A file, a folder, a definition, a screenshot of the browser or the phone, its logs, a pull request, a card on the board: type <code>@</code> and pick. No copying between apps.</p>
+    <!-- The chat: an @ typed in the composer, and what else the chat does. -->
+    <section class="chat" id="chat">
+      <div class="split reverse">
+        <div class="split-copy">
+          <p class="kicker reveal"><i>03</i> Context, one @ away</p>
+          <h2 class="reveal">Point at anything. The agent gets it whole.</h2>
+          <p class="reveal">A file, a folder, a function by name, a screenshot of the browser or the phone, its logs, a pull request, the last test run, a card on the board: type <code>@</code> or <code>#</code> and pick. No copying between apps.</p>
+        </div>
+        <div class="composer-demo reveal" role="img" aria-label="Typing an at-mention in the chat box shows files, folders and live sources to attach.">
+          <div class="suggest">
+            <div class="sugg" data-i="0"><span class="ico folder"></span>src/<em>folder</em></div>
+            <div class="sugg" data-i="1"><span class="ico rs"></span>src/routes/bookings.rs</div>
+            <div class="sugg" data-i="2"><span class="ico rs"></span>src/store.rs</div>
+            <div class="sugg" data-i="3"><span class="ico shot"></span>screenshot<em>browser or phone</em></div>
+            <div class="sugg" data-i="4"><span class="ico log"></span>log<em>recent logs</em></div>
+          </div>
+          <div class="composer">
+            <div class="typed"><span class="text"></span><span class="caret"></span></div>
+            <div class="composer-bar"><span class="agent-pick"><svg class="burst" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v6.5M12 14.5V21M3 12h6.5M14.5 12H21M5.6 5.6l4.6 4.6M13.8 13.8l4.6 4.6M5.6 18.4l4.6-4.6M13.8 10.2l4.6-4.6"/></svg> Claude Code</span><span class="pill">Medium</span><span class="pill">Manual</span><span class="send">↑</span></div>
+          </div>
+        </div>
       </div>
-      <div class="composer-demo reveal" role="img" aria-label="Typing an at-mention in the chat box shows files, folders and live sources to attach.">
-        <div class="suggest">
-          <div class="sugg" data-i="0"><span class="ico folder"></span>src/<em>folder</em></div>
-          <div class="sugg" data-i="1"><span class="ico rs"></span>src/routes/bookings.rs</div>
-          <div class="sugg" data-i="2"><span class="ico rs"></span>src/store.rs</div>
-          <div class="sugg" data-i="3"><span class="ico shot"></span>screenshot<em>browser or phone</em></div>
-          <div class="sugg" data-i="4"><span class="ico log"></span>log<em>recent logs</em></div>
+      <ul class="bento">
+        <li class="reveal"><b>Agent, model, effort, mode</b><span>One picker for every agent and its models. ⇧Tab steps through the modes, never to one that skips permissions.</span></li>
+        <li class="reveal"><b>Undo a turn</b><span>Before each message, a snapshot of the files. Restore them, and undo the restore, without touching branches or history.</span></li>
+        <li class="reveal"><b>Queue while it works</b><span>Enter queues the next message; <em>Send now</em> steers Claude Code and Codex in the turn under way.</span></li>
+        <li class="reveal"><b>Plans, questions, subagents</b><span>A plan to approve, a question with choices, each subagent's steps under the call that started it.</span></li>
+        <li class="reveal"><b>Diagrams in replies</b><span>A Mermaid block in a reply is drawn as a picture, in the theme's light or dark.</span></li>
+        <li class="reveal"><b>Hand it over</b><span>Continue a chat with another agent, with a recap, or step aside with ⌘; for a side question.</span></li>
+        <li class="reveal"><b>Several agents at once</b><span>One prompt to two or more agents, each in its own copy. Compare, then keep one.</span></li>
+        <li class="reveal"><b>Search and usage</b><span>⌘⇧K searches every chat. The header shows the context used and the cost so far.</span></li>
+      </ul>
+    </section>
+
+    <!-- The workbench: a strip that moves sideways as the page scrolls. -->
+    <section class="hs" id="workbench" aria-labelledby="workbench-title">
+      <div class="hs-sticky">
+        <div class="hs-head">
+          <p class="kicker"><i>04</i> The workbench</p>
+          <h2 id="workbench-title">Nine tools beside the chat.<br><span class="dim">⌘1 to ⌘9.</span></h2>
+          <p class="hs-hint" aria-hidden="true">Scroll <span>→</span></p>
         </div>
-        <div class="composer">
-          <div class="typed"><span class="text"></span><span class="caret"></span></div>
-          <div class="composer-bar"><span class="agent-pick"><i class="star"></i> Gemini CLI</span><span class="send">↑</span></div>
-        </div>
+        <ol class="hs-track">
+          <li class="tool">
+            <span class="key">⌘1</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h6l2 2h8v12H4z"/></svg>
+            <h3>Files and editor</h3>
+            <p>A tree with Git marks, and an editor for about 200 languages.</p>
+            <ul><li>Language servers you have installed: errors, go to definition, references, rename</li><li>⌘P files, ⌘T symbols, ⌘⇧F search as you type</li><li>Logs of many gigabytes, read only where you look</li><li>Explain, Find bugs or Write tests on a selection</li></ul>
+          </li>
+          <li class="tool">
+            <span class="key">⌘2</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="9" r="2.5"/><path d="M6 8.5v7M18 11.5c0 4-6 3-11 5"/></svg>
+            <h3>Git</h3>
+            <p>Changes, the branch, history and stashes.</p>
+            <ul><li>Keep or discard one hunk; notes on lines go to the chat</li><li>Conflicts block by block: Ours, Theirs, Both or Ask agent</li><li>A history graph, blame, and a changelog an agent writes</li><li>Commit messages written from the staged diff</li></ul>
+          </li>
+          <li class="tool">
+            <span class="key">⌘3</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="5" height="16" rx="1.5"/><rect x="10" y="4" width="5" height="10" rx="1.5"/><rect x="17" y="4" width="4" height="13" rx="1.5"/></svg>
+            <h3>Board</h3>
+            <p>A Kanban board agents plan on and work through.</p>
+            <ul><li>To do, In progress, Review, Done</li><li><em>Work through board</em>: cards taken one by one</li><li>A card linked to UI tests is Done only once they pass</li><li>Agents use it through PilotHouse's MCP tools</li></ul>
+          </li>
+          <li class="tool">
+            <span class="key">⌘4</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 8 4 4-4 4M12 16h7"/></svg>
+            <h3>Terminal</h3>
+            <p>Real shells on a real PTY, side by side.</p>
+            <ul><li>Up to four shells split, any one installed</li><li>⌘-click a <code>path:line</code> in the output to open it</li><li>Agent CLIs in a tab, followed: working, waiting, done</li><li>The last lines come back after a restart</li></ul>
+          </li>
+          <li class="tool">
+            <span class="key">⌘5</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg>
+            <h3>Browser</h3>
+            <p>Your installed Chrome, in a pane you and the agents share.</p>
+            <ul><li>A profile per workspace, logins kept</li><li>Console and network, errors sent to the chat</li><li>Driven over a private pipe, not a port</li><li><code>confirm()</code> waits for you, never for an agent</li></ul>
+          </li>
+          <li class="tool">
+            <span class="key">⌘6</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></svg>
+            <h3>Devices</h3>
+            <p>Android emulators and phones, live and touchable.</p>
+            <ul><li>Emulators in the pane at up to about 40 frames a second</li><li>Phones over USB or Wi-Fi, pairing codes included</li><li>Install an APK, launch it, browse its files and layout</li><li>Logcat in its own panel, by app, tag or level</li></ul>
+          </li>
+          <li class="tool">
+            <span class="key">⌘7</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16l13-8z"/></svg>
+            <h3>Run</h3>
+            <p>Run configurations found without running anything.</p>
+            <ul><li>npm, pnpm, yarn, bun, cargo, go, Django, pytest, Maven, .NET, CMake, Flutter, Deno, Gradle</li><li>An Android run bar: module, variant, device, Build APK</li><li>Listening ports, opened in the browser pane</li><li>Your own commands, kept per project</li></ul>
+          </li>
+          <li class="tool">
+            <span class="key">⌘8</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V9a3 3 0 0 0-3-3h-4m2-2-2 2 2 2"/></svg>
+            <h3>Pull requests</h3>
+            <p>The repository's pull requests, with their checks.</p>
+            <ul><li>Open, Mine, To review</li><li>New PR, its description written by an agent</li><li>Check out a PR on a local branch</li><li>Review it with an agent in the GitHub view</li></ul>
+          </li>
+          <li class="tool">
+            <span class="key">⌘9</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l5 5L20 6"/></svg>
+            <h3>UI tests</h3>
+            <p>Tests in plain words, recorded from what an agent does.</p>
+            <ul><li>Replayed without AI, a screenshot per step</li><li>Desktop, tablet and phone sizes, or every device</li><li>A screen over 1% different fails the run</li><li><em>Repair with agent</em> when the app has changed</li></ul>
+          </li>
+        </ol>
       </div>
     </section>
 
-    <!-- Studio: three windows in a stack; the one in front is the one picked. -->
+    <!-- Live panes: marks draw themselves on a page as you scroll. -->
+    <section class="split reverse live" id="live">
+      <div class="split-copy">
+        <p class="kicker reveal"><i>05</i> Show it</p>
+        <h2 class="reveal">Point at the screen. Not at words.</h2>
+        <p class="reveal">The browser and the phone are live in PilotHouse, and so are the marks you draw on them. Put a box, an arrow or numbered pins on what is wrong, and ⌘⇧S sends the frame with them to the chat.</p>
+        <ul class="ticks reveal">
+          <li><b>Pick an element</b>: its selector, the CSS that shapes it, and its source file and line when a dev build tells.</li>
+          <li><b>Record</b> a GIF, or <b>before and after</b> with a diff of what changed.</li>
+          <li><b>Your own Chrome</b> for real websites, through PilotHouse's extension: agents work only in its PilotHouse tab group, with your sign-ins, a glow where they act and a Stop button. Share a tab by dropping it in the group; agents never type into password fields and leave CAPTCHAs to you.</li>
+        </ul>
+      </div>
+      <div class="pane-demo reveal" role="img" aria-label="A web page in the browser pane with a red box, an arrow and two numbered pins drawn on it.">
+        <div class="pane-bar"><i></i><i></i><i></i><span>localhost:5173/bookings</span></div>
+        <div class="page">
+          <div class="pg-nav"><b></b><i></i><i></i><i></i></div>
+          <div class="pg-hero"><b></b><i></i><i></i></div>
+          <div class="pg-cards"><i></i><i></i><i></i></div>
+          <div class="pg-btn">Book a berth</div>
+          <svg class="marks" viewBox="0 0 400 260" preserveAspectRatio="none" aria-hidden="true">
+            <rect class="mark sd sd-draw" style="--a:22%;--b:42%" x="236" y="196" width="128" height="40" rx="6" pathLength="1"/>
+            <path class="mark sd sd-draw" style="--a:34%;--b:52%" d="M160 150 C 200 170, 210 190, 228 206" pathLength="1"/>
+            <path class="mark sd sd-draw" style="--a:34%;--b:52%" d="M214 206 L 230 208 L 222 194" pathLength="1"/>
+          </svg>
+          <span class="pin sd sd-pop" style="--a:30%;--b:38%;left:86%;top:66%">1</span>
+          <span class="pin sd sd-pop" style="--a:34%;--b:42%;left:14%;top:44%">2</span>
+        </div>
+        <div class="live-bar" aria-hidden="true"><span class="on">Use</span><span>Pick</span><span>Box</span><span>Arrow</span><span>Pin</span><span class="cap">Capture ⌘⇧S</span><span>Record</span><span>Before/after</span></div>
+      </div>
+    </section>
+
+    <!-- Pull requests: a findings list drawn in the page. -->
+    <section class="split reviews" id="reviews">
+      <div class="split-copy">
+        <p class="kicker reveal"><i>06</i> Pull requests</p>
+        <h2 class="reveal">Reviews with evidence, posted where they belong.</h2>
+        <p class="reveal">The GitHub view (⌘⇧G) lists what waits for your review across repositories. Ask an agent to review it, explain it or write a test plan: it works in PilotHouse's own copy, your checkouts untouched, and its chat only reads.</p>
+        <ul class="ticks reveal">
+          <li><b>Findings</b> with a severity, the evidence and a fix, posted on the code with one-click suggestions.</li>
+          <li><b>Walkthrough</b> explains a change in a minute; <b>Watch</b> tells you when the author pushes or answers.</li>
+          <li><b>Address comments</b> on your own pull requests in a task, with a reply drafted for each.</li>
+          <li><b>Review before you push</b>: the Git tab's Review puts its findings on your lines.</li>
+          <li>GitHub.com and GitHub Enterprise Server; tokens stay in the system's keychain.</li>
+        </ul>
+      </div>
+      <div class="findings reveal" role="img" aria-label="An example of an agent review's findings on a pull request.">
+        <div class="f-head"><b>Findings</b><span>3 open · round 2</span></div>
+        <div class="f-row"><i class="sev crit">critical</i><div><b>Session token written to the log on a failed sign-in</b><code>src/auth/session.rs:88</code></div></div>
+        <div class="f-row"><i class="sev major">major</i><div><b>Retry loop never gives up when the server is down</b><code>src/sync/push.rs:142</code></div></div>
+        <div class="f-row fixed"><i class="sev minor">minor</i><div><b>Date shown in UTC, not the berth's time zone</b><code>web/board.tsx:31</code><em>fixed after push ✓</em></div></div>
+        <div class="f-row"><i class="sev nit">nit</i><div><b>Name says <code>count</code>, holds a list</b><code>src/store.rs:204</code></div></div>
+        <div class="f-foot"><span class="btn tiny primary">Post findings</span><span class="btn tiny">Double-check</span><span class="btn tiny">Fix in a task</span></div>
+      </div>
+    </section>
+
+    <!-- Studio: three windows stack as the page scrolls. -->
     <section class="studio" id="studio">
       <div class="studio-head">
-        <p class="kicker center reveal">New in 0.5 · Studio</p>
-        <h2 class="center reveal">Pictures, videos and slides,<br><span class="ink">made beside the code.</span></h2>
+        <p class="kicker center reveal"><i>07</i> Studio</p>
+        <h2 class="center reveal">Pictures, videos and slides,<br><span class="hl-text">made beside the code.</span></h2>
         <p class="center narrow reveal">Mark up a screenshot for the bug report, trim the screen recording for the release notes, build the deck for Friday's review. By hand, or by telling the agent in the chat beside it, and every step can be undone.</p>
       </div>
-      <div class="studio-body">
-        <div class="studio-side">
-          <div class="studio-tabs" role="tablist" aria-label="Studio">
-            <button class="studio-tab" role="tab" id="tab-picture" aria-controls="panel-picture" aria-selected="true" data-card="picture">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/></svg>
-              <span><b>Pictures</b><small>Arrows, steps, blur, frames</small></span><i class="timer"></i>
-            </button>
-            <button class="studio-tab" role="tab" id="tab-video" aria-controls="panel-video" aria-selected="false" tabindex="-1" data-card="video">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 5-3v10l-5-3z"/></svg>
-              <span><b>Video</b><small>Cut, speed up, label, hide</small></span><i class="timer"></i>
-            </button>
-            <button class="studio-tab" role="tab" id="tab-slides" aria-controls="panel-slides" aria-selected="false" tabindex="-1" data-card="slides">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M12 16v4M8 20h8M7 12l3-3 2 2 4-4"/></svg>
-              <span><b>Slides</b><small>Decks you can open in PowerPoint</small></span><i class="timer"></i>
-            </button>
+      <div class="stack">
+        <article class="stack-card">
+          <div class="stack-copy">
+            <span class="stack-no">Pictures</span>
+            <h3>Point out what matters. Hide what should not be shared.</h3>
+            <ul class="ticks"><li>Arrows, boxes, numbered steps, highlights, spotlights and labels.</li><li>Blur or pixelate emails, tokens and faces.</li><li>Crop, a gradient frame with a shadow, PNG, JPEG, WebP or ICO. Edits are descriptions, so any step can change later.</li></ul>
           </div>
-          <div class="studio-panel" role="tabpanel" id="panel-picture" aria-labelledby="tab-picture">
-            <ul class="ticks">
-              <li><b>Point out what matters</b> with arrows, boxes, numbered steps, highlights and labels.</li>
-              <li><b>Hide what should not be shared:</b> blur or pixelate emails, tokens and faces.</li>
-              <li><b>Ready for docs</b> in one go: crop, a gradient frame with a shadow, and a size limit for the upload.</li>
-            </ul>
+          <figure class="window"><img src="shots/studio-picture.webp" alt="Studio editing a screenshot of an arrivals board: the email is blurred, one row is spotlit, and a red label says Suggest a free berth here." width="1600" height="1000" loading="lazy"></figure>
+        </article>
+        <article class="stack-card">
+          <div class="stack-copy">
+            <span class="stack-no">Video</span>
+            <h3>Cut the waiting out of a screen recording.</h3>
+            <ul class="ticks"><li>Split, cut, and speed parts up from 0.5× to 16× on a timeline of frames.</li><li>Labels, arrows and blurs that show for the seconds you pick; A and B measure the time between two frames.</li><li>MP4, HEVC, WebM or GIF; nothing is written until you export, always to a new file.</li></ul>
           </div>
-          <div class="studio-panel" role="tabpanel" id="panel-video" aria-labelledby="tab-video" hidden>
-            <ul class="ticks">
-              <li><b>Cut and speed up</b> the slow parts on a timeline of frames; nothing is lost until you export.</li>
-              <li><b>Labels, arrows and blurs</b> that show for just the moments you pick, as it plays.</li>
-              <li><b>Fits where it is going:</b> MP4, HEVC, WebM or GIF, under 50 MB for Confluence if you ask.</li>
-            </ul>
+          <figure class="window"><img src="shots/studio-video.webp" alt="Studio editing a screen recording: a timeline of frames with a part at 2× speed, and marks for a blur, a spotlight and labels that show at set times." width="1600" height="1000" loading="lazy"></figure>
+        </article>
+        <article class="stack-card">
+          <div class="stack-copy">
+            <span class="stack-no">Slides</span>
+            <h3>Decks you can open in PowerPoint.</h3>
+            <ul class="ticks"><li>Draft from a few lines, then say "make this bigger" about what you selected.</li><li>Charts, tables, icons, code and diagrams; transitions, builds and a presenter's view.</li><li>Open any .pptx, keep its template, export editable PPTX, PDF or pictures.</li></ul>
           </div>
-          <div class="studio-panel" role="tabpanel" id="panel-slides" aria-labelledby="tab-slides" hidden>
-            <ul class="ticks">
-              <li><b>Draft a deck from a few lines,</b> then say "make this bigger" about what you selected.</li>
-              <li><b>Charts, tables, diagrams and icons</b> in a dozen themes, or your company's PowerPoint template.</li>
-              <li><b>PowerPoint in, PowerPoint out:</b> open any .pptx, present with notes, export editable PPTX, PDF or pictures.</li>
-            </ul>
-          </div>
-        </div>
-        <div class="deck-stage">
-          <div class="deck">
-            <figure class="window studio-card" data-card="picture">
-              <img src="shots/studio-picture.webp" alt="Studio editing a screenshot of an arrivals board: the email is blurred, one row is spotlit, and a red label says Suggest a free berth here." width="1600" height="1000" loading="lazy">
-              <figcaption class="chip"><span class="ok">✓</span> Email blurred · framed for docs</figcaption>
-            </figure>
-            <figure class="window studio-card" data-card="video">
-              <img src="shots/studio-video.webp" alt="Studio editing a screen recording: a timeline of frames with a part at 2× speed, and marks for a blur, a spotlight and labels that show at set times." width="1600" height="1000" loading="lazy">
-              <figcaption class="chip"><span class="spd">2×</span> 6.0 – 7.2 s sped up</figcaption>
-            </figure>
-            <figure class="window studio-card" data-card="slides">
-              <img src="shots/slides.webp" alt="Slides in Studio: a deck called Harbor Q4 review with a column chart and two highlighted numbers, the slides down the side and speaker notes below." width="1600" height="1000" loading="lazy">
-              <figcaption class="chip"><span class="ok">↧</span> Export · PowerPoint, PDF, PNG</figcaption>
-            </figure>
-          </div>
-        </div>
+          <figure class="window"><img src="shots/slides.webp" alt="Slides in Studio: a deck called Harbor Q4 review with a column chart and two highlighted numbers, the slides down the side and speaker notes below." width="1600" height="1000" loading="lazy"></figure>
+        </article>
       </div>
+    </section>
+
+    <!-- Previews: a wall of file kinds, each shown as itself. -->
+    <section class="previews" id="previews">
+      <div class="previews-copy">
+        <p class="kicker reveal"><i>08</i> Every file as itself</p>
+        <h2 class="reveal">Open anything. See what it is.</h2>
+        <p class="reveal">PilotHouse draws every viewer itself: no web view, no bundled codecs. Markdown edits like a document, a block at a time. JSON, YAML and TOML fold as trees, CSV sorts and filters, notebooks show their outputs, <code>.env</code> values stay hidden until you show them, and a gigabyte log opens in seconds.</p>
+      </div>
+      <ul class="kinds" aria-label="File kinds PilotHouse shows">
+        <li>.md</li><li>.mmd</li><li>.svg</li><li>.json</li><li>.jsonl</li><li>.yaml</li><li>.toml</li><li>.csv</li><li>.env</li><li>.log</li><li>.diff</li><li>.ipynb</li><li>.html</li><li>.png</li><li>.gif</li><li>.webp</li><li>.mp3</li><li>.flac</li><li>.mp4</li><li>.mov</li><li>.pdf</li><li>.sqlite</li><li>.xlsx</li><li>.ods</li><li>.zip</li><li>.apk</li><li>.tar.gz</li><li>.ttf</li><li>.otf</li><li>hex</li>
+      </ul>
+    </section>
+
+    <!-- Automation: a line runs down the day as you scroll. -->
+    <section class="automation" id="automation">
+      <div class="auto-head">
+        <p class="kicker center reveal"><i>09</i> Automation</p>
+        <h2 class="center reveal">Work that carries on<br><span class="dim">while you look elsewhere.</span></h2>
+      </div>
+      <ol class="timeline">
+        <li><time>08:30</time><h3>Morning summary</h3><p>A schedule asks the agent every weekday and keeps the chat under <em>Runs</em>. Every 15 minutes, hourly, daily or weekly.</p></li>
+        <li><time>On a new PR</time><h3>Review a pull request</h3><p>PilotHouse looks every five minutes. The prompt says why now: which pull request opened.</p></li>
+        <li><time>On files, commits</time><h3>When something happens</h3><p>Files change, a new commit lands, checks fail: each can start a schedule, never twice at once.</p></li>
+        <li><time>22:00</time><h3>Nightly UI tests, then a fix</h3><p>Chain schedules: when the nightly tests fail, ask the agent to fix them.</p></li>
+        <li><time>Any time</time><h3>A task in a worktree</h3><p><em>New task</em> makes a branch in its own worktree, runs the setup from <code>pilothouse.toml</code> and gives its dev server a port of its own. Your checkout stays as it is.</p></li>
+        <li><time>Any time</time><h3>The board, card by card</h3><p><em>Work through board</em> hands the agent the To do cards; a card linked to tests waits for them to pass.</p></li>
+        <li><time>When only you can</time><h3>A to-do for you</h3><p>Agents leave you a to-do, with a reminder, for what only you can do: sign in somewhere, decide something.</p></li>
+      </ol>
     </section>
 
     <!-- Themes: the window repaints from the swatch you pick. -->
     <section class="themes" id="themes">
       <div class="themes-copy">
-        <p class="kicker reveal">Make it yours</p>
+        <p class="kicker reveal"><i>10</i> Make it yours</p>
         <h2 class="reveal">Eight themes.<br>Or describe your own.</h2>
         <p class="reveal">Pick a theme, an accent, how roomy it is, and what shows behind the window: a gradient or a picture of yours. Or tell an agent what you would like, "a calm night at sea with brass details", and PilotHouse changes as you talk. Keep it as your own theme, or bring one over from VS Code.</p>
         <div class="swatches reveal" role="radiogroup" aria-label="Theme shown">
@@ -253,27 +403,47 @@
           <button class="swatch" role="radio" aria-checked="false" data-theme="one-light" style="--a:#fafafa;--b:#526fff">One Light</button>
           <button class="swatch" role="radio" aria-checked="false" data-theme="studio-dark" style="--a:#1e1f22;--b:#3574f0">Studio Dark</button>
         </div>
-        <p class="hint reveal">Pick one to repaint the window.</p>
+        <p class="hint reveal">Pick one to repaint the window. Panes drag and dock anywhere, and each workspace keeps its layout.</p>
       </div>
       <figure class="window themes-window" aria-live="polite">
-        <img class="paint" src="shots/themes/modern-dark.webp" alt="PilotHouse in the Modern Dark theme." width="1600" height="1000" loading="lazy">
+        <img class="paint" src="shots/themes/modern-dark.webp" alt="PilotHouse in the Modern Dark theme, with Claude Code's chat in the harbor workspace." width="1600" height="1000" loading="lazy">
       </figure>
+    </section>
+
+    <!-- The rest of the toolbox, in brief. -->
+    <section class="more" id="more">
+      <p class="kicker center reveal"><i>11</i> And the rest</p>
+      <h2 class="center reveal">The small things you would miss.</h2>
+      <ul class="more-grid">
+        <li class="reveal"><b>Network drives</b><span>Code on a server's share? Git, terminals and runs work on the server over SSH, next to the files; its ports come through tunnels.</span></li>
+        <li class="reveal"><b>Command palette</b><span>⌘K for every command and chat. ⌘/ lists every shortcut in force, read from the keys.</span></li>
+        <li class="reveal"><b>Utilities</b><span>JSON, TOML, XML, CSV, Base64, JWT, hashes, UUIDs, Unix time, cron and regex, offline, for you and the agents.</span></li>
+        <li class="reveal"><b>Architecture map</b><span>The project's parts in layers with what they use, read from its manifests; an agent explains it.</span></li>
+        <li class="reveal"><b>Usage and limits</b><span>Tokens and cost by agent or project. Subscription windows in the status bar, amber near the limit.</span></li>
+        <li class="reveal"><b>Agent instructions</b><span><code>AGENTS.md</code>, <code>CLAUDE.md</code> and <code>GEMINI.md</code> side by side; Sync makes <code>AGENTS.md</code> the one place to write.</span></li>
+        <li class="reveal"><b>MCP servers and skills</b><span>Set up an MCP server once for every agent; see and start Claude Code and Codex skills.</span></li>
+        <li class="reveal"><b>Status bar</b><span>The branch, CI for the commit checked out, the ports your processes listen on, the device in use.</span></li>
+        <li class="reveal"><b>Open from anywhere</b><span><code>pilothouse &lt;path&gt;</code> opens a folder as a workspace, or a file in a window of its own. <em>Open with PilotHouse</em> in Finder and Explorer.</span></li>
+        <li class="reveal"><b>Agents from outside</b><span>An agent you started elsewhere can use the board, browser and devices through <code>pilothouse mcp</code>.</span></li>
+        <li class="reveal"><b>Resume a CLI session</b><span>Past Claude Code, Codex, Gemini CLI and Antigravity sessions in the folder, resumed in a terminal, with the transcript beside it.</span></li>
+        <li class="reveal"><b>Kept on your disk</b><span>Settings → Storage shows what takes space (clones, copies, recordings), removes it, and puts new copies on a bigger disk.</span></li>
+      </ul>
     </section>
 
     <!-- Native: fewer, lighter processes. -->
     <section class="native" id="native">
-      <p class="kicker center reveal">Why native</p>
+      <p class="kicker center reveal"><i>12</i> Why native</p>
       <h2 class="center reveal">One light window instead of five heavy ones.</h2>
       <p class="center narrow reveal">PilotHouse is written in Rust and drawn by the GPU. No Electron, no bundled browser engine: one process holds every workspace, its agents, shells and test runs, and stays quick with all of them going.</p>
       <div class="stats">
-        <div class="stat reveal"><b data-count="1">0</b><span>native process, not a stack of apps</span></div>
-        <div class="stat reveal"><b data-count="300" data-prefix="&lt;" data-suffix=" MB">0</b><span>of memory with a workspace open, in our tests</span></div>
+        <div class="stat reveal"><b data-count="1">1</b><span>native process, not a stack of apps</span></div>
+        <div class="stat reveal"><b data-count="300" data-prefix="&lt;" data-suffix=" MB">&lt;300 MB</b><span>of memory with a workspace open, in our tests</span></div>
         <div class="stat reveal"><b data-count="0">0</b><span>browser engines bundled</span></div>
       </div>
       <div class="race reveal" aria-label="The usual setup is several heavy apps; PilotHouse is one.">
         <div class="race-row">
           <span class="race-label">The usual setup</span>
-          <div class="race-bar stack">
+          <div class="race-bar stack-bar">
             <i style="--w:22%">Editor</i><i style="--w:28%">Android IDE + emulator</i><i style="--w:20%">Browser</i><i style="--w:14%">Git client</i><i style="--w:12%">Terminals</i>
           </div>
         </div>
@@ -284,39 +454,18 @@
       </div>
     </section>
 
-    <section class="features" id="features">
-      <p class="kicker center reveal">Everything in one place</p>
-      <h2 class="center reveal">The whole workbench, beside the chat.</h2>
-      <div class="grid">
-        <article class="card"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="7" height="16" rx="2"/><rect x="13" y="4" width="8" height="7" rx="2"/><rect x="13" y="13" width="8" height="7" rx="2"/></svg><h3>Workspaces</h3><p>Any number of folders and repositories, each with chats, colour and status. Move one to its own window.</p></article>
-        <article class="card"><svg viewBox="0 0 24 24"><path d="M4 5h16v10H9l-5 4z"/></svg><h3>Agent chat</h3><p>Tool calls, diffs, plans, a model picker with effort and mode, usage, and search across every chat.</p></article>
-        <article class="card"><svg viewBox="0 0 24 24"><path d="m8 7-5 5 5 5M16 7l5 5-5 5"/></svg><h3>Code</h3><p>A file tree with Git marks, an editor with language servers, project search and a viewer for huge logs.</p></article>
-        <article class="card"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg><h3>Previews</h3><p>Markdown with Mermaid, JSON, CSV, PDF, video, audio, SQLite, spreadsheets, archives, fonts: each shown as itself.</p></article>
-        <article class="card fresh"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/></svg><h3>Pictures <span class="new">New</span></h3><p>Mark up, blur, crop and frame screenshots by hand or by asking; export for docs under a size limit.</p></article>
-        <article class="card fresh"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 5-3v10l-5-3z"/></svg><h3>Video <span class="new">New</span></h3><p>Cut, speed up and label screen recordings on a timeline; MP4, HEVC, WebM or GIF.</p></article>
-        <article class="card fresh"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M12 16v4M8 20h8M7 12l3-3 2 2 4-4"/></svg><h3>Slides <span class="new">New</span></h3><p>Decks drafted with an agent, with charts and templates, presented with notes, exported as PowerPoint.</p></article>
-        <article class="card fresh"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18c1.1 0 1.6-.9 1.2-1.8-.5-1-.1-2.2 1.1-2.2H17a4 4 0 0 0 4-4c0-5.5-4-10-9-10z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10" cy="7" r="1"/><circle cx="15" cy="7.5" r="1"/></svg><h3>Themes and layout <span class="new">New</span></h3><p>Eight themes or your own, and panes you drag and dock wherever you work best.</p></article>
-        <article class="card"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="9" r="2.5"/><path d="M6 8.5v7M18 11.5c0 4-6 3-11 5"/></svg><h3>Git and GitHub</h3><p>Commit, branches, a history graph, stashes, blame; pull requests and agent reviews you post as comments.</p></article>
-        <article class="card"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="5" height="16" rx="1.5"/><rect x="10" y="4" width="5" height="10" rx="1.5"/><rect x="17" y="4" width="4" height="13" rx="1.5"/></svg><h3>Board</h3><p>A Kanban board agents plan on and work through card by card, with UI tests a card must pass.</p></article>
-        <article class="card"><svg viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></svg><h3>Browser and Android</h3><p>A browser pane and emulators or phones that you and the agents both see and drive, marked up and sent to the chat.</p></article>
-        <article class="card"><svg viewBox="0 0 24 24"><path d="M4 12l5 5L20 6"/></svg><h3>UI tests</h3><p>Recorded from what an agent does, replayed without AI on several screens, repaired by an agent when they break.</p></article>
-        <article class="card"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg><h3>Automation</h3><p>Prompts and test runs on a schedule, or when files change, a commit lands, a pull request opens or checks fail.</p></article>
-        <article class="card"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg><h3>Network drives</h3><p>Code on a server's share? Git, terminals and runs work on the server over SSH, next to the files.</p></article>
-        <article class="card"><svg viewBox="0 0 24 24"><path d="m5 8 4 4-4 4M12 16h7"/></svg><h3>Terminals and runs</h3><p>Shells side by side, detected run configurations, and agents' CLIs in terminals that PilotHouse follows.</p></article>
-        <article class="card"><svg viewBox="0 0 24 24"><path d="M14 6a4 4 0 0 0-5 5l-5 5 3 3 5-5a4 4 0 0 0 5-5l-2 2-3-3z"/></svg><h3>Utilities</h3><p>An offline toolbox for JSON, JWT, hashes, times, cron, regex and SQLite, for you and the agents.</p></article>
-      </div>
-    </section>
-
     <section class="private" id="private">
-      <div class="orbit" aria-hidden="true"><i></i><i></i><i></i><span class="lock"></span></div>
+      <div class="vault" aria-hidden="true"><i></i><i></i><i></i><span class="lock"></span></div>
       <div class="private-copy">
-        <p class="kicker reveal">Private by design</p>
+        <p class="kicker reveal"><i>13</i> Private by design</p>
         <h2 class="reveal">Everything stays on your machine.</h2>
         <ul class="ticks reveal">
           <li><b>No account, no backend, no telemetry.</b> It talks to the agents you installed, to Git, and to the hosts you add.</li>
-          <li><b>Your agents, your sign-ins.</b> It uses the CLIs you already have.</li>
-          <li><b>Careful with what it opens.</b> Opening a project never runs its code; viewing a file never runs it either.</li>
-          <li><b>Someone else's code stays theirs.</b> Pull requests are reviewed in a copy where their settings, hooks and build scripts never run.</li>
+          <li><b>Your agents, your sign-ins.</b> It uses the CLIs you already have and never sees their credentials.</li>
+          <li><b>Careful with what it opens.</b> Opening a project never runs its code; viewing a file never runs it either. Links in agents' replies open only when they are web or mail links.</li>
+          <li><b>Someone else's code stays theirs.</b> Pull requests are reviewed in a copy, by chats that only read.</li>
+          <li><b>Tokens in the system's keychain</b>, sent only to the GitHub hosts you added. The browser is driven over a private pipe, not a port.</li>
+          <li><b>Signed updates.</b> Each update is checked against the release's signed checksums before it is installed.</li>
           <li><b>Open source.</b> Apache-2.0, built in the open, releases with build provenance.</li>
         </ul>
       </div>
@@ -326,18 +475,38 @@
       <img class="download-mark" src="mark.svg" alt="" width="96" height="96">
       <h2 class="center reveal">Take the helm.</h2>
       <div class="downloads">
-        <a class="dl magnetic" data-os="mac" href="https://github.com/LibreGuild/PilotHouse/releases/latest/download/PilotHouse-macOS-universal.dmg">
+        <a class="dl" data-os="mac" href="https://github.com/LibreGuild/PilotHouse/releases/latest/download/PilotHouse-macOS-universal.dmg">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 3c0 2-1.6 3.5-3.4 3.5C12.4 4.6 14 3 16 3zM19 16.5c-.6 1.4-1.9 3.5-3.4 3.5-1.3 0-1.6-.8-3.2-.8s-2 .8-3.2.8C7.4 20 5 16.5 5 13.2 5 10 7 8.4 8.9 8.4c1.3 0 2.2.8 3.2.8s2.1-.9 3.6-.8c.6 0 2.3.2 3.4 1.8-3 1.8-2.4 5.5-.1 6.3z"/></svg>
           <span class="os">macOS</span><span class="sub">Universal · Apple silicon and Intel</span>
         </a>
-        <a class="dl magnetic" data-os="windows" href="https://github.com/LibreGuild/PilotHouse/releases/latest/download/PilotHouse-Windows-Setup-x64.exe">
+        <a class="dl" data-os="windows" href="https://github.com/LibreGuild/PilotHouse/releases/latest/download/PilotHouse-Windows-Setup-x64.exe">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5 10.5 4.5v7H3zM12 4.3 21 3v8.5h-9zM3 13h7.5v7L3 19zM12 13h9v8l-9-1.3z"/></svg>
           <span class="os">Windows</span><span class="sub">Installer · x64</span>
         </a>
-        <a class="dl magnetic" data-os="linux" href="https://github.com/LibreGuild/PilotHouse/releases/latest/download/PilotHouse-Linux-x86_64.AppImage">
+        <a class="dl" data-os="linux" href="https://github.com/LibreGuild/PilotHouse/releases/latest/download/PilotHouse-Linux-x86_64.AppImage">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c-2 0-3 1.8-3 4 0 1.5-.6 2.6-1.7 4.1C6 13 5 15 6 17c.6 1.2 2 1.8 3 1.4.8-.3 1.6.6 3 .6s2.2-.9 3-.6c1 .4 2.4-.2 3-1.4 1-2 0-4-1.3-5.9C15.6 9.6 15 8.5 15 7c0-2.2-1-4-3-4z"/></svg>
           <span class="os">Linux</span><span class="sub">AppImage · x86_64</span>
         </a>
+      </div>
+      <!-- The Release workflow copies every release to Cloudflare R2. -->
+      <div class="mirrors">
+        <p><b>Mirrors</b> · the same files and checksums</p>
+        <ul>
+          <li>
+            <span>Mirror</span>
+            <a data-os="mac" href="https://libreguild.skatech.org/pilothouse/latest/PilotHouse-macOS-universal.dmg">macOS</a>
+            <a data-os="windows" href="https://libreguild.skatech.org/pilothouse/latest/PilotHouse-Windows-Setup-x64.exe">Windows</a>
+            <a data-os="linux" href="https://libreguild.skatech.org/pilothouse/latest/PilotHouse-Linux-x86_64.AppImage">Linux</a>
+            <a href="https://libreguild.skatech.org/pilothouse/latest/SHA256SUMS">Checksums</a>
+          </li>
+          <li>
+            <span>Backup</span>
+            <a data-os="mac" href="https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/latest/PilotHouse-macOS-universal.dmg">macOS</a>
+            <a data-os="windows" href="https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/latest/PilotHouse-Windows-Setup-x64.exe">Windows</a>
+            <a data-os="linux" href="https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/latest/PilotHouse-Linux-x86_64.AppImage">Linux</a>
+            <a href="https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/latest/SHA256SUMS">Checksums</a>
+          </li>
+        </ul>
       </div>
       <p class="note center">Every build is on the <a href="https://github.com/LibreGuild/PilotHouse/releases/latest">releases page</a>, with SHA-256 checksums. The builds are not code-signed yet: on macOS, choose <em>Open Anyway</em> in System Settings → Privacy &amp; Security; on Windows, <em>More info → Run anyway</em>.</p>
     </section>
@@ -350,6 +519,7 @@
       <li><a href="https://github.com/LibreGuild/PilotHouse/blob/main/docs/user-guide.md">User guide</a></li>
       <li><a href="https://github.com/LibreGuild/PilotHouse/blob/main/docs/security.md">Security</a></li>
       <li><a href="https://github.com/LibreGuild/PilotHouse/releases">Releases</a></li>
+      <li><a href="#download">Mirrors</a></li>
     </ul>
     <p>Apache-2.0 · Made by LibreGuild</p>
   </footer>

@@ -860,6 +860,23 @@ impl ChatThread {
         cx.notify();
     }
 
+    /// Before its session starts, a chat shows its agent's cached options:
+    /// again once they were loaded in the background
+    /// ([`crate::preload`]).
+    pub fn reload_cached_options(&mut self, cx: &mut Context<Self>) {
+        if self.acp_session_id.is_some() || self.setup.is_some() {
+            return;
+        }
+        let options = options::with_preferences(
+            options::cached(&self.store, self.agent.id),
+            &options::preferences(&self.store, self.agent.id),
+        );
+        if options != self.options {
+            self.options = options;
+            cx.notify();
+        }
+    }
+
     /// Starts the agent session ahead of the first message, so pickers fill
     /// in and the first reply comes sooner. Errors surface on send instead.
     pub fn warm_up(&mut self, connection: Entity<AgentConnection>, cx: &mut Context<Self>) {
@@ -1968,6 +1985,13 @@ impl ChatThread {
             .as_ref()
             .map(|id| id.to_string())
             .unwrap_or_default();
+        // Kept with what it adds, for usage by model: the model's id (what
+        // prices are listed by), not its name in the picker.
+        report.model = self
+            .options
+            .iter()
+            .find(|option| option.category == crate::options::OptionCategory::Model)
+            .map(|option| option.current.clone());
         match &self.session {
             Some(session) => match self.store.record_usage(session.id, &report) {
                 Ok(usage) => self.usage = Some(usage),

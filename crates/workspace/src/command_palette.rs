@@ -343,10 +343,18 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
                 &["view", "sidebar", "chats"],
             ),
             Entry::action(
-                "Open PilotHouse Chrome (agents' browser, to sign in or watch)",
+                "Let agents use your Chrome (the PilotHouse extension)…",
                 IconName::Globe,
-                ph_browser::OpenAgentChrome,
-                &["chrome", "edge", "browser", "sign in", "login", "agents"],
+                ph_browser::OpenChromeExtensionSettings,
+                &[
+                    "chrome",
+                    "edge",
+                    "brave",
+                    "browser",
+                    "extension",
+                    "agents",
+                    "tab group",
+                ],
             ),
             Entry::action(
                 "Show the agents at work",

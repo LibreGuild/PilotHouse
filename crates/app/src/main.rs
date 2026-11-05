@@ -33,10 +33,11 @@ fn main() {
     if args.first().is_some_and(|command| command == "ctl") {
         attach_console();
     }
-    // The helpers run beside the app and keep to stderr.
+    // The helpers run beside the app and keep to stderr (`chrome-host`'s
+    // stdout is Chrome's channel to the extension).
     let helper = matches!(
         args.first().map(String::as_str),
-        Some("ctl" | "mcp" | "agy-acp" | "agent-hook")
+        Some("ctl" | "mcp" | "agy-acp" | "agent-hook" | "chrome-host")
     );
     logs::init(!helper);
     logs::install_crash_handler();

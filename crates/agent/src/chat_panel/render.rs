@@ -337,7 +337,99 @@ impl ChatPanel {
         }
     }
 
+    /// Every agent's setup checks, for the first-run card: in the
+    /// background, again when a few seconds old, and once more a few seconds
+    /// after each look while the card is up, so an agent installed meanwhile
+    /// is found without a click.
+    fn welcome_checks(&mut self, cx: &mut Context<Self>) -> AgentChecks {
+        let fresh = self
+            .welcome
+            .as_ref()
+            .is_some_and(|(at, _)| at.elapsed() < std::time::Duration::from_secs(5));
+        if !fresh && self._welcome_refresh.is_none() {
+            let checks = cx.background_spawn(async {
+                AGENTS
+                    .iter()
+                    .map(|spec| (spec, setup::checks(spec)))
+                    .collect::<Vec<_>>()
+            });
+            self._welcome_refresh = Some(cx.spawn(async move |panel, cx| {
+                let checks = checks.await;
+                let shown = panel.update(cx, |panel, cx| {
+                    panel._welcome_refresh = None;
+                    let changed = panel.welcome.as_ref().is_none_or(|(_, old)| *old != checks);
+                    // One can start now: look for agents again, and the
+                    // chat takes it (once per change, not every refresh).
+                    if changed && checks.iter().any(|(_, checks)| setup::ready(checks)) {
+                        crate::installed::recheck(cx);
+                    }
+                    panel.welcome = Some((std::time::Instant::now(), checks));
+                    if changed {
+                        cx.notify();
+                    }
+                });
+                if shown.is_ok() {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(5))
+                        .await;
+                    // Drawn again: a card still up looks again.
+                    _ = panel.update(cx, |_, cx| cx.notify());
+                }
+            }));
+        }
+        self.welcome
+            .as_ref()
+            .map(|(_, checks)| checks.clone())
+            .unwrap_or_else(|| AGENTS.iter().map(|spec| (spec, Vec::new())).collect())
+    }
+
     pub(super) fn render_empty(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        // The first look for agents waits for the login shell: no agent to
+        // name yet (it may not be installed).
+        if crate::installed::looking(cx) && agents::installed().is_none() {
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .child(ph_ui::logo_mark(gpui_kit::px(32.)))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(gpui_kit::component::spinner::Spinner::new().xsmall())
+                        .child("Looking for your coding agents…"),
+                )
+                .into_any_element();
+        }
+        // None installed: the agents to choose from, not what is missing.
+        if agents::installed().is_some_and(|installed| installed.is_empty()) {
+            let checks = self.welcome_checks(cx);
+            let panel = cx.weak_entity();
+            let recheck = Box::new(move |_: &mut Window, cx: &mut App| {
+                _ = panel.update(cx, |panel, cx| {
+                    panel.welcome = None;
+                    cx.notify();
+                });
+                crate::installed::recheck(cx);
+            }) as setup_view::Recheck;
+            return v_flex()
+                .id("welcome")
+                .size_full()
+                .items_center()
+                .overflow_y_scroll()
+                .px_6()
+                .py_8()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(gpui_kit::px(600.))
+                        .my_auto()
+                        .child(setup_view::welcome(&checks, recheck, cx)),
+                )
+                .into_any_element();
+        }
         let agent = self.active.read(cx).agent();
         let checks = self.setup_checks(agent, cx);
         let (title, subtitle): (SharedString, SharedString) = match &self.context {
@@ -367,21 +459,70 @@ impl ChatPanel {
                         panel.setup = None;
                         cx.notify();
                     });
+                    crate::installed::recheck(cx);
                 }) as setup_view::Recheck
             };
+            // Agents that are installed, to start with one of them instead.
+            let others: Vec<&'static AgentSpec> = agents::installed()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|spec| spec.id != agent.id)
+                .collect();
             return v_flex()
                 .size_full()
                 .items_center()
                 .justify_center()
                 .px_6()
+                .gap_4()
                 .child(
                     div()
                         .w_full()
                         .max_w(gpui_kit::px(560.))
                         .child(setup_view::card(agent, &checks, Some(recheck), cx)),
                 )
+                .when(!others.is_empty(), |this| {
+                    this.child(
+                        v_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Or use an agent that is installed:"),
+                            )
+                            .child(h_flex().flex_wrap().justify_center().gap_2().children(
+                                others.into_iter().map(|spec| {
+                                    let panel = panel.clone();
+                                    Button::new(SharedString::from(format!("use-{}", spec.id)))
+                                        .small()
+                                        .outline()
+                                        .child(
+                                            h_flex()
+                                                .gap_1p5()
+                                                .child(spec.mark(gpui_kit::px(14.)))
+                                                .child(format!("Use {}", spec.name)),
+                                        )
+                                        .on_click(move |_, window, cx| {
+                                            _ = panel.update(cx, |panel, cx| {
+                                                panel.switch_agent(spec, window, cx)
+                                            });
+                                        })
+                                }),
+                            )),
+                    )
+                })
                 .into_any_element();
         }
+        // The agent chosen for new chats went away: say which is used now.
+        let fallback = crate::chats::default_fallback(&self.store)
+            .filter(|(_, used)| used.id == agent.id)
+            .map(|(chosen, used)| {
+                format!(
+                    "{} was not found, so new chats use {}.",
+                    chosen.name, used.name
+                )
+            });
         // The first start downloads the adapter: say so, it takes a while.
         let first_start = checks
             .iter()
@@ -415,9 +556,10 @@ impl ChatPanel {
                             .text_color(cx.theme().muted_foreground)
                             .child(subtitle),
                     )
-                    .children(first_start.map(|note| {
+                    .children(first_start.into_iter().chain(fallback).map(|note| {
                         div()
                             .text_xs()
+                            .text_center()
                             .text_color(cx.theme().muted_foreground)
                             .child(note)
                     })),
@@ -786,7 +928,11 @@ impl ChatPanel {
         let options = thread.options().to_vec();
         let panel = cx.weak_entity();
 
+        // No agent installed: the welcome card says how to get one, and
+        // nothing can be sent until then.
+        let no_agent = agents::installed().is_some_and(|installed| installed.is_empty());
         let status_line: Option<SharedString> = match status {
+            _ if no_agent => Some("Install one of the coding agents above to start a chat.".into()),
             _ if self.busy.is_some() => self.busy.clone(),
             ThreadStatus::Connecting => Some(format!("Starting {}…", agent.name).into()),
             // The transcript's working row says it.
@@ -833,7 +979,7 @@ impl ChatPanel {
                 .on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))
         });
         // While the agent works, a message is queued: it goes when the turn ends.
-        let send = (!busy || has_text).then(|| {
+        let send = (!no_agent && (!busy || has_text)).then(|| {
             Button::new("send-message")
                 .small()
                 .primary()

@@ -30,7 +30,8 @@ actions!(
         SideChat,
         /// Search the words of every chat (⌘⇧K).
         SearchChats,
-        /// Tokens and cost by agent or project.
+        /// What the agents used: tokens, the estimate at API prices and
+        /// limits, by agent, workspace or model.
         ShowUsage,
         /// A new presentation in Studio (title, size, theme).
         NewPresentation,

@@ -1,6 +1,7 @@
-//! Chrome tools: a real, visible Chrome (or Edge) with a profile of its own
-//! that PilotHouse starts for agents, to use websites as a person would.
-//! Each agent session works in its own tab; the bridge adds who it is.
+//! Chrome tools: the user's own Chrome (or Edge, Brave), through PilotHouse's
+//! Chrome extension, to use websites as a person would, with the user's
+//! sign-ins. Agents work only in tabs of its PilotHouse tab group; each
+//! agent session in tabs of its own. The bridge adds who it is.
 
 use serde_json::{Value, json};
 
@@ -25,7 +26,7 @@ fn with(mut properties: Value, extra: Value) -> Value {
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: "chrome_open",
-        description: "Open a URL in your tab of the user's PilotHouse Chrome: a real, visible Chrome (or Edge) with its own profile, so sites the user signed in to there stay signed in. Waits for the page to load. Use it for real websites (web apps, dashboards, docs, accounts); use browser_open for the project's own dev server in the PilotHouse pane. The first call starts Chrome. Each chat has its own tab; new_tab opens another. Never try to solve a CAPTCHA or other check that a person is there: ask the user to complete it in that window.",
+        description: "Open a URL in your tab of the user's own Chrome (through PilotHouse's Chrome extension), with the sites they are signed in to. Waits for the page to load. Your tabs live in Chrome's PilotHouse tab group; you can use only tabs in that group (ones you open, and ones the user shared: see chrome_tabs). Use it for real websites (web apps, dashboards, docs, accounts); use browser_open for the project's own dev server in the PilotHouse pane. If the extension is not connected, the answer says how the user sets it up; use the browser_ tools meanwhile. Each chat has its own tab; new_tab opens another. Never try to solve a CAPTCHA or other check that a person is there: ask the user to complete it in that tab.",
         schema: || {
             json!({ "type": "object", "required": ["url"], "properties": {
             "url": { "type": "string" },
@@ -108,7 +109,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "chrome_type",
-        description: "Type text: into an element (by `ref`, `selector` or `text`; `clear` replaces what is there) or where the focus is. `submit` presses Enter after; `slowly` types a key at a time for fields that react to each key (search suggestions). Password fields are refused: ask the user to sign in in the PilotHouse Chrome window.",
+        description: "Type text: into an element (by `ref`, `selector` or `text`; `clear` replaces what is there) or where the focus is. `submit` presses Enter after; `slowly` types a key at a time for fields that react to each key (search suggestions). Password fields are refused: ask the user to sign in themselves in that tab.",
         schema: || {
             json!({ "type": "object", "required": ["text"], "properties": with(element_properties(), json!({
             "text": { "type": "string" },
@@ -231,13 +232,13 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "chrome_tabs",
-        description: "Your tabs in Chrome: list them, open a new one (optionally at url), switch to one, or close one (by its index from list). Tabs a page opens (sign-in popups) become your current tab by themselves. list also shows the tabs the user opened, with their ids and which is on screen. When the user asks you to work in their tab (\"the active tab\", \"this page\", a form they started), take it: action take with its id as tab, or without one for the tab on screen. It becomes your current tab, with what the user typed kept; fill only what they asked. close on a taken tab gives it back without closing it.",
+        description: "Your tabs in Chrome's PilotHouse tab group: list them, open a new one (optionally at url), switch to one, or close one (by its index from list). Tabs a page opens (sign-in popups) become your current tab by themselves. list also shows the tabs the user shared with agents (put in the PilotHouse group), with their ids and which is on screen; you never see the user's other tabs. When the user asks you to work in their tab (\"the active tab\", \"this page\", a form they started), take it: action take with its id as tab, or without one for the shared tab on screen. If it is not listed, ask the user to share it (drag it into the PilotHouse group, or click the PilotHouse button in Chrome's toolbar). A taken tab becomes your current tab, with what the user typed kept; fill only what they asked. close on a taken tab gives it back without closing it.",
         schema: || {
             json!({ "type": "object", "properties": {
             "action": { "type": "string", "enum": ["list", "new", "switch", "close", "take"] },
             "index": { "type": "integer", "description": "Your tab's index from list (switch, close)." },
             "url": { "type": "string", "description": "For new." },
-            "tab": { "type": "string", "description": "For take: the user's tab id from list, e.g. 3F2A9C1B. Leave out for the tab on screen." }
+            "tab": { "type": "string", "description": "For take: a shared tab's id from list, e.g. 1234. Leave out for the shared tab on screen." }
         } })
         },
         build: |arguments, project_id, _| Ok(("chrome.tabs", with_project(arguments, project_id))),
@@ -319,7 +320,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "chrome_upload",
-        description: "Put files into a file field (input type=file) of your page: absolute paths of files in the workspace's folders or the downloads folder.",
+        description: "Put files into a file field (input type=file) of your page: absolute paths of files in the workspace's folders, or files your pages downloaded (chrome_downloads).",
         schema: || {
             json!({ "type": "object", "required": ["paths"], "properties": with(element_properties(), json!({
             "paths": { "type": "array", "items": { "type": "string" } }
@@ -332,7 +333,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "chrome_downloads",
-        description: "Files downloaded in Chrome, with where they were saved (a PilotHouse folder of the user's Downloads) and how far along they are.",
+        description: "Files your pages downloaded in Chrome, with how far along they are and where they were saved (where Chrome saves the user's downloads).",
         schema: || json!({ "type": "object", "properties": {} }),
         build: |arguments, project_id, _| {
             Ok(("chrome.downloads", with_project(arguments, project_id)))

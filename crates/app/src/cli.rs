@@ -17,6 +17,8 @@ usage:
   pilothouse agy-acp                 run Google Antigravity (agy) as an ACP agent
   pilothouse agent-hook --socket PATH --pane ID
                                      pass a terminal agent's hook event (stdin) to the app
+  pilothouse chrome-host <origin>    Chrome's native messaging host for PilotHouse's
+                                     extension (Chrome starts it; see Settings)
 ";
 
 /// What `main` does after reading the arguments.
@@ -38,6 +40,7 @@ pub fn run(args: &[String]) -> Launch {
         Some("mcp") => Launch::Exit(mcp(&args[1..])),
         Some("agy-acp") => Launch::Exit(agy_acp()),
         Some("agent-hook") => Launch::Exit(agent_hook(&args[1..])),
+        Some("chrome-host") => Launch::Exit(ph_browser::extension::run_host(&args[1..])),
         Some("-h" | "--help" | "help") => {
             print!("{USAGE}");
             Launch::Exit(0)

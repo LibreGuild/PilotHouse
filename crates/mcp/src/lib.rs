@@ -58,8 +58,9 @@ pub struct Session {
     options: BridgeOptions,
     client: Option<ControlClient>,
     project_id: Option<i64>,
-    /// This agent session, for the tab it uses in agents' Chrome: one bridge
-    /// runs per agent session.
+    /// This agent session, for the tabs it uses in agents' Chrome (the
+    /// user's Chrome, through PilotHouse's extension): one bridge runs per
+    /// agent session.
     owner: String,
 }
 

@@ -1,4 +1,5 @@
-//! JavaScript for agents' Chrome ([`crate::AgentChrome`]), run in an
+//! JavaScript for agents' Chrome ([`crate::AgentChrome`], the user's own
+//! Chrome through PilotHouse's extension), run in an
 //! isolated world of each page: it shares the page's DOM but not its
 //! scripts, so a site can neither see nor break it.
 //!
@@ -15,15 +16,6 @@
 pub const WORLD: &str = "pilothouse";
 /// The binding the bar's buttons call with `stop` or `continue`.
 pub const BINDING: &str = "__pilothouseControl";
-
-/// In the page's own world, before its scripts: Chrome sets
-/// `navigator.webdriver` for any browser driven over DevTools, which bot
-/// checks look at first.
-pub const NOT_AUTOMATED: &str = r#"(() => {
-  try {
-    Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: true });
-  } catch (_) {}
-})()"#;
 
 pub const OVERLAY: &str = r#"(() => {
   if (window.__phOverlay) return;

@@ -3,6 +3,12 @@
 //! Windows, GStreamer on Linux (loaded when a video opens; without it, or
 //! without a codec, the view says so and the file opens in the default
 //! player). PilotHouse draws the frames itself, with its own controls.
+//!
+//! **Full screen** (the button, F, or a double-click on the picture; Esc
+//! or F again to leave) opens a window of its own on the pane's screen that
+//! shows the same player, so playback carries on where it was, while the
+//! pane says where the video went. Frames are the player's, drawn by
+//! whichever window shows it, which works alike on every system.
 
 #[cfg(target_os = "linux")]
 pub mod gst;
@@ -34,10 +40,11 @@ use gpui_kit::component::{
     h_flex, v_flex,
 };
 use gpui_kit::{
-    AnyElement, Bounds, Context, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, ParentElement as _,
-    Pixels, Render, RenderImage, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Task, Window, canvas, div, img, px,
+    AnyElement, AnyWindowHandle, AppContext as _, Bounds, ClickEvent, Context, Entity, FocusHandle,
+    Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, ObjectFit, ParentElement as _, Pixels, Render, RenderImage, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, Window, WindowBounds,
+    WindowOptions, canvas, div, img, px,
 };
 
 use crate::audio::clock;
@@ -77,6 +84,8 @@ pub struct VideoPlayer {
     bar: Rc<Cell<Bounds<Pixels>>>,
     dragging: bool,
     focus: FocusHandle,
+    /// The window showing the video full screen, while it does.
+    fullscreen: Option<AnyWindowHandle>,
     _tick: Option<Task<()>>,
 }
 
@@ -98,6 +107,7 @@ impl VideoPlayer {
             bar: Rc::default(),
             dragging: false,
             focus: cx.focus_handle(),
+            fullscreen: None,
             _tick: None,
         };
         this.reload(window, cx);
@@ -234,15 +244,72 @@ impl VideoPlayer {
         cx.notify();
     }
 
-    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "space" | "k" => self.toggle(cx),
             "left" | "j" => self.step(-5., cx),
             "right" | "l" => self.step(5., cx),
             "m" => self.set_muted(!self.muted, cx),
+            "f" => self.toggle_fullscreen(window, cx),
+            "escape" if self.fullscreen.is_some() => self.toggle_fullscreen(window, cx),
             _ => return,
         }
         cx.stop_propagation();
+    }
+
+    /// Shows the video full screen (the same player, in a window of its
+    /// own on this window's screen), or back in its pane.
+    fn toggle_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.fullscreen == Some(window.window_handle()) {
+            self.fullscreen = None;
+            window.remove_window();
+            cx.notify();
+            return;
+        }
+        if self.fullscreen.is_some() {
+            // Asked from the pane: the full-screen window goes.
+            self.close_fullscreen(cx);
+            return;
+        }
+        let Some(display) = window.display(cx) else {
+            return;
+        };
+        let player = cx.entity();
+        let focus = self.focus.clone();
+        // Opened once this player is no longer being updated: the window
+        // draws it.
+        cx.defer(move |cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Fullscreen(display.bounds())),
+                display_id: Some(display.id()),
+                titlebar: None,
+                focus: true,
+                show: true,
+                ..WindowOptions::default()
+            };
+            let opened = gpui_kit::open_window(options, cx, |window, cx| {
+                let player = player.clone();
+                cx.new(|cx| FullScreen::new(player, &focus, window, cx))
+            });
+            if let Ok((handle, _)) = opened {
+                player.update(cx, |player, cx| {
+                    player.fullscreen = Some(handle);
+                    cx.notify();
+                });
+            }
+        });
+    }
+
+    /// Closes the full-screen window, if there is one. It holds the player
+    /// too, so when the pane's file closes this lets the player go (and its
+    /// sound stop) rather than play on full screen.
+    pub(crate) fn close_fullscreen(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.fullscreen.take() {
+            cx.defer(move |cx| {
+                _ = handle.update(cx, |_, window, _| window.remove_window());
+            });
+            cx.notify();
+        }
     }
 
     fn set_muted(&mut self, muted: bool, cx: &mut Context<Self>) {
@@ -263,6 +330,42 @@ impl Drop for VideoPlayer {
     }
 }
 
+/// A video full screen: its player, in a window of its own.
+struct FullScreen {
+    player: Entity<VideoPlayer>,
+}
+
+impl FullScreen {
+    fn new(
+        player: Entity<VideoPlayer>,
+        focus: &FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Keys (Space, the arrows, Esc) go to the player at once.
+        window.focus(focus, cx);
+        // However the window goes, the pane shows the video again.
+        let pane = player.downgrade();
+        cx.on_release(move |_, cx| {
+            _ = pane.update(cx, |player, cx| {
+                player.fullscreen = None;
+                cx.notify();
+            });
+        })
+        .detach();
+        Self { player }
+    }
+}
+
+impl Render for FullScreen {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .bg(gpui_kit::black())
+            .child(self.player.clone())
+    }
+}
+
 /// `frame`, filling its element, kept in proportion.
 pub fn picture(frame: &Frame) -> AnyElement {
     match frame {
@@ -280,6 +383,31 @@ pub fn picture(frame: &Frame) -> AnyElement {
 
 impl Render for VideoPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Full screen, the pane says so (and draws no frames).
+        let fullscreen = self.fullscreen;
+        if fullscreen.is_some_and(|handle| handle != window.window_handle()) {
+            return v_flex()
+                .id("video-player")
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .bg(gpui_kit::black())
+                .text_sm()
+                .text_color(gpui_kit::white().opacity(0.7))
+                .child("Playing full screen")
+                .child(
+                    Button::new("video-exit-fullscreen")
+                        .small()
+                        .outline()
+                        .icon(IconName::Minimize)
+                        .label("Exit full screen")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_fullscreen(window, cx)),
+                        ),
+                )
+                .into_any_element();
+        }
         let engine = match &self.engine {
             None => return crate::notice("Opening the video…", cx),
             Some(Err(err)) => {
@@ -372,9 +500,14 @@ impl Render for VideoPlayer {
                     .flex_1()
                     .min_h_0()
                     .child(picture)
-                    .on_click(cx.listener(|this, _, window, cx| {
+                    .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
                         window.focus(&this.focus, cx);
+                        // A double-click goes full screen (or back); its
+                        // first click's play or pause is undone.
                         this.toggle(cx);
+                        if event.click_count() == 2 {
+                            this.toggle_fullscreen(window, cx);
+                        }
                     })),
             )
             .child(
@@ -478,7 +611,25 @@ impl Render for VideoPlayer {
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.set_muted(!this.muted, cx)),
                             ),
-                    ),
+                    )
+                    .child({
+                        let (icon, tip) = if fullscreen.is_some() {
+                            (IconName::Minimize, "Exit full screen (F or Esc)")
+                        } else {
+                            (IconName::Maximize, "Full screen (F)")
+                        };
+                        Button::new("video-fullscreen")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon)
+                            .tooltip(tip)
+                            .accessibility_label(tip)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.toggle_fullscreen(window, cx)
+                                }),
+                            )
+                    }),
             )
             .into_any_element()
     }

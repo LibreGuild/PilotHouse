@@ -10,12 +10,13 @@ use gpui_kit::{
 };
 use ph_store::usage::SessionUsage;
 
-/// `950`, `12.3k`, `1.2M`.
+/// `950`, `12.3k`, `1.2M`, `2.4B`.
 pub fn compact(n: u64) -> String {
     match n {
         0..1_000 => n.to_string(),
         1_000..1_000_000 => trim(format!("{:.1}", n as f64 / 1_000.0)) + "k",
-        _ => trim(format!("{:.1}", n as f64 / 1_000_000.0)) + "M",
+        1_000_000..1_000_000_000 => trim(format!("{:.1}", n as f64 / 1_000_000.0)) + "M",
+        _ => trim(format!("{:.1}", n as f64 / 1_000_000_000.0)) + "B",
     }
 }
 
@@ -123,6 +124,7 @@ mod tests {
         assert_eq!(compact(12_340), "12.3k");
         assert_eq!(compact(2_000), "2k");
         assert_eq!(compact(1_250_000), "1.2M");
+        assert_eq!(compact(2_400_000_000), "2.4B");
         assert_eq!(money(0.4512, None), "$0.45");
         assert_eq!(money(3.0, Some("EUR")), "3.00 EUR");
     }

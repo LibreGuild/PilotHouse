@@ -275,6 +275,27 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE pr_reviews ADD COLUMN summary_comment_id INTEGER;
     ALTER TABLE pr_reviews ADD COLUMN data TEXT NOT NULL DEFAULT '';
     "#,
+    // 14: usage by day and model, for the usage dashboard: what each report
+    // added to a chat, on the (local) day it came, under the model the chat
+    // used then. Chats recorded before this keep their totals on the day
+    // they were last used, with no model.
+    r#"
+    CREATE TABLE usage_days (
+        session_id      INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        day             TEXT NOT NULL,
+        model           TEXT NOT NULL DEFAULT '',
+        input_tokens    INTEGER NOT NULL DEFAULT 0,
+        output_tokens   INTEGER NOT NULL DEFAULT 0,
+        cached_tokens   INTEGER NOT NULL DEFAULT 0,
+        cost            REAL NOT NULL DEFAULT 0,
+        currency        TEXT,
+        PRIMARY KEY (session_id, day, model)
+    );
+    INSERT INTO usage_days (session_id, day, input_tokens, output_tokens, cached_tokens, cost, currency)
+        SELECT session_id, date(updated_at / 1000, 'unixepoch', 'localtime'),
+               input_tokens, output_tokens, cached_tokens, cost, currency
+        FROM session_usage;
+    "#,
 ];
 
 /// Backups kept of a database file, newest first; older ones are deleted.
@@ -380,5 +401,36 @@ mod tests {
             .count();
         assert_eq!(backups, 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn usage_kept_before_days_moves_to_its_last_day() {
+        let connection = Connection::open_in_memory().unwrap();
+        // A database just before usage by day, with a chat that used some.
+        let before = MIGRATIONS.len() - 1;
+        for sql in &MIGRATIONS[..before] {
+            connection.execute_batch(sql).unwrap();
+        }
+        connection
+            .execute_batch(&format!(
+                "PRAGMA user_version = {before};
+                 INSERT INTO projects (id, name, path, created_at, last_opened_at) VALUES (1, 'p', '/tmp/p', 0, 0);
+                 INSERT INTO sessions (id, project_id, title, agent_id, created_at, updated_at)
+                    VALUES (7, 1, 'One', 'codex', 0, 0);
+                 INSERT INTO session_usage (session_id, input_tokens, output_tokens, cached_tokens, cost, updated_at)
+                    VALUES (7, 900, 40, 300, 0.5, 1767225600000);"
+            ))
+            .unwrap();
+        apply(&connection).unwrap();
+        let (day, input, cost): (String, i64, f64) = connection
+            .query_row(
+                "SELECT day, input_tokens, cost FROM usage_days WHERE session_id = 7",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        // 1 January 2026, 00:00 UTC: that day or the one before, by time zone.
+        assert!(day == "2026-01-01" || day == "2025-12-31", "{day}");
+        assert_eq!((input, cost), (900, 0.5));
     }
 }

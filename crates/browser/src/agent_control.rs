@@ -1,5 +1,6 @@
-//! `chrome.*` control-socket methods: agents' Chrome ([`AgentChrome`]),
-//! behind the MCP bridge's `chrome_*` tools.
+//! `chrome.*` control-socket methods: agents' Chrome ([`AgentChrome`], the
+//! user's own Chrome through PilotHouse's extension), behind the MCP
+//! bridge's `chrome_*` tools.
 //!
 //! Every call names its agent session (`owner`, which the bridge sets) and
 //! how to show it to the user (`agent`).
@@ -9,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow};
 use gpui_kit::{App, Context, Task};
 use ph_control::ControlServer;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::agent_chrome::{AgentChrome, Target, Who};
 
@@ -157,13 +158,6 @@ pub fn register(cx: &mut App) {
             .collect();
         Ok(chrome.upload(&who, params["project_id"].as_i64(), element, paths, cx))
     });
-    action("chrome.show", cx, |chrome, _, _, cx| {
-        let shown = chrome.show(cx);
-        Ok(cx.spawn(async move |_, _| {
-            shown.await?;
-            Ok(json!({ "text": "Chrome is in front." }))
-        }))
-    });
 
     // Already in memory: answered at once.
     read("chrome.console", cx, |chrome, who, params| {
@@ -305,6 +299,8 @@ fn string(params: &Value, key: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]

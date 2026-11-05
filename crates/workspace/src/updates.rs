@@ -1,11 +1,15 @@
-//! Updates from the project's GitHub releases.
+//! Updates from the project's GitHub releases, or their mirrors.
 //!
 //! Each release carries `latest.json`: the version, and per kind of install
-//! the file to download with its SHA-256. PilotHouse reads it (only that, and
-//! only from this repository's releases, over HTTPS) at start and every six
-//! hours, downloads the file for how it was installed, checks the SHA-256,
-//! unpacks it beside the data folder, and puts it in place when the app
-//! quits, or at once with *Restart to update*. Nothing is sent anywhere.
+//! the file to download with its SHA-256, signed with the project's release
+//! key (`latest.json.sig`). PilotHouse reads it over HTTPS at start and every
+//! six hours from GitHub or, where GitHub cannot be reached, from the
+//! project's mirrors ([`SOURCES`], in that order: the first that answers),
+//! and uses it only when the signature is the release key's. It downloads
+//! the file for how it was installed from the same place (should that fail,
+//! the next source's `latest.json` and file), checks the SHA-256, unpacks
+//! it beside the data folder, and puts it in place when the app quits, or
+//! at once with *Restart to update*. Nothing is sent anywhere.
 //!
 //! | Installed as | Update |
 //! |---|---|
@@ -26,11 +30,45 @@ use anyhow::{Context as _, Result, bail};
 use gpui_kit::{App, AppContext as _, Global, SharedString, Task};
 use serde::Deserialize;
 
-const REPO: &str = "LibreGuild/PilotHouse";
 const AUTO_CHECK: &str = "updates.auto_check";
 const AUTO_INSTALL: &str = "updates.auto_install";
 const EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 const FIRST_CHECK: Duration = Duration::from_secs(20);
+
+/// Where a release is published: its `latest.json` (with `.sig` beside it),
+/// and the folder holding each release's files by tag (`<files><tag>/<name>`).
+struct Source {
+    name: &'static str,
+    manifest: &'static str,
+    files: &'static str,
+}
+
+/// GitHub, then the mirrors the Release workflow copies every release to
+/// (the same files, for networks where GitHub is blocked). `latest.json`
+/// names files by their GitHub address; the mirrors keep the same
+/// `<tag>/<name>` under their own folder.
+const SOURCES: [Source; 3] = [
+    Source {
+        name: "GitHub",
+        manifest: "https://github.com/LibreGuild/PilotHouse/releases/latest/download/latest.json",
+        files: "https://github.com/LibreGuild/PilotHouse/releases/download/",
+    },
+    Source {
+        name: "the mirror",
+        manifest: "https://libreguild.skatech.org/pilothouse/latest/latest.json",
+        files: "https://libreguild.skatech.org/pilothouse/releases/",
+    },
+    Source {
+        name: "the backup mirror",
+        manifest: "https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/latest/latest.json",
+        files: "https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/releases/",
+    },
+];
+
+/// The release key's public half (Ed25519, base64): `latest.json` is used
+/// only with its signature. The Release workflow signs with the private half
+/// (`scripts/package/sign-manifest.sh`), and refuses a key that is not this.
+const UPDATE_KEY: &str = include_str!("update_key.pub");
 
 /// What `latest.json` says.
 #[derive(Debug, Clone, Deserialize)]
@@ -38,6 +76,9 @@ pub(crate) struct Manifest {
     pub version: String,
     #[serde(default)]
     pub platforms: HashMap<String, Asset>,
+    /// The [`SOURCES`] it came from, tried first for the download.
+    #[serde(skip)]
+    source: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +96,7 @@ pub(crate) enum Install {
         bundle: PathBuf,
     },
     WindowsSetup {
+        dir: PathBuf,
         exe: PathBuf,
     },
     WindowsPortable {
@@ -111,6 +153,7 @@ impl Install {
         if cfg!(windows) {
             if dir.join("Uninstall.exe").is_file() {
                 return Install::WindowsSetup {
+                    dir,
                     exe: exe.to_path_buf(),
                 };
             }
@@ -207,32 +250,51 @@ pub(crate) fn is_newer(candidate: &str, current: &str) -> bool {
     }
 }
 
-/// Where updates come from: this repository's releases (a debug build may
-/// point elsewhere to be tried out).
-fn manifest_url() -> String {
+/// A debug build may take its updates from elsewhere, to try them out
+/// (unsigned, from any address).
+fn test_manifest() -> Option<String> {
     #[cfg(debug_assertions)]
     if let Ok(url) = std::env::var("PILOTHOUSE_UPDATE_MANIFEST") {
-        return url;
+        return Some(url);
     }
-    format!("https://github.com/{REPO}/releases/latest/download/latest.json")
+    None
 }
 
-/// Whether `url` is a file of this repository's releases (no `..` or
-/// escapes that could lead out of them).
-fn trusted(url: &str) -> bool {
-    #[cfg(debug_assertions)]
-    if std::env::var("PILOTHOUSE_UPDATE_MANIFEST").is_ok() {
-        return true;
-    }
-    url.strip_prefix(&format!("https://github.com/{REPO}/releases/download/"))
-        .is_some_and(|rest| {
-            !rest
-                .split('/')
-                .any(|part| part.is_empty() || part.starts_with('.'))
-                && rest
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | '/'))
-        })
+/// The `<tag>/<name>` of `url` when it is a file of this repository's
+/// GitHub releases (no `..` or escapes that could lead out of them).
+fn release_file(url: &str) -> Option<&str> {
+    url.strip_prefix(SOURCES[0].files).filter(|rest| {
+        !rest
+            .split('/')
+            .any(|part| part.is_empty() || part.starts_with('.'))
+            && rest
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | '/'))
+    })
+}
+
+/// Where `asset` is on the [`SOURCES`] at `index`; `None` unless it is a
+/// file of this repository's releases.
+fn source_url(asset: &Asset, index: usize) -> Option<String> {
+    let file = release_file(&asset.url)?;
+    Some(format!("{}{file}", SOURCES.get(index)?.files))
+}
+
+/// Whether `signature` (base64) is the release key's for `manifest`.
+fn signed(manifest: &[u8], signature: &str) -> bool {
+    signed_by(UPDATE_KEY, manifest, signature)
+}
+
+fn signed_by(key: &str, manifest: &[u8], signature: &str) -> bool {
+    use base64::Engine as _;
+    let base64 = base64::engine::general_purpose::STANDARD;
+    let (Ok(key), Ok(signature)) = (base64.decode(key.trim()), base64.decode(signature.trim()))
+    else {
+        return false;
+    };
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
+        .verify(manifest, &signature)
+        .is_ok()
 }
 
 /// Whether `version` is a plain version (`1.2.3`, `1.2.3-beta.1`): it names
@@ -253,30 +315,66 @@ fn agent() -> ureq::Agent {
         .provider(TlsProvider::NativeTls)
         .root_certs(RootCerts::PlatformVerifier)
         .build();
+    // A network that blocks a source may hold the request open instead of
+    // refusing it: give up on an answer that does not start, and try the next.
     ureq::Agent::config_builder()
         .tls_config(tls)
         .timeout_connect(Some(Duration::from_secs(20)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
         .user_agent(concat!("PilotHouse/", env!("CARGO_PKG_VERSION")))
         .build()
         .into()
 }
 
-/// Reads `latest.json`. Blocking.
-fn fetch_manifest() -> Result<Manifest> {
-    let mut response = agent()
-        .get(&manifest_url())
-        .call()
-        .context("could not reach GitHub")?;
-    let text = response
+/// The body of `url`, up to `limit` bytes. Blocking.
+fn get(url: &str, limit: u64) -> Result<Vec<u8>> {
+    Ok(agent()
+        .get(url)
+        .call()?
         .body_mut()
         .with_config()
-        .limit(1 << 20)
-        .read_to_string()?;
-    let manifest: Manifest =
-        serde_json::from_str(&text).context("the release's latest.json could not be read")?;
+        .limit(limit)
+        .read_to_vec()?)
+}
+
+/// Reads `latest.json` from the first of [`SOURCES`] that has one signed
+/// with the release key. Blocking.
+fn fetch_manifest() -> Result<Manifest> {
+    if let Some(url) = test_manifest() {
+        return read_manifest(&get(&url, 1 << 20)?, 0);
+    }
+    let mut failures = Vec::new();
+    for (index, source) in SOURCES.iter().enumerate() {
+        match fetch_manifest_from(index) {
+            Ok(manifest) => return Ok(manifest),
+            Err(err) => {
+                tracing::info!("no update from {}: {err:#}", source.manifest);
+                failures.push(format!("{}: {err:#}", source.name));
+            }
+        }
+    }
+    bail!("no update source answered ({})", failures.join("; "))
+}
+
+/// The `latest.json` of the [`SOURCES`] at `index`, when it is signed with
+/// the release key. Blocking.
+fn fetch_manifest_from(index: usize) -> Result<Manifest> {
+    let source = &SOURCES[index];
+    let manifest = get(source.manifest, 1 << 20)?;
+    let signature = get(&format!("{}.sig", source.manifest), 1024)?;
+    if !signed(&manifest, &String::from_utf8_lossy(&signature)) {
+        bail!("its latest.json is not signed with the release key");
+    }
+    read_manifest(&manifest, index)
+}
+
+fn read_manifest(bytes: &[u8], source: usize) -> Result<Manifest> {
+    let mut manifest: Manifest =
+        serde_json::from_slice(bytes).context("the release's latest.json could not be read")?;
     if !plain_version(&manifest.version) {
         bail!("the release's latest.json names no plain version");
     }
+    manifest.source = source;
     Ok(manifest)
 }
 
@@ -285,14 +383,68 @@ fn updates_dir() -> PathBuf {
     ph_store::paths::data_dir().join("updates")
 }
 
-/// Downloads `asset` into `folder`, counting bytes in `done`, and checks
-/// its SHA-256. Blocking.
-fn download(asset: &Asset, folder: &Path, done: &AtomicU64) -> Result<PathBuf> {
-    use sha2::Digest as _;
-    use std::io::{Read as _, Write as _};
-    if !trusted(&asset.url) {
-        bail!("the update is not from {REPO}'s releases");
+/// Downloads the file `manifest` names for `platform` into `folder`,
+/// counting bytes in `done`. Each source is used whole, in order from the
+/// one `manifest` came from: its signed `latest.json` (for a source after
+/// that one, read again, and naming the same version), then the file from
+/// the same place. A source whose download fails gives way to the next
+/// (GitHub's files are served from another host, which a network may block
+/// too); one before it already failed to answer. Blocking.
+fn download(
+    manifest: &Manifest,
+    platform: &str,
+    folder: &Path,
+    done: &AtomicU64,
+) -> Result<PathBuf> {
+    let asset = manifest
+        .platforms
+        .get(platform)
+        .context("the release has no file for this install")?;
+    if test_manifest().is_some() {
+        return download_file(&asset.url, asset, folder, done);
     }
+    let mut failures = Vec::new();
+    for (index, source) in SOURCES.iter().enumerate().skip(manifest.source) {
+        let attempt = (|| -> Result<PathBuf> {
+            let fetched;
+            let manifest = if index == manifest.source {
+                manifest
+            } else {
+                fetched = fetch_manifest_from(index)?;
+                if fetched.version != manifest.version {
+                    bail!(
+                        "it has PilotHouse {}, not {}",
+                        fetched.version,
+                        manifest.version
+                    );
+                }
+                &fetched
+            };
+            let asset = manifest
+                .platforms
+                .get(platform)
+                .context("its latest.json has no file for this install")?;
+            let url =
+                source_url(asset, index).context("the update is not from PilotHouse's releases")?;
+            download_file(&url, asset, folder, done)
+        })();
+        match attempt {
+            Ok(path) => return Ok(path),
+            Err(err) => {
+                tracing::info!("no update download from {}: {err:#}", source.name);
+                failures.push(format!("{}: {err:#}", source.name));
+            }
+        }
+    }
+    bail!(
+        "the update could not be downloaded ({})",
+        failures.join("; ")
+    )
+}
+
+/// Downloads `url` into `folder`, under the name of `asset`'s file, and
+/// checks it is `asset` (its size and SHA-256). Blocking.
+fn download_file(url: &str, asset: &Asset, folder: &Path, done: &AtomicU64) -> Result<PathBuf> {
     let name = asset
         .url
         .rsplit('/')
@@ -302,11 +454,29 @@ fn download(asset: &Asset, folder: &Path, done: &AtomicU64) -> Result<PathBuf> {
     std::fs::create_dir_all(folder)?;
     let path = folder.join(name);
     let partial = folder.join(format!("{name}.part"));
-    // A download that breaks off leaves nothing behind.
-    let fetched = (|| -> Result<sha2::Sha256> {
-        let mut response = agent().get(&asset.url).call()?;
+    done.store(0, Ordering::Relaxed);
+    match download_to(url, asset, &partial, done) {
+        Ok(()) => {
+            std::fs::rename(&partial, &path)?;
+            Ok(path)
+        }
+        Err(err) => {
+            // A download that breaks off leaves nothing behind.
+            let _ = std::fs::remove_file(&partial);
+            Err(err)
+        }
+    }
+}
+
+/// Downloads `url` into `partial`, which holds `asset` when this succeeds.
+/// Blocking.
+fn download_to(url: &str, asset: &Asset, partial: &Path, done: &AtomicU64) -> Result<()> {
+    use sha2::Digest as _;
+    use std::io::{Read as _, Write as _};
+    let hasher = {
+        let mut response = agent().get(url).call()?;
         let mut reader = response.body_mut().with_config().limit(2 << 30).reader();
-        let mut file = std::fs::File::create(&partial)?;
+        let mut file = std::fs::File::create(partial)?;
         let mut hasher = sha2::Sha256::new();
         let mut buffer = vec![0; 256 * 1024];
         let mut total = 0u64;
@@ -324,23 +494,14 @@ fn download(asset: &Asset, folder: &Path, done: &AtomicU64) -> Result<PathBuf> {
             done.fetch_add(read as u64, Ordering::Relaxed);
         }
         file.flush()?;
-        Ok(hasher)
-    })();
-    let hasher = match fetched {
-        Ok(hasher) => hasher,
-        Err(err) => {
-            let _ = std::fs::remove_file(&partial);
-            return Err(err);
-        }
+        hasher
     };
     let digest = hasher.finalize();
     let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     if !hex.eq_ignore_ascii_case(asset.sha256.trim()) {
-        let _ = std::fs::remove_file(&partial);
         bail!("the download does not match its checksum");
     }
-    std::fs::rename(&partial, &path)?;
-    Ok(path)
+    Ok(())
 }
 
 /// Unpacks a downloaded update into `staging`, ready to put in place;
@@ -470,8 +631,9 @@ pub(crate) fn apply_script(
                 },
             ))
         }
-        Install::WindowsSetup { exe } => Some(format!(
-            "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Start-Process -FilePath {setup} -ArgumentList '/S' -Wait; {launch}",
+        Install::WindowsSetup { dir, exe } => Some(format!(
+            "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; {stop} Start-Process -FilePath {setup} -ArgumentList '/S' -Wait; {launch}",
+            stop = ps_stop_programs_in(dir),
             setup = ps_quote(staged),
             launch = if relaunch {
                 format!("Start-Process -FilePath {}", ps_quote(exe))
@@ -480,7 +642,8 @@ pub(crate) fn apply_script(
             },
         )),
         Install::WindowsPortable { dir, exe } => Some(format!(
-            "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Copy-Item -Path (Join-Path {staged} '*') -Destination {dir} -Recurse -Force; {launch}",
+            "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; {stop} Copy-Item -Path (Join-Path {staged} '*') -Destination {dir} -Recurse -Force; {launch}",
+            stop = ps_stop_programs_in(dir),
             staged = ps_quote(staged),
             dir = ps_quote(dir),
             launch = if relaunch {
@@ -494,7 +657,34 @@ pub(crate) fn apply_script(
 }
 
 fn ps_quote(path: &Path) -> String {
-    format!("'{}'", path.display().to_string().replace('\'', "''"))
+    ps_quote_str(&path.display().to_string())
+}
+
+fn ps_quote_str(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+/// The `pilothouse` subcommands that run as helpers of the app (see
+/// `crates/app/src/cli.rs`): an agent's MCP server, the Antigravity bridge,
+/// a Claude Code hook, the Chrome extension's host.
+const HELPERS: [&str; 4] = ["mcp", "agy-acp", "agent-hook", "chrome-host"];
+
+/// PowerShell that stops the helpers still running from `dir` once
+/// PilotHouse has quit ([`HELPERS`]), and waits (up to ten seconds) until
+/// none does. Windows keeps a running program's file open, so a copy of
+/// `pilothouse.exe` left behind would stop the installer at "Abort, Retry,
+/// Ignore". Only helpers: another PilotHouse the user has open (a second
+/// data folder) is left alone.
+fn ps_stop_programs_in(dir: &Path) -> String {
+    let dir = dir.display().to_string();
+    let prefix = format!("{}\\", dir.trim_end_matches('\\'));
+    // The program (quoted or not), then the subcommand.
+    let helpers = format!(r#"^\s*("[^"]*"|\S+)\s+({})(\s|$)"#, HELPERS.join("|"));
+    format!(
+        "$dir = {prefix}; $helpers = {helpers}; for ($i = 0; $i -lt 20; $i++) {{ $left = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {{ $_.ExecutablePath -and $_.ExecutablePath.StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase) -and $_.CommandLine -match $helpers }}); if ($left.Count -eq 0) {{ break }}; $left | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}; Start-Sleep -Milliseconds 500 }};",
+        prefix = ps_quote_str(&prefix),
+        helpers = ps_quote_str(&helpers),
+    )
 }
 
 /// Starts the script that installs `staged` after PilotHouse quits.
@@ -557,6 +747,9 @@ impl Global for Updater {}
 
 /// The page of the newest release.
 pub(crate) const RELEASES_URL: &str = "https://github.com/LibreGuild/PilotHouse/releases/latest";
+
+/// The project's page.
+pub(crate) const REPOSITORY_URL: &str = "https://github.com/LibreGuild/PilotHouse";
 
 pub(crate) fn auto_check(cx: &App) -> bool {
     crate::AppState::store(cx)
@@ -697,18 +890,17 @@ pub(crate) fn download_update(cx: &mut App) {
     else {
         return;
     };
-    let Some(asset) = manifest.platforms.get(platform).cloned() else {
+    let Some(size) = manifest.platforms.get(platform).map(|asset| asset.size) else {
         return;
     };
     let install = updater.install.clone();
     let version = manifest.version.clone();
-    let size = asset.size;
     let done = Arc::new(AtomicU64::new(0));
     let folder = updates_dir().join(&version);
     let work = {
         let done = done.clone();
         cx.background_spawn(async move {
-            let file = download(&asset, &folder, &done)?;
+            let file = download(&manifest, platform, &folder, &done)?;
             stage(&install, &file, &folder.join("staged"))
         })
     };
@@ -791,17 +983,83 @@ mod tests {
         )
         .unwrap();
         assert_eq!(manifest.platforms["macos-universal"].size, 3);
-        assert!(trusted(&manifest.platforms["macos-universal"].url));
-        assert!(!trusted("https://example.com/PilotHouse.zip"));
-        assert!(!trusted(
-            "https://github.com/LibreGuild/PilotHouse/releases/download/../../../evil/x/releases/download/v1/a.zip"
-        ));
-        assert!(!trusted(
-            "https://github.com/LibreGuild/PilotHouse/releases/download/v1/%2e%2e/a.zip"
-        ));
+        assert_eq!(
+            release_file(&manifest.platforms["macos-universal"].url),
+            Some("v0.3.0/PilotHouse-macOS-universal.zip")
+        );
+        assert_eq!(release_file("https://example.com/PilotHouse.zip"), None);
+        assert_eq!(
+            release_file(
+                "https://github.com/LibreGuild/PilotHouse/releases/download/../../../evil/x/releases/download/v1/a.zip"
+            ),
+            None
+        );
+        assert_eq!(
+            release_file(
+                "https://github.com/LibreGuild/PilotHouse/releases/download/v1/%2e%2e/a.zip"
+            ),
+            None
+        );
         assert!(plain_version("0.3.0-beta.1"));
         assert!(!plain_version("../../x"));
         assert!(!plain_version("0.3/0"));
+    }
+
+    #[test]
+    fn finds_each_file_on_every_source() {
+        let asset = Asset {
+            url: "https://github.com/LibreGuild/PilotHouse/releases/download/v0.6.0/PilotHouse-Linux-x86_64.tar.gz".into(),
+            sha256: "ab".into(),
+            size: 3,
+        };
+        let urls: Vec<_> = (0..SOURCES.len())
+            .map(|index| source_url(&asset, index).unwrap())
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "https://github.com/LibreGuild/PilotHouse/releases/download/v0.6.0/PilotHouse-Linux-x86_64.tar.gz",
+                "https://libreguild.skatech.org/pilothouse/releases/v0.6.0/PilotHouse-Linux-x86_64.tar.gz",
+                "https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/releases/v0.6.0/PilotHouse-Linux-x86_64.tar.gz",
+            ]
+        );
+        assert_eq!(source_url(&asset, SOURCES.len()), None);
+        let elsewhere = Asset {
+            url: "https://libreguild.skatech.org/pilothouse/releases/v0.6.0/a.zip".into(),
+            ..asset
+        };
+        assert_eq!(
+            source_url(&elsewhere, 1),
+            None,
+            "named by its GitHub address only"
+        );
+    }
+
+    #[test]
+    fn trusts_only_the_release_key() {
+        // Signed by `scripts/package/sign-manifest.sh` with the release key.
+        let manifest = br#"{"version":"9.9.9","platforms":{}}"#;
+        let signature = "A41yq3ZvukGjr/HNgou97Kn8xl19ce8xdFI+yz6SAmBBs7DBJ8CdK40QejsN4hHqlFEFYYd/r2UaG3ClllPgAQ==";
+        assert!(signed(manifest, signature));
+        assert!(signed(manifest, &format!("{signature}\n")));
+        assert!(!signed(
+            br#"{"version":"9.9.10","platforms":{}}"#,
+            signature
+        ));
+        assert!(!signed(manifest, ""));
+        assert!(!signed(manifest, "not base64"));
+        // Another key's signature, however valid, is refused.
+        let other = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+        use base64::Engine as _;
+        let base64 = base64::engine::general_purpose::STANDARD;
+        let theirs = base64.encode(other.sign(manifest));
+        use ring::signature::KeyPair as _;
+        assert!(signed_by(
+            &base64.encode(other.public_key()),
+            manifest,
+            &theirs
+        ));
+        assert!(!signed(manifest, &theirs));
     }
 
     #[test]
@@ -848,5 +1106,47 @@ mod tests {
         );
         assert!(script.contains("open '/Applications/PilotHouse.app'"));
         assert!(apply_script(&Install::Manual, Path::new("/x"), 1, false).is_none());
+    }
+
+    #[test]
+    fn windows_scripts_stop_what_runs_from_the_folder_first() {
+        let dir = PathBuf::from(r"C:\Users\o'neil\AppData\Local\Programs\PilotHouse");
+        let exe =
+            PathBuf::from(r"C:\Users\o'neil\AppData\Local\Programs\PilotHouse\pilothouse.exe");
+        let setup = apply_script(
+            &Install::WindowsSetup {
+                dir: dir.clone(),
+                exe: exe.clone(),
+            },
+            Path::new(r"C:\data\updates\0.6.0\PilotHouse-Windows-Setup-x64.exe"),
+            42,
+            true,
+        )
+        .unwrap();
+        let portable = apply_script(
+            &Install::WindowsPortable { dir, exe },
+            Path::new(r"C:\data\updates\0.6.0\staged"),
+            42,
+            false,
+        )
+        .unwrap();
+        for (script, install) in [
+            (&setup, "Start-Process -FilePath 'C:\\data"),
+            (&portable, "Copy-Item"),
+        ] {
+            let wait = script.find("Wait-Process -Id 42").unwrap();
+            let stop = script.find("Stop-Process -Id $_.ProcessId -Force").unwrap();
+            let install = script.find(install).unwrap();
+            assert!(wait < stop && stop < install, "{script}");
+            // The folder, quoted, with a separator: not `PilotHouse2`.
+            assert!(
+                script.contains(r"$dir = 'C:\Users\o''neil\AppData\Local\Programs\PilotHouse\';")
+            );
+            // Only helpers: never another PilotHouse window.
+            assert!(script.contains(
+                r#"$helpers = '^\s*("[^"]*"|\S+)\s+(mcp|agy-acp|agent-hook|chrome-host)(\s|$)';"#
+            ));
+        }
+        assert!(setup.ends_with(r"Start-Process -FilePath 'C:\Users\o''neil\AppData\Local\Programs\PilotHouse\pilothouse.exe'"));
     }
 }

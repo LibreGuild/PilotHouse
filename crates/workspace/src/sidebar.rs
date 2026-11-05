@@ -2,15 +2,22 @@
 //! needs switching to be seen.
 //!
 //! - **New chat** (⌘N) and a search field (⌘⇧K) on top.
-//! - **Pinned**: chats pinned from any workspace, kept on top.
-//! - **Chats**: the Chats space, for chats outside any workspace (no folder
-//!   needed), grouped by day.
-//! - **Workspaces**: each with its colour and what it is doing; unfolded,
-//!   its newest chats (all of them on request). Picking a chat opens its
-//!   workspace at it. Each row's menu adds folders, renames, moves it to a
-//!   window of its own, recolours or removes it.
-//! - Each chat's menu pins, renames or deletes it. Every section folds away
-//!   from its header.
+//! - Below them two panes, stacked as in VS Code's side bar, each with a
+//!   header that collapses it (a click, or Enter or Space when focused):
+//!   - **Chats**: chats pinned from any workspace (*Pinned*, kept on top,
+//!     folding on their own), then the Chats space, for chats outside any
+//!     workspace (no folder needed), grouped by day.
+//!   - **Workspaces**: each with its colour and what it is doing; unfolded,
+//!     its newest chats (all of them on request). Picking a chat opens its
+//!     workspace at it. Each row's menu adds folders, renames, moves it to a
+//!     window of its own, recolours or removes it.
+//!
+//!   A collapsed pane keeps only its header, and the open one takes the
+//!   rest of the height. With both open they share it: the line between
+//!   them drags to give one more (double-click it to share evenly), and
+//!   each scrolls on its own. Which panes are collapsed and how the height
+//!   is shared are kept across restarts.
+//! - Each chat's menu pins, renames or deletes it.
 //!
 //! Chats that PilotHouse started itself (schedules, test recording and
 //! repair, pull request reviews) fold into *Runs*, so the user's own stay in
@@ -27,9 +34,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    WeakEntity, Window, div, px,
+    AnyElement, App, AppContext as _, Context, FocusHandle, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, WeakEntity, Window, div, px,
 };
 use jiff::{ToSpan as _, Zoned};
 use ph_agent::ChatState;
@@ -47,6 +54,14 @@ use crate::workspace::{View, Workspace};
 /// The chats an unfolded workspace lists before *Show all*.
 const NEWEST: usize = 5;
 
+/// The least height an open pane is given while both are open: its
+/// header and a few rows.
+const MIN_PANE: Pixels = px(96.);
+
+/// The Chats pane's part of the height while both panes are open, unless
+/// the user has dragged it.
+const EVEN_SPLIT: f32 = 0.5;
+
 /// Section names, as [`Workspace::folded`] keeps them.
 pub(crate) const CHATS: &str = "chats";
 const WORKSPACES: &str = "workspaces";
@@ -63,15 +78,86 @@ struct SidebarWidth {
 
 impl gpui_kit::Global for SidebarWidth {}
 
-/// Reads the saved width (at startup).
-pub(crate) fn load_width(cx: &mut App) {
-    let saved: f32 = crate::AppState::store(cx).setting(crate::app_state::keys::SIDEBAR_WIDTH);
+/// How the Chats and Workspaces panes share the height while both are
+/// open: the Chats pane's part (0 to 1), as the user last dragged it. Every
+/// window's sidebar shares it, as they share the width.
+#[derive(Clone, Copy)]
+struct SidebarSplit {
+    chats: f32,
+    /// Bumped by each drag step: only the last one is saved.
+    edit: u64,
+}
+
+impl gpui_kit::Global for SidebarSplit {}
+
+/// Reads the saved width and how the panes share the height (at startup).
+pub(crate) fn load_sizes(cx: &mut App) {
+    let store = crate::AppState::store(cx);
+    let saved: f32 = store.setting(crate::app_state::keys::SIDEBAR_WIDTH);
     let width = if saved > 0. {
         px(saved).clamp(layout::SIDEBAR_MIN, layout::SIDEBAR_MAX)
     } else {
         layout::SIDEBAR_WIDTH
     };
+    let saved: f32 = store.setting(crate::app_state::keys::SIDEBAR_SPLIT);
+    let chats = if saved > 0. && saved < 1. {
+        saved
+    } else {
+        EVEN_SPLIT
+    };
     cx.set_global(SidebarWidth { width, edit: 0 });
+    cx.set_global(SidebarSplit { chats, edit: 0 });
+}
+
+/// The Chats pane's part of the height while both panes are open.
+fn split(cx: &App) -> f32 {
+    cx.try_global::<SidebarSplit>()
+        .map_or(EVEN_SPLIT, |split| split.chats)
+}
+
+/// What is dragged when the line between the panes is.
+pub(crate) struct PaneDivider;
+
+impl Render for PaneDivider {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui_kit::Empty
+    }
+}
+
+/// The line between the panes was dragged to `top` of the panes' `height`:
+/// the Chats pane ends there, each pane keeping [`MIN_PANE`].
+fn drag_split(top: Pixels, height: Pixels, cx: &mut App) {
+    let height = f32::from(height);
+    if height <= 0. {
+        return;
+    }
+    let least = (f32::from(MIN_PANE) / height).min(EVEN_SPLIT);
+    set_split((f32::from(top) / height).clamp(least, 1. - least), cx);
+}
+
+/// Shares the height at `chats`, saved once the drag rests.
+fn set_split(chats: f32, cx: &mut App) {
+    let edit = cx
+        .try_global::<SidebarSplit>()
+        .map_or(0, |split| split.edit)
+        + 1;
+    cx.set_global(SidebarSplit { chats, edit });
+    cx.refresh_windows();
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(400))
+            .await;
+        cx.update(|cx| {
+            if cx
+                .try_global::<SidebarSplit>()
+                .is_some_and(|split| split.edit == edit)
+            {
+                _ = crate::AppState::store(cx)
+                    .set_setting(crate::app_state::keys::SIDEBAR_SPLIT, &chats);
+            }
+        });
+    })
+    .detach();
 }
 
 pub(crate) fn width(cx: &App) -> Pixels {
@@ -132,33 +218,33 @@ pub(crate) fn drag_width(width: Pixels, cx: &mut App) {
 }
 
 pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let mut rows: Vec<AnyElement> = Vec::new();
-    if !workspace.pinned.is_empty() {
-        rows.extend(pinned_rows(workspace, cx));
-    }
-    if let Some(chats) = workspace.chats_space() {
+    // The Chats pane, while there are loose or pinned chats to list.
+    let chats_space = workspace.chats_space().map(|space| space.id);
+    let chats = (chats_space.is_some() || !workspace.pinned.is_empty()).then(|| {
         let folded = workspace.folded.contains(CHATS);
-        rows.push(chats_header(chats.id, folded, cx));
-        if !folded {
-            rows.extend(chat_rows(workspace, chats.id, None, cx));
-        }
-    }
-    // A rule between the two lists, so the last chat never reads as the
-    // first workspace's.
-    if !rows.is_empty() {
-        rows.push(
-            div()
-                .flex_none()
-                .mt_2()
-                .mx_1()
-                .h(px(1.))
-                .bg(cx.theme().sidebar_border)
-                .into_any_element(),
-        );
-    }
+        let header = chats_header(chats_space, folded, &workspace.pane_focus[0], cx);
+        let rows = (!folded).then(|| {
+            let mut rows = Vec::new();
+            if !workspace.pinned.is_empty() {
+                rows.extend(pinned_rows(workspace, cx));
+            }
+            if let Some(chats) = chats_space {
+                rows.extend(chat_rows(workspace, chats, None, cx));
+            }
+            rows
+        });
+        pane("sidebar-chats-pane", header, rows)
+    });
+
     let folded = workspace.folded.contains(WORKSPACES);
-    rows.push(workspaces_header(workspace.projects().len(), folded, cx));
-    if !folded {
+    let header = workspaces_header(
+        workspace.projects().len(),
+        folded,
+        &workspace.pane_focus[1],
+        cx,
+    );
+    let rows = (!folded).then(|| {
+        let mut rows = Vec::new();
         if workspace.projects().is_empty() {
             rows.push(no_workspaces(cx));
         }
@@ -179,7 +265,10 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                 );
             }
         }
-    }
+        rows
+    });
+    let workspaces = pane("sidebar-workspaces-pane", header, rows);
+
     v_flex()
         .id("workspace-sidebar")
         .flex_none()
@@ -188,16 +277,126 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
         .pl_2()
         .pb_2()
         .child(top(cx))
-        .child(
-            v_flex()
-                .id("sidebar-list")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .pr_1()
-                .pb_2()
-                .children(rows),
-        )
+        .child(panes(chats, workspaces, cx))
+}
+
+/// A pane: its header, and while it is open its rows, which scroll on
+/// their own.
+struct Pane {
+    id: &'static str,
+    header: AnyElement,
+    rows: Option<Vec<AnyElement>>,
+}
+
+fn pane(id: &'static str, header: AnyElement, rows: Option<Vec<AnyElement>>) -> Pane {
+    Pane { id, header, rows }
+}
+
+impl Pane {
+    fn is_open(&self) -> bool {
+        self.rows.is_some()
+    }
+
+    fn into_element(self) -> gpui_kit::Stateful<gpui_kit::Div> {
+        v_flex()
+            .id(self.id)
+            .min_h_0()
+            .child(self.header)
+            .when_some(self.rows, |this, rows| {
+                this.child(
+                    v_flex()
+                        .id(SharedString::from(format!("{}-list", self.id)))
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .pr_1()
+                        .pb_2()
+                        .children(rows),
+                )
+            })
+    }
+}
+
+/// The Chats pane (when there is one) over the Workspaces pane. A collapsed
+/// pane is its header alone; an open one takes the height the other leaves,
+/// and with both open they share it at the line between them, which drags.
+fn panes(chats: Option<Pane>, workspaces: Pane, cx: &App) -> impl IntoElement {
+    let chats_open = chats.as_ref().is_some_and(Pane::is_open);
+    let both_open = chats_open && workspaces.is_open();
+    let divider = chats.is_some().then(|| divider(both_open, cx));
+    let chats = chats.map(|chats| match (chats.is_open(), both_open) {
+        (true, true) => chats
+            .into_element()
+            .flex_none()
+            .h(gpui_kit::relative(split(cx)))
+            .min_h(MIN_PANE),
+        (true, false) => chats.into_element().flex_1(),
+        (false, _) => chats.into_element().flex_none(),
+    });
+    let workspaces_open = workspaces.is_open();
+    let workspaces = workspaces.into_element();
+    let workspaces = if workspaces_open {
+        workspaces
+            .flex_1()
+            .when(both_open, |this| this.min_h(MIN_PANE))
+    } else {
+        workspaces.flex_none()
+    };
+    v_flex()
+        .id("sidebar-panes")
+        .flex_1()
+        .min_h_0()
+        .pt_1()
+        .overflow_hidden()
+        .on_drag_move(|event: &gpui_kit::DragMoveEvent<PaneDivider>, _, cx| {
+            drag_split(
+                event.event.position.y - event.bounds.top(),
+                event.bounds.size.height,
+                cx,
+            );
+        })
+        .children(chats)
+        .children(divider)
+        .child(workspaces)
+        // None open: the headers stay on top.
+        .when(!chats_open && !workspaces_open, |this| {
+            this.child(div().flex_1())
+        })
+}
+
+/// The line between the panes; with both open it drags to share the height
+/// (a double-click shares it evenly again).
+fn divider(draggable: bool, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let hover = theme.border;
+    div()
+        .relative()
+        .flex_none()
+        .mx_1()
+        .h(px(1.))
+        .bg(theme.sidebar_border)
+        .when(draggable, |this| {
+            this.child(
+                div()
+                    .id("sidebar-pane-divider")
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(-3.))
+                    .h(px(7.))
+                    .rounded(theme.radius)
+                    .cursor_row_resize()
+                    .hover(move |style| style.bg(hover))
+                    .on_drag(PaneDivider, |_, _, _, cx| cx.new(|_| PaneDivider))
+                    .on_click(|event, _, cx| {
+                        if event.click_count() == 2 {
+                            set_split(EVEN_SPLIT, cx);
+                        }
+                    })
+                    .aria_label("Resize the Chats and Workspaces panes")
+                    .test_support(),
+            )
+        })
 }
 
 /// New chat and search, as plain rows with their shortcut on the right:
@@ -308,54 +507,148 @@ fn pinned_rows(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyEle
     rows
 }
 
-fn chats_header(chats: ProjectId, folded: bool, cx: &mut Context<Workspace>) -> AnyElement {
+/// The Chats pane's header; its button starts a chat outside any workspace
+/// (there is none to start without the Chats space).
+fn chats_header(
+    chats: Option<ProjectId>,
+    folded: bool,
+    focus: &FocusHandle,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
     let workspace = cx.entity().downgrade();
-    section(
+    pane_header(
         "sidebar-chats",
         "Chats",
         (CHATS, folded),
         None,
-        Button::new("sidebar-new-loose-chat")
-            .ghost()
-            .xsmall()
-            .icon(IconName::Plus)
-            .tooltip("New chat outside any workspace")
-            .accessibility_label("New chat outside any workspace")
-            .on_click(move |_, window, cx| {
-                _ = workspace.update(cx, |workspace, cx| workspace.new_chat_in(chats, window, cx));
-            }),
+        focus,
+        chats.map(|chats| {
+            Button::new("sidebar-new-loose-chat")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Plus)
+                .tooltip("New chat outside any workspace")
+                .accessibility_label("New chat outside any workspace")
+                .on_click(move |_, window, cx| {
+                    _ = workspace
+                        .update(cx, |workspace, cx| workspace.new_chat_in(chats, window, cx));
+                })
+        }),
         cx,
     )
 }
 
-fn workspaces_header(count: usize, folded: bool, cx: &mut Context<Workspace>) -> AnyElement {
-    section(
+fn workspaces_header(
+    count: usize,
+    folded: bool,
+    focus: &FocusHandle,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    pane_header(
         "sidebar-workspaces",
         "Workspaces",
         (WORKSPACES, folded),
         (folded && count > 0).then_some(count),
-        Button::new("sidebar-add-workspace")
-            .ghost()
-            .xsmall()
-            .icon(IconName::Plus)
-            .tooltip("New workspace or open a folder")
-            .accessibility_label("Add a workspace")
-            .menu(gpui_kit::Anchor::TopRight, |menu, _, _| {
-                menu.item(
-                    PopupMenuItem::new("Open folder as a workspace…")
-                        .icon(Icon::new(Icons::FolderOpen))
-                        .on_click(|_, window, cx| window.dispatch_action(Box::new(AddProject), cx)),
-                )
-                .item(
-                    PopupMenuItem::new("New workspace without folders")
-                        .icon(Icon::new(Icons::SquarePen))
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(NewWorkspace), cx)
-                        }),
-                )
-            }),
+        focus,
+        Some(
+            Button::new("sidebar-add-workspace")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Plus)
+                .tooltip("New workspace or open a folder")
+                .accessibility_label("Add a workspace")
+                .menu(gpui_kit::Anchor::TopRight, |menu, _, _| {
+                    menu.item(
+                        PopupMenuItem::new("Open folder as a workspace…")
+                            .icon(Icon::new(Icons::FolderOpen))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(AddProject), cx)
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("New workspace without folders")
+                            .icon(Icon::new(Icons::SquarePen))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(NewWorkspace), cx)
+                            }),
+                    )
+                }),
+        ),
         cx,
     )
+}
+
+/// A pane's header: chevron, title, (collapsed) how much it hides, and its
+/// button. A click collapses or opens the pane; so do Enter and Space once
+/// it has keyboard focus, which shows as a ring.
+fn pane_header(
+    id: &'static str,
+    title: &'static str,
+    (name, folded): (&'static str, bool),
+    count: Option<usize>,
+    focus: &FocusHandle,
+    action: Option<impl IntoElement>,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let workspace = cx.entity().downgrade();
+    let theme = cx.theme();
+    h_flex()
+        .id(id)
+        .flex_none()
+        .h(ph_theme::dense(2., cx))
+        .px_1()
+        .gap_1()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(gpui_kit::transparent_black())
+        .text_xs()
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+        .text_color(theme.muted_foreground)
+        .cursor_pointer()
+        .hover(|style| style.text_color(theme.foreground))
+        // A click, or Enter or Space while focused (GPUI makes those a click).
+        .on_click(move |_, _, cx| {
+            _ = workspace.update(cx, |workspace, cx| workspace.toggle_section(name, cx));
+        })
+        .child(
+            Icon::new(if folded {
+                IconName::ChevronRight
+            } else {
+                IconName::ChevronDown
+            })
+            .xsmall(),
+        )
+        .child(title.to_uppercase())
+        .when_some(count, |this, count| {
+            this.child(
+                div()
+                    .px_1p5()
+                    .rounded_full()
+                    .bg(theme.muted)
+                    .child(count.to_string()),
+            )
+        })
+        .child(div().flex_1())
+        // Its button acts without collapsing the pane.
+        .when_some(action, |this, action| {
+            this.child(
+                div()
+                    .id(SharedString::from(format!("{id}-action")))
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(action),
+            )
+        })
+        .aria_label(if folded {
+            format!("{title}, collapsed")
+        } else {
+            format!("{title}, open")
+        })
+        // Findable in UI tests and automation, focus included.
+        .test_support()
+        .track_focus(focus)
+        .tab_index(0)
+        .focus_visible(|style| style.border_color(theme.ring))
+        .into_any_element()
 }
 
 /// A workspace: fold chevron, colour, name, what it is doing, and on hover

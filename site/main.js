@@ -1,26 +1,108 @@
-// PilotHouse's site: the sea under the hero, the pointer's glow and pull,
-// the live Agents panel and chat box, the scroll tour, the Studio stack, the
-// theme painter, and the download for this computer. Everything still reads with motion turned off.
+// PilotHouse's site: the radar under the hero, scroll-driven motion (and its
+// fallback where the browser has no `animation-timeline`), the live Agents
+// panel and chat box, the pinned tour, the sideways workbench, the stacking
+// Studio windows, the day's timeline, the theme painter, and the download
+// for this computer. Everything still reads with motion turned off.
 
+const root = document.documentElement;
+root.classList.add("js");
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-const finePointer = window.matchMedia("(pointer: fine)").matches;
-const $ = (selector, root = document) => root.querySelector(selector);
-const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const $ = (selector, scope = document) => scope.querySelector(selector);
+const $$ = (selector, scope = document) => [...scope.querySelectorAll(selector)];
+const clamp = (value, low = 0, high = 1) => Math.min(high, Math.max(low, value));
+const supports = (rule) => window.CSS && CSS.supports(rule);
+const navHeight = () => parseFloat(getComputedStyle(root).getPropertyValue("--nav-h")) || 64;
 
-// ---- Scroll progress ----------------------------------------------------
-const progress = $(".progress");
-const onScroll = () => {
-  const max = document.documentElement.scrollHeight - innerHeight;
-  progress.style.setProperty("--p", max > 0 ? scrollY / max : 0);
+// ---- One loop for everything that follows the scroll position ------------
+const onFrame = new Set();
+const onResize = new Set();
+let queued = false;
+const schedule = () => {
+  if (queued) return;
+  queued = true;
+  requestAnimationFrame(() => {
+    queued = false;
+    for (const run of onFrame) run();
+  });
 };
-addEventListener("scroll", onScroll, { passive: true });
-onScroll();
+addEventListener("scroll", schedule, { passive: true });
+addEventListener("resize", () => {
+  for (const run of onResize) run();
+  schedule();
+});
+addEventListener("load", () => {
+  for (const run of onResize) run();
+  schedule();
+});
+
+// Runs `start` while `element` is on screen and `stop` when it leaves.
+const whileVisible = (element, start, stop, margin = "0px") => {
+  if (!element) return;
+  new IntersectionObserver(([entry]) => (entry.isIntersecting ? start() : stop()), { rootMargin: margin }).observe(element);
+};
+
+// ---- Scroll progress, where CSS cannot follow the page itself -------------
+if (!supports("animation-timeline: scroll()")) {
+  const bar = $(".progress");
+  onFrame.add(() => {
+    const max = root.scrollHeight - innerHeight;
+    bar.style.setProperty("--p", max > 0 ? (scrollY / max).toFixed(4) : 0);
+  });
+}
+
+// ---- Scroll-driven effects, scrubbed by hand without `animation-timeline` --
+// Each `.sd` element plays between --a and --b of the time it crosses the
+// screen (as `animation-range: cover --a cover --b` would). Positions are
+// read from the layout (offsets), not from the moving element.
+if (!reduceMotion && !supports("animation-timeline: view()")) {
+  root.classList.add("no-sda");
+  const top = (node) => {
+    let y = 0;
+    for (; node; node = node.offsetParent) y += node.offsetTop;
+    return y;
+  };
+  const items = $$(".sd").map((element) => {
+    const style = getComputedStyle(element);
+    // An SVG mark follows the page it is drawn on.
+    const box = element instanceof SVGElement ? element.closest("svg").parentElement : element;
+    return {
+      element,
+      box,
+      a: (parseFloat(style.getPropertyValue("--a")) || 0) / 100,
+      b: (parseFloat(style.getPropertyValue("--b")) || 100) / 100,
+      y: 0,
+      h: 0,
+    };
+  });
+  const measure = () => {
+    for (const item of items) {
+      item.y = top(item.box);
+      item.h = item.box.offsetHeight;
+    }
+  };
+  measure();
+  onResize.add(measure);
+  onFrame.add(() => {
+    const height = innerHeight;
+    for (const item of items) {
+      const at = item.y - scrollY;
+      if (at > height * 1.5 || at + item.h < -height * 0.5) continue;
+      const cover = (height - at) / (height + item.h);
+      const p = clamp((cover - item.a) / Math.max(0.0001, item.b - item.a));
+      item.element.style.setProperty("--p", p.toFixed(4));
+    }
+  });
+}
 
 // ---- The headline rises word by word ------------------------------------
 $$(".headline .w").forEach((word, i) => word.style.setProperty("--i", i));
-requestAnimationFrame(() => $(".headline").classList.add("in"));
 
-// ---- Reveal on scroll ---------------------------------------------------
+// ---- The radar only turns while the hero shows -----------------------------
+const hero = $(".hero");
+whileVisible(hero, () => hero.classList.remove("paused"), () => hero.classList.add("paused"));
+
+// ---- Text arrives as it scrolls in ---------------------------------------
+$$(".kinds li").forEach((kind, i) => kind.style.setProperty("--k", i));
 const reveal = new IntersectionObserver(
   (entries) => {
     for (const entry of entries) {
@@ -31,161 +113,22 @@ const reveal = new IntersectionObserver(
   },
   { rootMargin: "0px 0px -12% 0px" }
 );
-$$(".reveal, .race").forEach((element) => reveal.observe(element));
+$$(".reveal, .race, .kinds").forEach((element) => reveal.observe(element));
 
-// ---- The pointer's glow -------------------------------------------------
-const glow = $(".glow-cursor");
-const pointer = { x: innerWidth / 2, y: innerHeight / 3 };
-if (finePointer && !reduceMotion) {
-  const at = { ...pointer };
-  addEventListener("pointermove", (event) => {
-    pointer.x = event.clientX;
-    pointer.y = event.clientY;
-  });
-  const follow = () => {
-    at.x += (pointer.x - at.x) * 0.12;
-    at.y += (pointer.y - at.y) * 0.12;
-    glow.style.setProperty("--gx", `${at.x}px`);
-    glow.style.setProperty("--gy", `${at.y}px`);
-    requestAnimationFrame(follow);
-  };
-  follow();
-} else {
-  glow.remove();
-}
-
-// ---- Magnetic buttons: they lean toward the pointer ---------------------
-if (finePointer && !reduceMotion) {
-  for (const button of $$(".magnetic")) {
-    button.addEventListener("pointermove", (event) => {
-      const box = button.getBoundingClientRect();
-      const dx = event.clientX - (box.left + box.width / 2);
-      const dy = event.clientY - (box.top + box.height / 2);
-      button.style.transform = `translate(${dx * 0.22}px, ${dy * 0.3}px)`;
-    });
-    button.addEventListener("pointerleave", () => (button.style.transform = ""));
-  }
-}
-
-// ---- The app tilts with the pointer -------------------------------------
-const hero = $(".hero");
-const tilt = $(".tilt");
-const windowShot = $(".hero-stage .window");
-if (finePointer && !reduceMotion) {
-  hero.addEventListener("pointermove", (event) => {
-    const x = event.clientX / innerWidth - 0.5;
-    const y = event.clientY / innerHeight - 0.5;
-    tilt.style.setProperty("--ry", `${x * 10}deg`);
-    tilt.style.setProperty("--rx", `${8 - y * 8}deg`);
-    windowShot.style.setProperty("--shine", `${120 - (x + 0.5) * 140}%`);
-  });
-  hero.addEventListener("pointerleave", () => {
-    tilt.style.setProperty("--ry", "0deg");
-    tilt.style.setProperty("--rx", "8deg");
-  });
-  // Flattens as it scrolls into view.
-  addEventListener(
-    "scroll",
-    () => {
-      const flat = Math.min(scrollY / 500, 1);
-      tilt.style.setProperty("--rx", `${8 * (1 - flat)}deg`);
-    },
-    { passive: true }
-  );
-}
-
-// ---- The sea: lines of light that ripple around the pointer -------------
+// ---- The section in view, marked in the bar -------------------------------
 (() => {
-  const canvas = $(".sea");
-  const context = canvas.getContext("2d");
-  let width = 0;
-  let height = 0;
-  let scale = 1;
-  let stars = [];
-  const resize = () => {
-    scale = Math.min(devicePixelRatio || 1, 2);
-    width = canvas.clientWidth;
-    height = canvas.clientHeight;
-    canvas.width = width * scale;
-    canvas.height = height * scale;
-    context.setTransform(scale, 0, 0, scale, 0, 0);
-    stars = Array.from({ length: Math.round((width * height) / 9000) }, () => ({
-      x: Math.random() * width,
-      y: Math.random() * height * 0.5,
-      r: Math.random() * 1.2 + 0.2,
-      phase: Math.random() * Math.PI * 2,
-    }));
-  };
-  resize();
-  addEventListener("resize", resize);
-
-  const local = { x: -9999, y: -9999 };
-  hero.addEventListener("pointermove", (event) => {
-    const box = canvas.getBoundingClientRect();
-    local.x = event.clientX - box.left;
-    local.y = event.clientY - box.top;
-  });
-  hero.addEventListener("pointerleave", () => {
-    local.x = local.y = -9999;
-  });
-
-  const LINES = 34;
-  const draw = (time) => {
-    const t = time / 1000;
-    context.clearRect(0, 0, width, height);
-    for (const star of stars) {
-      const twinkle = 0.35 + 0.65 * Math.abs(Math.sin(t * 0.8 + star.phase));
-      context.fillStyle = `rgba(226, 220, 255, ${0.55 * twinkle})`;
-      context.beginPath();
-      context.arc(star.x, star.y, star.r, 0, Math.PI * 2);
-      context.fill();
-    }
-    const horizon = height * 0.5;
-    for (let i = 0; i < LINES; i++) {
-      // Far lines bunch up near the horizon, near ones spread out.
-      const depth = i / (LINES - 1);
-      const base = horizon + Math.pow(depth, 1.7) * (height - horizon + 40);
-      const amplitude = 3 + depth * 16;
-      const alpha = 0.06 + depth * 0.32;
-      const hue = 270 - depth * 80; // violet far, cyan near
-      context.strokeStyle = `hsla(${hue}, 90%, ${68 + depth * 8}%, ${alpha})`;
-      context.lineWidth = 0.6 + depth * 1.2;
-      context.beginPath();
-      for (let x = -20; x <= width + 20; x += 14) {
-        let y =
-          base +
-          Math.sin(x * (0.006 - depth * 0.002) + t * (0.6 + depth * 0.5) + i * 0.7) * amplitude +
-          Math.sin(x * 0.017 - t * 1.1 + i) * amplitude * 0.25;
-        // A ripple around the pointer.
-        const dx = x - local.x;
-        const dy = base - local.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        if (distance < 260) {
-          const fall = 1 - distance / 260;
-          y += Math.sin(distance * 0.06 - t * 5) * 14 * fall * fall * (0.4 + depth);
-        }
-        if (x === -20) context.moveTo(x, y);
-        else context.lineTo(x, y);
+  const links = new Map($$(".nav nav a").map((link) => [link.getAttribute("href").slice(1), link]));
+  // Every section, so one the bar does not name clears the mark.
+  const watched = $$("main > section");
+  const seen = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) links.forEach((link, id) => link.classList.toggle("on", id === entry.target.id));
       }
-      context.stroke();
-    }
-  };
-
-  if (reduceMotion) {
-    draw(0);
-    return;
-  }
-  let running = false;
-  let frame = 0;
-  const loop = (time) => {
-    draw(time);
-    if (running) frame = requestAnimationFrame(loop);
-  };
-  new IntersectionObserver(([entry]) => {
-    running = entry.isIntersecting;
-    cancelAnimationFrame(frame);
-    if (running) frame = requestAnimationFrame(loop);
-  }).observe(hero);
+    },
+    { rootMargin: "-45% 0px -50% 0px" }
+  );
+  watched.forEach((section) => seen.observe(section));
 })();
 
 // ---- The Agents panel, alive --------------------------------------------
@@ -209,23 +152,32 @@ if (finePointer && !reduceMotion) {
   const row = (state, chat) => {
     const element = document.createElement("div");
     element.className = `ag ${state}`;
-    const glyph = state === "needs" ? '<span class="glyph q">?</span>' : state === "working" ? '<span class="glyph spin"></span>' : '<span class="glyph done"></span>';
-    const line = state === "needs" ? chat.ask : state === "working" ? chat.doing : chat.said;
-    element.innerHTML = `${glyph}<span class="t"></span><span class="age"></span>
-      <span class="meta"><i style="--c:${workspaces[chat.workspace]}"></i>${chat.workspace} · ${chat.agent}</span>
-      <span class="line"></span>`;
-    element.querySelector(".t").textContent = chat.title;
-    element.querySelector(".age").textContent = chat.age;
-    element.querySelector(".line").textContent = line;
+    const glyph = document.createElement("span");
+    glyph.className = state === "needs" ? "glyph q" : state === "working" ? "glyph spin" : "glyph done";
+    if (state === "needs") glyph.textContent = "?";
+    const title = document.createElement("span");
+    title.className = "t";
+    title.textContent = chat.title;
+    const age = document.createElement("span");
+    age.className = "age";
+    age.textContent = chat.age;
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    const dot = document.createElement("i");
+    dot.style.setProperty("--c", workspaces[chat.workspace]);
+    meta.append(dot, `${chat.workspace} · ${chat.agent}`);
+    const line = document.createElement("span");
+    line.className = "line";
+    line.textContent = state === "needs" ? chat.ask : state === "working" ? chat.doing : chat.said;
+    element.append(glyph, title, age, meta, line);
     return element;
   };
   const chats = [
     { title: "Build the release and deploy it to staging", workspace: "tidewatch-android", agent: "Codex", ask: "./scripts/deploy.sh staging", doing: "Building the release", said: "Deployed to staging.", age: "3m" },
-    { title: "Start the arrivals board for the office screen", workspace: "harbour-office", agent: "Gemini CLI", ask: "Write src/board.rs?", doing: "Laying out today's arrivals", said: "The board shows boats due today.", age: "2m" },
+    { title: "Start the arrivals board for the office screen", workspace: "harbour-office", agent: "Antigravity", ask: "Write src/board.rs?", doing: "Laying out today's arrivals", said: "The board shows boats due today.", age: "2m" },
     { title: "Add a rate limit to bookings", workspace: "harbor", agent: "Claude Code", ask: "Run cargo test?", doing: "Running the tests", said: "Bookings are limited to 30 a minute.", age: "4m" },
-    { title: "Fix the broken links in the guide", workspace: "docs-site", agent: "Antigravity", ask: "Delete old/guide.md?", doing: "Checking 214 links", said: "Fixed 6 links; all pages build.", age: "1m" },
+    { title: "Fix the broken links in the guide", workspace: "docs-site", agent: "Codex", ask: "Delete old/guide.md?", doing: "Checking 214 links", said: "Fixed 6 links; all pages build.", age: "1m" },
   ];
-  // Where each chat is, and the way they go round.
   const state = ["needs", "working", "working", "done"];
   const render = () => {
     for (const key of Object.keys(lists)) lists[key].replaceChildren();
@@ -236,16 +188,25 @@ if (finePointer && !reduceMotion) {
   if (reduceMotion) return;
   const next = { working: "done", done: "working", needs: "working" };
   let turn = 0;
-  setInterval(() => {
-    // One chat moves on each beat: a question answered, a task finished,
-    // a new one started, and now and then an agent asks something.
+  let timer = 0;
+  // One chat moves on each beat: a question answered, a task finished, a
+  // new one started, and now and then an agent asks something.
+  const beat = () => {
     turn++;
     const i = turn % chats.length;
     if (turn % 5 === 0) state[i] = "needs";
     else state[i] = next[state[i]];
     if (!state.includes("needs")) state[(i + 1) % chats.length] = "needs";
     render();
-  }, 2600);
+  };
+  whileVisible(
+    $(".panel-demo"),
+    () => (timer = timer || setInterval(beat, 2600)),
+    () => {
+      clearInterval(timer);
+      timer = 0;
+    }
+  );
 })();
 
 // ---- Typing an @ mention ------------------------------------------------
@@ -254,6 +215,17 @@ if (finePointer && !reduceMotion) {
   const suggest = $(".suggest");
   const items = $$(".sugg", suggest);
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const mention = (label) => {
+    const span = document.createElement("span");
+    span.className = "mention";
+    span.textContent = label;
+    return span;
+  };
+  if (reduceMotion) {
+    text.append("Why does ", mention("@src/routes/bookings.rs"), " return 409 here? ", mention("@screenshot"));
+    return;
+  }
+  let visible = false;
   const type = async (chars, speed = 55) => {
     for (const char of chars) {
       text.append(char);
@@ -261,12 +233,10 @@ if (finePointer && !reduceMotion) {
     }
   };
   const highlight = (index) => items.forEach((item, i) => item.classList.toggle("hi", i === index));
-  if (reduceMotion) {
-    text.innerHTML = 'Why does <span class="mention">@src/routes/bookings.rs</span> return 409 here? <span class="mention">@screenshot</span>';
-    return;
-  }
   const run = async () => {
     for (;;) {
+      // Paused off screen, between rounds.
+      while (!visible) await wait(400);
       text.replaceChildren();
       await wait(700);
       await type("Why does ");
@@ -278,13 +248,9 @@ if (finePointer && !reduceMotion) {
       }
       await type("rou", 110);
       suggest.classList.remove("open");
-      // The last characters typed become the mention.
-      text.lastChild?.remove();
-      [...text.childNodes].slice(-3).forEach((node) => node.remove());
-      const mention = document.createElement("span");
-      mention.className = "mention";
-      mention.textContent = "@src/routes/bookings.rs";
-      text.append(mention);
+      // The characters typed after "Why does " become the mention.
+      [...text.childNodes].slice(-4).forEach((node) => node.remove());
+      text.append(mention("@src/routes/bookings.rs"));
       await type(" return 409 here? ");
       await type("@", 120);
       highlight(3);
@@ -292,32 +258,39 @@ if (finePointer && !reduceMotion) {
       await wait(900);
       suggest.classList.remove("open");
       text.lastChild?.remove();
-      const shot = document.createElement("span");
-      shot.className = "mention";
-      shot.textContent = "@screenshot";
-      text.append(shot);
+      text.append(mention("@screenshot"));
       await wait(2600);
     }
   };
-  // Starts when it is on screen.
-  new IntersectionObserver(([entry], observer) => {
-    if (entry.isIntersecting) {
-      observer.disconnect();
-      run();
-    }
-  }).observe($(".composer-demo"));
+  let started = false;
+  whileVisible(
+    $(".composer-demo"),
+    () => {
+      visible = true;
+      if (!started) {
+        started = true;
+        run();
+      }
+    },
+    () => (visible = false)
+  );
 })();
 
-// ---- The scroll tour ----------------------------------------------------
+// ---- The tour: the step in front zooms the pinned window ------------------
 (() => {
   const layers = Object.fromEntries($$(".tour-window .layer").map((layer) => [layer.dataset.layer, layer]));
   const spotlight = $(".spotlight");
+  const dots = $$(".tour-dots i");
   const steps = $$(".step");
+  let current = null;
   const show = (step) => {
-    steps.forEach((other) => other.classList.toggle("on", other === step));
-    const name = step.dataset.layer;
+    current = step;
+    steps.forEach((other, i) => {
+      other.classList.toggle("on", other === step);
+      dots[i]?.classList.toggle("on", other === step);
+    });
     for (const [key, layer] of Object.entries(layers)) {
-      const on = key === name;
+      const on = key === step.dataset.layer;
       layer.classList.toggle("on", on);
       if (on) {
         layer.style.setProperty("--x", `${-Number(step.dataset.x)}%`);
@@ -329,127 +302,90 @@ if (finePointer && !reduceMotion) {
   };
   // The step in front is the last one whose top has passed the middle of
   // the screen (from the scroll position, so a fast scroll skips none).
-  let current = null;
-  let queued = false;
-  const update = () => {
-    queued = false;
+  onFrame.add(() => {
     const line = innerHeight * 0.55;
     const step = steps.filter((each) => each.getBoundingClientRect().top < line).pop() || steps[0];
-    if (step !== current) {
-      current = step;
-      show(step);
-    }
-  };
-  addEventListener(
-    "scroll",
-    () => {
-      if (!queued) {
-        queued = true;
-        requestAnimationFrame(update);
-      }
-    },
-    { passive: true }
-  );
-  update();
+    if (step !== current) show(step);
+  });
+  show(steps[0]);
 })();
 
-// ---- Studio: the picked window comes to the front ------------------------
+// ---- The workbench: down the page moves the strip sideways ----------------
 (() => {
-  const section = $(".studio");
-  const tabs = $$(".studio-tab");
-  const panels = $$(".studio-panel");
-  const cards = $$(".studio-card");
-  const deck = $(".deck");
-  const count = cards.length;
-  // Where a window sits: in front, then further back, to one side and the other.
-  const PLACES = [
-    "translate3d(0, 0, 0) rotateZ(0deg) scale(1)",
-    "translate3d(6%, -13%, -60px) rotateZ(3deg) scale(0.92)",
-    "translate3d(-6%, -24%, -120px) rotateZ(-3.5deg) scale(0.85)",
-  ];
-  const SHADE = ["none", "brightness(0.72) saturate(0.9)", "brightness(0.5) saturate(0.8)"];
-  let front = 0;
-  const place = () => {
-    cards.forEach((card, i) => {
-      const at = (i - front + count) % count;
-      card.style.zIndex = String(count - at);
-      card.style.transform = PLACES[at];
-      card.style.filter = SHADE[at];
-      card.classList.toggle("front", at === 0);
-      card.setAttribute("aria-hidden", String(at !== 0));
-    });
+  const section = $(".hs");
+  const track = $(".hs-track");
+  if (!section || reduceMotion) return;
+  root.classList.add("hs-on");
+  let distance = 0;
+  const measure = () => {
+    distance = Math.max(0, track.scrollWidth - innerWidth);
+    // As much page to scroll as the strip has to move, and a little to rest.
+    section.style.height = `${distance + innerHeight + innerHeight * 0.25}px`;
   };
-  const select = (index, focus = false) => {
-    tabs.forEach((tab, i) => {
-      const on = i === index;
-      tab.setAttribute("aria-selected", String(on));
-      tab.tabIndex = on ? 0 : -1;
-      tab.classList.remove("running");
-      panels[i].hidden = !on;
-    });
-    if (focus) tabs[index].focus();
-    if (index !== front) {
-      const leaving = cards[front];
-      front = index;
-      place();
-      if (!reduceMotion) {
-        // The window leaving the front swings out to the side, then slips in
-        // behind. Its own transition would override the animation, so it
-        // is off until the swing ends.
-        leaving.style.transition = "none";
-        leaving
-          .animate(
-            [
-              { transform: PLACES[0], zIndex: 9, filter: "none" },
-              { transform: "translate3d(64%, 3%, 60px) rotateZ(10deg) scale(0.92)", zIndex: 9, offset: 0.42 },
-              { transform: leaving.style.transform, zIndex: 0, filter: leaving.style.filter },
-            ],
-            { duration: 950, easing: "cubic-bezier(.45, 0, .2, 1)" }
-          )
-          .finished.then(() => (leaving.style.transition = ""), () => {});
-      }
-    }
-    // The next one comes forward when the bar under this tab fills (it
-    // pauses while the pointer is over the section or it is off screen).
-    if (autoplay) {
-      void tabs[index].offsetWidth;
-      tabs[index].classList.add("running");
-    }
-  };
-  let autoplay = !reduceMotion;
-  tabs.forEach((tab, i) => {
-    tab.addEventListener("click", () => {
-      autoplay = false;
-      select(i);
-    });
-    tab.addEventListener("keydown", (event) => {
-      const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
-      if (!step) return;
-      event.preventDefault();
-      autoplay = false;
-      select((i + step + count) % count, true);
-    });
-    tab.querySelector(".timer").addEventListener("animationend", () => select((front + 1) % count));
+  measure();
+  onResize.add(measure);
+  onFrame.add(() => {
+    const box = section.getBoundingClientRect();
+    if (box.bottom < 0 || box.top > innerHeight) return;
+    const pinned = innerHeight - navHeight();
+    const p = clamp((navHeight() - box.top) / Math.max(1, box.height - pinned));
+    track.style.setProperty("--hs-x", `${(-p * distance).toFixed(1)}px`);
   });
-  place();
-  select(0);
-  new IntersectionObserver(([entry]) => section.classList.toggle("playing", entry.isIntersecting), { threshold: 0.35 }).observe(section);
+})();
 
-  // The stack leans toward the pointer.
-  if (finePointer && !reduceMotion) {
-    const stage = $(".deck-stage");
-    stage.addEventListener("pointermove", (event) => {
-      const box = stage.getBoundingClientRect();
-      const x = (event.clientX - box.left) / box.width - 0.5;
-      const y = (event.clientY - box.top) / box.height - 0.5;
-      deck.style.setProperty("--ry", `${-6 + x * 10}deg`);
-      deck.style.setProperty("--rx", `${4 - y * 8}deg`);
-    });
-    stage.addEventListener("pointerleave", () => {
-      deck.style.setProperty("--ry", "-6deg");
-      deck.style.setProperty("--rx", "4deg");
-    });
+// ---- Studio: a window steps back as the next one covers it ----------------
+(() => {
+  const cards = $$(".stack-card");
+  if (reduceMotion || cards.length < 2) return;
+  let stops = [];
+  const measure = () => (stops = cards.map((card) => parseFloat(getComputedStyle(card).top) || 0));
+  measure();
+  onResize.add(measure);
+  onFrame.add(() => {
+    for (let i = 0; i < cards.length - 1; i++) {
+      const next = cards[i + 1].getBoundingClientRect().top;
+      const p = clamp((innerHeight - next) / Math.max(1, innerHeight - stops[i + 1]));
+      cards[i].style.setProperty("--shrink", (1 - p * 0.06).toFixed(4));
+      cards[i].style.setProperty("--dimmed", (1 - p * 0.5).toFixed(4));
+    }
+  });
+})();
+
+// ---- File kinds light up in turn as the page passes ------------------------
+(() => {
+  const section = $(".previews");
+  const kinds = $$(".kinds li");
+  if (!section || reduceMotion) return;
+  let lit = -1;
+  onFrame.add(() => {
+    const box = section.getBoundingClientRect();
+    if (box.bottom < 0 || box.top > innerHeight) return;
+    const p = clamp((innerHeight - box.top) / (innerHeight + box.height));
+    const index = Math.floor(p * kinds.length * 1.6) % kinds.length;
+    if (index === lit) return;
+    kinds[lit]?.classList.remove("lit");
+    kinds[index].classList.add("lit");
+    lit = index;
+  });
+})();
+
+// ---- The day's line draws down as you read ------------------------------
+(() => {
+  const line = $(".timeline");
+  const items = $$(".timeline li");
+  if (!line) return;
+  if (reduceMotion) {
+    items.forEach((item) => item.classList.add("lit"));
+    return;
   }
+  line.style.setProperty("--fill", 0);
+  onFrame.add(() => {
+    const box = line.getBoundingClientRect();
+    if (box.bottom < -200 || box.top > innerHeight + 200) return;
+    const mark = innerHeight * 0.62;
+    line.style.setProperty("--fill", clamp((mark - box.top) / box.height).toFixed(4));
+    for (const item of items) item.classList.toggle("lit", item.getBoundingClientRect().top + 12 < mark);
+  });
 })();
 
 // ---- Themes: the window repaints from the swatch picked -----------------
@@ -458,14 +394,14 @@ if (finePointer && !reduceMotion) {
   const frame = $(".themes-window");
   const swatches = $$(".swatch");
   const GLOW = {
-    "modern-dark": "#0078d4",
-    "modern-light": "#9cc3ff",
-    "warm-dark": "#d9a45b",
-    "warm-light": "#e8c9a0",
-    dracula: "#bd93f9",
-    "one-dark": "#4d78cc",
-    "one-light": "#526fff",
-    "studio-dark": "#3574f0",
+    "modern-dark": "rgba(0, 120, 212, 0.6)",
+    "modern-light": "rgba(156, 195, 255, 0.45)",
+    "warm-dark": "rgba(217, 164, 91, 0.5)",
+    "warm-light": "rgba(232, 201, 160, 0.4)",
+    dracula: "rgba(189, 147, 249, 0.55)",
+    "one-dark": "rgba(77, 120, 204, 0.55)",
+    "one-light": "rgba(82, 111, 255, 0.45)",
+    "studio-dark": "rgba(53, 116, 240, 0.55)",
   };
   const source = (name) => `shots/themes/${name}.webp`;
   let current = swatches[0].dataset.theme;
@@ -477,7 +413,7 @@ if (finePointer && !reduceMotion) {
       other.setAttribute("aria-checked", String(other === swatch));
       other.tabIndex = other === swatch ? 0 : -1;
     });
-    section.style.setProperty("--glow", GLOW[name]);
+    frame.style.setProperty("--glow", GLOW[name]);
     // The paint spreads from the swatch, wherever it is next to the window.
     const box = frame.getBoundingClientRect();
     const from = swatch.getBoundingClientRect();
@@ -485,7 +421,7 @@ if (finePointer && !reduceMotion) {
     next.className = reduceMotion ? "paint" : "paint wet";
     next.width = 1600;
     next.height = 1000;
-    next.alt = `PilotHouse in the ${swatch.textContent} theme.`;
+    next.alt = `PilotHouse in the ${swatch.textContent} theme, with Claude Code's chat in the harbor workspace.`;
     next.style.setProperty("--cx", `${((from.left + from.width / 2 - box.left) / box.width) * 100}%`);
     next.style.setProperty("--cy", `${((from.top + from.height / 2 - box.top) / box.height) * 100}%`);
     next.src = source(name);
@@ -524,22 +460,22 @@ if (finePointer && !reduceMotion) {
   // swatch is picked.
   let timer = 0;
   let fetched = false;
-  new IntersectionObserver(
-    ([entry]) => {
-      clearInterval(timer);
-      if (!entry.isIntersecting) return;
+  whileVisible(
+    section,
+    () => {
       if (!fetched) {
         fetched = true;
         swatches.forEach((swatch) => (new Image().src = source(swatch.dataset.theme)));
       }
+      clearInterval(timer);
       timer = setInterval(() => {
         if (!cycling) return clearInterval(timer);
         const at = swatches.findIndex((swatch) => swatch.dataset.theme === current);
         paint(swatches[(at + 1) % swatches.length]);
       }, 3200);
     },
-    { threshold: 0.4 }
-  ).observe(section);
+    () => clearInterval(timer)
+  );
 })();
 
 // ---- Numbers count up ---------------------------------------------------
@@ -571,25 +507,6 @@ if (finePointer && !reduceMotion) {
   $$("[data-count]").forEach((element) => observer.observe(element));
 })();
 
-// ---- Cards: a spotlight and a slight tilt under the pointer -------------
-if (finePointer && !reduceMotion) {
-  for (const card of $$(".card")) {
-    card.addEventListener("pointermove", (event) => {
-      const box = card.getBoundingClientRect();
-      const x = (event.clientX - box.left) / box.width;
-      const y = (event.clientY - box.top) / box.height;
-      card.style.setProperty("--mx", `${x * 100}%`);
-      card.style.setProperty("--my", `${y * 100}%`);
-      card.style.setProperty("--ty", `${(x - 0.5) * 8}deg`);
-      card.style.setProperty("--tx", `${(0.5 - y) * 8}deg`);
-    });
-    card.addEventListener("pointerleave", () => {
-      card.style.setProperty("--tx", "0deg");
-      card.style.setProperty("--ty", "0deg");
-    });
-  }
-}
-
 // ---- The download for this computer -------------------------------------
 (() => {
   const platform = (navigator.userAgentData?.platform || navigator.platform || navigator.userAgent).toLowerCase();
@@ -608,4 +525,7 @@ if (finePointer && !reduceMotion) {
     main.textContent = `Download for ${card.querySelector(".os").textContent}`;
     main.href = card.href;
   }
+  $$(`.mirrors a[data-os="${os}"]`).forEach((link) => link.classList.add("mine"));
 })();
+
+schedule();

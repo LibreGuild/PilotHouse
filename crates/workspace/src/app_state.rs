@@ -17,8 +17,12 @@ pub(crate) mod keys {
     pub const SIDEBAR_PINNED: &str = "workspace.sidebar_pinned";
     /// Chats marked done: listed apart, under *Done*.
     pub const SIDEBAR_SETTLED: &str = "workspace.sidebar_settled";
-    /// Sidebar sections folded away (`chats`, `workspaces`).
+    /// Sidebar panes collapsed and sections folded away (`chats`,
+    /// `workspaces`, `pinned`).
     pub const SIDEBAR_FOLDED: &str = "workspace.sidebar_folded";
+    /// The Chats pane's part of the sidebar's height while the Workspaces
+    /// pane is open too, 0 to 1 (0 for an even split).
+    pub const SIDEBAR_SPLIT: &str = "workspace.sidebar_split";
     pub const DISABLED_FEATURES: &str = "features.disabled";
     pub const PREFERENCES: &str = "appearance.preferences";
 }
