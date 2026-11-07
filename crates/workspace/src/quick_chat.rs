@@ -574,11 +574,12 @@ fn open(cx: &mut App) -> anyhow::Result<()> {
 /// Windows: above every window that is not on top itself.
 #[cfg(windows)]
 fn stay_on_top(window: &Window) {
-    use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
     };
-    let Ok(handle) = window.window_handle() else {
+    // The trait's: `Window` has a `window_handle` of its own (GPUI's id).
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
     };
     if let RawWindowHandle::Win32(win32) = handle.as_raw() {
