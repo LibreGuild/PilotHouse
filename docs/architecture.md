@@ -41,6 +41,10 @@ crates/
   store/      SQLite persistence (workspaces, chats, board, schedules, to-dos, usage…)
   theme/      light, dark and warm-dark themes, user preferences, layout + motion tokens
   ui/         icon assets, small shared components
+  brand/      the app's name, ids, icons, features on or off and update sources, read from
+              brand/brand.toml at build time (see customizing.md)
+  custom/     an organisation's own views, commands and startup code (empty in PilotHouse;
+              see customizing.md)
   env/        the login shell's environment (PATH for agents/terminals)
 ```
 
@@ -96,7 +100,7 @@ The app says **workspace**; the code says it two ways. The window and screens us
 
 ## Persistence
 
-One SQLite file (`~/Library/Application Support/PilotHouse/pilothouse.db` on macOS, or `$PILOTHOUSE_DATA_DIR`). Migrations are append-only (`store/src/migrations.rs`). Per-project layout is a JSON blob, so new layout fields need no migration.
+One SQLite file (`~/Library/Application Support/PilotHouse/pilothouse.db` on macOS, or `$PILOTHOUSE_DATA_DIR`; the folder's name is the brand's `data_folder`). Migrations are append-only (`store/src/migrations.rs`); an organisation's build keeps its own tables on its own track (`Store::apply_track`, see customizing.md). Per-project layout is a JSON blob, so new layout fields need no migration.
 
 ## Feature loading
 
@@ -112,11 +116,11 @@ Nothing is on by default except what the project needs:
 | Decision | Why |
 |---|---|
 | GPUI via gpui-kit, Apache-2.0 only | Native GPU UI for the performance budget; permissive license for an Apache-2.0 project. Zed's GPL crates are not used. |
-| Bundled art, permissive only | File icons from Material Icon Theme (MIT, `crates/ui/assets/file-icons`), agent marks from Lobe Icons (MIT, `crates/ui/assets/agents`), UI icons from Lucide (ISC, via gpui-kit). The app icon (`crates/app/assets/icon`) was made for PilotHouse. Nothing is fetched at run time. |
+| Bundled art, permissive only | File icons from Material Icon Theme (MIT, `crates/ui/assets/file-icons`), agent marks from Lobe Icons (MIT, `crates/ui/assets/agents`), UI icons from Lucide (ISC, via gpui-kit). The app icon (`brand/icons`) was made for PilotHouse. Nothing is fetched at run time. |
 | `git` CLI, not libgit2 | No license question, on every dev machine, simpler |
 | syntect highlighting (not tree-sitter) for now | ~200 languages in a few MB vs tens of MB; tree-sitter returns with LSP work in Phase 3 |
 | Hand-written MCP server and ACP transport | Tiny protocol surface; avoids tokio and keeps the binary small |
-| Exact pin `gpui-kit = "=0.8.0"` | GPUI's API changes between snapshots; upgrades are deliberate |
+| Exact pin `gpui-kit = "=0.8.1"` | GPUI's API changes between snapshots; upgrades are deliberate |
 | The user's Chrome over CDP, not an embedded web engine | No second engine in the binary; it renders what users' browsers render, and agents share the session |
 | CDP over a pipe, not a port | No localhost endpoint other users could drive; Chrome exits with PilotHouse |
 | Emulator gRPC with a hand-written HTTP/2 client | ~35–40 fps and real-time touch (adb screencap gives ~8 fps); no tokio, tonic or protoc |

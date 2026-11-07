@@ -16,6 +16,7 @@ default = []
 automation = ["ph-control/automation"]
 
 [dependencies]
+ph-brand.workspace = true
 anyhow.workspace = true
 gpui-kit.workspace = true
 ph-board.workspace = true

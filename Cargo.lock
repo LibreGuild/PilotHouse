@@ -1472,6 +1472,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-channel"
+version = "0.5.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98b0cc327b5bc766e7fda9c9260cc0fa81b43a8e240440422dff70788e3f9ef1"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-deque"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2591,6 +2600,23 @@ name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
+name = "global-hotkey"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adda8c76a5139df3bae0eb0413c2cd746f66594e0bb66231a4daa0be3172da70"
+dependencies = [
+ "crossbeam-channel",
+ "keyboard-types",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "once_cell",
+ "thiserror 2.0.21",
+ "windows-sys 0.59.0",
+ "x11rb",
+ "xkeysym",
+]
 
 [[package]]
 name = "globset"
@@ -4521,6 +4547,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyboard-types"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fbe853b403ae61a04233030ae8a79d94975281ed9770a1f9e246732b534b28d"
+dependencies = [
+ "bitflags 2.13.2",
+ "serde",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6082,6 +6118,7 @@ dependencies = [
  "libc",
  "memchr",
  "mermaid-rs-renderer",
+ "ph-brand",
  "ph-env",
  "ph-files",
  "ph-git",
@@ -6089,6 +6126,7 @@ dependencies = [
  "ph-store",
  "ph-theme",
  "ph-ui",
+ "rusqlite",
  "serde",
  "serde_json",
  "similar 3.2.1",
@@ -6124,6 +6162,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ph-brand"
+version = "0.6.0"
+dependencies = [
+ "serde",
+ "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
 name = "ph-browser"
 version = "0.6.0"
 dependencies = [
@@ -6132,6 +6178,7 @@ dependencies = [
  "futures",
  "gpui-kit",
  "libc",
+ "ph-brand",
  "ph-control",
  "ph-env",
  "ph-media",
@@ -6167,12 +6214,23 @@ dependencies = [
  "anyhow",
  "gpui-kit",
  "image",
+ "ph-brand",
  "ph-store",
  "serde",
  "serde_json",
  "smol",
  "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ph-custom"
+version = "0.6.0"
+dependencies = [
+ "gpui-kit",
+ "ph-store",
+ "ph-ui",
+ "serde",
 ]
 
 [[package]]
@@ -6183,6 +6241,7 @@ dependencies = [
  "base64 0.23.1",
  "dirs 7.0.0",
  "gpui-kit",
+ "ph-brand",
  "ph-control",
  "ph-env",
  "ph-media",
@@ -6243,6 +6302,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "ph-brand",
  "ph-store",
  "security-framework",
  "serde",
@@ -6272,6 +6332,7 @@ name = "ph-mcp"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "ph-brand",
  "ph-control",
  "serde",
  "serde_json",
@@ -6335,11 +6396,14 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "ph-agent",
+ "ph-brand",
  "ph-changes",
  "ph-git",
  "ph-github",
  "ph-review",
  "ph-store",
+ "ph-theme",
  "ph-ui",
  "serde_json",
  "tracing",
@@ -6353,6 +6417,7 @@ dependencies = [
  "base64 0.23.1",
  "dirs 7.0.0",
  "dunce",
+ "ph-brand",
  "ph-env",
  "serde",
  "sha2 0.11.1",
@@ -6366,6 +6431,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "ph-brand",
  "ph-git",
  "ph-github",
  "ph-store",
@@ -6399,6 +6465,7 @@ dependencies = [
  "dirs 7.0.0",
  "dunce",
  "jiff",
+ "ph-brand",
  "rusqlite",
  "serde",
  "serde_json",
@@ -6428,6 +6495,7 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation 0.3.2",
  "pdf-writer",
+ "ph-brand",
  "ph-control",
  "ph-env",
  "ph-media",
@@ -6454,6 +6522,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "gpui-kit",
+ "ph-brand",
  "ph-env",
  "ph-remote",
  "ph-theme",
@@ -6472,6 +6541,7 @@ dependencies = [
  "anyhow",
  "gpui-kit",
  "image",
+ "ph-brand",
  "serde",
  "serde_json",
  "tracing",
@@ -6486,6 +6556,7 @@ dependencies = [
  "futures",
  "gpui-kit",
  "image",
+ "ph-brand",
  "tracing",
 ]
 
@@ -6541,6 +6612,7 @@ dependencies = [
  "base64 0.23.1",
  "dirs 7.0.0",
  "dunce",
+ "global-hotkey",
  "gpui-kit",
  "ignore",
  "jiff",
@@ -6549,9 +6621,11 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "ph-agent",
  "ph-board",
+ "ph-brand",
  "ph-browser",
  "ph-changes",
  "ph-control",
+ "ph-custom",
  "ph-devices",
  "ph-env",
  "ph-files",
@@ -6569,11 +6643,13 @@ dependencies = [
  "ph-ui",
  "ph-uitest",
  "ph-utils",
+ "raw-window-handle",
  "ring",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "smol",
  "toml 1.1.8+spec-1.1.0",
  "tracing",
  "ureq",
@@ -6686,6 +6762,7 @@ dependencies = [
  "gpui-kit",
  "ph-agy",
  "ph-board",
+ "ph-brand",
  "ph-browser",
  "ph-control",
  "ph-devices",

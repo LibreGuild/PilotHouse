@@ -1307,7 +1307,7 @@ impl Render for FindingsView {
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
                 .child("No agent review of this pull request yet.")
-                .child("Review with agent (above) finds problems you can post, track across rounds and fix; if someone reviewed it with PilotHouse, its findings show here from their summary comment.")
+                .child(concat!("Review with agent (above) finds problems you can post, track across rounds and fix; if someone reviewed it with ", ph_brand::name!(), ", its findings show here from their summary comment."))
                 .into_any_element();
         }
         let shown: Vec<&Finding> = findings

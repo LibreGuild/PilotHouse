@@ -230,13 +230,14 @@ fn slides_instructions(document: &gpui_kit::Entity<DeckDocument>, cx: &App) -> S
         })
         .unwrap_or_default();
     format!(
-        "[PilotHouse Studio · Slides] The user is editing the presentation \"{}\" ({} slides, {} × {} points, theme {}) beside this chat. Its folder is {}: put files the user gives you to work from in references/, and pictures go into the deck with slides_edit `import`. Change the deck only with the slides_* tools: slides_get to read it (with `render` to see slides), slides_edit to change it (the user sees each change at once and can undo it), slides_export only when asked. Now selected: {slide}, {elements}{text}; \"this\" in the user's message means what is selected.",
+        "[{app} Studio · Slides] The user is editing the presentation \"{}\" ({} slides, {} × {} points, theme {}) beside this chat. Its folder is {}: put files the user gives you to work from in references/, and pictures go into the deck with slides_edit `import`. Change the deck only with the slides_* tools: slides_get to read it (with `render` to see slides), slides_edit to change it (the user sees each change at once and can undo it), slides_export only when asked. Now selected: {slide}, {elements}{text}; \"this\" in the user's message means what is selected.",
         deck.title,
         deck.slides.len(),
         deck.size.width,
         deck.size.height,
         deck.theme.name,
         doc.folder().display(),
+        app = ph_brand::NAME,
     )
 }
 
@@ -280,8 +281,9 @@ fn instructions(path: &std::path::Path, video: bool) -> String {
         ("picture", "studio_get to look at it")
     };
     format!(
-        "[PilotHouse Studio] The user is editing the {what} {} in Studio, beside this chat. Change it only with the studio_* tools: {look}, studio_edit to change it (each change shows to the user at once and can be undone). Save with studio_export only when the user asks; never edit the file by other means.",
-        path.display()
+        "[{app} Studio] The user is editing the {what} {} in Studio, beside this chat. Change it only with the studio_* tools: {look}, studio_edit to change it (each change shows to the user at once and can be undone). Save with studio_export only when the user asks; never edit the file by other means.",
+        path.display(),
+        app = ph_brand::NAME,
     )
 }
 

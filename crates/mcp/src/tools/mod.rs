@@ -28,19 +28,27 @@ pub struct Tool {
     pub format: fn(&Value) -> String,
 }
 
+/// Every tool agents get: those of the features this build has (the brand's
+/// `[features]`; a group with no feature is always there).
 pub fn all() -> impl Iterator<Item = &'static Tool> {
-    board::TOOLS
-        .iter()
-        .chain(browser::TOOLS)
-        .chain(chrome::TOOLS)
-        .chain(devices::TOOLS)
-        .chain(runs::TOOLS)
-        .chain(slides::TOOLS)
-        .chain(studio::TOOLS)
-        .chain(tests::TOOLS)
-        .chain(theme::TOOLS)
-        .chain(todos::TOOLS)
-        .chain(utils::TOOLS)
+    use ph_brand::Feature;
+    let groups: [(Option<Feature>, &'static [Tool]); 11] = [
+        (Some(Feature::Board), board::TOOLS),
+        (Some(Feature::Browser), browser::TOOLS),
+        (Some(Feature::ChromeExtension), chrome::TOOLS),
+        (Some(Feature::Devices), devices::TOOLS),
+        (Some(Feature::Runs), runs::TOOLS),
+        (Some(Feature::Presentations), slides::TOOLS),
+        (None, studio::TOOLS),
+        (Some(Feature::Tests), tests::TOOLS),
+        (None, theme::TOOLS),
+        (None, todos::TOOLS),
+        (Some(Feature::Utilities), utils::TOOLS),
+    ];
+    groups
+        .into_iter()
+        .filter(|(feature, _)| feature.is_none_or(ph_brand::enabled))
+        .flat_map(|(_, tools)| tools.iter())
 }
 
 pub fn find(name: &str) -> Option<&'static Tool> {

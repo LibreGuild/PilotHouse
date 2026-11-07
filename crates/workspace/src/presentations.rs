@@ -114,6 +114,9 @@ struct Choice {
 
 /// The New presentation dialog.
 pub(crate) fn new_dialog(window: &mut Window, cx: &mut App) {
+    if !ph_brand::enabled(ph_brand::Feature::Presentations) {
+        return;
+    }
     let title = cx.new(|cx| {
         InputState::new(window, cx)
             .placeholder("Title")
@@ -351,6 +354,9 @@ fn preview(
 
 /// The Open presentation dialog.
 pub(crate) fn open_dialog(window: &mut Window, cx: &mut App) {
+    if !ph_brand::enabled(ph_brand::Feature::Presentations) {
+        return;
+    }
     forget_list(cx);
     // First-slide pictures are rewritten as decks change: the ones GPUI
     // keeps by path are read again.

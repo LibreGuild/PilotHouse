@@ -56,7 +56,11 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "device_start_emulator",
-        description: "Start an Android emulator (AVD) by name and wait until it has booted. It is shown in the PilotHouse Devices pane.",
+        description: concat!(
+            "Start an Android emulator (AVD) by name and wait until it has booted. It is shown in the ",
+            ph_brand::name!(),
+            " Devices pane."
+        ),
         schema: || json!({ "type": "object", "required": ["avd"], "properties": { "avd": { "type": "string" } } }),
         build: |arguments, project_id, _| {
             Ok(("device.start_emulator", with_project(arguments, project_id)))

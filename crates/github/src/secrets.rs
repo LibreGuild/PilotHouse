@@ -10,9 +10,10 @@
 
 use anyhow::Result;
 
-/// The service name secrets are filed under in the OS store.
+/// The service name secrets are filed under in the OS store (the brand's
+/// `keychain`).
 #[cfg(any(target_vendor = "apple", windows))]
-const SERVICE: &str = "PilotHouse";
+const SERVICE: &str = ph_brand::KEYCHAIN;
 
 /// The OS store in release builds on macOS and Windows.
 const OS_STORE: bool = !cfg!(debug_assertions) && (cfg!(target_vendor = "apple") || cfg!(windows));

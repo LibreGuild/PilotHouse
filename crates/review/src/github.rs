@@ -406,7 +406,7 @@ pub fn propose_rule(store: &Store, pull: &PullRef, rule: &str) -> Result<String>
     let (text, sha) = match pulls::file_at(&client, &repo, path, &base)? {
         Some((text, sha)) => (text, Some(sha)),
         None => (
-            "# Review rules\n\nRead by PilotHouse's reviews.\n".to_string(),
+            format!("# Review rules\n\nRead by {}'s reviews.\n", ph_brand::NAME),
             None,
         ),
     };
@@ -434,7 +434,8 @@ pub fn propose_rule(store: &Store, pull: &PullRef, rule: &str) -> Result<String>
         &base,
         "Review rules: a finding that is not a problem here",
         &format!(
-            "Adds to `{path}`, which PilotHouse's reviews read:\n\n> {}\n",
+            "Adds to `{path}`, which {}'s reviews read:\n\n> {}\n",
+            ph_brand::NAME,
             rule.trim()
         ),
         false,

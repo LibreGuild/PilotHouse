@@ -290,29 +290,43 @@ pub fn parse_claim(reply: &str) -> Option<(bool, String)> {
     ))
 }
 
-/// Asks for a walkthrough of the pull request (see [`crate::walkthrough`]).
+/// Asks for a walkthrough of the pull request: a briefing for whoever
+/// reviews it (see [`crate::walkthrough`]).
 pub fn walkthrough_prompt(pull: &PullInfo) -> String {
+    use crate::walkthrough::{END, SECTIONS, START};
+    let sections: String = SECTIONS
+        .iter()
+        .map(|(name, what)| format!("## {name}\n{what}.\n\n"))
+        .collect();
     format!(
-        "Explain this pull request to someone new to the code, briefly. Do not judge it (that \
-         is the review's job).\n\n{}\n\
-         Read the change and what it touches (callers, where the flow starts and ends) first. \
-         Then end your reply with exactly one block:\n\n\
-         ```json pilothouse-walkthrough\n\
-         {{\n  \"gist\": {{\"what\": \"what it does, one or two sentences\", \"why\": \"why it was made\", \
-         \"why_from\": \"description | commits | guess\", \"before\": \"how it was, one line\", \
-         \"after\": \"how it is now, one line\"}},\n  \
-         \"groups\": [{{\"name\": \"Core logic\", \"kind\": \"core | api | ui | data | tests | config | docs | generated | other\", \
-         \"files\": [\"path\"]}}],\n  \
-         \"tour\": [{{\"title\": \"a few words\", \"path\": \"path\", \"start\": 40, \"end\": 58, \
-         \"note\": \"one sentence: what to notice here\"}}],\n  \
-         \"flow\": [{{\"from\": \"Login page\", \"to\": \"Session cache\", \"label\": \"reads\"}}]\n}}\n```\n\n\
-         - `gist`: plain words. Say `why_from` honestly: `guess` when neither the description \
-         nor the commits say why.\n\
-         - `groups`: every changed file in one group, by purpose.\n\
-         - `tour`: 3 to 6 stops in the order to read the change, each a few lines (at most 40) \
-         of a changed file at the head commit.\n\
-         - `flow`: only when calls cross several files (at most 8 arrows); else `[]`.",
-        context(pull)
+        "Write a briefing on this pull request for the person who reviews it: a tech lead or \
+         a manager who has to understand and approve it, and may not know this part of the \
+         code. Explain what changes and how, in plain words, and the system around it. Do not \
+         judge it (whether it is right is the review's job); do say where a careful reader \
+         should look.\n\n{context}\n\
+         First read: the description and the commits; the whole change; the code around it \
+         (what calls the changed code and what it calls, where the affected flow starts and \
+         ends, the modules it lives in); the repository's README and documentation about this \
+         area; the tests it touches. Only then write.\n\n\
+         Put the briefing, in Markdown, between a line `{START}` and a line `{END}`. Start it \
+         with a title line, `# ` and the change in a few plain words, then these sections in \
+         this order, with these headings. Leave out a section that has nothing to say, except \
+         In short and What changes.\n\n\
+         {sections}\
+         Rules:\n\
+         - Plain words first, technical detail after. Short paragraphs and lists. Aim for a \
+         five-minute read; longer only for a large change.\n\
+         - Refer to code as `path/to/file.ext:12` or `path/to/file.ext:12-30` in backticks, \
+         with paths from the repository's root at the head commit, so the reader can open \
+         them.\n\
+         - Diagrams: ```` ```mermaid ```` blocks only (a `flowchart TD` or a \
+         sequenceDiagram), at most three, each with at most 10 boxes, labels in plain words \
+         in double quotes, no styling. The briefing is shown in a narrow column, so a wide \
+         diagram shrinks until its text cannot be read: draw top to bottom, at most three \
+         boxes side by side.\n\
+         - Say what you are unsure of. Never describe behaviour you did not see in the code.\n\
+         - Outside the briefing, say only that it is done.",
+        context = context(pull),
     )
 }
 
@@ -402,6 +416,31 @@ pub fn request_prompt(pull: &PullInfo, request: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asks_for_a_briefing_in_sections_between_markers() {
+        let pull = PullInfo {
+            number: 12,
+            title: "Fix login",
+            body: "Adds a backoff.",
+            author: "alice",
+            owner: "acme",
+            repo: "app",
+            base: "main",
+            head: "fix/login",
+            head_sha: "abc123",
+        };
+        let prompt = walkthrough_prompt(&pull);
+        for (section, _) in crate::walkthrough::SECTIONS {
+            assert!(prompt.contains(&format!("## {section}\n")), "{section}");
+        }
+        assert!(prompt.contains(crate::walkthrough::START));
+        assert!(prompt.contains(crate::walkthrough::END));
+        assert!(prompt.contains("`path/to/file.ext:12-30`"));
+        // The pull request's own context, as in a review.
+        assert!(prompt.contains("git diff origin/main...HEAD"));
+        assert!(prompt.contains("Adds a backoff."));
+    }
 
     #[test]
     fn asks_for_the_template_and_recheck() {

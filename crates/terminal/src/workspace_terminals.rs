@@ -128,9 +128,10 @@ impl TerminalHub {
         for kept in kept.iter().take(KEPT_TERMINALS) {
             let terminal = terminals.update(cx, |terminals, cx| terminals.new_terminal(cx));
             if let Some(terminal) = terminal {
-                terminal
-                    .read(cx)
-                    .show_restored(&kept.text, "from the last run of PilotHouse");
+                terminal.read(cx).show_restored(
+                    &kept.text,
+                    concat!("from the last run of ", ph_brand::name!()),
+                );
                 restored = true;
             }
         }

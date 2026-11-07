@@ -208,6 +208,85 @@ impl From<&ToolCallStatus> for ToolStatus {
     }
 }
 
+/// A tool title that is the call dumped as JSON (Cline's `editor:
+/// {"path": …, "new_text": …}`) said in words: what it does, to what
+/// ("Edit src/app.rs"). Other titles stay as the agent wrote them.
+pub(crate) fn readable_title(
+    title: &str,
+    kind: ToolKindLabel,
+    raw_input: Option<&serde_json::Value>,
+) -> String {
+    use serde_json::Value;
+    let Some((name, rest)) = title.split_once(": ") else {
+        return title.to_string();
+    };
+    let rest = rest.trim_start();
+    if name.is_empty()
+        || name.contains(char::is_whitespace)
+        || !(rest.starts_with("{\"") || rest.starts_with('['))
+    {
+        return title.to_string();
+    }
+    let parsed = serde_json::from_str::<Value>(rest).ok();
+    // A dump cut short still has the call's input beside it.
+    let Some(input) = raw_input.or(parsed.as_ref()) else {
+        return title.to_string();
+    };
+    let input = Some(input);
+    // A string, the first of a list, or the path of the first item.
+    fn named(value: &Value) -> Option<String> {
+        match value {
+            Value::String(text) => Some(text.clone()),
+            Value::Array(items) => named(items.first()?),
+            Value::Object(item) => ["path", "file_path", "file"]
+                .iter()
+                .find_map(|key| item.get(*key)?.as_str().map(str::to_string)),
+            _ => None,
+        }
+    }
+    const KEYS: [&str; 11] = [
+        "path",
+        "file_path",
+        "filePath",
+        "file",
+        "paths",
+        "files",
+        "command",
+        "commands",
+        "pattern",
+        "query",
+        "url",
+    ];
+    let target = input.and_then(|input| KEYS.iter().find_map(|key| named(input.get(*key)?)));
+    let verb = match kind {
+        ToolKindLabel::Read => "Read".to_string(),
+        ToolKindLabel::Edit => "Edit".to_string(),
+        ToolKindLabel::Delete => "Delete".to_string(),
+        ToolKindLabel::Move => "Move".to_string(),
+        ToolKindLabel::Search => "Search".to_string(),
+        ToolKindLabel::Execute => "Run".to_string(),
+        ToolKindLabel::Fetch => "Fetch".to_string(),
+        _ => name.replace('_', " "),
+    };
+    match target {
+        Some(target) => {
+            let line = target.lines().next().unwrap_or_default();
+            let count = line.chars().count();
+            // A long path keeps its end (the file); anything else its start.
+            let short: String = if count <= 120 {
+                line.to_string()
+            } else if line.contains('/') || line.contains('\\') {
+                let tail: String = line.chars().skip(count - 119).collect();
+                format!("…{tail}")
+            } else {
+                line.chars().take(120).collect()
+            };
+            format!("{verb} {short}")
+        }
+        None => verb,
+    }
+}
+
 impl ToolEntry {
     /// The title for display: MCP tools arrive as `mcp__server__tool_name`,
     /// shown as "tool name · server".
@@ -319,7 +398,7 @@ impl ToolEntry {
     pub fn from_call(call: &ToolCall) -> Self {
         let mut entry = Self {
             id: call.tool_call_id.0.to_string(),
-            title: call.title.clone(),
+            title: readable_title(&call.title, (&call.kind).into(), call.raw_input.as_ref()),
             kind: (&call.kind).into(),
             status: (&call.status).into(),
             output: String::new(),
@@ -336,11 +415,11 @@ impl ToolEntry {
 
     pub fn apply(&mut self, update: &ToolCallUpdate) {
         let fields = &update.fields;
-        if let Some(title) = &fields.title {
-            self.title = title.clone();
-        }
         if let Some(kind) = &fields.kind {
             self.kind = kind.into();
+        }
+        if let Some(title) = &fields.title {
+            self.title = readable_title(title, self.kind, fields.raw_input.as_ref());
         }
         if let Some(status) = &fields.status {
             self.status = status.into();
@@ -771,6 +850,51 @@ pub fn parse_update(params: &Value) -> Option<Update> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_tool_titles_read_as_words() {
+        let input = serde_json::json!({ "path": "tide.py", "new_text": "x" });
+        assert_eq!(
+            readable_title(
+                r#"editor: {"new_text":"x"#,
+                ToolKindLabel::Edit,
+                Some(&input)
+            ),
+            "Edit tide.py"
+        );
+        assert_eq!(
+            readable_title(
+                r#"run_commands: {"commands":["ls -la"]}"#,
+                ToolKindLabel::Execute,
+                None
+            ),
+            "Run ls -la"
+        );
+        assert_eq!(
+            readable_title(
+                r#"read_files: {"files":[{"path":"/w/a.py"}]}"#,
+                ToolKindLabel::Read,
+                None
+            ),
+            "Read /w/a.py"
+        );
+        let deep = format!("/{}/tide.py", "folder/".repeat(30));
+        let input = serde_json::json!({ "path": deep });
+        let title = readable_title(r#"read: {"path":"x"}"#, ToolKindLabel::Read, Some(&input));
+        assert!(
+            title.starts_with("Read …") && title.ends_with("/tide.py"),
+            "{title}"
+        );
+        // Titles that are words already stay.
+        assert_eq!(
+            readable_title("Read src/main.rs", ToolKindLabel::Read, Some(&input)),
+            "Read src/main.rs"
+        );
+        assert_eq!(
+            readable_title("Note: {braces} in prose", ToolKindLabel::Other, None),
+            "Note: {braces} in prose"
+        );
+    }
 
     #[test]
     fn a_long_output_keeps_its_start() {

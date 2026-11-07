@@ -100,12 +100,30 @@ pub fn checks(spec: &AgentSpec) -> Vec<Check> {
     // Shown only when the agent's own sign-in record is found: without one
     // it may still be signed in some other way (a keychain), and the chat
     // offers its sign-in methods if it asks.
-    if let Some(how) = dirs::home_dir().and_then(|home| signed_in(spec.id, &home, &env_var)) {
+    let how = dirs::home_dir().and_then(|home| signed_in(spec.id, &home, &env_var));
+    if let Some(how) = how {
         checks.push(Check {
             title: "Signed in".into(),
             state: CheckState::Ok,
-            detail: how.into(),
+            detail: how,
             action: None,
+        });
+    } else if spec.id == "cline"
+        && let Some(provider) =
+            crate::cline::terminal_provider(&crate::cline::Paths::of_this_computer())
+                .filter(|provider| provider.needs_key)
+    {
+        // Cline then works in a terminal, but not here: PilotHouse does not
+        // read keys.
+        checks.push(Check {
+            title: "Sign in to Cline for editors".into(),
+            state: CheckState::Note,
+            detail: format!(
+                "`cline auth` set up {} with an API key, which Cline uses only in a terminal. \
+                 Run this and pick Cline or ChatGPT, or set CLINE_PROVIDER and CLINE_API_KEY in your shell:",
+                provider.id
+            ),
+            action: Some(Fix::Command("cline auth".into())),
         });
     }
     checks
@@ -120,7 +138,7 @@ fn env_var(name: &str) -> Option<String> {
 /// How agent `id` is signed in on this machine, if its own record says so
 /// (`home` is the user's home folder, `var` reads the login environment).
 /// Nothing secret is read: only whether the record is there.
-fn signed_in(id: &str, home: &Path, var: &dyn Fn(&str) -> Option<String>) -> Option<&'static str> {
+fn signed_in(id: &str, home: &Path, var: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     let json = |path: PathBuf| -> Option<serde_json::Value> {
         serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
     };
@@ -156,8 +174,10 @@ fn signed_in(id: &str, home: &Path, var: &dyn Fn(&str) -> Option<String>) -> Opt
                 var("GEMINI_API_KEY").map(|_| "With GEMINI_API_KEY.")
             }
         }
+        "cline" => return crate::cline::signed_in(&crate::cline::Paths::under(home, var), var),
         _ => None,
     }
+    .map(str::to_string)
 }
 
 /// Whether nothing blocks starting the agent.

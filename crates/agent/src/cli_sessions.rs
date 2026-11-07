@@ -8,6 +8,8 @@
 //! - Gemini CLI: `~/.gemini/tmp/<name>/chats/session-*.jsonl`, the name from
 //!   `~/.gemini/projects.json`.
 //! - Antigravity: `~/.gemini/antigravity-cli/conversation_summaries.db`.
+//! - Cline: `<CLINE_DIR or ~/.cline>/data/sessions/<id>/<id>.json`, which
+//!   names the folder and the title.
 
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -21,7 +23,7 @@ const MOST: usize = 50;
 
 /// One past session.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct PastSession {
+pub struct PastSession {
     pub id: String,
     pub title: String,
     /// When it last changed (Unix milliseconds).
@@ -31,12 +33,13 @@ pub(crate) struct PastSession {
 }
 
 /// Agent `agent`'s sessions in `cwd`, newest first.
-pub(crate) fn sessions(agent: &str, cwd: &Path) -> Vec<PastSession> {
+pub fn sessions(agent: &str, cwd: &Path) -> Vec<PastSession> {
     let mut sessions = match agent {
         "claude" => claude_sessions(cwd),
         "codex" => codex_sessions(cwd),
         "gemini" => gemini_sessions(cwd),
         "antigravity" => antigravity_sessions(cwd),
+        "cline" => cline_sessions(&crate::cline::Paths::of_this_computer().sessions, cwd),
         _ => Vec::new(),
     };
     sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
@@ -108,6 +111,10 @@ fn typed(text: &str) -> Option<String> {
     // PilotHouse's own note ahead of a chat's first message.
     if text.starts_with("(Workspace note from PilotHouse") {
         text = text.split_once("\n\n")?.1.trim_start();
+    }
+    // The recap PilotHouse gives an agent that could not resume a chat.
+    if text.starts_with("Context: this continues an earlier conversation in") {
+        text = text.split_once("\n---\n")?.1.trim_start();
     }
     if text.starts_with('<')
         || text.starts_with("# AGENTS.md")
@@ -431,6 +438,57 @@ fn title_of(path: &Path) -> Option<String> {
 }
 
 /// The first line that is not markup, cut to a title's length.
+/// Cline's sessions in `cwd`, from its folder of sessions `root`: each
+/// `<id>/<id>.json` names its folder, title and times. Sessions nobody
+/// typed in (a one-off `cline --json` job) are left out. The ids begin with
+/// the time they started, so the newest names come first.
+fn cline_sessions(root: &Path, cwd: &Path) -> Vec<PastSession> {
+    /// Session folders looked at, newest first: enough for the newest
+    /// [`MOST`] of any folder without reading years of them.
+    const LOOKED_AT: usize = 2000;
+    let mut sessions = Vec::new();
+    for dir in newest_first(root).into_iter().take(LOOKED_AT) {
+        let Some(id) = dir.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let file = dir.join(format!("{id}.json"));
+        let Some(meta) = std::fs::read(&file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        else {
+            continue;
+        };
+        if meta["cwd"].as_str().map(Path::new) != Some(cwd)
+            || meta["interactive"].as_bool() == Some(false)
+        {
+            continue;
+        }
+        // What was typed first; Cline's title is that prompt's first line,
+        // which may be PilotHouse's note.
+        let title = meta["prompt"]
+            .as_str()
+            .and_then(typed)
+            .or_else(|| meta["metadata"]["title"].as_str().and_then(typed));
+        let Some(title) = title else {
+            continue;
+        };
+        let messages = dir.join(format!("{id}.messages.json"));
+        let updated_at = modified_ms(&messages)
+            .or_else(|| modified_ms(&file))
+            .unwrap_or_default();
+        sessions.push(PastSession {
+            id: id.to_string(),
+            title,
+            updated_at,
+            path: messages.is_file().then_some(messages),
+        });
+        if sessions.len() >= MOST {
+            break;
+        }
+    }
+    sessions
+}
+
 fn one_line(text: &str) -> Option<String> {
     text.lines()
         .map(str::trim)
@@ -441,6 +499,40 @@ fn one_line(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cline_sessions_of_a_folder() {
+        let root = std::env::temp_dir().join(format!("ph-cline-sessions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = |id: &str, cwd: &str, interactive: bool, title: &str| {
+            let dir = root.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let meta = serde_json::json!({
+                "session_id": id, "cwd": cwd, "interactive": interactive,
+                "prompt": if title.is_empty() { "Context: this continues an earlier conversation in PilotHouse. Here is the recent history:\n\nUser: hi\n\n---\nfix the build" } else { title },
+                "metadata": { "title": title }
+            });
+            std::fs::write(dir.join(format!("{id}.json")), meta.to_string()).unwrap();
+        };
+        session("1790000000000_aaaaa", "/work/app", true, "Fix the build");
+        session("1790000000001_bbbbb", "/work/other", true, "Elsewhere");
+        session("1790000000002_ccccc", "/work/app", false, "A one-off job");
+        session("1790000000003_ddddd", "/work/app", true, "");
+        let found = cline_sessions(&root, Path::new("/work/app"));
+        let titles: Vec<(&str, &str)> = found
+            .iter()
+            .map(|session| (session.id.as_str(), session.title.as_str()))
+            .collect();
+        // Newest first; no title falls back to the prompt.
+        assert_eq!(
+            titles,
+            [
+                ("1790000000003_ddddd", "fix the build"),
+                ("1790000000000_aaaaa", "Fix the build")
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn reads_file_uris() {

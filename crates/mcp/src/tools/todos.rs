@@ -8,7 +8,13 @@ use super::{Tool, with_project};
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: "todo_add",
-        description: "Leave the user a to-do in PilotHouse's inbox, for something only they can do: sign in somewhere, decide something, check a page, reply to someone. With remind_in_minutes, PilotHouse reminds them then. Do not use it for your own work steps (use the board for those).",
+        description: concat!(
+            "Leave the user a to-do in ",
+            ph_brand::name!(),
+            "'s inbox, for something only they can do: sign in somewhere, decide something, check a page, reply to someone. With remind_in_minutes, ",
+            ph_brand::name!(),
+            " reminds them then. Do not use it for your own work steps (use the board for those)."
+        ),
         schema: || {
             json!({ "type": "object", "required": ["text"], "properties": {
                 "text": { "type": "string", "description": "What to do, in one line." },
@@ -28,7 +34,11 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "todo_list",
-        description: "List the user's to-dos in PilotHouse for this workspace (and the ones for all workspaces).",
+        description: concat!(
+            "List the user's to-dos in ",
+            ph_brand::name!(),
+            " for this workspace (and the ones for all workspaces)."
+        ),
         schema: || json!({ "type": "object", "properties": {} }),
         build: |arguments, project_id, _| Ok(("todo.list", with_project(arguments, project_id))),
         format: |result| {

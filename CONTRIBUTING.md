@@ -33,6 +33,7 @@ CI runs the same on Linux, Windows and macOS, and a pull request merges only whe
 
 - Keep each crate to one feature; the shell composes features (see [docs/architecture.md](docs/architecture.md) and the conventions in [docs/development.md](docs/development.md)).
 - Database migrations are append-only: add a new one, never edit one that shipped.
+- Organisations build their own copies ([docs/customizing.md](docs/customizing.md)). Never write the product's name into code: use `ph_brand::NAME`. A feature that can be left out gets a key in `ph_brand::Feature`. A change to `brand/brand.toml`'s keys, `ph_custom` or `Store::apply_track` gets a line in the *Merge notes* of [CHANGELOG.md](CHANGELOG.md).
 - Add or update the short page under `docs/` for what you changed.
 - Only permissively licensed dependencies (Apache-2.0, MIT, BSD, ISC, Zlib).
 

@@ -6,8 +6,8 @@ use gpui_kit::{App, AppContext as _, Entity, EventEmitter, Global};
 
 pub struct ReviewRounds;
 
-/// A round of review `review_id` was saved: its findings and walkthrough
-/// are in the store.
+/// A round of review `review_id` was saved (its findings are in the
+/// store), or a walkthrough run started or was saved.
 pub struct RoundRecorded {
     pub review_id: i64,
 }
@@ -29,7 +29,8 @@ impl ReviewRounds {
         rounds
     }
 
-    pub(crate) fn recorded(review_id: i64, cx: &mut App) {
+    /// Says run `review_id` changed: views of its pull request read it again.
+    pub fn recorded(review_id: i64, cx: &mut App) {
         Self::global(cx).update(cx, |_, cx| cx.emit(RoundRecorded { review_id }));
     }
 }

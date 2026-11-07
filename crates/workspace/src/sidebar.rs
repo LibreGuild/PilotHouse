@@ -833,9 +833,11 @@ fn workspace_menu(
             }))
             .item(PopupMenuItem::submenu("Colour", colours))
             .separator()
-            .item(item("Remove from PilotHouse", Icons::Trash, || {
-                Box::new(RemoveWorkspace)
-            }))
+            .item(item(
+                concat!("Remove from ", ph_brand::name!()),
+                Icons::Trash,
+                || Box::new(RemoveWorkspace),
+            ))
         })
 }
 
@@ -848,7 +850,15 @@ fn chat_rows(
     limit: Option<usize>,
     cx: &mut Context<Workspace>,
 ) -> Vec<AnyElement> {
-    let sessions = workspace.sessions_of(project, cx);
+    // An agent CLI's chat whose terminal is open lists as that terminal.
+    let sessions: Vec<Session> = workspace
+        .sessions_of(project, cx)
+        .into_iter()
+        .filter(|session| {
+            session.kind != "terminal"
+                || crate::terminal_agents::TerminalAgents::of_session(session.id, cx).is_none()
+        })
+        .collect();
     let active = (workspace.view() == View::Workspaces
         && workspace.active_project_id() == Some(project))
     .then(|| {
@@ -1094,7 +1104,14 @@ fn chat_row(
         .or_else(|| ph_agent::agents::find(&session.agent_id));
     let line = summary
         .and_then(|summary| summary.line)
-        .filter(|line| !line.is_empty());
+        .filter(|line| !line.is_empty())
+        // An agent CLI's chat, its terminal closed: what it said last.
+        .or_else(|| {
+            (session.kind == "terminal").then(|| match &session.last_line {
+                Some(line) if !line.is_empty() => format!("Terminal · {line}"),
+                _ => "Terminal session".to_string(),
+            })
+        });
     let line_color = match state {
         ChatState::NeedsYou => cx.theme().warning,
         ChatState::Failed => cx.theme().danger,
@@ -1634,6 +1651,7 @@ mod tests {
             updated_at: 0,
             cwd: None,
             kind: kind.into(),
+            last_line: None,
         };
         assert!(is_automated(&session(
             "Nightly summary (scheduled)",

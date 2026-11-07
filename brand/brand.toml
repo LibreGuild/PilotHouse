@@ -1,0 +1,74 @@
+# What this build of PilotHouse is called, who makes it and where it looks
+# for updates. The icons are beside this file, in icons/. An organisation that
+# builds PilotHouse for its own people changes this folder; see
+# docs/customizing.md. The app (crates/brand) and the packaging scripts
+# (scripts/package) both read it, so this is the one place to change.
+
+[app]
+# The name people see: menus, the title bar, notifications, About, installers.
+name = "PilotHouse"
+# Who makes this build: the installers' publisher and the Linux package's
+# maintainer.
+vendor = "LibreGuild"
+# A reverse-DNS id: the macOS bundle identifier.
+id = "org.libreguild.pilothouse"
+# The folder, in the system's app data folder, that holds settings, chats and
+# logs (macOS: ~/Library/Application Support/<data_folder>). A different
+# folder is a separate install: nothing is moved from the old one, so a build
+# with its own name usually has its own folder and can run beside PilotHouse.
+data_folder = "PilotHouse"
+# The name secrets (GitHub tokens) are filed under in the system's keychain.
+# Changing it means people sign in to GitHub again.
+keychain = "PilotHouse"
+
+[features]
+# Every feature is in unless it is switched off here (`browser = false`). A
+# feature switched off is not in the app at all for its people: not in the
+# tools, the menus, the command palette, Settings or the shortcuts, and the
+# agents do not get its tools. Missing keys mean on, so a new PilotHouse
+# feature arrives on in a merged build until it is listed here as false.
+#
+# The tools beside the chat:
+#   files, changes (Git), pulls (pull requests), board, browser, devices
+#   (Android), runs (run configurations and ports), tests (UI tests),
+#   terminal, logcat
+# Elsewhere:
+#   github (the GitHub view beside the workspaces), schedules, utilities,
+#   usage (the usage dashboard), network_drives, parallel_runs (one prompt to
+#   several agents), presentations (slides in Studio), chrome_extension
+#   (agents in the user's own Chrome), quick_chat (a small chat window over
+#   every app, opened with a global shortcut)
+
+[links]
+# The project's page (Settings → About).
+repository = "https://github.com/LibreGuild/PilotHouse"
+# The page of the newest release ("What's new", the update notice).
+releases = "https://github.com/LibreGuild/PilotHouse/releases/latest"
+
+[updates]
+# Whether the app looks for updates at all. With false, Settings → About has
+# no update section and the app never asks a server for one.
+enabled = true
+# The public half of the key that signs `latest.json` (Ed25519, base64), in
+# this folder. A build with its own update server signs with its own key; see
+# docs/packaging.md.
+key = "update_key.pub"
+
+# Where updates come from, tried in order. `manifest` is the signed
+# `latest.json`; `files` is the folder its downloads are under (each file at
+# `<files><tag>/<name>`). The first source's `files` must be the address
+# `latest.json` names its downloads by.
+[[updates.sources]]
+name = "GitHub"
+manifest = "https://github.com/LibreGuild/PilotHouse/releases/latest/download/latest.json"
+files = "https://github.com/LibreGuild/PilotHouse/releases/download/"
+
+[[updates.sources]]
+name = "the mirror"
+manifest = "https://libreguild.skatech.org/pilothouse/latest/latest.json"
+files = "https://libreguild.skatech.org/pilothouse/releases/"
+
+[[updates.sources]]
+name = "the backup mirror"
+manifest = "https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/latest/latest.json"
+files = "https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/releases/"

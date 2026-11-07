@@ -8,7 +8,7 @@ A text file of one of these kinds has a switch in its toolbar between its **Sour
 
 | Kind | Files | Opens as | The preview |
 |---|---|---|---|
-| Markdown | `.md`, `.markdown`, `.mdx` | Rich | GitHub-flavored Markdown with Mermaid diagrams drawn in place, images (beside the document, or on the web over HTTPS), tables, tasks; links to files open them in the editor, web and mail links in the browser, and other links nothing (see the rich editor below) |
+| Markdown | `.md`, `.markdown`, `.mdx` | Rich | GitHub-flavored Markdown with Mermaid diagrams drawn in place (hover one to zoom it, fit it, open it large or copy its source), images (beside the document, or on the web over HTTPS), tables, tasks; links to files open them in the editor, web and mail links in the browser, and other links nothing (see the rich editor below) |
 | Mermaid | `.mmd`, `.mermaid` | Split | The diagram, zoomable (`mermaid-rs-renderer`, pure Rust, 23 diagram types) |
 | SVG | `.svg` | Split | The drawing, zoomable |
 | JSON | `.json`, `.jsonc`, `.json5`, `.geojson`… | Source | A tree: fold levels, pick a value to see its path (`$.a.b[0]`), copy the path or the value. **Format** and **Minify** reflow strict JSON without touching keys' order or numbers' spelling |

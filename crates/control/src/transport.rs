@@ -41,7 +41,8 @@ mod unix {
             if endpoint.exists() {
                 if UnixStream::connect(endpoint).is_ok() {
                     anyhow::bail!(
-                        "another PilotHouse is running with this data folder ({})",
+                        "another {} is running with this data folder ({})",
+                        ph_brand::NAME,
                         endpoint.display()
                     );
                 }
@@ -69,7 +70,8 @@ mod unix {
             .with_context(|| format!("refusing the control socket at {}", endpoint.display()))?;
         let stream = UnixStream::connect(endpoint).with_context(|| {
             format!(
-                "PilotHouse is not running (no control socket at {})",
+                "{} is not running (no control socket at {})",
+                ph_brand::NAME,
                 endpoint.display()
             )
         })?;
@@ -117,7 +119,8 @@ mod windows {
             // The file names a running app's pipe: that one is not ours.
             if connect(endpoint).is_ok() {
                 anyhow::bail!(
-                    "another PilotHouse is running with this data folder ({})",
+                    "another {} is running with this data folder ({})",
+                    ph_brand::NAME,
                     endpoint.display()
                 );
             }
@@ -182,7 +185,7 @@ mod windows {
 
     pub fn connect(endpoint: &Path) -> Result<Connection> {
         let name = std::fs::read_to_string(endpoint)
-            .with_context(|| "PilotHouse is not running (no control pipe)")?;
+            .with_context(|| format!("{} is not running (no control pipe)", ph_brand::NAME))?;
         let name = name.trim();
         anyhow::ensure!(
             name.starts_with(r"\\.\pipe\pilothouse-"),
@@ -203,8 +206,12 @@ mod windows {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 Err(err) => {
-                    return Err(err)
-                        .context("PilotHouse is not running (cannot open its control pipe)");
+                    return Err(err).with_context(|| {
+                        format!(
+                            "{} is not running (cannot open its control pipe)",
+                            ph_brand::NAME
+                        )
+                    });
                 }
             }
         };

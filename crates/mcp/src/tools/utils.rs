@@ -8,7 +8,11 @@ use super::{Tool, with_project};
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: "util_list",
-        description: "List PilotHouse's offline utilities: JSON/TOML/XML/CSV, Base64/URL/hex/HTML encoding, JWT decoding, hashes and HMAC, UUIDs and ULIDs, Unix times, cron lines, regex, text diff, colors, Markdown to HTML, read-only SQLite queries. Each has an id and modes for util_run.",
+        description: concat!(
+            "List ",
+            ph_brand::name!(),
+            "'s offline utilities: JSON/TOML/XML/CSV, Base64/URL/hex/HTML encoding, JWT decoding, hashes and HMAC, UUIDs and ULIDs, Unix times, cron lines, regex, text diff, colors, Markdown to HTML, read-only SQLite queries. Each has an id and modes for util_run."
+        ),
         schema: || json!({ "type": "object", "properties": {} }),
         build: |arguments, _, _| Ok(("util.list", arguments)),
         format: |result| {
@@ -37,7 +41,11 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "util_run",
-        description: "Run one of PilotHouse's offline utilities (see util_list) on some text, e.g. decode a JWT, format JSON, explain a cron line, or query a SQLite file of this workspace read-only.",
+        description: concat!(
+            "Run one of ",
+            ph_brand::name!(),
+            "'s offline utilities (see util_list) on some text, e.g. decode a JWT, format JSON, explain a cron line, or query a SQLite file of this workspace read-only."
+        ),
         schema: || {
             json!({ "type": "object", "required": ["id", "text"], "properties": {
                 "id": { "type": "string", "description": "The utility, e.g. jwt, json, cron, sqlite." },

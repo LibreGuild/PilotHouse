@@ -450,6 +450,10 @@ impl WorkspaceScreen {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A tool the brand leaves out never starts.
+        if !tab.in_build() {
+            return;
+        }
         match tab {
             ContextTab::Files => {
                 if !self.project.empty {
@@ -575,8 +579,10 @@ impl WorkspaceScreen {
     ) {
         let folder = cwd.clone();
         let list =
-            cx.background_spawn(async move { crate::agent_sessions::sessions(agent, &folder) });
+            cx.background_spawn(async move { ph_agent::cli_sessions::sessions(agent, &folder) });
         let name = ph_agent::agents::find(agent).map_or(agent, |spec| spec.name);
+        let loads_sessions =
+            ph_agent::agents::find(agent).is_some_and(|spec| !spec.quirks.no_session_load);
         cx.spawn_in(window, async move |this, cx| {
             let sessions = list.await;
             _ = this.update_in(cx, |_, window, cx| {
@@ -605,33 +611,34 @@ impl WorkspaceScreen {
                                     .text_sm()
                                     .child(session.title.clone()),
                             )
-                            // The row resumes in a terminal; this, in a chat.
-                            .child(
-                                gpui_kit::div()
-                                    .invisible()
-                                    .group_hover(group, |style| style.visible())
-                                    .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "agent-session-chat-{}",
-                                            session.id
-                                        )))
-                                        .ghost()
-                                        .xsmall()
-                                        .label("Open in chat")
-                                        .on_click(
-                                            move |_, window, cx| {
+                            // The row resumes in a terminal; this, in a chat
+                            // (for agents that can take a session back).
+                            .when(loads_sessions, |row| {
+                                row.child(
+                                    gpui_kit::div()
+                                        .invisible()
+                                        .group_hover(group, |style| style.visible())
+                                        .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "agent-session-chat-{}",
+                                                session.id
+                                            )))
+                                            .ghost()
+                                            .xsmall()
+                                            .label("Open in chat")
+                                            .on_click(move |_, window, cx| {
                                                 cx.stop_propagation();
                                                 window.close_dialog(cx);
                                                 _ = chat_screen.update(cx, |screen, cx| {
                                                     screen.resume_in_chat(agent, &past, window, cx)
                                                 });
-                                            },
+                                            }),
                                         ),
-                                    ),
-                            )
+                                )
+                            })
                             .child(
                                 gpui_kit::div()
                                     .flex_none()
@@ -745,7 +752,7 @@ impl WorkspaceScreen {
     pub(crate) fn resume_in_chat(
         &mut self,
         agent: &str,
-        past: &crate::agent_sessions::PastSession,
+        past: &ph_agent::cli_sessions::PastSession,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {

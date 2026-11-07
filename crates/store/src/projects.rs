@@ -386,8 +386,9 @@ impl Store {
         drop(conn);
         if !project.is_workspace() {
             bail!(
-                "{} is PilotHouse's own folder for the GitHub view",
-                path.display()
+                "{} is {}'s own folder for the GitHub view",
+                path.display(),
+                ph_brand::NAME
             );
         }
         self.with_folders(project)

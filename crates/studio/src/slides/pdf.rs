@@ -110,7 +110,7 @@ pub fn write(
         .count(page_ids.len() as i32);
     pdf.document_info(info)
         .title(TextStr(&deck.title))
-        .creator(TextStr("PilotHouse"));
+        .creator(TextStr(ph_brand::NAME));
     std::fs::write(out, pdf.finish())
         .with_context(|| format!("could not write {}", out.display()))?;
     Ok(())

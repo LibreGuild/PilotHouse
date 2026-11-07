@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Sizable as _,
+    ActiveTheme as _, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{PopupMenu, PopupMenuItem},
@@ -67,6 +67,35 @@ pub struct TerminalPanel {
 }
 
 impl TerminalPanel {
+    /// Closes tab `ix`; one whose agent is at work, or waits for an
+    /// answer, only after asking (closing stops the agent).
+    fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminals.read(cx).terminals().get(ix).cloned() else {
+            return;
+        };
+        if !agent_busy(terminal.read(cx)) {
+            self.terminals
+                .update(cx, |terminals, cx| terminals.close(&terminal, cx));
+            return;
+        }
+        let name = terminal.read(cx).title().clone();
+        let terminals = self.terminals.downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (terminals, terminal) = (terminals.clone(), terminal.clone());
+            dialog
+                .title("Close the terminal?")
+                .w(gpui_kit::px(440.))
+                .child(format!(
+                    "The agent in “{name}” is still at work or waiting for you. Closing the terminal stops it; what it did so far stays."
+                ))
+                .footer(ph_ui::dialog_buttons("Close", true))
+                .on_ok(move |_, _, cx| {
+                    _ = terminals.update(cx, |terminals, cx| terminals.close(&terminal, cx));
+                    true
+                })
+        });
+    }
+
     /// Shows the workspace's `terminals`.
     pub fn new(terminals: Entity<WorkspaceTerminals>, cx: &mut Context<Self>) -> Self {
         Self {
@@ -405,11 +434,12 @@ impl TerminalPanel {
                         menu.item(PopupMenuItem::submenu(label, submenu))
                     });
                 // Agents whose CLI PilotHouse follows in a terminal.
-                const AGENTS: [(&str, &str); 4] = [
+                const AGENTS: [(&str, &str); 5] = [
                     ("claude", "Claude Code"),
                     ("codex", "Codex"),
                     ("gemini", "Gemini CLI"),
                     ("antigravity", "Antigravity"),
+                    ("cline", "Cline"),
                 ];
                 let menu = AGENTS.iter().fold(
                     menu.separator().label("Agent in a terminal"),
@@ -602,9 +632,8 @@ impl Render for TerminalPanel {
                             .xsmall()
                             .icon(IconName::Close)
                             .accessibility_label("Close terminal")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.terminals
-                                    .update(cx, |terminals, cx| terminals.close_index(ix, cx))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.close_tab(ix, window, cx)
                             })),
                     )
             });
@@ -713,6 +742,18 @@ fn cut(text: &str, max: usize) -> SharedString {
     let mut cut: String = text.chars().take(max - 1).collect();
     cut.push('…');
     cut.into()
+}
+
+/// Whether an agent in `terminal` is at work or waits for the user: as its
+/// tab shows it, or as the program says (OSC 7501).
+fn agent_busy(terminal: &Terminal) -> bool {
+    use crate::program_status::ProgramState;
+    matches!(
+        terminal.badge(),
+        Some(crate::AgentBadge::Working | crate::AgentBadge::NeedsYou)
+    ) || terminal
+        .program_status()
+        .is_some_and(|status| matches!(status.state, ProgramState::Working | ProgramState::Blocked))
 }
 
 #[cfg(test)]

@@ -7,7 +7,11 @@ use super::{Tool, with_project};
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: "browser_open",
-        description: "Open a URL in the project's browser (the pane the user sees in PilotHouse) and wait for it to load. Logins made there persist for this project. Local addresses like localhost:3000 work.",
+        description: concat!(
+            "Open a URL in the project's browser (the pane the user sees in ",
+            ph_brand::name!(),
+            ") and wait for it to load. Logins made there persist for this project. Local addresses like localhost:3000 work."
+        ),
         schema: || json!({ "type": "object", "required": ["url"], "properties": { "url": { "type": "string" } } }),
         build: |arguments, project_id, _| Ok(("browser.open", with_project(arguments, project_id))),
         format: format_page,

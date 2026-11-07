@@ -36,6 +36,10 @@ pub struct Ready {
     pub images: bool,
     /// The agent can resume an earlier session (`session/load`).
     pub load_session: bool,
+    /// The agent can end a session it holds (`session/close`), freeing what
+    /// it keeps for it (Claude Code: a process of its own, with its MCP
+    /// servers).
+    pub close_session: bool,
     /// Ways to sign in that the agent handles itself (`authenticate`).
     pub sign_in: Vec<SignInMethod>,
     /// A message can be added to a running turn (`_session/steering`).
@@ -67,9 +71,26 @@ impl AgentConnection {
     /// Starts `spec` in `cwd`. Never fails: problems surface when a thread
     /// awaits [`Self::ready`], as a message the chat can show.
     pub fn start(spec: &'static AgentSpec, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
+        Self::start_with(spec, cwd, Vec::new(), cx)
+    }
+
+    /// [`Self::start`], with `env` set for the agent's process too.
+    pub fn start_with(
+        spec: &'static AgentSpec,
+        cwd: PathBuf,
+        env: Vec<(String, String)>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let launched = match spec.availability() {
             Availability::Ready { program, args } => {
-                RpcProcess::spawn(&program, &args, &cwd, ph_env::shell_env()).map_err(|err| {
+                let mut vars = ph_env::shell_env().clone();
+                vars.extend(
+                    spec.env
+                        .iter()
+                        .map(|(name, value)| (name.to_string(), value.to_string()))
+                        .chain(env),
+                );
+                RpcProcess::spawn(&program, &args, &cwd, &vars).map_err(|err| {
                     SharedString::from(format!("Could not start {}: {err:#}", spec.name))
                 })
             }
@@ -120,6 +141,64 @@ impl AgentConnection {
 
     pub fn has_exited(&self) -> bool {
         self.exited.is_some()
+    }
+
+    /// Stops the agent, so the next message starts it again (with what it
+    /// is started with now, such as Cline's provider); its chats go on in
+    /// new sessions. Not while one of them works: false then. `asking` is
+    /// the chat that asked (being updated, so it sees to itself).
+    pub fn restart(&mut self, asking: Option<gpui_kit::EntityId>, cx: &mut Context<Self>) -> bool {
+        let threads: Vec<_> = self
+            .threads
+            .values()
+            .filter_map(WeakEntity::upgrade)
+            .filter(|thread| Some(thread.entity_id()) != asking)
+            .collect();
+        if threads
+            .iter()
+            .any(|thread| *thread.read(cx).status() != crate::ThreadStatus::Idle)
+        {
+            return false;
+        }
+        if let Some(process) = self.process.take() {
+            process.stop();
+        }
+        let message = SharedString::from(format!("{} restarted.", self.spec.name));
+        self.exited = Some(message.clone());
+        // Its output closing later finds no chat to tell.
+        self.threads.clear();
+        for thread in threads {
+            thread.update(cx, |thread, cx| thread.agent_exited(message.clone(), cx));
+        }
+        true
+    }
+
+    /// Ends the agent session `session` (once known: it may still be being
+    /// set up) when the agent can (`session/close`). A chat that goes away
+    /// does this, so its session does not live on in the agent until the
+    /// agent exits.
+    pub(crate) fn close_session(
+        &self,
+        session: impl Future<Output = Option<String>> + Send + 'static,
+        cx: &App,
+    ) {
+        let ready = self.ready.clone();
+        cx.background_spawn(async move {
+            let (Some(session_id), Ok(ready)) = (session.await, ready.await) else {
+                return;
+            };
+            if !ready.close_session {
+                return;
+            }
+            if let Err(err) = ready
+                .process
+                .request("session/close", json!({ "sessionId": session_id }))
+                .await
+            {
+                tracing::debug!("closing agent session {session_id}: {err:#}");
+            }
+        })
+        .detach();
     }
 
     /// Runs an agent-handled sign-in (it may open the browser).
@@ -182,7 +261,7 @@ impl AgentConnection {
                         id,
                         Err(RpcError {
                             code: -32601,
-                            message: format!("PilotHouse does not support `{method}`"),
+                            message: format!("{} does not support `{method}`", ph_brand::NAME),
                         }),
                     );
                 }
@@ -344,6 +423,7 @@ async fn initialize(
         embedded_context: capabilities.prompt_capabilities.embedded_context,
         images: capabilities.prompt_capabilities.image,
         load_session: capabilities.load_session,
+        close_session: capabilities.session_capabilities.close.is_some(),
         sign_in,
         steering,
     })

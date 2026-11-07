@@ -42,18 +42,19 @@ fn main() {
     logs::init(!helper);
     logs::install_crash_handler();
 
-    let open = match cli::run(&args) {
+    let (open, quick_chat) = match cli::run(&args) {
         cli::Launch::Exit(code) => std::process::exit(code),
-        cli::Launch::App(open) => open,
+        cli::Launch::App(open) => (open, false),
+        cli::Launch::QuickChat => (Vec::new(), true),
     };
 
-    if let Err(err) = run_app(open) {
-        eprintln!("PilotHouse could not start: {err:#}");
+    if let Err(err) = run_app(open, quick_chat) {
+        eprintln!("{} could not start: {err:#}", ph_brand::NAME);
         std::process::exit(1);
     }
 }
 
-fn run_app(open: Vec<std::path::PathBuf>) -> Result<()> {
+fn run_app(open: Vec<std::path::PathBuf>, quick_chat: bool) -> Result<()> {
     // Agents and terminals need the login shell's PATH; read it while the UI starts.
     ph_env::warm_up();
     let store = Store::open(&paths::database_path())?;
@@ -114,6 +115,9 @@ fn run_app(open: Vec<std::path::PathBuf>) -> Result<()> {
             tracing::warn!("control socket unavailable: {err:#}");
         }
         cx.activate(true);
+        if quick_chat {
+            ph_workspace::toggle_quick_chat(cx);
+        }
     });
     Ok(())
 }

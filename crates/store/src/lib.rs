@@ -58,6 +58,14 @@ impl Store {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
+    /// Applies the migrations of an organisation's own tables, on a track of
+    /// their own beside PilotHouse's (see `docs/customizing.md`). Call it once
+    /// at startup with every migration of the track, oldest first; only the
+    /// ones this database does not have yet run. Name tables `x_<track>_…`.
+    pub fn apply_track(&self, track: &str, migrations: &[&str]) -> Result<()> {
+        migrations::apply_track(&self.conn(), track, migrations)
+    }
+
     /// The database file, or `None` for an in-memory one.
     pub fn file(&self) -> Option<std::path::PathBuf> {
         self.conn()

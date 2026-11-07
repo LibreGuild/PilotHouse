@@ -1,0 +1,15 @@
+[package]
+name = "ph-custom"
+description = "An organisation's own additions to PilotHouse: views beside Workspaces and GitHub, and commands. Empty in PilotHouse itself."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# An organisation's build adds its own crates here, and nowhere else:
+#   acme-reports = { path = "../acme-reports" }
+[dependencies]
+gpui-kit.workspace = true
+ph-store.workspace = true
+ph-ui.workspace = true
+serde.workspace = true

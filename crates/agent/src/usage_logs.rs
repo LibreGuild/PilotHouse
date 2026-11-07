@@ -14,6 +14,9 @@
 //! - Gemini CLI: `<GEMINI_CLI_HOME or ~>/.gemini/tmp/*/chats/session-*`, a
 //!   `tokens` object per reply (a reply is written again as it grows; the
 //!   last one counts).
+//! - Cline: `<CLINE_DIR or ~/.cline>/data/sessions/<id>/<id>.messages.json`,
+//!   rewritten whole as the session goes, with `metrics` on each reply; the
+//!   folder from `<id>.json` beside it.
 //!
 //! These files can add up to gigabytes, so: lines are matched as bytes
 //! before any is parsed, only the fields needed are parsed, files are read
@@ -36,7 +39,7 @@ use serde_json::Value;
 /// One model reply's tokens.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
-    /// The agent id (`claude`, `codex`, `gemini`).
+    /// The agent id (`claude`, `codex`, `gemini`, `cline`).
     pub agent: &'static str,
     /// When it came (Unix milliseconds).
     pub at: i64,
@@ -97,13 +100,14 @@ pub struct Progress {
     pub done: AtomicUsize,
 }
 
-const AGENTS: [&str; 3] = ["claude", "codex", "gemini"];
+const AGENTS: [&str; 4] = ["claude", "codex", "gemini", "cline"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Claude,
     Codex,
     Gemini,
+    Cline,
 }
 
 impl Kind {
@@ -118,6 +122,7 @@ struct Roots {
     claude: Vec<PathBuf>,
     codex: Vec<PathBuf>,
     gemini: Vec<PathBuf>,
+    cline: Vec<PathBuf>,
 }
 
 impl Roots {
@@ -155,6 +160,7 @@ impl Roots {
                 codex_home.join("archived_sessions"),
             ],
             gemini: vec![gemini_home.join(".gemini/tmp")],
+            cline: vec![crate::cline::Paths::under(&home, &var).sessions],
         }
     }
 }
@@ -273,6 +279,7 @@ fn scan_roots(roots: &Roots, since: i64, progress: &Progress, saved: Option<&Pat
         (&roots.claude, Kind::Claude),
         (&roots.codex, Kind::Codex),
         (&roots.gemini, Kind::Gemini),
+        (&roots.cline, Kind::Cline),
     ] {
         let found: Vec<&PathBuf> = dirs.iter().filter(|dir| dir.is_dir()).collect();
         if let Some(first) = found.first() {
@@ -424,6 +431,10 @@ fn list(dir: &Path, kind: Kind, since: i64) -> Vec<PathBuf> {
                     matches!(ext, Some("jsonl" | "json"))
                         && dir.file_name().is_some_and(|name| name == "chats")
                 }
+                Kind::Cline => path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".messages.json")),
             };
             if wanted && meta.modified().is_ok_and(|modified| modified >= since) {
                 found.push(path);
@@ -455,6 +466,7 @@ fn read_file(
         Kind::Claude => claude_file(path, usage.read_to, &mut usage, &mut index),
         Kind::Codex => codex_file(path, &mut usage, &mut index),
         Kind::Gemini => gemini_file(path, &mut usage, &mut index),
+        Kind::Cline => cline_file(path, &mut usage, &mut index),
     };
     usage.len = len;
     usage.modified = modified;
@@ -786,6 +798,57 @@ fn gemini_file(path: &Path, usage: &mut FileUsage, index: &mut HashMap<String, u
     read_to
 }
 
+/// Cline: `{"sessionId", "messages": [{"id", "role": "assistant", "ts",
+/// "modelInfo": {"id"}, "metrics": {inputTokens, outputTokens,
+/// cacheReadTokens, cacheWriteTokens}}]}`, rewritten whole; the folder the
+/// session worked in is in `<id>.json` beside it. Its `inputTokens` leave
+/// out the cache.
+fn cline_file(path: &Path, usage: &mut FileUsage, index: &mut HashMap<String, u32>) -> u64 {
+    let bytes = std::fs::read(path).unwrap_or_default();
+    let Ok(file) = serde_json::from_slice::<Value>(&bytes) else {
+        return bytes.len() as u64;
+    };
+    let session = file["sessionId"].as_str().map_or_else(
+        || stem(path).trim_end_matches(".messages").to_string(),
+        str::to_string,
+    );
+    let cwd = path
+        .parent()
+        .map(|dir| dir.join(format!("{session}.json")))
+        .and_then(|meta| std::fs::read(meta).ok())
+        .and_then(|meta| serde_json::from_slice::<Value>(&meta).ok())
+        .and_then(|meta| meta["cwd"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    for message in file["messages"].as_array().into_iter().flatten() {
+        let metrics = &message["metrics"];
+        if message["role"].as_str() != Some("assistant") || !metrics.is_object() {
+            continue;
+        }
+        let Some(at) = message["ts"].as_i64() else {
+            continue;
+        };
+        let cache_write = number(metrics, "cacheWriteTokens");
+        let id = message["id"].as_str().unwrap_or_default();
+        let row = Row {
+            at,
+            model: message["modelInfo"]["id"].as_str().unwrap_or_default(),
+            session: &session,
+            cwd: &cwd,
+            input: number(metrics, "inputTokens") + cache_write,
+            cache_write,
+            cached: number(metrics, "cacheReadTokens"),
+            output: number(metrics, "outputTokens"),
+            key: if id.is_empty() {
+                0
+            } else {
+                key(&["cline", &session, id])
+            },
+        };
+        usage.push(index, row);
+    }
+    bytes.len() as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -923,6 +986,44 @@ mod tests {
         assert_eq!(
             (entries[0].input, entries[0].cached, entries[0].output),
             (80, 20, 14)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cline_replies_with_their_folder() {
+        let root = folder("cline");
+        let dir = root.join("1790000000000_abcde");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("1790000000000_abcde.json"),
+            r#"{"session_id":"1790000000000_abcde","cwd":"/work/app"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("1790000000000_abcde.messages.json"),
+            r#"{"sessionId":"1790000000000_abcde","messages":[
+                {"id":"u1","role":"user","content":"hi","ts":1790000000100},
+                {"id":"a1","role":"assistant","ts":1790000000200,"modelInfo":{"id":"anthropic/claude-sonnet-4.6"},
+                 "metrics":{"inputTokens":100,"outputTokens":7,"cacheReadTokens":30,"cacheWriteTokens":5,"cost":0.01}}]}"#,
+        )
+        .unwrap();
+        // The session's own file is not a messages file.
+        let roots = Roots {
+            cline: vec![root.clone()],
+            ..Default::default()
+        };
+        let found = scan(&roots, 0);
+        assert_eq!(found.sources, [("cline", root.clone())]);
+        let entry = &found.entries[0];
+        assert_eq!(found.entries.len(), 1);
+        assert_eq!(
+            (entry.agent, &*entry.cwd, &*entry.model),
+            ("cline", "/work/app", "anthropic/claude-sonnet-4.6")
+        );
+        assert_eq!(
+            (entry.input, entry.cache_write, entry.cached, entry.output),
+            (105, 5, 30, 7)
         );
         let _ = std::fs::remove_dir_all(&root);
     }

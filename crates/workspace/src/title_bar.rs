@@ -50,7 +50,9 @@ pub(crate) fn render(
                 .flex_basis(left_bias)
                 .gap_1()
                 .child(app_icon(cx))
-                .child(view_toggle(workspace, cx)),
+                // Workspaces | GitHub | the organisation's: none when there
+                // is only Workspaces.
+                .when(has_views(), |this| this.child(view_toggle(workspace, cx))),
         )
         .child(
             h_flex()
@@ -182,49 +184,56 @@ fn more_button() -> impl IntoElement {
                         .icon(icon)
                         .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
                 };
-            let mut menu = menu
-                .label("Create")
-                .item(item("New presentation…", Icons::Presentation, || {
-                    Box::new(NewPresentation)
-                }))
-                .item(item("Open presentation…", Icons::FolderOpen, || {
-                    Box::new(OpenPresentation)
-                }));
-            for listed in crate::presentations::listed(cx).iter().take(5) {
-                let folder = listed.space.path.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(listed.title.clone())
-                        .icon(Icons::Presentation)
-                        .on_click(move |_, window, cx| {
-                            crate::presentations::open(folder.clone(), None, window, cx)
-                        }),
-                );
+            let mut menu = menu;
+            if ph_brand::enabled(ph_brand::Feature::Presentations) {
+                menu = menu
+                    .label("Create")
+                    .item(item("New presentation…", Icons::Presentation, || {
+                        Box::new(NewPresentation)
+                    }))
+                    .item(item("Open presentation…", Icons::FolderOpen, || {
+                        Box::new(OpenPresentation)
+                    }));
+                for listed in crate::presentations::listed(cx).iter().take(5) {
+                    let folder = listed.space.path.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(listed.title.clone())
+                            .icon(Icons::Presentation)
+                            .on_click(move |_, window, cx| {
+                                crate::presentations::open(folder.clone(), None, window, cx)
+                            }),
+                    );
+                }
+                menu = menu.separator();
+            }
+            let tools: [MenuEntry; 8] = [
+                ("Utilities…", Icons::Wrench, || Box::new(ShowUtilities)),
+                ("Architecture map…", Icons::Network, || {
+                    Box::new(ShowArchitecture)
+                }),
+                ("Parallel runs…", Icons::Columns2, || {
+                    Box::new(ShowParallelRuns)
+                }),
+                ("Schedules…", Icons::CalendarClock, || {
+                    Box::new(ShowSchedules)
+                }),
+                ("Usage…", Icons::ChartPie, || Box::new(ShowUsage)),
+                ("Network drives…", Icons::HardDrive, || {
+                    Box::new(ShowNetworkDrives)
+                }),
+                ("Agent instructions…", Icons::BookOpen, || {
+                    Box::new(ShowInstructions)
+                }),
+                ("Search chats…", Icons::Search, || Box::new(SearchChats)),
+            ];
+            menu = menu.label("Tools");
+            for (label, icon, action) in tools {
+                // Not what this build leaves out (the brand's features).
+                if crate::features::allows(action().as_ref()) {
+                    menu = menu.item(item(label, icon, action));
+                }
             }
             menu.separator()
-                .label("Tools")
-                .item(item("Utilities…", Icons::Wrench, || {
-                    Box::new(ShowUtilities)
-                }))
-                .item(item("Architecture map…", Icons::Network, || {
-                    Box::new(ShowArchitecture)
-                }))
-                .item(item("Parallel runs…", Icons::Columns2, || {
-                    Box::new(ShowParallelRuns)
-                }))
-                .item(item("Schedules…", Icons::CalendarClock, || {
-                    Box::new(ShowSchedules)
-                }))
-                .item(item("Usage…", Icons::ChartPie, || Box::new(ShowUsage)))
-                .item(item("Network drives…", Icons::HardDrive, || {
-                    Box::new(ShowNetworkDrives)
-                }))
-                .item(item("Agent instructions…", Icons::BookOpen, || {
-                    Box::new(ShowInstructions)
-                }))
-                .item(item("Search chats…", Icons::Search, || {
-                    Box::new(SearchChats)
-                }))
-                .separator()
                 .label("Help")
                 .item(item("Keyboard shortcuts", Icons::Keyboard, || {
                     Box::new(ShowShortcuts)
@@ -232,6 +241,9 @@ fn more_button() -> impl IntoElement {
                 .item(item("Settings", Icons::Settings, || Box::new(OpenSettings)))
         })
 }
+
+/// A row of the More menu: label, icon, and the action it dispatches.
+type MenuEntry = (&'static str, Icons, fn() -> Box<dyn gpui_kit::Action>);
 
 /// How much more room each side of the bar gets, so its middle is the
 /// window's: the width of the window's own buttons on the other side.
@@ -325,7 +337,8 @@ fn update_item(cx: &App) -> Option<AnyElement> {
         Status::Ready { version, .. } => button("update-restart", "Restart to update".into())
             .child(dot(cx.theme().success))
             .tooltip(format!(
-                "PilotHouse {version} is downloaded. Restart to install it now; otherwise it installs when you quit."
+                "{} {version} is downloaded. Restart to install it now; otherwise it installs when you quit.",
+                ph_brand::NAME
             ))
             .on_click(|_, _, cx| updates::restart_to_update(cx)),
         Status::Available { version } => button("update-download", format!("Update to {version}"))
@@ -351,8 +364,8 @@ fn app_icon(_: &App) -> AnyElement {
         .ghost()
         .small()
         .child(mark)
-        .tooltip("PilotHouse")
-        .accessibility_label("PilotHouse menu")
+        .tooltip(ph_brand::NAME)
+        .accessibility_label(format!("{} menu", ph_brand::NAME))
         .menu(gpui_kit::Anchor::TopLeft, |menu, _, _| {
             let item = |label: &'static str, action: fn() -> Box<dyn gpui_kit::Action>| {
                 PopupMenuItem::new(label)
@@ -368,13 +381,14 @@ fn app_icon(_: &App) -> AnyElement {
                 .item(item("Command palette", || Box::new(ToggleCommandPalette)))
                 .item(item("Settings…", || Box::new(OpenSettings)))
                 .separator()
-                .item(item("Quit PilotHouse", || Box::new(Quit)))
+                .item(item(concat!("Quit ", ph_brand::name!()), || Box::new(Quit)))
         })
         .into_any_element()
 }
 
-/// The two views, side by side: Workspaces and GitHub (how many pull
-/// requests wait for the user's review).
+/// The views, side by side: Workspaces, GitHub (how many pull requests
+/// wait for the user's review) unless the brand leaves it out, and the
+/// organisation's own (`ph_custom::views`).
 fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let current = workspace.view();
     let waiting = workspace
@@ -401,7 +415,7 @@ fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
     let item = |view: View,
                 id: &'static str,
                 label: &'static str,
-                icon: Icons,
+                icon: Icon,
                 hint: &'static str,
                 badge: Option<AnyElement>,
                 cx: &App| {
@@ -434,8 +448,12 @@ fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
                 this.hover(|style| style.text_color(cx.theme().foreground))
             })
             .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(format!("{label} ({hint})"))
-                    .build(window, cx)
+                let tip = if hint.is_empty() {
+                    label.to_string()
+                } else {
+                    format!("{label} ({hint})")
+                };
+                gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
             })
             // On press, like a tab: nothing can come between press and
             // release to lose it (the mouse moving, a slow frame). Straight
@@ -448,7 +466,7 @@ fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
                     _ = this.update(cx, |workspace, cx| workspace.set_view(view, window, cx));
                 }
             })
-            .child(Icon::new(icon).small())
+            .child(icon.small())
             .child(label)
             .children(badge)
             .test_support()
@@ -490,18 +508,36 @@ fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             View::Workspaces,
             "view-workspaces",
             "Workspaces",
-            Icons::LayoutGrid,
+            Icon::new(Icons::LayoutGrid),
             workspaces_hint,
             dot,
             cx,
         ))
-        .child(item(
-            View::GitHub,
-            "view-github",
-            "GitHub",
-            Icons::Github,
-            github_hint,
-            count,
-            cx,
-        ))
+        .when(ph_brand::enabled(ph_brand::Feature::GitHub), |this| {
+            this.child(item(
+                View::GitHub,
+                "view-github",
+                "GitHub",
+                Icon::new(Icons::Github),
+                github_hint,
+                count,
+                cx,
+            ))
+        })
+        .children(ph_custom::views().into_iter().map(|custom| {
+            item(
+                View::Custom(custom.id),
+                custom.id,
+                custom.label,
+                (custom.icon)(),
+                "",
+                None,
+                cx,
+            )
+        }))
+}
+
+/// Whether the window has more than one view to switch between.
+pub(crate) fn has_views() -> bool {
+    ph_brand::enabled(ph_brand::Feature::GitHub) || !ph_custom::views().is_empty()
 }

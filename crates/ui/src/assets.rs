@@ -158,16 +158,38 @@ icon_assets!(
         ListIndentDecrease,
         RectangleHorizontal,
         Ratio,
+        // A diagram's zoom buttons.
+        ZoomIn,
+        ZoomOut,
+        Scan,
+        Maximize2,
     ]
 );
 
+/// Where an organisation's own icons are served (`brand/icons/custom`).
+const CUSTOM_ICONS: &str = "icons/custom/";
+
+/// An icon of the organisation's own, `brand/icons/custom/<name>.svg` (see
+/// docs/customizing.md). Lucide icons PilotHouse does not list yet go in
+/// `ExtraIcons` above instead.
+pub fn custom_icon(name: &str) -> gpui_kit::component::Icon {
+    gpui_kit::component::Icon::empty().path(format!("{CUSTOM_ICONS}{name}.svg"))
+}
+
 /// The app's asset source: PilotHouse's extra icons layered over the
-/// gpui-component defaults.
+/// gpui-component defaults, and the brand's own icons.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PilotHouseAssets;
 
 impl AssetSource for PilotHouseAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some(name) = path
+            .strip_prefix(CUSTOM_ICONS)
+            .and_then(|file| file.strip_suffix(".svg"))
+            && let Some((_, svg)) = ph_brand::icons::CUSTOM.iter().find(|(id, _)| *id == name)
+        {
+            return Ok(Some(Cow::Borrowed(svg)));
+        }
         if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -177,6 +199,13 @@ impl AssetSource for PilotHouseAssets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = Assets.list(path)?;
         paths.extend(ExtraIcons.list(path)?);
+        if CUSTOM_ICONS.starts_with(path) {
+            paths.extend(
+                ph_brand::icons::CUSTOM
+                    .iter()
+                    .map(|(name, _)| SharedString::from(format!("{CUSTOM_ICONS}{name}.svg"))),
+            );
+        }
         paths.sort();
         paths.dedup();
         Ok(paths)

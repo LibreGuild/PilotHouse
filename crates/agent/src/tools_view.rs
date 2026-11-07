@@ -284,7 +284,11 @@ impl Render for ToolsView {
                             "Use for every agent"
                         })
                         .disabled(taken)
-                        .tooltip("Copies it, with its environment, into PilotHouse's list")
+                        .tooltip(concat!(
+                            "Copies it, with its environment, into ",
+                            ph_brand::name!(),
+                            "'s list"
+                        ))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.add(server.clone(), window, cx);
                         })),
@@ -335,7 +339,10 @@ impl Render for ToolsView {
             .gap_3()
             .child(Self::heading(
                 "MCP servers for every agent",
-                "PilotHouse starts these for each chat, along with its own (board, browser, devices). Local servers only.",
+                concat!(
+                    ph_brand::name!(),
+                    " starts these for each chat, along with its own (board, browser, devices). Local servers only."
+                ),
                 cx,
             ))
             .children(servers)

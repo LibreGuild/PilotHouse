@@ -35,6 +35,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
 # PilotHouse crates
+ph-brand = { path = "crates/brand" }
+ph-custom = { path = "crates/custom" }
 ph-theme = { path = "crates/theme" }
 ph-store = { path = "crates/store" }
 ph-ui = { path = "crates/ui" }

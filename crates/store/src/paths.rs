@@ -7,14 +7,15 @@ use std::path::{Path, PathBuf};
 pub const DATA_DIR_ENV: &str = "PILOTHOUSE_DATA_DIR";
 
 /// `~/Library/Application Support/PilotHouse` on macOS, the XDG data dir on
-/// Linux and `%APPDATA%\PilotHouse` on Windows.
+/// Linux and `%APPDATA%\PilotHouse` on Windows (the folder's name is the
+/// brand's `data_folder`).
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os(DATA_DIR_ENV) {
         return PathBuf::from(dir);
     }
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("PilotHouse")
+        .join(ph_brand::DATA_FOLDER)
 }
 
 /// Names, in the data folder, the folder chosen for copies (see

@@ -339,17 +339,21 @@ impl GithubView {
             cx.spawn_in(window, async move |_, cx| {
                 let result = work.await;
                 _ = chat.update_in(cx, |chat, window, cx| match result {
-                    Ok((run_id, worktree, title, display, prompt)) => chat.start_review_turn(
-                        None,
-                        Some(ReviewTurn::Walkthrough { run_id }),
-                        Some(agent),
-                        worktree,
-                        title,
-                        display,
-                        prompt,
-                        window,
-                        cx,
-                    ),
+                    Ok((run_id, worktree, title, display, prompt)) => {
+                        chat.start_review_turn(
+                            None,
+                            Some(ReviewTurn::Walkthrough { run_id }),
+                            Some(agent),
+                            worktree,
+                            title,
+                            display,
+                            prompt,
+                            window,
+                            cx,
+                        );
+                        // Every view of the pull request shows it being written.
+                        ph_agent::review_rounds::ReviewRounds::recorded(run_id, cx);
+                    }
                     Err(err) => chat.set_failed(format!("{err:#}"), cx),
                 });
             }),

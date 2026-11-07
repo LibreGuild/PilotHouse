@@ -134,6 +134,44 @@ impl Attachment {
     }
 }
 
+/// `blocks` for an agent that reads only a prompt's text (Cline): a link to
+/// a file becomes a line naming the file, which the agent can read with its
+/// own tools; anything else that is not text becomes a line saying it was
+/// left out, so the agent still knows it was there.
+pub fn text_only(blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
+    blocks
+        .into_iter()
+        .map(|block| match block {
+            ContentBlock::Text(_) => block,
+            ContentBlock::ResourceLink(link) => ContentBlock::Text(TextContent::new(format!(
+                "Attached file: {} ({})",
+                link.name,
+                file_path(&link.uri)
+            ))),
+            _ => ContentBlock::Text(TextContent::new(
+                "(An attachment this agent cannot read was left out.)",
+            )),
+        })
+        .collect()
+}
+
+/// The path a `file://` URL names (as [`ph_ui::platform::file_url`] makes
+/// them); any other address as it is.
+fn file_path(uri: &str) -> String {
+    let Some(path) = uri.strip_prefix("file://") else {
+        return uri.to_string();
+    };
+    // `file:///C:/work` on Windows.
+    let path = match path.as_bytes() {
+        [b'/', drive, b':', ..] if drive.is_ascii_alphabetic() => &path[1..],
+        _ => path,
+    };
+    path.replace("%20", " ")
+        .replace("%23", "#")
+        .replace("%3F", "?")
+        .replace("%25", "%")
+}
+
 /// A card as text. Only this project's cards: `#12` must not read another
 /// board.
 fn card_text(store: &Store, project_id: i64, id: i64) -> Option<String> {
@@ -437,5 +475,32 @@ mod tests {
         let found = live_mentions("see @screenshot, and @logs. Why does @test-run fail?");
         assert!(found.screenshot && found.logs && found.tests);
         assert_eq!(live_mentions("email me@log.com"), LiveMentions::default());
+    }
+
+    #[test]
+    fn text_only_agents_get_files_named_in_text() {
+        let blocks = text_only(vec![
+            ContentBlock::Text(TextContent::new("Fix it")),
+            ContentBlock::ResourceLink(ResourceLink::new(
+                "src/my app.rs",
+                ph_ui::platform::file_url(std::path::Path::new("/work/src/my app.rs")),
+            )),
+            ContentBlock::Image(ImageContent::new("AAAA", "image/png")),
+        ]);
+        let texts: Vec<String> = blocks
+            .iter()
+            .map(|block| match block {
+                ContentBlock::Text(text) => text.text.clone(),
+                _ => panic!("only text goes"),
+            })
+            .collect();
+        assert_eq!(texts[0], "Fix it");
+        assert_eq!(
+            texts[1],
+            "Attached file: src/my app.rs (/work/src/my app.rs)"
+        );
+        assert!(texts[2].contains("left out"));
+        assert_eq!(file_path("file:///C:/work/a%23b.rs"), "C:/work/a#b.rs");
+        assert_eq!(file_path("https://example.com"), "https://example.com");
     }
 }

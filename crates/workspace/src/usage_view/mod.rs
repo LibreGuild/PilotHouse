@@ -68,6 +68,9 @@ const SHARE_W: f32 = 90.;
 const PERCENT_W: f32 = 36.;
 
 pub fn open(window: &mut Window, cx: &mut App) {
+    if !ph_brand::enabled(ph_brand::Feature::Usage) {
+        return;
+    }
     let view = cx.new(UsageView::new);
     window.open_dialog(cx, move |dialog, _, _| {
         dialog.title("Usage").w(px(600.)).child(view.clone())
@@ -897,8 +900,9 @@ impl UsageView {
                 tilde(dir)
             ),
             _ => format!(
-                "What {} reported in PilotHouse chats; sessions elsewhere are not counted.",
-                spec.name
+                "What {} reported in {} chats; sessions elsewhere are not counted.",
+                spec.name,
+                ph_brand::NAME
             ),
         };
         let account = match spec.id {
@@ -907,11 +911,15 @@ impl UsageView {
             _ => None,
         };
         let no_limits = match spec.id {
-            "claude" => {
-                "Claude Code reports its limits while it works in a PilotHouse chat; none since PilotHouse started."
-            }
+            "claude" => concat!(
+                "Claude Code reports its limits while it works in a ",
+                ph_brand::name!(),
+                " chat; none since ",
+                ph_brand::name!(),
+                " started."
+            ),
             "codex" => "Codex keeps its limits in its session files; none found.",
-            _ => "Not reported to PilotHouse.",
+            _ => concat!("Not reported to ", ph_brand::name!(), "."),
         };
         v_flex()
             .ml(px(26.))
@@ -995,8 +1003,9 @@ impl UsageView {
                 }
                 if tally.cost > 0.0 {
                     parts.push(format!(
-                        "{} reported in PilotHouse chats",
-                        money(tally.cost, tally.currency.as_deref())
+                        "{} reported in {} chats",
+                        money(tally.cost, tally.currency.as_deref()),
+                        ph_brand::NAME
                     ));
                 }
                 this.child(muted(parts.join(" · "), cx))
@@ -1048,7 +1057,11 @@ impl UsageView {
                             format!("{}: its session files in {}.", agent.spec.name, tilde(dir))
                         }
                         Source::PilotHouse => {
-                            format!("{}: what it reported in PilotHouse chats.", agent.spec.name)
+                            format!(
+                                "{}: what it reported in {} chats.",
+                                agent.spec.name,
+                                ph_brand::NAME
+                            )
                         }
                     })
                     .collect()
@@ -1104,13 +1117,14 @@ impl UsageView {
                         .text_color(theme.muted_foreground)
                         .child("Tokens are input (read from a cache or not) and output, as each agent records them. Where an agent keeps its own session files on this computer, they are read, so sessions it ran in a terminal or an editor count too:")
                         .children(sources.into_iter().map(|source| div().pl_2().child(format!("• {source}"))))
-                        .child("Files are only read, never sent anywhere; what they held is kept in PilotHouse's data folder (usage-files.json) so the next read is quick.")
+                        .child(format!("Files are only read, never sent anywhere; what they held is kept in {}'s data folder (usage-files.json) so the next read is quick.", ph_brand::NAME))
                         .child(format!(
-                            "\"At API prices\" is an estimate: the tokens at each model's list price, from LiteLLM's public price list{}. PilotHouse ships a copy and never downloads it by itself; Update prices fetches the latest from GitHub when you click it. Costs agents reported in PilotHouse chats are shown as reported. Limits are what the agents report while they work.",
+                            "\"At API prices\" is an estimate: the tokens at each model's list price, from LiteLLM's public price list{}. {app} ships a copy and never downloads it by itself; Update prices fetches the latest from GitHub when you click it. Costs agents reported in {app} chats are shown as reported. Limits are what the agents report while they work.",
                             prices_date
                                 .as_deref()
                                 .map(|date| format!(" as of {date}"))
-                                .unwrap_or_default()
+                                .unwrap_or_default(),
+                            app = ph_brand::NAME,
                         ))
                         .child("Work belongs to the workspace whose folder it ran in.")
                         .child(

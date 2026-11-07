@@ -1,7 +1,7 @@
 //! Agent chat for PilotHouse.
 //!
 //! PilotHouse drives the coding agents the user already has (Claude Code,
-//! Codex, Gemini CLI, Antigravity) over the [Agent Client Protocol](https://agentclientprotocol.com):
+//! Codex, Gemini CLI, Antigravity, Cline) over the [Agent Client Protocol](https://agentclientprotocol.com):
 //! each agent runs as a child process speaking JSON-RPC on stdio.
 //!
 //! - [`rpc`]: the process and JSON-RPC plumbing.
@@ -21,7 +21,9 @@ mod attachment_view;
 pub mod attachments;
 mod chat_panel;
 pub mod chats;
+pub mod cli_sessions;
 pub mod cli_transcript;
+pub mod cline;
 mod connection;
 mod entry_view;
 pub mod form;
@@ -35,7 +37,7 @@ pub mod options;
 mod permission;
 pub mod preload;
 pub mod rate_limits;
-mod reply;
+pub mod reply;
 pub mod review_card;
 mod review_policy;
 pub mod review_rounds;

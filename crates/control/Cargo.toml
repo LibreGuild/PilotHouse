@@ -12,6 +12,7 @@ publish.workspace = true
 automation = ["gpui-kit/test-support", "dep:image"]
 
 [dependencies]
+ph-brand.workspace = true
 anyhow.workspace = true
 gpui-kit.workspace = true
 ph-store.workspace = true

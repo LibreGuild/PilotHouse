@@ -198,6 +198,51 @@ impl WorkspaceScreen {
                     }
                 }
                 ChatPanelEvent::WantPulls => this.feed_pulls(window, cx),
+                // A closed terminal's chat goes on.
+                ChatPanelEvent::ResumeInTerminal {
+                    agent,
+                    session,
+                    cwd,
+                } => {
+                    // Already going on in a terminal: that one.
+                    let open = session.as_deref().and_then(|session| {
+                        crate::terminal_agents::TerminalAgents::of_cli_session(agent, session, cx)
+                            .and_then(|running| running.terminal.upgrade())
+                    });
+                    match open {
+                        Some(terminal) => this.show_terminal(&terminal, window, cx),
+                        None => this.start_terminal_agent(
+                            agent,
+                            cwd.clone(),
+                            session.clone(),
+                            window,
+                            cx,
+                        ),
+                    }
+                }
+                ChatPanelEvent::ContinueInChat {
+                    agent,
+                    recap,
+                    title,
+                } => {
+                    let from = format!("{} in a terminal", agent.name);
+                    this.chat.update(cx, |chat, cx| {
+                        chat.continue_with(agent, recap.clone(), title.clone(), &from, window, cx)
+                    });
+                }
+                ChatPanelEvent::ResumeInChat {
+                    agent,
+                    session,
+                    title,
+                } => {
+                    let past = ph_agent::cli_sessions::PastSession {
+                        id: session.clone(),
+                        title: title.clone(),
+                        updated_at: 0,
+                        path: None,
+                    };
+                    this.resume_in_chat(agent, &past, window, cx);
+                }
                 // A workspace's chat has no starters of its own.
                 ChatPanelEvent::Starter(_) => {}
                 ChatPanelEvent::RunParallel { prompt } => {
@@ -343,6 +388,12 @@ impl WorkspaceScreen {
         space.git_folder = space.first_repo_folder();
         if !space.context_tab.in_bottom_panel() {
             space.column_tab = space.context_tab;
+        }
+        // Never a tool the brand leaves out (Files, by default, may be).
+        if !space.column_tab.in_build()
+            && let Some(tab) = first_column_tool(cx)
+        {
+            space.column_tab = tab;
         }
         let saved_dock = store.setting::<Option<gpui_kit::component::dock::DockAreaState>>(
             &dock_key(space.project.id),
@@ -756,7 +807,14 @@ impl WorkspaceScreen {
     /// ⌥⌘B (and the title bar's button): hides the column of tools beside
     /// the chat, or brings it back as it was.
     pub fn toggle_context_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tab = self.column_tab;
+        // A tool the brand leaves out gives way to the first one switched on.
+        let tab = if self.column_tab.in_build() {
+            self.column_tab
+        } else if let Some(tab) = first_column_tool(cx) {
+            tab
+        } else {
+            return;
+        };
         self.ensure_panel(tab, window, cx);
         let shown = self.shown.clone();
         self.panes
@@ -1186,7 +1244,7 @@ impl WorkspaceScreen {
     }
 
     /// Re-reads sessions after the chat created or renamed one.
-    fn reload_sessions(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn reload_sessions(&mut self, cx: &mut Context<Self>) {
         self.sessions = AppState::store(cx)
             .sessions(self.project.id)
             .unwrap_or_default();
@@ -1227,4 +1285,12 @@ impl WorkspaceScreen {
 /// The settings key of workspace `id`'s dock layout.
 fn dock_key(id: ph_store::projects::ProjectId) -> String {
     format!("workspace.dock.{id}")
+}
+
+/// The first tool for the column beside the chat that this build has and
+/// the user has switched on (Settings → Features), if any.
+fn first_column_tool(cx: &App) -> Option<ContextTab> {
+    AppState::enabled_tabs(cx)
+        .into_iter()
+        .find(|tab| !tab.in_bottom_panel())
 }

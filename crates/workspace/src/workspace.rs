@@ -15,8 +15,9 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, TitleBar, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathPromptOptions, Render, Styled as _, Subscription, Window, div,
+    AnyView, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement as _, PathPromptOptions, Render, Styled as _, Subscription, Window,
+    div,
 };
 use ph_store::projects::{Project, ProjectId};
 use ph_theme::Appearance;
@@ -39,6 +40,8 @@ pub enum View {
     #[default]
     Workspaces,
     GitHub,
+    /// One of the organisation's own (`ph_custom::views`), by its id.
+    Custom(&'static str),
 }
 
 /// Owns the project list and the open [`WorkspaceScreen`]s, and routes workspace
@@ -57,6 +60,9 @@ pub struct Workspace {
     view: View,
     /// The GitHub view, made when first shown.
     github: Option<Entity<GithubView>>,
+    /// The organisation's own views (`ph_custom::views`), each made when
+    /// first shown.
+    custom_views: HashMap<&'static str, AnyView>,
     /// The sidebar: workspaces unfolded, those listing every chat, and those
     /// listing the chats PilotHouse started (*Runs*).
     pub(crate) expanded: HashSet<ProjectId>,
@@ -158,6 +164,7 @@ impl Workspace {
             chats_space,
             view: View::Workspaces,
             github: None,
+            custom_views: HashMap::new(),
             expanded: expanded.into_iter().collect(),
             show_all: HashSet::new(),
             runs_open: HashSet::new(),
@@ -255,6 +262,27 @@ impl Workspace {
 
     /// Shows the Workspaces, Agents or GitHub view.
     pub fn set_view(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
+        // A build whose brand leaves the GitHub view out stays where it is.
+        if view == View::GitHub && !ph_brand::enabled(ph_brand::Feature::GitHub) {
+            return;
+        }
+        // An organisation's view, made the first time it is shown; an id no
+        // view has (one since removed) changes nothing.
+        if let View::Custom(id) = view
+            && !self.custom_views.contains_key(id)
+        {
+            let Some(custom) = ph_custom::views()
+                .into_iter()
+                .find(|custom| custom.id == id)
+            else {
+                return;
+            };
+            let context = ph_custom::CustomContext {
+                store: AppState::store(cx).clone(),
+            };
+            let built = (custom.build)(&context, window, cx);
+            self.custom_views.insert(custom.id, built);
+        }
         self.view = view;
         if view == View::GitHub {
             let (github, folders) = (self.github(cx), self.folders());
@@ -321,6 +349,9 @@ impl Workspace {
             return;
         };
         if project.kind == ph_store::projects::ProjectKind::GitHub {
+            if !ph_brand::enabled(ph_brand::Feature::GitHub) {
+                return;
+            }
             self.set_view(View::GitHub, window, cx);
             let github = self.github(cx);
             github.update(cx, |github, cx| {
@@ -339,6 +370,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // An agent CLI's chat whose terminal is still open: the terminal.
+        if let Some(pane) = crate::terminal_agents::TerminalAgents::of_session(session, cx)
+            .map(|agent| agent.pane.clone())
+        {
+            return self.open_terminal_agent(project, &pane, true, window, cx);
+        }
         self.open_project(project, window, cx);
         if let Some(space) = self.spaces.get(&project) {
             space.update(cx, |space, cx| space.select_session(session, cx));
@@ -642,6 +679,10 @@ impl Workspace {
     /// Gives the keyboard to the chat in front (the workspace's, or the
     /// GitHub view's), else the window.
     pub(crate) fn focus_front(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let View::Custom(_) = self.view {
+            self.focus_handle.focus(window, cx);
+            return;
+        }
         if self.view == View::GitHub {
             let focused = self.github.clone().is_some_and(|github| {
                 github.update(cx, |github, cx| github.focus_chat(window, cx))
@@ -815,6 +856,14 @@ impl Workspace {
             hasher.finish()
         };
         let agents_changed = std::mem::replace(&mut self.terminal_agents_seen, agents) != agents;
+        // Terminal agents' chats saved meanwhile.
+        let saved = crate::session_changes::take(cx);
+        for project in &saved {
+            if let Some(space) = self.spaces.get(project).cloned() {
+                space.update(cx, |space, cx| space.reload_sessions(cx));
+            }
+        }
+        let sessions_changed = sessions_changed || (!saved.is_empty() && self.read_sessions(cx));
         if statuses != self.statuses || sessions_changed || agents_changed {
             self.statuses = statuses;
             cx.notify();
@@ -868,10 +917,17 @@ impl Workspace {
                         this.fix_pull(hosting, request, window, cx);
                         return;
                     }
+                    // Reviews run in the GitHub view, which the brand can
+                    // leave out.
+                    if !ph_brand::enabled(ph_brand::Feature::GitHub) {
+                        return;
+                    }
                     this.set_view(View::GitHub, window, cx);
                     let github = this.github(cx);
                     github.update(cx, |github, cx| github.agent(hosting, request, window, cx));
                 }
+                WorkspaceScreenEvent::OpenFindings(_) | WorkspaceScreenEvent::ReviewAgain(_)
+                    if !ph_brand::enabled(ph_brand::Feature::GitHub) => {}
                 WorkspaceScreenEvent::OpenFindings(review_id) => {
                     this.set_view(View::GitHub, window, cx);
                     let github = this.github(cx);
@@ -1256,6 +1312,11 @@ impl Workspace {
     }
 
     fn new_session(&mut self, _: &NewSession, window: &mut Window, cx: &mut Context<Self>) {
+        // An organisation's view has no chats: the new one is the
+        // workspace's, so show it.
+        if let View::Custom(_) = self.view {
+            self.set_view(View::Workspaces, window, cx);
+        }
         if self.view == View::GitHub {
             if let Some(github) = self.github.clone() {
                 github.update(cx, |github, cx| github.new_chat(window, cx));
@@ -1748,6 +1809,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !ph_brand::enabled(ph_brand::Feature::ChromeExtension) {
+            return;
+        }
         let project = self
             .active_space()
             .map(|space| space.read(cx).project().path.clone());
@@ -1792,7 +1856,8 @@ impl Workspace {
         }
         let from = ph_theme::themes::current(cx).name.clone();
         let prompt = format!(
-            "Let's design a PilotHouse theme together, starting from {from}. Show each change live with the theme tools, and save it when I say so. I'd like "
+            "Let's design a {app} theme together, starting from {from}. Show each change live with the theme tools, and save it when I say so. I'd like ",
+            app = ph_brand::NAME,
         );
         self.with_active_space(window, cx, move |space, window, cx| {
             space.new_session(window, cx);
@@ -1862,7 +1927,19 @@ impl Render for Workspace {
         let github = (self.view == View::GitHub)
             .then(|| self.github.clone())
             .flatten();
+        // An organisation's view fills the window below the title bar, as
+        // the GitHub view does.
+        let custom = match self.view {
+            View::Custom(id) => self.custom_views.get(id).cloned(),
+            _ => None,
+        };
         let content = match (&github, self.active_space()) {
+            _ if custom.is_some() => div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .children(custom.clone())
+                .into_any_element(),
             (Some(github), _) => div()
                 .flex_1()
                 .min_w_0()
@@ -1924,6 +2001,14 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &ShowGitHubView, window, cx| {
                 this.set_view(View::GitHub, window, cx)
+            }))
+            .on_action(cx.listener(|this, show: &ph_custom::ShowView, window, cx| {
+                if let Some(custom) = ph_custom::views()
+                    .into_iter()
+                    .find(|custom| custom.id == show.id)
+                {
+                    this.set_view(View::Custom(custom.id), window, cx)
+                }
             }))
             .on_action(cx.listener(|this, _: &ShowAgentsView, _, cx| {
                 this.set_agents_open(!this.agents_open, cx)
@@ -2049,17 +2134,21 @@ impl Render for Workspace {
                             sidebar::drag_width(event.event.position.x - event.bounds.left(), cx);
                         },
                     ))
-                    // The GitHub view draws its own sidebar.
-                    .when(!self.sidebar_collapsed && github.is_none(), |this| {
-                        this.child(
-                            div()
-                                .relative()
-                                .flex_none()
-                                .h_full()
-                                .child(sidebar::render(self, cx))
-                                .child(sidebar::resize_edge(cx)),
-                        )
-                    })
+                    // The GitHub view draws its own sidebar; an organisation's
+                    // view has none.
+                    .when(
+                        !self.sidebar_collapsed && github.is_none() && custom.is_none(),
+                        |this| {
+                            this.child(
+                                div()
+                                    .relative()
+                                    .flex_none()
+                                    .h_full()
+                                    .child(sidebar::render(self, cx))
+                                    .child(sidebar::resize_edge(cx)),
+                            )
+                        },
+                    )
                     .child(content),
             )
             .child(status_bar::render(self, cx))

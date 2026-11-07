@@ -52,6 +52,30 @@ impl std::fmt::Display for RpcError {
 
 impl std::error::Error for RpcError {}
 
+/// A JSON-RPC error's message, with the reason the agent put in its `data`
+/// (Cline says only "Internal error" there, and why in `data.details`).
+fn error_message(error: &Value) -> String {
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown error");
+    let data = error.get("data");
+    let details = data
+        .and_then(Value::as_str)
+        .or_else(|| {
+            let data = data?;
+            ["details", "message", "error"]
+                .iter()
+                .find_map(|key| data.get(key).and_then(Value::as_str))
+        })
+        .map(str::trim)
+        .filter(|details| !details.is_empty() && !message.contains(details));
+    match details {
+        Some(details) => format!("{message}: {details}"),
+        None => message.to_string(),
+    }
+}
+
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
 
 /// A running agent process and its JSON-RPC plumbing.
@@ -251,6 +275,14 @@ impl RpcProcess {
 impl Drop for RpcProcess {
     fn drop(&mut self) {
         // Agents are children of the app; never leave them running.
+        self.stop();
+    }
+}
+
+impl RpcProcess {
+    /// Ends the agent and everything it started, now (its output then
+    /// closes, and waiting requests fail).
+    pub fn stop(&self) {
         let Some(mut child) = self.child.lock().ok().and_then(|mut child| child.take()) else {
             return;
         };
@@ -310,11 +342,7 @@ fn route(message: Value, pending: &Pending, incoming: &smol::channel::Sender<Inc
             let result = match message.get("error") {
                 Some(error) => Err(RpcError {
                     code: error.get("code").and_then(Value::as_i64).unwrap_or(-32603),
-                    message: error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown error")
-                        .to_string(),
+                    message: error_message(error),
                 }),
                 None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
             };
@@ -327,6 +355,20 @@ fn route(message: Value, pending: &Pending, incoming: &smol::channel::Sender<Inc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_messages_carry_the_agents_reason() {
+        let error = serde_json::json!({ "code": -32603, "message": "Internal error",
+            "data": { "details": "cline requires re-authentication." } });
+        assert_eq!(
+            error_message(&error),
+            "Internal error: cline requires re-authentication."
+        );
+        let plain = serde_json::json!({ "code": -32000, "message": "Authentication required" });
+        assert_eq!(error_message(&plain), "Authentication required");
+        let repeated = serde_json::json!({ "message": "Bad input", "data": "Bad input" });
+        assert_eq!(error_message(&repeated), "Bad input");
+    }
 
     /// A tiny "agent" in a shell script: answers the first request, then
     /// sends a notification and a request of its own.

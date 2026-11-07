@@ -526,7 +526,8 @@ impl ImageDocument {
             });
         let Some(format) = format else {
             return Task::ready(Err(anyhow::anyhow!(
-                "PilotHouse cannot write this file's format; save a copy instead"
+                "{} cannot write this file's format; save a copy instead",
+                ph_brand::NAME
             )));
         };
         if let Some(lost) = self.original().and_then(|original| original.would_lose) {

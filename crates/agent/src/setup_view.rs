@@ -101,7 +101,7 @@ pub fn welcome(
                     div()
                         .text_xl()
                         .font_weight(gpui_kit::FontWeight::MEDIUM)
-                        .child("Welcome to PilotHouse"),
+                        .child(concat!("Welcome to ", ph_brand::name!())),
                 )
                 .child(
                     div()
@@ -146,7 +146,7 @@ pub fn welcome(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("PilotHouse also looks every few seconds."),
+                        .child(concat!(ph_brand::name!(), " also looks every few seconds.")),
                 ),
         )
         .into_any_element()

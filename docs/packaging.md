@@ -1,6 +1,6 @@
 # Packaging and releases
 
-Installers are built by `scripts/package/` and published by the **Release** workflow (`.github/workflows/release.yml`).
+Installers are built by `scripts/package/` and published by the **Release** workflow (`.github/workflows/release.yml`). Their name, maker, bundle id and icons come from `brand/` (`brand.toml`, read by `scripts/package/brand.sh`, and `icons/`); file names start with the name without spaces. An organisation's build changes those; see [customizing.md](customizing.md).
 
 | System | Files | Script |
 |---|---|---|
@@ -39,11 +39,11 @@ The `publish` and `mirror` jobs run in the repository's `release` environment, w
 
 | Secret | What |
 |---|---|
-| `UPDATE_SIGNING_KEY` | the Ed25519 private key (PEM) that signs `latest.json`; its public half is `crates/workspace/src/update_key.pub` |
+| `UPDATE_SIGNING_KEY` | the Ed25519 private key (PEM) that signs `latest.json`; its public half is `brand/update_key.pub` |
 | `R2_ACCOUNT_ID` | the Cloudflare account that holds the bucket |
 | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | an R2 API token with *Object Read & Write* on the `libreguild` bucket only |
 
-Keep a copy of the signing key outside GitHub (a password manager): every copy of PilotHouse checks updates against its public half, so a lost key means a new one has to ship in an app release before updates can be signed again, and copies older than that release would no longer update by themselves. To replace it: `openssl genpkey -algorithm ed25519 -out key.pem`, put its public half in `update_key.pub` (`openssl pkey -in key.pem -pubout -outform DER | tail -c 32 | base64`), and store the PEM as the secret. `scripts/package/sign-manifest.sh` refuses to sign with a key whose public half is not the one in the source.
+Keep a copy of the signing key outside GitHub (a password manager): every copy of PilotHouse checks updates against its public half, so a lost key means a new one has to ship in an app release before updates can be signed again, and copies older than that release would no longer update by themselves. To replace it: `openssl genpkey -algorithm ed25519 -out key.pem`, put its public half in `brand/update_key.pub` (`openssl pkey -in key.pem -pubout -outform DER | tail -c 32 | base64`), and store the PEM as the secret. `scripts/package/sign-manifest.sh` refuses to sign with a key whose public half is not the one in the source.
 
 ## Updates
 

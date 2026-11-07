@@ -182,7 +182,9 @@ pub const AGENT_SETTINGS: &[&str] = &[
     ".codex",
     ".cursor",
     ".agents",
+    // Cline's rules, hooks and plugins (code it runs).
     ".clinerules",
+    ".cline",
     ".vscode/mcp.json",
 ];
 

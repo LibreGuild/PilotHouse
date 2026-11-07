@@ -88,6 +88,15 @@ impl Pane {
         }
     }
 
+    /// Whether this build has it (a tool the brand leaves out is never
+    /// shown).
+    pub(crate) fn in_build(self) -> bool {
+        match self {
+            Pane::Tool(tab) => tab.in_build(),
+            Pane::Chat | Pane::Editor => true,
+        }
+    }
+
     /// A tool whose home is the bottom panel: long lines, read across.
     pub(crate) fn in_bottom_panel(self) -> bool {
         matches!(self, Pane::Tool(tab) if tab.in_bottom_panel())
@@ -468,7 +477,7 @@ impl Panes {
             .panel_view(self.handle(Pane::Chat), cx)
             .panel_view(self.handle(Pane::Editor), cx);
         let tool = Pane::Tool(column);
-        let center = if open && tool.in_column() {
+        let center = if open && tool.in_column() && tool.in_build() {
             let width = column_width(window, cx);
             DockLayout::h_split().child(main, None).child(
                 DockLayout::tabs().panel_view(self.handle(tool), cx),
@@ -490,7 +499,11 @@ impl Panes {
             }
             area.set_center(center, window, cx);
         });
-        if open && let Some(bottom) = bottom.map(Pane::Tool).filter(|pane| pane.in_bottom_panel()) {
+        if open
+            && let Some(bottom) = bottom
+                .map(Pane::Tool)
+                .filter(|pane| pane.in_bottom_panel() && pane.in_build())
+        {
             self.show(bottom, window, cx);
         }
     }
@@ -836,10 +849,13 @@ fn dock_size(window: &Window, cx: &gpui_kit::App) -> gpui_kit::Pixels {
 }
 
 /// Whether every panel `state` names is a pane of this build (splits and
-/// tab groups hold panels; only a panel names one).
+/// tab groups hold panels; only a panel names one). A tool the brand leaves
+/// out is not one: a layout saved with it starts over.
 fn known_names(state: &PanelState) -> bool {
     match state.info {
-        PanelInfo::Panel(_) => Pane::all().any(|pane| pane.name() == state.panel_name),
+        PanelInfo::Panel(_) => Pane::all()
+            .filter(|pane| pane.in_build())
+            .any(|pane| pane.name() == state.panel_name),
         PanelInfo::Stack { .. } | PanelInfo::Tabs { .. } => state.children.iter().all(known_names),
     }
 }

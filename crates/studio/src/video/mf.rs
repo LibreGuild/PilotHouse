@@ -713,7 +713,10 @@ impl MfPcm {
             || !(1..=32).contains(&channels)
             || bits != if float { 32 } else { 16 }
         {
-            bail!("Windows decodes this video's sound in a form PilotHouse does not take");
+            bail!(
+                "Windows decodes this video's sound in a form {} does not take",
+                ph_brand::NAME
+            );
         }
         Ok(MfPcm {
             reader,

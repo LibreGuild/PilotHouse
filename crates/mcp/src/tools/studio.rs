@@ -16,7 +16,11 @@ const FILE: &str =
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: "studio_get",
-        description: "Shows the picture or video the user is editing in PilotHouse Studio, with a guide to positions, times and marks. A picture: an image of it (the result, or with view \"original\" the original as turned, to place marks and crops on), its sizes, the edit so far (crop, colors, marks with their ids, size, frame) and how it saves. A video: its length, size and frame rate, the parts kept (and where they land in the result), its marks and when they show, and frames of the result at the source times in `at` (up to 6; else four across it). Look before changing it, and after, to check.",
+        description: concat!(
+            "Shows the picture or video the user is editing in ",
+            ph_brand::name!(),
+            " Studio, with a guide to positions, times and marks. A picture: an image of it (the result, or with view \"original\" the original as turned, to place marks and crops on), its sizes, the edit so far (crop, colors, marks with their ids, size, frame) and how it saves. A video: its length, size and frame rate, the parts kept (and where they land in the result), its marks and when they show, and frames of the result at the source times in `at` (up to 6; else four across it). Look before changing it, and after, to check."
+        ),
         schema: || {
             json!({ "type": "object", "properties": {
                 "view": { "type": "string", "enum": ["result", "original"], "description": "What the images show (default result)." },
@@ -64,7 +68,11 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "studio_list",
-        description: "The pictures and videos open in PilotHouse Studio for this workspace.",
+        description: concat!(
+            "The pictures and videos open in ",
+            ph_brand::name!(),
+            " Studio for this workspace."
+        ),
         schema: || json!({ "type": "object", "properties": {} }),
         build: |arguments, project_id, _| Ok(("studio.list", with_project(arguments, project_id))),
         format: text,

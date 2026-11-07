@@ -14,9 +14,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AppContext as _, Context, Entity, Image, ImageFormat, InteractiveElement as _, IntoElement,
-    ObjectFit, ParentElement as _, Render, Styled as _, StyledImage as _, Task, Window, div, img,
-    px,
+    ParentElement as _, Render, Styled as _, Task, Window, div,
 };
+use ph_ui::DiagramCard;
 
 /// Diagrams are drawn at most this wide (they scale down to fit).
 const MAX_WIDTH: f32 = 680.;
@@ -85,9 +85,14 @@ enum Part {
     Diagram(Entity<Diagram>),
 }
 
+/// What a click on a link in a reply does (it gets the link's address).
+pub type OnLink = Arc<dyn Fn(&str, &mut Window, &mut gpui_kit::App) + Send + Sync>;
+
 pub struct Reply {
     text: String,
     parts: Vec<Part>,
+    /// Links go here; without it, they open as a chat's do.
+    on_link: Option<OnLink>,
 }
 
 impl Reply {
@@ -95,9 +100,17 @@ impl Reply {
         let mut reply = Self {
             text: String::new(),
             parts: Vec::new(),
+            on_link: None,
         };
         reply.set_text(text.to_string(), cx);
         reply
+    }
+
+    /// Clicks on links go to `on_link` (a view of its own takes its own
+    /// links, and passes on the rest).
+    pub fn on_link(mut self, on_link: OnLink) -> Self {
+        self.on_link = Some(on_link);
+        self
     }
 
     /// More of the reply arrived.
@@ -207,15 +220,21 @@ impl Render for Reply {
             .gap_2()
             .children(self.parts.iter().map(|part| {
                 match part {
-                    Part::Markdown { view, .. } => TextView::new(view)
-                        .selectable(true)
-                        .w_full()
-                        .code_block_actions(ph_ui::markdown::code_actions)
-                        // An agent wrote it: no files on this computer, and
-                        // no drawing that would read them.
-                        .image_source(ph_ui::images_safe::web_only)
-                        .on_link_click(|url, _, _, cx| crate::entry_view::open_link(url, cx))
-                        .into_any_element(),
+                    Part::Markdown { view, .. } => {
+                        let on_link = self.on_link.clone();
+                        TextView::new(view)
+                            .selectable(true)
+                            .w_full()
+                            .code_block_actions(ph_ui::markdown::code_actions)
+                            // An agent wrote it: no files on this computer, and
+                            // no drawing that would read them.
+                            .image_source(ph_ui::images_safe::web_only)
+                            .on_link_click(move |url, _, window, cx| match &on_link {
+                                Some(on_link) => on_link(url, window, cx),
+                                None => crate::entry_view::open_link(url, cx),
+                            })
+                            .into_any_element()
+                    }
                     Part::Diagram(diagram) => diagram.clone().into_any_element(),
                 }
             }))
@@ -355,24 +374,15 @@ impl Render for Diagram {
                 image,
                 width,
                 height,
-            } => {
-                let scale = (MAX_WIDTH / width).min(1.);
-                // As wide as the column allows (at most its own size), and
-                // as tall as that width keeps its shape.
-                let mut shape = div().w_full().max_w(px(width * scale));
-                shape.style().aspect_ratio = Some(width / height.max(1.));
-                frame
-                    .items_center()
-                    .child(
-                        shape.child(
-                            img(image.clone())
-                                .size_full()
-                                .object_fit(ObjectFit::Contain),
-                        ),
-                    )
-                    .child(copy)
-                    .into_any_element()
-            }
+            } => frame
+                .child(DiagramCard::new(
+                    ("diagram-card", id),
+                    image.clone(),
+                    (*width, *height),
+                    self.source.clone(),
+                    MAX_WIDTH,
+                ))
+                .into_any_element(),
             Drawing::Failed(reason) => frame
                 .child(
                     div()

@@ -8,7 +8,11 @@ use super::{Tool, with_project};
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: "test_expect",
-        description: "Check that the browser page (or, with device: true, the Android screen) shows some text, does not show it, or that the page URL contains something. It waits a few seconds for the screen to settle and fails if the check does not hold. While PilotHouse records a UI test, each passing check is saved as a step of the test.",
+        description: concat!(
+            "Check that the browser page (or, with device: true, the Android screen) shows some text, does not show it, or that the page URL contains something. It waits a few seconds for the screen to settle and fails if the check does not hold. While ",
+            ph_brand::name!(),
+            " records a UI test, each passing check is saved as a step of the test."
+        ),
         schema: || {
             json!({ "type": "object", "required": ["value"], "properties": {
             "kind": { "type": "string", "enum": ["text", "no_text", "url"], "description": "Default text." },
@@ -21,7 +25,11 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "test_list",
-        description: "List this workspace's UI tests (recorded in PilotHouse's Tests tab) with what each checks and how its newest run went.",
+        description: concat!(
+            "List this workspace's UI tests (recorded in ",
+            ph_brand::name!(),
+            "'s Tests tab) with what each checks and how its newest run went."
+        ),
         schema: || json!({ "type": "object", "properties": {} }),
         build: |arguments, project_id, _| Ok(("test.list", with_project(arguments, project_id))),
         format: |result| {
