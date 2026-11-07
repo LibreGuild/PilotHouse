@@ -21,6 +21,10 @@ A short tour of PilotHouse for people using it. For how it is built, see the [do
 
 A workspace keeps its chats, shells and test runs going while you look at another one. The sidebar shows what each is doing, and coming back shows what finished while you were away.
 
+**Quick chat:** ⌥Space (Alt+Shift+Space on Windows and Linux) opens a small chat window over every app, from anywhere, while PilotHouse runs; press it again to hide it. Its chats are under *Chats*. Set the shortcut in Settings → Chat, or give `pilothouse quick-chat` a shortcut in your system's keyboard settings ([quick-chat.md](features/quick-chat.md)).
+
+**Agents in a terminal:** start one from the terminal's **+** (or resume one of its sessions there). Once you ask it something it is listed with the chats; after its terminal closes it stays, with its last answer, and opens read only, to go on in a terminal or in a new chat.
+
 ## The GitHub view
 
 *GitHub* in the title bar (⌘⇧G) shows what you would see on GitHub, apart from your workspaces: the pull requests waiting for your review, your own, those assigned to you, and the repositories you follow (your workspaces' and any you add). Open a pull request to read it, comment, approve or merge. The chat beside it is that PR's: ask about the change, or start with a template (*Review this PR*, *Security review*, *Explain this PR*, *Test plan*, or your own from Settings → Templates). PilotHouse keeps its own copy of the repository for this, so your checkouts are never touched, and these chats only read. A review's findings go to the pull request's *Findings* tab: post them (on the code, with one-click suggestions, and one summary comment the author ticks), read the author's answers back, check the fixes after a push, get a second opinion or a double-check, fix them in a task, or open issues. *Walkthrough* briefs you on a change before you review it (what changes and why, how that part of the system works today, what is different after, where to look closely), and *Watch* tells you when the author pushes or answers. **Review** in the Git tab reviews your own changes before you push. A repository can add its own review rules in `.pilothouse/review.md`. Add a GitHub account first in Settings → GitHub. See [pull requests](features/pulls.md).
@@ -49,6 +53,7 @@ If your code lives on a server and you reach it as a mapped drive (`Z:\`) or a m
 | ⌘⇧S | Send the browser or device screen (with your marks) to the chat |
 | ⌘L | Ask about the selected code or terminal output |
 | ⌘, | Settings |
+| ⌥Space (Alt+Shift+Space) | Quick chat, from any app (set in Settings → Chat) |
 | ⌘/ | All shortcuts, read from the keys in force |
 
 ## Your data

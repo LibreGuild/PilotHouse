@@ -4,7 +4,7 @@ What changed in each release, newest first. The full notes are on the [releases 
 
 Each release also has **Merge notes** for organisations that build their own copy of PilotHouse ([docs/customizing.md](docs/customizing.md)): what to look at when merging it. These cover new `[features]` keys (new features arrive switched on), new or renamed keys in `brand/brand.toml`, changes to `crates/custom` or `Store::apply_track`, and moved files.
 
-## Unreleased
+## 0.6.1
 
 - **Builds for organisations.** Everything an organisation changes now lives in a few places of its own. [docs/customizing.md](docs/customizing.md) explains each:
   - `brand/` holds the name, ids, icons, features on or off, and update sources, read by the app and by the packaging scripts.

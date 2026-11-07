@@ -86,7 +86,7 @@ app ──► workspace ──► agent, board, files, changes, terminal, browse
 
 ## Agents (ACP)
 
-Agents run as child processes speaking the [Agent Client Protocol](https://agentclientprotocol.com) on stdio. `ph-agent` uses the official `agent-client-protocol-schema` types for exact message shapes, with a small hand-written JSON-RPC transport (`agent/src/rpc.rs`) on GPUI's executor, so there is no second async runtime. Gemini CLI speaks ACP natively; Claude Code and Codex use their official adapters via `npx`; Antigravity (`agy`) goes through PilotHouse's own bridge, `ph-agy`, run as `pilothouse agy-acp`. See [features/chat.md](features/chat.md).
+Agents run as child processes speaking the [Agent Client Protocol](https://agentclientprotocol.com) on stdio. `ph-agent` uses the official `agent-client-protocol-schema` types for exact message shapes, with a small hand-written JSON-RPC transport (`agent/src/rpc.rs`) on GPUI's executor, so there is no second async runtime. Gemini CLI and Cline speak ACP natively (Cline with workarounds for its gaps, `ph_agent::cline`); Claude Code and Codex use their official adapters via `npx`; Antigravity (`agy`) goes through PilotHouse's own bridge, `ph-agy`, run as `pilothouse agy-acp`. See [features/chat.md](features/chat.md).
 
 ## Agents → PilotHouse (MCP)
 

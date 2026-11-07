@@ -41,7 +41,10 @@ A day with coding agents usually means several agent CLIs in terminals, an edito
   - **Video**: cut and speed up parts of a screen recording on a timeline, add labels and blurs that show at set times, and export MP4, HEVC, WebM or GIF.
   - **Slides**: decks drafted by an agent from a few lines, with charts, tables, diagrams, icons, themes and your PowerPoint templates; present with notes; open any `.pptx` and export editable PowerPoint, PDF or pictures.
 - **Themes and layout**: eight themes, or one you describe to an agent (or import from VS Code); an accent, density, and a gradient or picture behind the window. Panes dock and split where you want them, and terminals run side by side.
+- **Quick chat**: a small chat window over every app, from anywhere, with a global shortcut (⌥Space; Alt+Shift+Space on Windows and Linux) or `pilothouse quick-chat`. Its chats are under Chats.
+- **Agents in terminals**: Claude Code, Codex, Gemini CLI, Antigravity or Cline in a workspace terminal, followed (working, needs you, done) and kept in the chat list once closed, to read, search and go on with in the terminal or in a chat.
 - **Inbox and to-dos**, and an offline utilities toolbox (JSON, JWT, hashes, times, cron, regex, SQLite…) for people and agents.
+- **Your own build**: an organisation sets its name, icons and features in `brand/`, adds views of its own beside Workspaces and GitHub, and keeps merging PilotHouse releases ([docs/customizing.md](docs/customizing.md)).
 
 <p align="center">
   <img src="site/shots/studio-picture.webp" alt="Studio marking up a screenshot: an email blurred, one row spotlit and a label added" width="290">
