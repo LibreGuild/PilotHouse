@@ -53,6 +53,8 @@ use crate::workspace::{View, Workspace};
 
 /// The chats an unfolded workspace lists before *Show all*.
 const NEWEST: usize = 5;
+/// How many chats the Chats list shows before *Show all*.
+const CHATS_SHOWN: usize = 50;
 
 /// The least height an open pane is given while both are open: its
 /// header and a few rows.
@@ -851,9 +853,9 @@ fn chat_rows(
     cx: &mut Context<Workspace>,
 ) -> Vec<AnyElement> {
     // An agent CLI's chat whose terminal is open lists as that terminal.
-    let sessions: Vec<Session> = workspace
-        .sessions_of(project, cx)
-        .into_iter()
+    let all = workspace.sessions_of(project, cx);
+    let sessions: Vec<&Session> = all
+        .iter()
         .filter(|session| {
             session.kind != "terminal"
                 || crate::terminal_agents::TerminalAgents::of_session(session.id, cx).is_none()
@@ -868,8 +870,13 @@ fn chat_rows(
     })
     .flatten();
     let nested = limit.is_some();
+    // The Chats list too shows its newest (it can hold thousands), all on
+    // request.
+    let limit = limit.unwrap_or(CHATS_SHOWN);
     let chats = ph_agent::ChatHub::existing(project, cx);
-    let (runs, own): (Vec<Session>, Vec<Session>) = sessions.into_iter().partition(is_automated);
+    let (runs, own): (Vec<&Session>, Vec<&Session>) = sessions
+        .into_iter()
+        .partition(|session| is_automated(session));
     // Chats marked done list apart, unless at work again.
     let busy = |session: &Session| {
         chats.as_ref().is_some_and(|chats| {
@@ -881,13 +888,14 @@ fn chat_rows(
                 })
         })
     };
-    let (done, own): (Vec<Session>, Vec<Session>) = own
+    let (done, own): (Vec<&Session>, Vec<&Session>) = own
         .into_iter()
         .partition(|session| workspace.is_settled(session.id) && !busy(session));
     let show_all = workspace.show_all.contains(&project);
-    let shown = match limit {
-        Some(limit) if !show_all => own.len().min(limit),
-        _ => own.len(),
+    let shown = if show_all {
+        own.len()
+    } else {
+        own.len().min(limit)
     };
     let entity = cx.entity().downgrade();
     let today = Zoned::now();
@@ -953,7 +961,7 @@ fn chat_rows(
             cx,
         ));
     }
-    if own.len() > shown || (show_all && limit.is_some_and(|limit| own.len() > limit)) {
+    if own.len() > shown || (show_all && own.len() > limit) {
         let more = own.len() > shown;
         let toggle = entity.clone();
         rows.push(

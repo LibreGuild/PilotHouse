@@ -1014,19 +1014,19 @@ impl ChatThread {
         .detach();
     }
 
-    /// Starts the agent again for an option it takes only at its start
-    /// (`option_id` set to `value`); this chat goes on in a new session,
-    /// told what was said. Not while one of its chats works: then from its
-    /// next start.
+    /// Starts the agent again, in every workspace, for an option it takes
+    /// only at its start (`option_id` set to `value`); this chat goes on in
+    /// a new session, told what was said. Not while one of its chats works:
+    /// then the choice is undone.
     fn restart_agent(&mut self, option_id: &str, value: &str, cx: &mut Context<Self>) {
         let me = cx.entity_id();
         let restarted = self.status == ThreadStatus::Idle
-            && match self.connection.clone() {
-                Some(connection) => {
-                    connection.update(cx, |connection, cx| connection.restart(Some(me), cx))
-                }
-                None => true,
-            };
+            && crate::chats::ChatHub::restart_agent(
+                self.agent.id,
+                Some(me),
+                self.connection.clone(),
+                cx,
+            );
         let Some(option) = self
             .options
             .iter_mut()

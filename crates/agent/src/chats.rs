@@ -79,6 +79,35 @@ impl ChatHub {
             .unwrap_or_default()
     }
 
+    /// Starts agent `id` again in every workspace it runs in, and `also`
+    /// (a chat's own process), for a choice it takes only at its start
+    /// (Cline's provider). None is, while a chat other than `asking` (being
+    /// updated) is at work with it: false then.
+    pub(crate) fn restart_agent(
+        id: &str,
+        asking: Option<gpui_kit::EntityId>,
+        also: Option<Entity<AgentConnection>>,
+        cx: &mut App,
+    ) -> bool {
+        let mut running: Vec<Entity<AgentConnection>> = Self::all(cx)
+            .into_iter()
+            .filter_map(|(_, chats)| chats.read(cx).connections.get(id).cloned())
+            .collect();
+        running.extend(also);
+        running.dedup_by_key(|connection| connection.entity_id());
+        running.retain(|connection| !connection.read(cx).has_exited());
+        if running
+            .iter()
+            .any(|connection| connection.read(cx).busy(asking, cx))
+        {
+            return false;
+        }
+        for connection in running {
+            connection.update(cx, |connection, cx| connection.restart(asking, cx));
+        }
+        true
+    }
+
     /// Ends a removed workspace's chats (its agents stop).
     pub fn remove(project_id: ProjectId, cx: &mut App) {
         if cx.has_global::<Self>() {

@@ -109,8 +109,9 @@ fn chats(workspace: &Workspace, cx: &App) -> Vec<Entry> {
         .flat_map(|(id, place)| {
             workspace
                 .sessions_of(id, cx)
-                .into_iter()
-                .map(move |session| (place.clone(), session))
+                .iter()
+                .map(|session| (place.clone(), session.clone()))
+                .collect::<Vec<_>>()
         })
         .filter(|(_, session)| !seen.contains(&session.id))
         .collect();

@@ -143,23 +143,29 @@ impl AgentConnection {
         self.exited.is_some()
     }
 
+    /// Whether one of its chats other than `except` (being updated) works.
+    pub(crate) fn busy(&self, except: Option<gpui_kit::EntityId>, cx: &App) -> bool {
+        self.threads
+            .values()
+            .filter_map(WeakEntity::upgrade)
+            .filter(|thread| Some(thread.entity_id()) != except)
+            .any(|thread| *thread.read(cx).status() != crate::ThreadStatus::Idle)
+    }
+
     /// Stops the agent, so the next message starts it again (with what it
     /// is started with now, such as Cline's provider); its chats go on in
     /// new sessions. Not while one of them works: false then. `asking` is
     /// the chat that asked (being updated, so it sees to itself).
     pub fn restart(&mut self, asking: Option<gpui_kit::EntityId>, cx: &mut Context<Self>) -> bool {
+        if self.busy(asking, cx) {
+            return false;
+        }
         let threads: Vec<_> = self
             .threads
             .values()
             .filter_map(WeakEntity::upgrade)
             .filter(|thread| Some(thread.entity_id()) != asking)
             .collect();
-        if threads
-            .iter()
-            .any(|thread| *thread.read(cx).status() != crate::ThreadStatus::Idle)
-        {
-            return false;
-        }
         if let Some(process) = self.process.take() {
             process.stop();
         }

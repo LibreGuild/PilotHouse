@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, TitleBar, WindowExt as _, h_flex, v_flex};
@@ -79,11 +80,13 @@ pub struct Workspace {
     pub(crate) folded: HashSet<String>,
     /// What the agent CLIs in terminals looked like at the last check.
     terminal_agents_seen: u64,
+    /// The changes to chats made away from their screen it has seen.
+    session_changes_seen: crate::session_changes::Seen,
     /// Status checks so far (one a second).
     status_ticks: u32,
     /// The chats of unfolded workspaces whose screen is closed, read again
     /// each second (a schedule may add one).
-    sessions: HashMap<ProjectId, Vec<ph_store::sessions::Session>>,
+    sessions: HashMap<ProjectId, Rc<[ph_store::sessions::Session]>>,
     /// Spaces stay alive after switching away so their state survives.
     spaces: HashMap<ProjectId, Entity<WorkspaceScreen>>,
     active_project: Option<ProjectId>,
@@ -181,6 +184,7 @@ impl Workspace {
             },
             folded: folded.into_iter().collect(),
             terminal_agents_seen: 0,
+            session_changes_seen: crate::session_changes::current(cx),
             status_ticks: 0,
             sessions: HashMap::new(),
             spaces: HashMap::new(),
@@ -418,15 +422,20 @@ impl Workspace {
         }
     }
 
-    /// The chats the sidebar lists for `id`: its screen's, else as last read.
+    /// The chats the sidebar lists for `id`: its screen's, else as last read
+    /// (shared, not copied: the sidebar asks on each draw).
     pub(crate) fn sessions_of(
         &self,
         id: ProjectId,
         cx: &gpui_kit::App,
-    ) -> Vec<ph_store::sessions::Session> {
+    ) -> Rc<[ph_store::sessions::Session]> {
         match self.spaces.get(&id) {
-            Some(space) => space.read(cx).sessions().to_vec(),
-            None => self.sessions.get(&id).cloned().unwrap_or_default(),
+            Some(space) => space.read(cx).sessions().clone(),
+            None => self
+                .sessions
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| Rc::new([])),
         }
     }
 
@@ -466,8 +475,8 @@ impl Workspace {
         self.sessions.retain(|id, _| wanted.contains(id));
         for id in wanted {
             let sessions = store.sessions(id).unwrap_or_default();
-            if self.sessions.get(&id) != Some(&sessions) {
-                self.sessions.insert(id, sessions);
+            if self.sessions.get(&id).map(|known| &known[..]) != Some(&sessions[..]) {
+                self.sessions.insert(id, sessions.into());
                 changed = true;
             }
         }
@@ -856,14 +865,21 @@ impl Workspace {
             hasher.finish()
         };
         let agents_changed = std::mem::replace(&mut self.terminal_agents_seen, agents) != agents;
-        // Terminal agents' chats saved meanwhile.
-        let saved = crate::session_changes::take(cx);
-        for project in &saved {
-            if let Some(space) = self.spaces.get(project).cloned() {
-                space.update(cx, |space, cx| space.reload_sessions(cx));
-            }
+        // Chats saved meanwhile away from their screen (terminal agents',
+        // quick chats): every screen when too many changed to tell which.
+        let saved = crate::session_changes::since(&mut self.session_changes_seen, cx);
+        let screens: Vec<_> = match &saved {
+            Some(projects) => projects
+                .iter()
+                .filter_map(|project| self.spaces.get(project).cloned())
+                .collect(),
+            None => self.spaces.values().cloned().collect(),
+        };
+        for space in screens {
+            space.update(cx, |space, cx| space.reload_sessions(cx));
         }
-        let sessions_changed = sessions_changed || (!saved.is_empty() && self.read_sessions(cx));
+        let any = saved.is_none_or(|projects| !projects.is_empty());
+        let sessions_changed = sessions_changed || (any && self.read_sessions(cx));
         if statuses != self.statuses || sessions_changed || agents_changed {
             self.statuses = statuses;
             cx.notify();

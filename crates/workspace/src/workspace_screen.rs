@@ -108,7 +108,8 @@ struct Away {
 
 pub struct WorkspaceScreen {
     project: Project,
-    sessions: Vec<Session>,
+    /// Shared with the sidebar, which lists them on each draw.
+    sessions: std::rc::Rc<[Session]>,
     active_session: Option<SessionId>,
     /// The tool shown last (for ⌘J, ⌘⇧J and the saved layout).
     context_tab: ContextTab,
@@ -204,6 +205,9 @@ impl WorkspaceScreen {
                     session,
                     cwd,
                 } => {
+                    if !ph_brand::enabled(ph_brand::Feature::Terminal) {
+                        return;
+                    }
                     // Already going on in a terminal: that one.
                     let open = session.as_deref().and_then(|session| {
                         crate::terminal_agents::TerminalAgents::of_cli_session(agent, session, cx)
@@ -348,7 +352,7 @@ impl WorkspaceScreen {
             branch_pickers: HashMap::new(),
             saved,
             project,
-            sessions,
+            sessions: sessions.into(),
             active_session,
             chat,
             watchers: Vec::new(),
@@ -609,7 +613,7 @@ impl WorkspaceScreen {
         &mut self.signals
     }
 
-    pub fn sessions(&self) -> &[Session] {
+    pub fn sessions(&self) -> &std::rc::Rc<[Session]> {
         &self.sessions
     }
 
@@ -1247,9 +1251,14 @@ impl WorkspaceScreen {
     pub(crate) fn reload_sessions(&mut self, cx: &mut Context<Self>) {
         self.sessions = AppState::store(cx)
             .sessions(self.project.id)
-            .unwrap_or_default();
-        self.active_session = self.chat.read(cx).active_session_id(cx);
-        self.save_layout(cx);
+            .unwrap_or_default()
+            .into();
+        // The layout keeps the chat on screen: saved when that changed.
+        let active = self.chat.read(cx).active_session_id(cx);
+        if active != self.active_session {
+            self.active_session = active;
+            self.save_layout(cx);
+        }
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
     }

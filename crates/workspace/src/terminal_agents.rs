@@ -63,8 +63,46 @@ pub(crate) struct TerminalAgent {
     pub session: Option<SessionId>,
     /// What [`remember`] last saved of it.
     saved: Saved,
-    /// When its session file was last looked for (Unix milliseconds).
+    /// When its session file was last looked for (Unix milliseconds), and
+    /// how many times in vain: each look waits twice as long as the last.
     looked_at: i64,
+    looks: u32,
+}
+
+/// How often a working agent's chat is marked active in the store (its
+/// row shows the live agent meanwhile; the last time is saved as it goes).
+const TOUCH_EVERY: i64 = 30_000;
+
+impl TerminalAgent {
+    /// It was asked something: it has a chat.
+    fn asked(&self) -> bool {
+        self.title.is_some() || self.session_id.is_some() || self.state != ChatState::Idle
+    }
+
+    /// Whether its chat lacks something [`remember`] saves.
+    fn unsaved(&self) -> bool {
+        self.asked()
+            && (self.session.is_none()
+                || (self.title.is_some() && self.saved.title != self.title)
+                || (self.session_id.is_some() && self.saved.session_id != self.session_id)
+                || self.touch_due()
+                || self.line_due())
+    }
+
+    /// When it did something since its chat was last marked active, at
+    /// most every [`TOUCH_EVERY`].
+    fn touch_due(&self) -> bool {
+        self.updated_at > self.saved.at
+            && (self.saved.at == 0 || self.updated_at - self.saved.at >= TOUCH_EVERY)
+    }
+
+    /// What it said at the end of a turn, not saved yet (hooks say; others
+    /// are read from their file once it is gone).
+    fn line_due(&self) -> bool {
+        matches!(self.state, ChatState::Done | ChatState::Idle)
+            && self.line.is_some()
+            && self.saved.line != self.line
+    }
 }
 
 /// What was saved of a terminal agent's chat, to save only changes.
@@ -87,6 +125,13 @@ pub(crate) struct TerminalAgents {
 impl Global for TerminalAgents {}
 
 impl TerminalAgents {
+    /// Every agent followed, read without marking the list changed.
+    fn list(cx: &App) -> &[TerminalAgent] {
+        cx.try_global::<Self>()
+            .map(|agents| agents.agents.as_slice())
+            .unwrap_or_default()
+    }
+
     /// The agents whose terminal is still open.
     pub(crate) fn all(cx: &App) -> Vec<&TerminalAgent> {
         cx.try_global::<Self>()
@@ -119,11 +164,12 @@ impl TerminalAgents {
             .find(|agent| agent.pane == pane)
     }
 
-    /// The agent running in a terminal for chat `session`.
+    /// The agent running in a terminal for chat `session` (asked for each
+    /// terminal chat the sidebar lists: nothing is collected).
     pub(crate) fn of_session(session: SessionId, cx: &App) -> Option<&TerminalAgent> {
-        Self::all(cx)
-            .into_iter()
-            .find(|agent| agent.session == Some(session))
+        Self::list(cx)
+            .iter()
+            .find(|agent| agent.session == Some(session) && agent.terminal.upgrade().is_some())
     }
 
     /// The agent running agent `agent`'s own session `session`, if one is.
@@ -132,8 +178,10 @@ impl TerminalAgents {
         session: &str,
         cx: &'a App,
     ) -> Option<&'a TerminalAgent> {
-        Self::all(cx).into_iter().find(|running| {
-            running.agent.id == agent && running.session_id.as_deref() == Some(session)
+        Self::list(cx).iter().find(|running| {
+            running.agent.id == agent
+                && running.session_id.as_deref() == Some(session)
+                && running.terminal.upgrade().is_some()
         })
     }
 
@@ -259,41 +307,47 @@ fn read_terminal(terminal: &Terminal, known: Option<ChatState>) -> Option<Found>
 
 /// Finds agents from what their terminals say (program status, Gemini's
 /// title) and brings their state up to date. Called once a second.
+///
+/// The list is only written when something changed: taking it to write
+/// marks it changed, and every view that shows it is drawn again.
 pub(crate) fn sync(cx: &mut App) {
     // A hooked agent's news is seen once its tab was looked at (that
     // clears the tab's dot).
-    let mut agents = std::mem::take(&mut cx.default_global::<TerminalAgents>().agents);
-    for agent in &mut agents {
-        if agent.source == Source::Hooks
-            && agent.state == ChatState::Done
-            && agent
-                .terminal
-                .upgrade()
-                .is_some_and(|terminal| terminal.read(cx).badge() != Some(AgentBadge::Done))
-        {
-            agent.state = ChatState::Idle;
+    let seen_news: Vec<String> = TerminalAgents::list(cx)
+        .iter()
+        .filter(|agent| {
+            agent.source == Source::Hooks
+                && agent.state == ChatState::Done
+                && agent
+                    .terminal
+                    .upgrade()
+                    .is_some_and(|terminal| terminal.read(cx).badge() != Some(AgentBadge::Done))
+        })
+        .map(|agent| agent.pane.clone())
+        .collect();
+    if !seen_news.is_empty() {
+        for agent in &mut cx.default_global::<TerminalAgents>().agents {
+            if seen_news.contains(&agent.pane) {
+                agent.state = ChatState::Idle;
+            }
         }
     }
-    cx.default_global::<TerminalAgents>().agents = agents;
     let mut seen_panes = Vec::new();
     for (project, terminals) in ph_terminal::TerminalHub::all(cx) {
         let list = terminals.read(cx).terminals().to_vec();
         for terminal in list {
             let pane = terminal_pane(&terminal);
-            let agents = cx.default_global::<TerminalAgents>();
-            let hooked = agents.agents.iter().any(|agent| {
+            let agents = TerminalAgents::list(cx);
+            let hooked = agents.iter().any(|agent| {
                 agent.source == Source::Hooks
                     && agent.terminal.upgrade().as_ref() == Some(&terminal)
             });
             if hooked {
                 continue;
             }
-            let known = agents
-                .agents
-                .iter()
-                .find(|agent| agent.pane == pane)
-                .map(|agent| agent.state);
-            let Some(found) = read_terminal(terminal.read(cx), known) else {
+            let known = agents.iter().find(|agent| agent.pane == pane);
+            let Some(found) = read_terminal(terminal.read(cx), known.map(|agent| agent.state))
+            else {
                 continue;
             };
             seen_panes.push(pane.clone());
@@ -306,15 +360,27 @@ pub(crate) fn sync(cx: &mut App) {
                 };
                 terminal.update(cx, |terminal, cx| terminal.set_badge(badge, cx));
             }
+            if TerminalAgents::list(cx)
+                .iter()
+                .find(|agent| agent.pane == pane)
+                .is_some_and(|agent| !found.changes(agent))
+            {
+                continue;
+            }
             let agents = cx.default_global::<TerminalAgents>();
             match agents.agents.iter_mut().find(|agent| agent.pane == pane) {
                 Some(agent) => {
-                    agent.source = found.source;
+                    if agent.state != found.state {
+                        // Asked something: its session is worth looking
+                        // for again soon.
+                        agent.looks = 0;
+                    }
                     if agent.state != found.state
                         || (found.line.is_some() && agent.line != found.line)
                     {
                         agent.updated_at = now();
                     }
+                    agent.source = found.source_for(agent);
                     agent.state = found.state;
                     // A program's line is as it says now (none once done).
                     if found.line.is_some() || found.source == Source::ProgramStatus {
@@ -342,6 +408,7 @@ pub(crate) fn sync(cx: &mut App) {
                         session: None,
                         saved: Saved::default(),
                         looked_at: 0,
+                        looks: 0,
                     })
                 }
             }
@@ -349,31 +416,74 @@ pub(crate) fn sync(cx: &mut App) {
     }
     // Agents whose terminal went, or whose program stopped saying, go
     // (their chats stay in the list, with what they said last).
-    let gone: Vec<(SessionId, &'static str, Option<String>, Option<PathBuf>)> = cx
-        .default_global::<TerminalAgents>()
-        .agents
-        .iter()
-        .filter(|agent| agent.terminal.upgrade().is_none())
-        .filter_map(|agent| {
-            Some((
-                agent.session?,
-                agent.agent.id,
-                agent.session_id.clone(),
-                agent.transcript.clone(),
-            ))
-        })
-        .collect();
-    for (session, agent, cli, transcript) in gone {
-        keep_last_reply(session, agent, cli, transcript, cx);
-    }
-    let agents = cx.default_global::<TerminalAgents>();
-    agents.agents.retain(|agent| {
+    let stays = |agent: &TerminalAgent| {
         agent.terminal.upgrade().is_some()
             && (matches!(agent.source, Source::Hooks | Source::Launched)
                 || seen_panes.contains(&agent.pane))
-    });
+    };
+    let gone: Vec<Gone> = TerminalAgents::list(cx)
+        .iter()
+        .filter(|agent| !stays(agent))
+        .map(|agent| Gone {
+            session: agent.session,
+            agent: agent.agent.id,
+            cli: agent.session_id.clone(),
+            transcript: agent.transcript.clone(),
+            at: (agent.updated_at > agent.saved.at).then_some(agent.updated_at),
+        })
+        .collect();
+    if !gone.is_empty() {
+        cx.default_global::<TerminalAgents>()
+            .agents
+            .retain(|agent| stays(agent));
+        let store = crate::AppState::store(cx).clone();
+        for gone in gone {
+            let Some(session) = gone.session else {
+                continue;
+            };
+            // When it last did something, saved at most every so often
+            // while it ran.
+            if let Some(at) = gone.at {
+                let _ = store.touch_session(session, at);
+            }
+            keep_last_reply(session, gone.agent, gone.cli, gone.transcript, cx);
+        }
+    }
     remember(cx);
     find_sessions(cx);
+}
+
+/// An agent no longer followed, and what is kept of it.
+struct Gone {
+    session: Option<SessionId>,
+    agent: &'static str,
+    cli: Option<String>,
+    transcript: Option<PathBuf>,
+    /// When it last did something, if not saved yet.
+    at: Option<i64>,
+}
+
+impl Found {
+    /// How `agent` is followed from now: one started from PilotHouse stays
+    /// followed while its terminal is open, even once it stops saying.
+    fn source_for(&self, agent: &TerminalAgent) -> Source {
+        if agent.source == Source::Launched {
+            Source::Launched
+        } else {
+            self.source
+        }
+    }
+
+    /// Whether this says anything new of `agent`.
+    fn changes(&self, agent: &TerminalAgent) -> bool {
+        let line_changes = (self.line.is_some() || self.source == Source::ProgramStatus)
+            && agent.line != self.line;
+        let title_changes = self.title.is_some() && agent.title != self.title;
+        self.source_for(agent) != agent.source
+            || self.state != agent.state
+            || line_changes
+            || title_changes
+    }
 }
 
 /// Saves each agent that was asked something as a chat of its workspace
@@ -381,13 +491,15 @@ pub(crate) fn sync(cx: &mut App) {
 /// last did something, so it stays in the list once its terminal closes. A
 /// session resumed in a terminal goes on in the chat it had.
 fn remember(cx: &mut App) {
+    // Most seconds nothing is new: the list is then left unmarked.
+    if !TerminalAgents::list(cx).iter().any(TerminalAgent::unsaved) {
+        return;
+    }
     let store = crate::AppState::store(cx).clone();
     let mut agents = std::mem::take(&mut cx.default_global::<TerminalAgents>().agents);
     let mut changed = Vec::new();
     for agent in &mut agents {
-        let asked =
-            agent.title.is_some() || agent.session_id.is_some() || agent.state != ChatState::Idle;
-        if !asked {
+        if !agent.unsaved() {
             continue;
         }
         let title = agent
@@ -445,17 +557,12 @@ fn remember(cx: &mut App) {
             let _ = store.set_session_acp_id(id, agent.session_id.as_deref());
             agent.saved.session_id = agent.session_id.clone();
         }
-        if agent.updated_at > agent.saved.at {
+        if agent.touch_due() {
             let _ = store.touch_session(id, agent.updated_at);
             agent.saved.at = agent.updated_at;
             changed.push(agent.project);
         }
-        // What it said at the end of a turn (hooks say; others are read
-        // from their file once their terminal closes).
-        if matches!(agent.state, ChatState::Done | ChatState::Idle)
-            && agent.line.is_some()
-            && agent.saved.line != agent.line
-        {
+        if agent.line_due() {
             let _ = store.set_session_line(id, agent.line.as_deref());
             agent.saved.line = agent.line.clone();
             changed.push(agent.project);
@@ -504,9 +611,15 @@ fn keep_last_reply(
                 })?;
                 let said = ph_agent::cli_transcript::said(format, &path);
                 let line = ph_agent::cli_transcript::first_line_of_last_reply(&said);
+                // For Search: the start of each message is enough, and keeps
+                // the write (under the store's lock) short for a long session.
+                const KEPT_CHARS: usize = 8_000;
                 let messages: Vec<(&str, String)> = said
                     .into_iter()
-                    .map(|(role, text)| (role, serde_json::json!({ "text": text }).to_string()))
+                    .map(|(role, text)| {
+                        let text: String = text.chars().take(KEPT_CHARS).collect();
+                        (role, serde_json::json!({ "text": text }).to_string())
+                    })
                     .collect();
                 let _ = job_store.replace_messages(session, &messages);
                 if line.is_some() {
@@ -524,14 +637,25 @@ fn keep_last_reply(
 }
 
 /// For agents whose own session is not known yet: looks for it in their
-/// files (off the UI thread, at most every 30 seconds each), the newest in
-/// their folder since they started that no other agent has, so their chat
-/// is saved and can be resumed and read once the terminal closes. One never
-/// asked anything has none, so it is not saved.
+/// files (off the UI thread; 30 seconds after the last look, then twice as
+/// long each time up to 10 minutes, again soon once it is asked something),
+/// the newest in their folder since they started that no other agent and no
+/// chat of the workspace has, so their chat is saved and can be resumed and
+/// read once the terminal closes. One never asked anything has none, so it
+/// is not saved.
 fn find_sessions(cx: &mut App) {
-    const EVERY: i64 = 30_000;
+    const FIRST: i64 = 30_000;
+    const LONGEST: i64 = 600_000;
     let now = now();
+    let due = |agent: &TerminalAgent| {
+        let wait = (FIRST << agent.looks.min(5)).min(LONGEST);
+        agent.session_id.is_none() && now - agent.looked_at >= wait
+    };
+    if !TerminalAgents::list(cx).iter().any(due) {
+        return;
+    }
     let mut jobs = Vec::new();
+    let store = crate::AppState::store(cx).clone();
     let state = cx.default_global::<TerminalAgents>();
     let taken: Vec<String> = state
         .agents
@@ -539,26 +663,44 @@ fn find_sessions(cx: &mut App) {
         .filter_map(|agent| agent.session_id.clone())
         .collect();
     for agent in &mut state.agents {
-        if agent.session_id.is_some() || now - agent.looked_at < EVERY {
+        if !due(agent) {
             continue;
         }
         agent.looked_at = now;
+        agent.looks = agent.looks.saturating_add(1);
         let Some(terminal) = agent.terminal.upgrade() else {
             continue;
         };
-        jobs.push((agent.pane.clone(), agent.agent.id, agent.since, terminal));
+        jobs.push((
+            agent.pane.clone(),
+            agent.agent.id,
+            agent.project,
+            agent.since,
+            terminal,
+        ));
     }
-    for (pane, agent_id, since, terminal) in jobs {
+    for (pane, agent_id, project, since, terminal) in jobs {
         let cwd = terminal.read(cx).cwd().to_path_buf();
-        let taken = taken.clone();
+        let (taken, store) = (taken.clone(), store.clone());
         cx.spawn(async move |cx| {
             let found = cx
                 .background_spawn(async move {
+                    // The workspace's chats with this agent (ACP sessions
+                    // are its CLI's own) are not this terminal's.
+                    let chats: Vec<String> = store
+                        .sessions(project)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|chat| chat.kind != "terminal" && chat.agent_id == agent_id)
+                        .filter_map(|chat| chat.acp_session_id)
+                        .collect();
                     ph_agent::cli_sessions::sessions(agent_id, &cwd)
                         .into_iter()
                         // Sessions keep their file's time; slack for the clock.
                         .find(|session| {
-                            session.updated_at >= since - 5_000 && !taken.contains(&session.id)
+                            session.updated_at >= since - 5_000
+                                && !taken.contains(&session.id)
+                                && !chats.contains(&session.id)
                         })
                 })
                 .await;
@@ -590,14 +732,11 @@ fn find_sessions(cx: &mut App) {
     }
 }
 
-/// A redraw of every window is due shortly (see `install`).
-#[derive(Default)]
-struct RedrawSoon(bool);
-
-impl gpui_kit::Global for RedrawSoon {}
-
 /// Answers `agent.event` from `pilothouse agent-hook`, and clears the
-/// hook settings of an earlier run.
+/// hook settings of an earlier run. The views that show agents read them
+/// from the list, which `apply` marks changed: each window's next status
+/// look (once a second) draws them again, so a burst of events (many a
+/// second while an agent works) costs one redraw.
 pub(crate) fn install(cx: &mut App) {
     let _ = std::fs::remove_dir_all(settings_dir());
     ph_control::ControlServer::handle(
@@ -605,22 +744,6 @@ pub(crate) fn install(cx: &mut App) {
         |params, cx| {
             let pane = params["pane"].as_str().unwrap_or_default().to_string();
             apply(&pane, &params["event"], cx);
-            // The Agents board, title bar and terminal tabs show its line
-            // and time; nothing they observe changed, so every window is
-            // drawn again — once for a burst of events (a tool call sends
-            // two at once, many a second while an agent works).
-            if !std::mem::replace(&mut cx.default_global::<RedrawSoon>().0, true) {
-                cx.spawn(async move |cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(250))
-                        .await;
-                    cx.update(|cx| {
-                        cx.default_global::<RedrawSoon>().0 = false;
-                        cx.refresh_windows();
-                    });
-                })
-                .detach();
-            }
             Ok(Value::Null)
         },
         cx,
@@ -665,10 +788,9 @@ pub(crate) fn launch(
             .ok_or_else(|| anyhow::anyhow!("Could not open a terminal"))?;
         // Known from the start, even if it never says how it is doing in
         // its output (Cline): its chat is saved once its session is found.
+        // (Agents whose terminal closed are left to `sync`, which keeps
+        // what they said.)
         let agents = cx.default_global::<TerminalAgents>();
-        agents
-            .agents
-            .retain(|agent| agent.terminal.upgrade().is_some());
         agents.agents.push(TerminalAgent {
             pane: terminal_pane(&terminal),
             source: Source::Launched,
@@ -685,6 +807,7 @@ pub(crate) fn launch(
             session: None,
             saved: Saved::default(),
             looked_at: 0,
+            looks: 0,
         });
         return Ok(terminal);
     }
@@ -711,27 +834,26 @@ pub(crate) fn launch(
             terminals.run_in(&label, &command, Some(cwd), cx)
         })
         .ok_or_else(|| anyhow::anyhow!("Could not open a terminal"))?;
-    let agents = cx.default_global::<TerminalAgents>();
-    agents
+    cx.default_global::<TerminalAgents>()
         .agents
-        .retain(|agent| agent.terminal.upgrade().is_some());
-    agents.agents.push(TerminalAgent {
-        pane,
-        source: Source::Hooks,
-        project,
-        terminal: terminal.downgrade(),
-        agent,
-        state: ChatState::Idle,
-        title: None,
-        line: None,
-        session_id: resume.map(str::to_string),
-        transcript: None,
-        updated_at: now(),
-        since: now(),
-        session: None,
-        saved: Saved::default(),
-        looked_at: 0,
-    });
+        .push(TerminalAgent {
+            pane,
+            source: Source::Hooks,
+            project,
+            terminal: terminal.downgrade(),
+            agent,
+            state: ChatState::Idle,
+            title: None,
+            line: None,
+            session_id: resume.map(str::to_string),
+            transcript: None,
+            updated_at: now(),
+            since: now(),
+            session: None,
+            saved: Saved::default(),
+            looked_at: 0,
+            looks: 0,
+        });
     Ok(terminal)
 }
 

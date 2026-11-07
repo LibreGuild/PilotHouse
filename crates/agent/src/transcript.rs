@@ -227,10 +227,18 @@ pub(crate) fn readable_title(
     {
         return title.to_string();
     }
-    let parsed = serde_json::from_str::<Value>(rest).ok();
-    // A dump cut short still has the call's input beside it.
-    let Some(input) = raw_input.or(parsed.as_ref()) else {
-        return title.to_string();
+    // The call's input beside it, else the dump (parsed only then: it can
+    // hold a whole file, and titles come with each update of the call).
+    let parsed;
+    let input = match raw_input {
+        Some(input) => input,
+        None => {
+            parsed = serde_json::from_str::<Value>(rest).ok();
+            let Some(input) = parsed.as_ref() else {
+                return title.to_string();
+            };
+            input
+        }
     };
     let input = Some(input);
     // A string, the first of a list, or the path of the first item.

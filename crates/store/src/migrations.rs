@@ -415,17 +415,23 @@ fn backup(connection: &Connection, label: &str) -> Result<()> {
     let _ = std::fs::remove_file(&target);
     connection.execute("VACUUM INTO ?1", [target.to_string_lossy()])?;
     tracing::info!("backed up the database to {}", target.display());
-    // The oldest backups go (the core's and every track's together).
+    // The oldest backups go: of this one's kind only (the core's, or this
+    // track's), so a track's updates never take the core's backups.
     let folder = file.parent().unwrap_or(std::path::Path::new("."));
+    let kind = backup_kind(label);
     let mut backups: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(folder)?
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
             path.file_name()
-                .map(|other| other.to_string_lossy())
-                .is_some_and(|other| {
-                    other.starts_with(&format!("{name}.")) && other.ends_with(".bak")
+                .map(|other| other.to_string_lossy().into_owned())
+                .and_then(|other| {
+                    other
+                        .strip_prefix(&format!("{name}."))?
+                        .strip_suffix(".bak")
+                        .map(|other| backup_kind(other) == kind)
                 })
+                .unwrap_or(false)
         })
         .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
         .collect();
@@ -436,9 +442,25 @@ fn backup(connection: &Connection, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whose backup a label is: `v13` the core's (``), `acme-v2` track
+/// `acme`'s (`acme-`).
+fn backup_kind(label: &str) -> &str {
+    label
+        .trim_end_matches(|c: char| c.is_ascii_digit())
+        .strip_suffix('v')
+        .unwrap_or(label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backups_are_kept_by_kind() {
+        assert_eq!(backup_kind("v14"), "");
+        assert_eq!(backup_kind("acme-v2"), "acme-");
+        assert_ne!(backup_kind("v3"), backup_kind("acme-v3"));
+    }
 
     #[test]
     fn an_existing_database_is_backed_up_before_it_changes() {

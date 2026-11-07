@@ -335,10 +335,12 @@ impl RenderOnce for DiagramCard {
                     .on_click(move |_, _, cx| update(&zoom, cx, Zoom::fit))
             })
             .children(expand)
-            .child(
-                CopyButton::new(child("copy"), self.source.to_string())
-                    .tooltip("Copy the diagram's source"),
-            );
+            .child({
+                // Copied at the click, not on each draw.
+                let source = self.source.clone();
+                CopyButton::with(child("copy"), move |_, _| source.to_string())
+                    .tooltip("Copy the diagram's source")
+            });
 
         div()
             .id(self.id)

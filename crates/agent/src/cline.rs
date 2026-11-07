@@ -37,6 +37,13 @@ impl Paths {
         })
     }
 
+    /// [`Self::of_this_computer`] without waiting for the login shell's
+    /// environment (the app's own until it is read): for what the UI
+    /// shows, which must not wait seconds for a shell to start.
+    fn of_this_computer_now() -> Self {
+        Self::under(&dirs::home_dir().unwrap_or_default(), &var_now)
+    }
+
     /// With `home` the user's home folder and `var` reading the environment.
     pub fn under(home: &Path, var: &dyn Fn(&str) -> Option<String>) -> Self {
         let var = |name: &str| {
@@ -105,20 +112,26 @@ fn saved(providers: &Value, id: &str) -> Option<TerminalProvider> {
 /// The provider Cline last used in a terminal, when it is not one of the
 /// [`ACCOUNTS`] editors sign in with.
 pub fn terminal_provider(paths: &Paths) -> Option<TerminalProvider> {
-    let providers = providers(paths);
-    saved(&providers, providers["lastUsedProvider"].as_str()?)
+    last_used(&providers(paths))
+}
+
+fn last_used(providers: &Value) -> Option<TerminalProvider> {
+    saved(providers, providers["lastUsedProvider"].as_str()?)
 }
 
 /// The saved providers Cline can run on in PilotHouse besides the
 /// [`ACCOUNTS`]: those that need no key, the one last used first.
 pub fn keyless_providers(paths: &Paths) -> Vec<TerminalProvider> {
-    let providers = providers(paths);
+    keyless(&providers(paths))
+}
+
+fn keyless(providers: &Value) -> Vec<TerminalProvider> {
     let last = providers["lastUsedProvider"].as_str().unwrap_or_default();
     let mut found: Vec<TerminalProvider> = providers["providers"]
         .as_object()
         .into_iter()
         .flat_map(|all| all.keys())
-        .filter_map(|id| saved(&providers, id))
+        .filter_map(|id| saved(providers, id))
         .filter(|provider| !provider.needs_key)
         .collect();
     found.sort_by_key(|provider| (provider.id != last, provider.id.clone()));
@@ -151,6 +164,15 @@ pub fn launch_env(
     var: &dyn Fn(&str) -> Option<String>,
     chosen: Option<&str>,
 ) -> Vec<(String, String)> {
+    launch_env_with(&providers(paths), var, chosen)
+}
+
+/// [`launch_env`] with Cline's `providers.json` read already.
+fn launch_env_with(
+    providers: &Value,
+    var: &dyn Fn(&str) -> Option<String>,
+    chosen: Option<&str>,
+) -> Vec<(String, String)> {
     let set = |name: &str| var(name).is_some_and(|value| !value.trim().is_empty());
     if set("CLINE_PROVIDER") || set("CLINE_API_KEY") {
         return Vec::new();
@@ -158,10 +180,10 @@ pub fn launch_env(
     let keyless = |provider: &TerminalProvider| !provider.needs_key;
     let provider = match chosen {
         Some(id) if ACCOUNTS.contains(&id) => None,
-        Some(id) => saved(&providers(paths), id)
+        Some(id) => saved(providers, id)
             .filter(keyless)
-            .or_else(|| terminal_provider(paths).filter(keyless)),
-        None => terminal_provider(paths).filter(keyless),
+            .or_else(|| last_used(providers).filter(keyless)),
+        None => last_used(providers).filter(keyless),
     };
     let Some(provider) = provider else {
         return Vec::new();
@@ -187,6 +209,14 @@ fn shell_var(name: &str) -> Option<String> {
     ph_env::shell_env().get(name).cloned()
 }
 
+/// A variable of the login shell's environment once it was read, else of
+/// the app's own.
+fn var_now(name: &str) -> Option<String> {
+    ph_env::shell_env_if_ready()
+        .and_then(|env| env.get(name).cloned())
+        .or_else(|| std::env::var(name).ok())
+}
+
 /// [`launch_env`] on this computer, with the provider chosen in PilotHouse.
 pub fn env_for(store: &ph_store::Store) -> Vec<(String, String)> {
     launch_env(
@@ -199,7 +229,16 @@ pub fn env_for(store: &ph_store::Store) -> Vec<(String, String)> {
 /// The provider PilotHouse runs Cline on ([`env_for`]), which Cline then
 /// will not change; `None` when Cline picks among its accounts.
 pub fn pinned(store: &ph_store::Store) -> Option<String> {
-    env_for(store)
+    pinned_with(
+        &providers(&Paths::of_this_computer_now()),
+        chosen(store).as_deref(),
+    )
+}
+
+/// [`pinned`] from `providers` read already, without waiting for the
+/// login shell (its choices are on screen).
+fn pinned_with(providers: &Value, chosen: Option<&str>) -> Option<String> {
+    launch_env_with(providers, &var_now, chosen)
         .into_iter()
         .find(|(name, _)| name == "CLINE_PROVIDER")
         .map(|(_, value)| value)
@@ -210,9 +249,12 @@ pub fn pinned(store: &ph_store::Store) -> Option<String> {
 /// list over ACP), the current one the provider it runs on.
 pub fn adjust_options(options: &mut Vec<crate::options::AgentOption>, store: &ph_store::Store) {
     use crate::options::{AgentOption, OptionCategory, OptionChoice, OptionKind, OptionSource};
+    // Read once: this runs as options change, on the UI thread.
+    let providers = providers(&Paths::of_this_computer_now());
+    let chosen = chosen(store);
     // Before Cline says (options kept from before it starts), its accounts.
     if !options.iter().any(|option| option.id == "provider") {
-        let current = chosen(store).unwrap_or_else(|| "cline".into());
+        let current = chosen.clone().unwrap_or_else(|| "cline".into());
         options.push(AgentOption {
             id: "provider".into(),
             name: "Provider".into(),
@@ -237,7 +279,7 @@ pub fn adjust_options(options: &mut Vec<crate::options::AgentOption>, store: &ph
     let OptionKind::Select(choices) = &mut option.kind else {
         return;
     };
-    for provider in keyless_providers(&Paths::of_this_computer()) {
+    for provider in keyless(&providers) {
         if !choices.iter().any(|choice| choice.value == provider.id) {
             choices.push(OptionChoice {
                 name: provider_name(&provider.id),
@@ -246,7 +288,7 @@ pub fn adjust_options(options: &mut Vec<crate::options::AgentOption>, store: &ph
             });
         }
     }
-    if let Some(pinned) = pinned(store) {
+    if let Some(pinned) = pinned_with(&providers, chosen.as_deref()) {
         option.current = pinned;
     }
 }

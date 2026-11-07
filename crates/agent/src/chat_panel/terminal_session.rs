@@ -51,6 +51,7 @@ impl ChatPanel {
                 Some(cx.new(|cx| {
                     TranscriptView::in_project(store, project, agent, format, find, cx)
                         .without_bar()
+                        .ended()
                 }))
             }
             _ => None,
@@ -115,7 +116,10 @@ impl ChatPanel {
                     agent.name, agent.name
                 ))
                 .when(shown.session.acp_session_id.is_none(), |this| {
-                    this.child("PilotHouse did not learn which of its sessions it was.")
+                    this.child(format!(
+                        "{} did not learn which of its sessions it was.",
+                        ph_brand::NAME
+                    ))
                 })
                 .into_any_element(),
         };
@@ -137,7 +141,9 @@ impl ChatPanel {
         let agent = shown.agent;
         let session = shown.session.acp_session_id.clone();
         let panel = cx.weak_entity();
-        let resume = {
+        // Only where this build has terminals.
+        let terminals = ph_brand::enabled(ph_brand::Feature::Terminal);
+        let resume = terminals.then(|| {
             let (panel, session, cwd) = (panel.clone(), session.clone(), shown.cwd.clone());
             Button::new("terminal-session-resume")
                 .primary()
@@ -158,7 +164,7 @@ impl ChatPanel {
                         })
                     });
                 })
-        };
+        });
         // From a recap of what the transcript shows, with any agent.
         let in_chat = shown.view.clone().map(|view| {
             let panel = panel.clone();
@@ -214,7 +220,7 @@ impl ChatPanel {
             .gap_2()
             .border_t_1()
             .border_color(cx.theme().border)
-            .child(resume)
+            .children(resume)
             .children(in_chat)
             .children(load)
             .into_any_element()

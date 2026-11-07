@@ -62,8 +62,12 @@ impl Format {
 pub type FindSession = Box<dyn Fn(&gpui_kit::App) -> Option<FindJob>>;
 pub type FindJob = Box<dyn FnOnce() -> Option<PathBuf> + Send>;
 
-/// How often the session file is looked for again.
+/// How often the session file is looked for again, in reads (one each 2
+/// seconds) once found.
 const FIND_EVERY: u32 = 10;
+/// The longest wait between looks for a session file not found yet, in
+/// reads: each look in vain waits twice as long as the last.
+const FIND_AT_MOST_EVERY: u32 = 30;
 
 /// The last bytes of a session file read (long sessions keep their end).
 const READ: u64 = 4 * 1024 * 1024;
@@ -394,9 +398,14 @@ pub struct TranscriptView {
     /// one (a closed terminal's chat).
     bar: bool,
     find: FindSession,
+    /// Whether a new session file can start (a terminal still open);
+    /// otherwise the one found stays.
+    refind: bool,
     path: Option<PathBuf>,
-    /// Reads since the file was last looked for.
+    /// Reads since the file was last looked for, and how many until the
+    /// next look.
     reads: u32,
+    find_after: u32,
     /// How far the file is read; off with a read, back after it.
     tail: Option<Tail>,
     /// What is shown, as read; a new read only redraws from where it
@@ -452,6 +461,13 @@ impl TranscriptView {
         self
     }
 
+    /// For a session that ended: its file, once found, is not looked for
+    /// again.
+    pub fn ended(mut self) -> Self {
+        self.refind = false;
+        self
+    }
+
     pub fn new(
         store: ph_store::Store,
         project: &ph_store::projects::Project,
@@ -477,9 +493,8 @@ impl TranscriptView {
         let poll = cx.spawn(async move |this, cx| {
             loop {
                 let Ok((find, tail)) = this.update(cx, |this, cx| {
-                    let find = (this.path.is_none() || this.reads >= FIND_EVERY)
-                        .then(|| (this.find)(cx))
-                        .flatten();
+                    let due = this.reads >= this.find_after && (this.refind || this.path.is_none());
+                    let find = due.then(|| (this.find)(cx)).flatten();
                     if find.is_some() {
                         this.reads = 0;
                     }
@@ -489,7 +504,8 @@ impl TranscriptView {
                 }) else {
                     return;
                 };
-                let (path, tail, changed) = cx
+                let looked = find.is_some();
+                let (path, tail, steps) = cx
                     .background_spawn(async move {
                         let mut tail = tail;
                         let found = find.and_then(|find| find());
@@ -503,14 +519,22 @@ impl TranscriptView {
                             }
                             _ => tail.path.clone(),
                         };
-                        let changed = tail.read_more(format);
-                        (path, tail, changed)
+                        // What to show is made here too: a long session's
+                        // steps are many.
+                        let steps = tail.read_more(format).then(|| tail.parsed.steps(format));
+                        (path, tail, steps)
                     })
                     .await;
                 if this
                     .update(cx, |this, cx| {
+                        if looked {
+                            this.find_after = if path.is_some() {
+                                FIND_EVERY
+                            } else {
+                                (this.find_after.max(1) * 2).min(FIND_AT_MOST_EVERY)
+                            };
+                        }
                         this.path = path;
-                        let steps = changed.then(|| tail.parsed.steps(format));
                         this.tail = Some(tail);
                         if let Some(steps) = steps {
                             this.show(steps, cx);
@@ -527,8 +551,10 @@ impl TranscriptView {
             thread,
             bar: true,
             find,
+            refind: true,
             path: None,
             reads: 0,
+            find_after: 0,
             tail: None,
             steps: Vec::new(),
             _poll: poll,

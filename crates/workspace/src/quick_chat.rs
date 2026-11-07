@@ -28,8 +28,8 @@ use gpui_kit::component::{
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle, Global,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Pixels, Render, Size,
-    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, WindowBounds,
-    WindowKind, WindowOptions, actions, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window,
+    WindowBounds, WindowKind, WindowOptions, actions, div, px,
 };
 use ph_agent::{ChatPanel, ChatPanelEvent};
 use ph_brand::Feature;
@@ -223,7 +223,9 @@ impl gpui_kit::RenderOnce for ShortcutRecorder {
             let state = state.read(cx);
             (state.on, state.error, state.focus.clone())
         };
-        let current = shortcut(AppState::store(cx));
+        let current = cx
+            .try_global::<QuickChat>()
+            .and_then(|state| state.shortcut.clone());
         let label = if on {
             "Press the keys…".to_string()
         } else {
@@ -362,6 +364,9 @@ struct QuickChat {
     /// The window while it is open, and its view.
     window: Option<(AnyWindowHandle, WeakEntity<QuickChatWindow>)>,
     keys: Option<Keys>,
+    /// The shortcut set (as saved), for Settings to show without reading
+    /// the store on each draw.
+    shortcut: Option<String>,
     /// Why the shortcut is not in use, for Settings.
     problem: Option<String>,
 }
@@ -406,6 +411,7 @@ pub(crate) fn apply_shortcut(cx: &mut App) {
     }
     let wanted = shortcut(AppState::store(cx));
     let state = cx.default_global::<QuickChat>();
+    state.shortcut = wanted.clone();
     state.problem = None;
     if wayland() {
         state.problem = Some(
@@ -601,6 +607,9 @@ pub(crate) struct QuickChatWindow {
     project: Project,
     chat: Entity<ChatPanel>,
     focus: FocusHandle,
+    /// Where it is, not saved yet, and the wait before saving it.
+    bounds: Option<Saved>,
+    save_bounds: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -636,20 +645,27 @@ impl QuickChatWindow {
                 _ => {}
             }
         });
-        // Where it is, for next time.
-        let bounds = cx.observe_window_bounds(window, |this, window, _| {
+        // Where it is, for next time: saved once it stops moving (bounds
+        // change every frame of a drag), or as it closes.
+        let bounds = cx.observe_window_bounds(window, |this, window, cx| {
             let bounds = window.bounds();
-            let saved = Saved {
+            this.bounds = Some(Saved {
                 x: bounds.origin.x.into(),
                 y: bounds.origin.y.into(),
                 width: bounds.size.width.into(),
                 height: bounds.size.height.into(),
-            };
-            let _ = this.store.set_setting(BOUNDS_KEY, &saved);
+            });
+            this.save_bounds = cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                _ = this.update(cx, |this, _| this.keep_bounds());
+            });
         });
         // Closed with its own button: no longer the open one.
         let mine = window.window_handle().window_id();
-        let released = cx.on_release(move |_, cx| {
+        let released = cx.on_release(move |this, cx| {
+            this.keep_bounds();
             let state = cx.default_global::<QuickChat>();
             if state
                 .window
@@ -664,7 +680,16 @@ impl QuickChatWindow {
             project,
             chat,
             focus: cx.focus_handle(),
+            bounds: None,
+            save_bounds: Task::ready(()),
             _subscriptions: vec![events, bounds, released],
+        }
+    }
+
+    /// Saves where the window is, if it moved since last saved.
+    fn keep_bounds(&mut self) {
+        if let Some(saved) = self.bounds.take() {
+            let _ = self.store.set_setting(BOUNDS_KEY, &saved);
         }
     }
 
