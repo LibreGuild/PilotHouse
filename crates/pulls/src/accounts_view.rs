@@ -172,7 +172,8 @@ impl Render for AccountsView {
         })
         .unwrap_or_else(|_| "github.com".into());
         let token_url = format!(
-            "https://{token_host}/settings/tokens/new?scopes=repo,read:org&description=PilotHouse"
+            "https://{token_host}/settings/tokens/new?scopes=repo,read:org&description={}",
+            query_value(ph_brand::NAME)
         );
         let can_add = !self.token.read(cx).value().trim().is_empty() && !self.adding;
         v_flex()
@@ -284,7 +285,7 @@ impl Render for AccountsView {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("PilotHouse checks the token with the host, then keeps it in the system keychain. It talks only to the hosts you add."),
+                            .child(concat!(ph_brand::name!(), " checks the token with the host, then keeps it in the system keychain. It talks only to the hosts you add.")),
                     ),
             )
     }
@@ -307,5 +308,30 @@ fn health_mark(health: Option<&Health>, cx: &gpui_kit::App) -> gpui_kit::AnyElem
             .xsmall()
             .into_any_element(),
         None => div().into_any_element(),
+    }
+}
+
+/// `text` for a URL's query: every byte but letters, digits and `-._~`
+/// percent-encoded (the app's name may hold spaces, `#` or `+`).
+fn query_value(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::query_value;
+
+    #[test]
+    fn query_values_are_percent_encoded() {
+        assert_eq!(query_value("PilotHouse"), "PilotHouse");
+        assert_eq!(query_value("Acme #1 Tools+"), "Acme%20%231%20Tools%2B");
+        assert_eq!(query_value("Café"), "Caf%C3%A9");
     }
 }

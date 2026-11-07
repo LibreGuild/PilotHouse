@@ -336,7 +336,7 @@ fn discard(cx: &mut App) -> Result<Value> {
     }
     themes::set_preview(None, cx);
     AppState::refresh_theme(cx);
-    reply("Dropped: PilotHouse looks as before.")
+    reply(concat!("Dropped: ", ph_brand::name!(), " looks as before."))
 }
 
 fn list(cx: &mut App) -> Result<Value> {
@@ -377,7 +377,7 @@ fn use_theme(params: Value, cx: &mut App) -> Result<Value> {
     };
     themes::set_preview(None, cx);
     AppState::set_appearance(appearance, cx);
-    reply(format!("PilotHouse now uses {name}."))
+    reply(format!("{} now uses {name}.", ph_brand::NAME))
 }
 
 fn delete(params: Value, cx: &mut App) -> Result<Value> {

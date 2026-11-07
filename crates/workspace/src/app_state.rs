@@ -74,20 +74,25 @@ impl AppState {
         Self::store(cx).setting(keys::APPEARANCE)
     }
 
-    /// Context-panel tools the user has switched on (Settings → Features).
+    /// Context-panel tools the user has switched on (Settings → Features),
+    /// of those this build has ([`ContextTab::in_build`]).
     pub fn enabled_tabs(cx: &App) -> Vec<ContextTab> {
         // Kept in memory: asked on every frame of every workspace.
         let disabled: Vec<String> = match cx.try_global::<DisabledTabs>() {
             Some(known) => known.0.clone(),
             None => Self::store(cx).setting(keys::DISABLED_FEATURES),
         };
-        ContextTab::ALL
-            .into_iter()
+        ContextTab::available()
             .filter(|tab| !disabled.iter().any(|key| key == tab.key()))
             .collect()
     }
 
+    /// Switches a tool on or off for the user. A tool this build does not
+    /// have stays off.
     pub fn set_tab_enabled(tab: ContextTab, enabled: bool, cx: &mut App) {
+        if !tab.in_build() {
+            return;
+        }
         let store = Self::store(cx);
         let mut disabled: Vec<String> = store.setting(keys::DISABLED_FEATURES);
         disabled.retain(|key| key != tab.key());

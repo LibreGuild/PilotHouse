@@ -7,6 +7,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ph-brand.workspace = true
+ph-agent.workspace = true
 anyhow.workspace = true
 gpui-kit.workspace = true
 ph-changes.workspace = true
@@ -17,3 +19,7 @@ ph-store.workspace = true
 ph-ui.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+ph-theme.workspace = true

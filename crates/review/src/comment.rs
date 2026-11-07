@@ -244,7 +244,8 @@ pub fn render(summary: &Summary) -> String {
         summary.sha, summary.round
     );
     md.push_str(&format!(
-        "### PilotHouse review · round {} · `{short}`\n\n",
+        "### {} review · round {} · `{short}`\n\n",
+        ph_brand::NAME,
         summary.round
     ));
     let mut counts: Vec<String> = crate::SEVERITIES
@@ -301,7 +302,8 @@ pub fn render(summary: &Summary) -> String {
     }
     if left_out > 0 {
         md.push_str(&format!(
-            "*And {left_out} more open, too many for one comment: see them in PilotHouse or on their lines.*\n\n"
+            "*And {left_out} more open, too many for one comment: see them in {} or on their lines.*\n\n",
+            ph_brand::NAME
         ));
     }
     if !done.is_empty() {
@@ -330,8 +332,9 @@ pub fn render(summary: &Summary) -> String {
         md.push('\n');
     }
     md.push_str(&format!(
-        "<sub>Reviewed `{short}` with {}. Findings are AI-generated; check them before acting. Posted with PilotHouse.</sub>\n",
-        if summary.agents.is_empty() { "an agent" } else { summary.agents }
+        "<sub>Reviewed `{short}` with {}. Findings are AI-generated; check them before acting. Posted with {}.</sub>\n",
+        if summary.agents.is_empty() { "an agent" } else { summary.agents },
+        ph_brand::NAME
     ));
     md.push_str(&data_block(summary, &md));
     md

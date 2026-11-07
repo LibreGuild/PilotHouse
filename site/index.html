@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PilotHouse: steer every coding agent from one window</title>
-  <meta name="description" content="A fast, native app where Claude Code, Codex, Gemini CLI and Antigravity work beside your code, Git, terminals, a browser and Android devices, with a studio for pictures, videos and slides. Free and open source.">
+  <meta name="description" content="A fast, native app where Claude Code, Codex, Gemini CLI, Antigravity and Cline work beside your code, Git, terminals, a browser and Android devices, with a studio for pictures, videos and slides. Free and open source.">
   <meta name="theme-color" content="#000000">
   <meta property="og:title" content="PilotHouse">
   <meta property="og:description" content="Steer every coding agent from one window. Native, private, open source.">
@@ -46,12 +46,12 @@
         <b class="blip violet" style="--x:36%;--y:24%;--d:5.53s"></b>
       </div>
       <div class="hero-copy">
-        <p class="eyebrow">Version 0.6.0 · free and open source</p>
+        <p class="eyebrow">Version 0.6.1 · free and open source</p>
         <h1 class="headline" aria-label="Steer every coding agent from one window.">
           <span class="row"><span class="w">Steer</span> <span class="w">every</span> <span class="w">coding</span> <span class="w">agent</span></span>
           <span class="row"><span class="w hl">from</span> <span class="w hl">one</span> <span class="w hl">window.</span></span>
         </h1>
-        <p class="lede">One fast, native app where Claude Code, Codex, Gemini CLI and Antigravity work beside your code, Git, terminals, a browser and Android devices, and help you make the pictures, videos and slides that go with it. You steer; the agents see what you see.</p>
+        <p class="lede">One fast, native app where Claude Code, Codex, Gemini CLI, Antigravity and Cline work beside your code, Git, terminals, a browser and Android devices, and help you make the pictures, videos and slides that go with it. You steer; the agents see what you see.</p>
         <div class="ctas">
           <a class="btn primary" id="download-main" href="#download">Download PilotHouse</a>
           <a class="btn ghost" href="https://github.com/LibreGuild/PilotHouse">Source on GitHub</a>
@@ -77,12 +77,12 @@
     <section class="strip" aria-label="Works with the agents you already use">
       <p class="strip-title">Works with the agents you already use, with your own installs and sign-ins</p>
       <div class="strip-row" aria-hidden="true">
-        <span>Claude Code</span><span class="o">Codex</span><span>Gemini CLI</span><span class="o">Antigravity</span><span>Claude Code</span><span class="o">Codex</span><span>Gemini CLI</span><span class="o">Antigravity</span>
+        <span>Claude Code</span><span class="o">Codex</span><span>Gemini CLI</span><span class="o">Antigravity</span><span>Cline</span><span class="o">Claude Code</span><span>Codex</span><span class="o">Gemini CLI</span><span>Antigravity</span><span class="o">Cline</span>
       </div>
       <div class="strip-row rev" aria-hidden="true">
-        <span class="o">Antigravity</span><span>Gemini CLI</span><span class="o">Codex</span><span>Claude Code</span><span class="o">Antigravity</span><span>Gemini CLI</span><span class="o">Codex</span><span>Claude Code</span>
+        <span class="o">Cline</span><span>Antigravity</span><span class="o">Gemini CLI</span><span>Codex</span><span class="o">Claude Code</span><span>Cline</span><span class="o">Antigravity</span><span>Gemini CLI</span><span class="o">Codex</span><span>Claude Code</span>
       </div>
-      <p class="sr-only">Claude Code, Codex, Gemini CLI and Antigravity.</p>
+      <p class="sr-only">Claude Code, Codex, Gemini CLI, Antigravity and Cline.</p>
     </section>
 
     <!-- Steering: a live rebuild of the Agents panel. -->
@@ -185,7 +185,8 @@
         <li class="reveal"><b>Undo a turn</b><span>Before each message, a snapshot of the files. Restore them, and undo the restore, without touching branches or history.</span></li>
         <li class="reveal"><b>Queue while it works</b><span>Enter queues the next message; <em>Send now</em> steers Claude Code and Codex in the turn under way.</span></li>
         <li class="reveal"><b>Plans, questions, subagents</b><span>A plan to approve, a question with choices, each subagent's steps under the call that started it.</span></li>
-        <li class="reveal"><b>Diagrams in replies</b><span>A Mermaid block in a reply is drawn as a picture, in the theme's light or dark.</span></li>
+        <li class="reveal"><b>Diagrams in replies</b><span>A Mermaid block in a reply is drawn as a picture, in the theme's light or dark. Zoom it where it is, or open it large.</span></li>
+        <li class="reveal"><b>Quick chat</b><span>⌥Space (Alt+Shift+Space on Windows and Linux) opens a small chat over every app, from anywhere. Its chats wait under Chats.</span></li>
         <li class="reveal"><b>Hand it over</b><span>Continue a chat with another agent, with a recap, or step aside with ⌘; for a side question.</span></li>
         <li class="reveal"><b>Several agents at once</b><span>One prompt to two or more agents, each in its own copy. Compare, then keep one.</span></li>
         <li class="reveal"><b>Search and usage</b><span>⌘⇧K searches every chat. The header shows the context used and the cost so far.</span></li>
@@ -307,7 +308,7 @@
         <p class="reveal">The GitHub view (⌘⇧G) lists what waits for your review across repositories. Ask an agent to review it, explain it or write a test plan: it works in PilotHouse's own copy, your checkouts untouched, and its chat only reads.</p>
         <ul class="ticks reveal">
           <li><b>Findings</b> with a severity, the evidence and a fix, posted on the code with one-click suggestions.</li>
-          <li><b>Walkthrough</b> explains a change in a minute; <b>Watch</b> tells you when the author pushes or answers.</li>
+          <li><b>Walkthrough</b> briefs the reviewer in plain words: what changes and why, how that part of the system works today, what is different after, with diagrams, and where to look closely; <b>Watch</b> tells you when the author pushes or answers.</li>
           <li><b>Address comments</b> on your own pull requests in a task, with a reply drafted for each.</li>
           <li><b>Review before you push</b>: the Git tab's Review puts its findings on your lines.</li>
           <li>GitHub.com and GitHub Enterprise Server; tokens stay in the system's keychain.</li>
@@ -425,7 +426,8 @@
         <li class="reveal"><b>Status bar</b><span>The branch, CI for the commit checked out, the ports your processes listen on, the device in use.</span></li>
         <li class="reveal"><b>Open from anywhere</b><span><code>pilothouse &lt;path&gt;</code> opens a folder as a workspace, or a file in a window of its own. <em>Open with PilotHouse</em> in Finder and Explorer.</span></li>
         <li class="reveal"><b>Agents from outside</b><span>An agent you started elsewhere can use the board, browser and devices through <code>pilothouse mcp</code>.</span></li>
-        <li class="reveal"><b>Resume a CLI session</b><span>Past Claude Code, Codex, Gemini CLI and Antigravity sessions in the folder, resumed in a terminal, with the transcript beside it.</span></li>
+        <li class="reveal"><b>Resume a CLI session</b><span>Past Claude Code, Codex, Gemini CLI, Antigravity and Cline sessions in the folder, resumed in a terminal, with the transcript beside it. An agent you ran in a terminal stays in the chat list: read it, search it, go on in the terminal or in a chat.</span></li>
+        <li class="reveal"><b>Your organisation's build</b><span>Its name, icons and features in one folder, its own views beside Workspaces and GitHub, and rules for coding agents that merge each new release.</span></li>
         <li class="reveal"><b>Kept on your disk</b><span>Settings → Storage shows what takes space (clones, copies, recordings), removes it, and puts new copies on a bigger disk.</span></li>
       </ul>
     </section>

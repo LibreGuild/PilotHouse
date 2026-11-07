@@ -33,6 +33,9 @@ actions!(
         /// What the agents used: tokens, the estimate at API prices and
         /// limits, by agent, workspace or model.
         ShowUsage,
+        /// A small chat window over every app (also from anywhere, with its
+        /// shortcut in Settings → Chat).
+        QuickChat,
         /// A new presentation in Studio (title, size, theme).
         NewPresentation,
         /// A presentation from the presentations folder, in Studio.
@@ -195,6 +198,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
             }
         });
     });
+    cx.on_action(|_: &QuickChat, cx| crate::quick_chat::toggle(cx));
     cx.on_action(|_: &ZoomIn, cx| AppState::update_preferences(cx, |p| p.zoom(1)));
     cx.on_action(|_: &ZoomOut, cx| AppState::update_preferences(cx, |p| p.zoom(-1)));
     cx.on_action(|_: &ResetZoom, cx| AppState::update_preferences(cx, |p| p.reset_zoom()));

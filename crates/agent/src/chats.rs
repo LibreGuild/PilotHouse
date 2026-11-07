@@ -79,6 +79,35 @@ impl ChatHub {
             .unwrap_or_default()
     }
 
+    /// Starts agent `id` again in every workspace it runs in, and `also`
+    /// (a chat's own process), for a choice it takes only at its start
+    /// (Cline's provider). None is, while a chat other than `asking` (being
+    /// updated) is at work with it: false then.
+    pub(crate) fn restart_agent(
+        id: &str,
+        asking: Option<gpui_kit::EntityId>,
+        also: Option<Entity<AgentConnection>>,
+        cx: &mut App,
+    ) -> bool {
+        let mut running: Vec<Entity<AgentConnection>> = Self::all(cx)
+            .into_iter()
+            .filter_map(|(_, chats)| chats.read(cx).connections.get(id).cloned())
+            .collect();
+        running.extend(also);
+        running.dedup_by_key(|connection| connection.entity_id());
+        running.retain(|connection| !connection.read(cx).has_exited());
+        if running
+            .iter()
+            .any(|connection| connection.read(cx).busy(asking, cx))
+        {
+            return false;
+        }
+        for connection in running {
+            connection.update(cx, |connection, cx| connection.restart(asking, cx));
+        }
+        true
+    }
+
     /// Ends a removed workspace's chats (its agents stop).
     pub fn remove(project_id: ProjectId, cx: &mut App) {
         if cx.has_global::<Self>() {
@@ -317,9 +346,39 @@ impl WorkspaceChats {
         } else {
             self.project.path.clone()
         };
-        let connection = cx.new(|cx| AgentConnection::start(spec, cwd, cx));
+        let mut env = self.mcp_settings_env(spec);
+        if spec.id == "cline" {
+            env.extend(crate::cline::env_for(&self.store));
+        }
+        let connection = cx.new(|cx| AgentConnection::start_with(spec, cwd, env, cx));
         self.connections.insert(spec.id, connection.clone());
         connection
+    }
+
+    /// For an agent that reads MCP servers only from its own settings file
+    /// (Cline): a copy of that file with PilotHouse's servers and those from
+    /// Settings → MCP & skills, named in the variable the agent reads.
+    fn mcp_settings_env(&self, spec: &'static AgentSpec) -> Vec<(String, String)> {
+        let Some(var) = spec.quirks.mcp_settings_env else {
+            return Vec::new();
+        };
+        let servers: Vec<_> =
+            crate::thread::pilothouse_mcp_server(&self.project.path, spec.id, self.project.id)
+                .into_iter()
+                .chain(crate::mcp_config::for_session(&self.store))
+                .collect();
+        let key = format!("{}:{}", self.project.id, self.project.path.display());
+        match crate::cline::write_mcp_settings(
+            &crate::cline::Paths::of_this_computer(),
+            &servers,
+            &key,
+        ) {
+            Ok(path) => vec![(var.to_string(), path.to_string_lossy().into_owned())],
+            Err(err) => {
+                tracing::warn!("{} gets no MCP servers: {err:#}", spec.name);
+                Vec::new()
+            }
+        }
     }
 
     /// Starts a chat named `title` with `prompt` and the default agent,

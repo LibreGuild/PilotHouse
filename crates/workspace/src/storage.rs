@@ -248,8 +248,9 @@ impl StorageView {
         }
         let message = match item.removal {
             Removal::Task(_) => format!(
-                "Remove the task “{}”? Its folder is deleted with any changes not committed and pushed, and its workspace leaves PilotHouse. Its branch stays in the repository.",
-                item.label
+                "Remove the task “{}”? Its folder is deleted with any changes not committed and pushed, and its workspace leaves {app}. Its branch stays in the repository.",
+                item.label,
+                app = ph_brand::NAME,
             ),
             _ => format!(
                 "Remove {}? Its folder is deleted, with any changes not pushed. A review or task needing it again makes a new one.",
@@ -333,7 +334,7 @@ impl Render for StorageView {
                                 div()
                                     .flex_1()
                                     .text_sm()
-                                    .child(format!("PilotHouse uses {} on disk", format_size(total))),
+                                    .child(format!("{} uses {} on disk", ph_brand::NAME, format_size(total))),
                             )
                             .when(self.measuring, |this| this.child(Spinner::new().xsmall()))
                             .child(
@@ -548,7 +549,11 @@ fn measure(store: &ph_store::Store) -> Vec<Group> {
         },
         Group {
             title: "Tasks",
-            note: "Worktrees of tasks; removing one also takes its workspace out of PilotHouse.",
+            note: concat!(
+                "Worktrees of tasks; removing one also takes its workspace out of ",
+                ph_brand::name!(),
+                "."
+            ),
             items: sort(tasks),
         },
         Group {
@@ -627,9 +632,9 @@ fn remove(store: &ph_store::Store, path: &Path, removal: &Removal) -> anyhow::Re
         .iter()
         .chain([&ph_store::paths::data_dir()])
         .any(|folder| path.starts_with(folder) && path != folder);
-    anyhow::ensure!(ours, "{} is not PilotHouse's", path.display());
+    anyhow::ensure!(ours, "{} is not {}'s", path.display(), ph_brand::NAME);
     match removal {
-        Removal::Never => anyhow::bail!("PilotHouse needs it"),
+        Removal::Never => anyhow::bail!("{} needs it", ph_brand::NAME),
         Removal::Contents => {
             for entry in std::fs::read_dir(path)?.flatten() {
                 let entry = entry.path();

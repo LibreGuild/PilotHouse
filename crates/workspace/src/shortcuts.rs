@@ -186,42 +186,51 @@ pub(crate) fn render(one_column: bool, window: &mut Window, cx: &mut App) -> Any
                     .text_color(muted)
                     .child(SharedString::from(title)),
             )
-            .children(rows.into_iter().map(|(label, keys)| {
-                let keys = match keys {
-                    Keys::Action(action) => {
-                        match Kbd::binding_for_action(
-                            action.as_ref(),
-                            Some(WORKSPACE_CONTEXT),
-                            window,
-                        ) {
-                            Some(kbd) => kbd.into_any_element(),
-                            None => div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child("—")
+            .children(
+                rows.into_iter()
+                    // Not what this build leaves out (the brand's features).
+                    .filter(|(_, keys)| match keys {
+                        Keys::Action(action) => crate::features::allows(action.as_ref()),
+                        _ => true,
+                    })
+                    .map(|(label, keys)| {
+                        let keys = match keys {
+                            Keys::Action(action) => {
+                                match Kbd::binding_for_action(
+                                    action.as_ref(),
+                                    Some(WORKSPACE_CONTEXT),
+                                    window,
+                                ) {
+                                    Some(kbd) => kbd.into_any_element(),
+                                    None => div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child("—")
+                                        .into_any_element(),
+                                }
+                            }
+                            Keys::Fixed(strokes) => h_flex()
+                                .gap_1()
+                                .children(
+                                    strokes
+                                        .iter()
+                                        .filter_map(|stroke| {
+                                            Keystroke::parse_with_os(stroke, cx.platform_info().os)
+                                                .ok()
+                                        })
+                                        .map(Kbd::new),
+                                )
                                 .into_any_element(),
-                        }
-                    }
-                    Keys::Fixed(strokes) => h_flex()
-                        .gap_1()
-                        .children(
-                            strokes
-                                .iter()
-                                .filter_map(|stroke| {
-                                    Keystroke::parse_with_os(stroke, cx.platform_info().os).ok()
-                                })
-                                .map(Kbd::new),
-                        )
-                        .into_any_element(),
-                    Keys::Text(text) => div().text_xs().child(text).into_any_element(),
-                };
-                h_flex()
-                    .justify_between()
-                    .gap_3()
-                    .text_sm()
-                    .child(div().min_w_0().truncate().child(label))
-                    .child(div().flex_none().child(keys))
-            }))
+                            Keys::Text(text) => div().text_xs().child(text).into_any_element(),
+                        };
+                        h_flex()
+                            .justify_between()
+                            .gap_3()
+                            .text_sm()
+                            .child(div().min_w_0().truncate().child(label))
+                            .child(div().flex_none().child(keys))
+                    }),
+            )
     });
     let mut columns: Vec<_> = columns.collect();
     if one_column {

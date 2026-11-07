@@ -11,6 +11,9 @@
 //! - Gemini CLI: `…/chats/session-*.jsonl`, a row per `user` or `gemini`
 //!   message (written again by `id` as it grows, with its `toolCalls`), and
 //!   `$rewindTo` rows that take messages back.
+//! - Cline: `…/sessions/<id>/<id>.messages.json`, one JSON document written
+//!   anew as the session goes (read whole when it changes), its `messages`
+//!   in `text`, `tool_use` and `tool_result` blocks.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,6 +21,7 @@ use std::time::Duration;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
     Styled as _, Task, Window, div,
@@ -36,6 +40,7 @@ pub enum Format {
     Claude,
     Codex,
     Gemini,
+    Cline,
 }
 
 impl Format {
@@ -45,6 +50,7 @@ impl Format {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "gemini" => Some(Self::Gemini),
+            "cline" => Some(Self::Cline),
             _ => None,
         }
     }
@@ -56,8 +62,12 @@ impl Format {
 pub type FindSession = Box<dyn Fn(&gpui_kit::App) -> Option<FindJob>>;
 pub type FindJob = Box<dyn FnOnce() -> Option<PathBuf> + Send>;
 
-/// How often the session file is looked for again.
+/// How often the session file is looked for again, in reads (one each 2
+/// seconds) once found.
 const FIND_EVERY: u32 = 10;
+/// The longest wait between looks for a session file not found yet, in
+/// reads: each look in vain waits twice as long as the last.
+const FIND_AT_MOST_EVERY: u32 = 30;
 
 /// The last bytes of a session file read (long sessions keep their end).
 const READ: u64 = 4 * 1024 * 1024;
@@ -89,8 +99,13 @@ pub(crate) struct Parsed {
 }
 
 impl Parsed {
-    /// Reads whole lines of JSON rows.
+    /// Reads whole lines of JSON rows (Cline's: the whole document, which
+    /// replaces what was read).
     pub(crate) fn feed(&mut self, format: Format, text: &str) {
+        if format == Format::Cline {
+            self.steps.clear();
+            return cline_file(&mut self.steps, text);
+        }
         for row in text
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -99,6 +114,7 @@ impl Parsed {
                 Format::Claude => claude_row(&mut self.steps, &row),
                 Format::Codex => codex_row(&mut self.steps, &row),
                 Format::Gemini => gemini_row(&mut self.messages, row),
+                Format::Cline => {}
             }
         }
     }
@@ -141,6 +157,61 @@ fn claude_row(steps: &mut Vec<Step>, row: &Value) {
         }
         _ => {}
     }
+}
+
+/// Cline: its `messages`, as Claude's (`text` and `tool_use` blocks), what
+/// the user typed inside `<user_input>`.
+fn cline_file(steps: &mut Vec<Step>, text: &str) {
+    let Ok(file) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
+    for message in file["messages"].as_array().into_iter().flatten() {
+        let blocks = match &message["content"] {
+            Value::String(text) => vec![serde_json::json!({ "type": "text", "text": text })],
+            Value::Array(blocks) => blocks.clone(),
+            _ => Vec::new(),
+        };
+        match message["role"].as_str() {
+            Some("user") => {
+                for block in &blocks {
+                    if block["type"] == "text"
+                        && let Some(text) = block["text"].as_str()
+                    {
+                        push_user(steps, &cline_input(text));
+                    }
+                }
+            }
+            Some("assistant") => {
+                for block in &blocks {
+                    match block["type"].as_str() {
+                        Some("text") => push_agent(steps, block["text"].as_str()),
+                        Some("tool_use") => steps.push(Step::Tool(tool_title(
+                            block["name"].as_str().unwrap_or("tool"),
+                            &block["input"],
+                        ))),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What the user typed, from Cline's `<user_input mode="act">…</user_input>`.
+fn cline_input(text: &str) -> String {
+    let Some(start) = text.find("<user_input") else {
+        return text.to_string();
+    };
+    let Some(open_end) = text[start..].find('>') else {
+        return text.to_string();
+    };
+    let inner = &text[start + open_end + 1..];
+    inner
+        .split("</user_input>")
+        .next()
+        .unwrap_or(inner)
+        .to_string()
 }
 
 fn codex_row(steps: &mut Vec<Step>, row: &Value) {
@@ -323,10 +394,18 @@ fn tool_title(tool: &str, input: &Value) -> String {
 /// A terminal agent's session, as a read-only chat.
 pub struct TranscriptView {
     thread: Entity<ChatThread>,
+    /// Its own bar (read only, continue in a chat); off where its host has
+    /// one (a closed terminal's chat).
+    bar: bool,
     find: FindSession,
+    /// Whether a new session file can start (a terminal still open);
+    /// otherwise the one found stays.
+    refind: bool,
     path: Option<PathBuf>,
-    /// Reads since the file was last looked for.
+    /// Reads since the file was last looked for, and how many until the
+    /// next look.
     reads: u32,
+    find_after: u32,
     /// How far the file is read; off with a read, back after it.
     tail: Option<Tail>,
     /// What is shown, as read; a new read only redraws from where it
@@ -350,10 +429,21 @@ impl EventEmitter<TranscriptViewEvent> for TranscriptView {}
 impl TranscriptView {
     /// "Continue in a chat" with `agent`: a recap of the session so far.
     fn continue_with(&mut self, agent: &'static AgentSpec, cx: &mut Context<Self>) {
-        let thread = self.thread.read(cx);
-        let Some(recap) = thread.handoff_recap(cx) else {
+        let Some((recap, title)) = self.recap(cx) else {
             return;
         };
+        cx.emit(TranscriptViewEvent::Continue {
+            agent,
+            recap,
+            title,
+        });
+    }
+
+    /// A recap of the session for another chat to start from, and its
+    /// title (the first thing asked); none while nothing was read.
+    pub fn recap(&self, cx: &gpui_kit::App) -> Option<(String, String)> {
+        let thread = self.thread.read(cx);
+        let recap = thread.handoff_recap(cx)?;
         let title = thread
             .entries()
             .iter()
@@ -362,11 +452,20 @@ impl TranscriptView {
                 _ => None,
             })
             .unwrap_or_else(|| "Terminal session".into());
-        cx.emit(TranscriptViewEvent::Continue {
-            agent,
-            recap,
-            title,
-        });
+        Some((recap, title))
+    }
+
+    /// Without its own bar (its host shows the actions).
+    pub fn without_bar(mut self) -> Self {
+        self.bar = false;
+        self
+    }
+
+    /// For a session that ended: its file, once found, is not looked for
+    /// again.
+    pub fn ended(mut self) -> Self {
+        self.refind = false;
+        self
     }
 
     pub fn new(
@@ -377,16 +476,25 @@ impl TranscriptView {
         find: FindSession,
         cx: &mut Context<Self>,
     ) -> Self {
-        let project = ThreadProject::of(project);
+        Self::in_project(store, ThreadProject::of(project), agent, format, find, cx)
+    }
+
+    pub(crate) fn in_project(
+        store: ph_store::Store,
+        project: ThreadProject,
+        agent: &'static AgentSpec,
+        format: Format,
+        find: FindSession,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let thread = cx.new(|cx| ChatThread::draft(store, project, agent, cx));
         // Read again while the session grows; the file is found, read and
         // parsed off the UI thread, each time only what was added.
         let poll = cx.spawn(async move |this, cx| {
             loop {
                 let Ok((find, tail)) = this.update(cx, |this, cx| {
-                    let find = (this.path.is_none() || this.reads >= FIND_EVERY)
-                        .then(|| (this.find)(cx))
-                        .flatten();
+                    let due = this.reads >= this.find_after && (this.refind || this.path.is_none());
+                    let find = due.then(|| (this.find)(cx)).flatten();
                     if find.is_some() {
                         this.reads = 0;
                     }
@@ -396,7 +504,8 @@ impl TranscriptView {
                 }) else {
                     return;
                 };
-                let (path, tail, changed) = cx
+                let looked = find.is_some();
+                let (path, tail, steps) = cx
                     .background_spawn(async move {
                         let mut tail = tail;
                         let found = find.and_then(|find| find());
@@ -410,14 +519,22 @@ impl TranscriptView {
                             }
                             _ => tail.path.clone(),
                         };
-                        let changed = tail.read_more(format);
-                        (path, tail, changed)
+                        // What to show is made here too: a long session's
+                        // steps are many.
+                        let steps = tail.read_more(format).then(|| tail.parsed.steps(format));
+                        (path, tail, steps)
                     })
                     .await;
                 if this
                     .update(cx, |this, cx| {
+                        if looked {
+                            this.find_after = if path.is_some() {
+                                FIND_EVERY
+                            } else {
+                                (this.find_after.max(1) * 2).min(FIND_AT_MOST_EVERY)
+                            };
+                        }
                         this.path = path;
-                        let steps = changed.then(|| tail.parsed.steps(format));
                         this.tail = Some(tail);
                         if let Some(steps) = steps {
                             this.show(steps, cx);
@@ -432,9 +549,12 @@ impl TranscriptView {
         });
         Self {
             thread,
+            bar: true,
             find,
+            refind: true,
             path: None,
             reads: 0,
+            find_after: 0,
             tail: None,
             steps: Vec::new(),
             _poll: poll,
@@ -464,14 +584,58 @@ impl TranscriptView {
     }
 }
 
+/// What was asked and said in session file `path` (its last `READ`
+/// bytes), in order: `("user" | "agent", text)`. Blocking: off the UI
+/// thread.
+pub fn said(format: Format, path: &std::path::Path) -> Vec<(&'static str, String)> {
+    let mut tail = Tail {
+        path: Some(path.to_path_buf()),
+        ..Tail::default()
+    };
+    tail.read_more(format);
+    tail.parsed
+        .steps(format)
+        .into_iter()
+        .filter_map(|step| match step {
+            Step::User(text) => Some(("user", text)),
+            Step::Agent(text) => Some(("agent", text)),
+            Step::Tool(_) => None,
+        })
+        .collect()
+}
+
+/// The first line of the last thing the agent said in session file
+/// `path`. Blocking: off the UI thread.
+pub fn last_reply(format: Format, path: &std::path::Path) -> Option<String> {
+    first_line_of_last_reply(&said(format, path))
+}
+
+/// The first line of the last `agent` text of `said`.
+pub fn first_line_of_last_reply(said: &[(&'static str, String)]) -> Option<String> {
+    said.iter()
+        .rev()
+        .find(|(role, _)| *role == "agent")
+        .and_then(|(_, text)| {
+            text.lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| line.chars().take(200).collect())
+        })
+}
+
 /// A session file read so far: where, how far, and what it said.
 #[derive(Default)]
 struct Tail {
     path: Option<PathBuf>,
     /// Bytes read (whole lines; a line still being written waits).
     offset: u64,
+    /// A whole-document file's (Cline's) length and time when read.
+    stamp: Option<(u64, Option<std::time::SystemTime>)>,
     parsed: Parsed,
 }
+
+/// The largest Cline session file read (it is read whole each time).
+const CLINE_FILE: u64 = 32 * 1024 * 1024;
 
 impl Tail {
     /// Reads what was added since the last time; whether anything was.
@@ -482,9 +646,24 @@ impl Tail {
         let Some(path) = self.path.clone() else {
             return false;
         };
-        let Ok(length) = std::fs::metadata(&path).map(|meta| meta.len()) else {
+        let Ok(meta) = std::fs::metadata(&path) else {
             return false;
         };
+        let length = meta.len();
+        if format == Format::Cline {
+            // Written anew as a whole: read again when it changed.
+            let stamp = (length, meta.modified().ok());
+            if self.stamp == Some(stamp) || length > CLINE_FILE {
+                return false;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                return false;
+            };
+            self.stamp = Some(stamp);
+            self.offset = length;
+            self.parsed.feed(format, &text);
+            return true;
+        }
         if length < self.offset {
             *self = Tail {
                 path: Some(path.clone()),
@@ -608,7 +787,7 @@ impl Render for TranscriptView {
             );
         v_flex()
             .size_full()
-            .child(bar)
+            .when(self.bar, |this| this.child(bar))
             .child(div().flex_1().min_h_0().child(list))
             .into_any_element()
     }
@@ -617,6 +796,41 @@ impl Render for TranscriptView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_last_reply_of_a_session_file() {
+        let path = std::env::temp_dir().join(format!("ph-last-reply-{}.jsonl", std::process::id()));
+        let rows = [
+            r#"{"type":"user","message":{"content":"Fix the bug"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Looking."}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"\nFixed: the parser skipped a line.\nDetails follow."}]}}"#,
+            "",
+        ];
+        std::fs::write(&path, rows.join("\n")).unwrap();
+        assert_eq!(
+            last_reply(Format::Claude, &path).as_deref(),
+            Some("Fixed: the parser skipped a line.")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reads_cline_sessions() {
+        let text = r#"{"sessionId":"s","messages":[
+            {"role":"user","content":[{"type":"text","text":"<user_input mode=\"act\">Add a docstring</user_input>"},{"type":"file","path":"/w/a.py"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"1","name":"editor","input":{"path":"a.py"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"1","content":"ok"}]},
+            {"role":"assistant","content":[{"type":"text","text":"Done."}]}]}"#;
+        assert_eq!(
+            parse(Format::Cline, text),
+            vec![
+                Step::User("Add a docstring".into()),
+                Step::Tool("editor: a.py".into()),
+                Step::Agent("Done.".into()),
+            ]
+        );
+    }
 
     #[test]
     fn reads_claude_sessions() {

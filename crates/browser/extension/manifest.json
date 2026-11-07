@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PilotHouse",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Lets PilotHouse's coding agents use tabs in the PilotHouse tab group of this Chrome, with your sign-ins. Nothing else.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuMjN6nVIwXL5rqrWDijYbTlE31Rsq/z7UJNUHKEcC3Kz21FhOhsGKDKWRgbn7W9gaa7H+se/+zTTOGFfSlihfJzWPsI9zOTMe6gBSrF8dDBzyjlSlRKoYxVlxX4Q198wH5cE+l3Y0Jwkv1EoZks/mIGrxwz/Vup6I9tEbjcB078oLBvQbKxXT2Mgbqdt75ho7P63zPe6YinDREPjItugVbpxDqcSGnsXoE81DP6Zlqen9y5APwWzQIEFpz3rHR3OAheeR50w2atnWQeLXLhg2DMy7N9/6ftb4U26VXmbge1p/17EAa+Anq+SP/TaIq/g3Kq/nynhrdP7iWnIPm2gBwIDAQAB",
   "minimum_chrome_version": "116",

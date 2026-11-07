@@ -62,6 +62,9 @@ fn save(store: &Store, mappings: Vec<Mapping>, cx: &mut App) -> anyhow::Result<(
 
 /// Opens the drives on their own, `drive` (a workspace's) filled in to add.
 pub fn open(drive: Option<NetworkDrive>, window: &mut Window, cx: &mut App) {
+    if !ph_brand::enabled(ph_brand::Feature::NetworkDrives) {
+        return;
+    }
     let store = AppState::store(cx).clone();
     let view = cx.new(|cx| {
         let mut view = NetworkDrivesView::new(store, window, cx);
@@ -548,8 +551,9 @@ impl NetworkDrivesView {
             Step::Changed { mapping, again } => {
                 let text = if *again {
                     format!(
-                        "The old key is in your own SSH settings, not PilotHouse's. If the server really was reinstalled, remove it there (in a terminal: {}) and check again.",
-                        check::forget_command(mapping)
+                        "The old key is in your own SSH settings, not {app}'s. If the server really was reinstalled, remove it there (in a terminal: {}) and check again.",
+                        check::forget_command(mapping),
+                        app = ph_brand::NAME,
                     )
                 } else {
                     format!(
@@ -609,7 +613,7 @@ impl NetworkDrivesView {
             Step::NeedKey { key } => {
                 let (text, action) = match key.clone() {
                     Some((public, _)) if self.installed => (
-                        "Your key is on the server now, but it has a passphrase, which PilotHouse's background commands cannot ask for. Add it to your SSH agent: you type the passphrase once, in the terminal below.",
+                        concat!("Your key is on the server now, but it has a passphrase, which ", ph_brand::name!(), "'s background commands cannot ask for. Add it to your SSH agent: you type the passphrase once, in the terminal below."),
                         Button::new("agent-key")
                             .small()
                             .primary()
@@ -765,7 +769,7 @@ impl Render for NetworkDrivesView {
                                     .flex_1()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child("Left empty, PilotHouse asks Samba on the server where the share is."),
+                                    .child(concat!("Left empty, ", ph_brand::name!(), " asks Samba on the server where the share is.")),
                             )
                             .child(
                                 Button::new("check-drive")
@@ -794,7 +798,7 @@ impl Render for NetworkDrivesView {
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child("PilotHouse signs in with your own SSH setup (keys, agent, ~/.ssh/config) and never stores a password. Servers you trust here are kept in PilotHouse's own known_hosts."),
+                    .child(concat!(ph_brand::name!(), " signs in with your own SSH setup (keys, agent, ~/.ssh/config) and never stores a password. Servers you trust here are kept in ", ph_brand::name!(), "'s own known_hosts.")),
             )
     }
 }

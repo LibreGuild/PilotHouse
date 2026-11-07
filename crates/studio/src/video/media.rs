@@ -124,7 +124,10 @@ fn native_probe(path: &Path) -> Result<Info> {
     #[allow(unreachable_code)]
     {
         let _ = path;
-        Err(anyhow!("this system has no video reader PilotHouse uses"))
+        Err(anyhow!(
+            "this system has no video reader {} uses",
+            ph_brand::NAME
+        ))
     }
 }
 
@@ -136,9 +139,10 @@ pub fn probe(path: &Path) -> Result<Info> {
     match ffmpeg() {
         Some(ffmpeg) => ffmpeg.probe(path),
         // The system's reason says what to install.
-        None => Err(native.context(
-            "PilotHouse cannot read this video, and ffmpeg (which reads more kinds) is not installed",
-        )),
+        None => Err(native.context(concat!(
+            ph_brand::name!(),
+            " cannot read this video, and ffmpeg (which reads more kinds) is not installed"
+        ))),
     }
 }
 
@@ -240,9 +244,10 @@ pub fn encoder(
             Ok(encoder) => Ok(Box::new(encoder)),
             Err(err) => Err(native.context(format!("ffmpeg could not either: {err:#}"))),
         },
-        (None, Some(native)) => Err(native.context(
-            "PilotHouse cannot write it, and ffmpeg (which writes more kinds) is not installed",
-        )),
+        (None, Some(native)) => Err(native.context(concat!(
+            ph_brand::name!(),
+            " cannot write it, and ffmpeg (which writes more kinds) is not installed"
+        ))),
         (None, None) => Err(anyhow!(
             "{} is written with ffmpeg here, and ffmpeg is not installed",
             match target.codec {

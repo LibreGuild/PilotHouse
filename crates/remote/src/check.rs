@@ -85,7 +85,7 @@ pub struct HostKey {
 pub fn host_keys(mapping: &Mapping) -> Result<Vec<HostKey>> {
     let dir = known_hosts_file()
         .and_then(|file| file.parent().map(PathBuf::from))
-        .context("PilotHouse's SSH folder is not set")?;
+        .context(concat!(ph_brand::name!(), "'s SSH folder is not set"))?;
     ssh::private_dir(&dir)?;
     let scratch = dir.join(format!("scan-{:016x}", probe_id()));
     let mut command = ssh::ssh();
@@ -161,7 +161,8 @@ fn parse_known_hosts(text: &str) -> Vec<HostKey> {
 
 /// Files `keys` as the server's in PilotHouse's `known_hosts`.
 pub fn trust(keys: &[HostKey]) -> Result<()> {
-    let file = known_hosts_file().context("PilotHouse's SSH folder is not set")?;
+    let file =
+        known_hosts_file().context(concat!(ph_brand::name!(), "'s SSH folder is not set"))?;
     if let Some(dir) = file.parent() {
         ssh::private_dir(dir)?;
     }

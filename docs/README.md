@@ -8,6 +8,7 @@ Short, practical notes on how PilotHouse is built. Start with **architecture**, 
 | [user-guide.md](user-guide.md) | Using PilotHouse: first steps, the screen, shortcuts |
 | [development.md](development.md) | Build, run, disk-friendly setup, code conventions |
 | [styleguide.md](styleguide.md) | UI rules: colour as signal, type steps, density, controls, review checklist |
+| [customizing.md](customizing.md) | For organisations building their own copy: name, icons, features on or off, updates, views and commands of their own, merging new releases |
 | [packaging.md](packaging.md) | Installers for macOS, Windows and Linux, and releases |
 | [testing.md](testing.md) | Test levels and the UI automation harness (`pilothouse ctl`) |
 | [performance.md](performance.md) | Budgets, how they are measured, current numbers |

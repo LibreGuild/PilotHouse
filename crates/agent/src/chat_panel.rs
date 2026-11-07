@@ -53,6 +53,7 @@ use crate::{setup, setup_view};
 mod mentions;
 mod picker;
 mod render;
+mod terminal_session;
 
 /// The composer's hint in a workspace's chat.
 const PLACEHOLDER: &str = "Ask anything. @file, #12 for a card, @screenshot, @log";
@@ -84,6 +85,25 @@ pub enum ChatPanelEvent {
     WantPulls,
     /// A starter of the panel's [`ChatContext`] was picked (its id).
     Starter(String),
+    /// Go on with an agent CLI's session in a terminal of the workspace
+    /// (`session` resumed; a new one when not known).
+    ResumeInTerminal {
+        agent: &'static str,
+        session: Option<String>,
+        cwd: std::path::PathBuf,
+    },
+    /// Go on in a new chat with `agent`, from `recap` of a terminal session.
+    ContinueInChat {
+        agent: &'static AgentSpec,
+        recap: String,
+        title: String,
+    },
+    /// Go on in a new chat that takes agent `agent`'s own `session` back.
+    ResumeInChat {
+        agent: &'static str,
+        session: String,
+        title: String,
+    },
 }
 
 /// What a chat panel is for when it is not a workspace's plain chat: the
@@ -146,7 +166,11 @@ const SUGGESTIONS: &[(&str, &str, &str)] = &[
     (
         "Plan a feature",
         "Break work into board cards",
-        "Help me plan a feature. Ask me what it should do, then break it into small cards on the PilotHouse board.",
+        concat!(
+            "Help me plan a feature. Ask me what it should do, then break it into small cards on the ",
+            ph_brand::name!(),
+            " board."
+        ),
     ),
     (
         "Write tests",
@@ -165,12 +189,20 @@ const FOLDERLESS_SUGGESTIONS: &[(&str, &str, &str)] = &[
     (
         "Check a website",
         "Look around it in the browser",
-        "Open a website I name in the PilotHouse browser and tell me what you find: what works, what looks broken, and anything slow. Ask me which site first.",
+        concat!(
+            "Open a website I name in the ",
+            ph_brand::name!(),
+            " browser and tell me what you find: what works, what looks broken, and anything slow. Ask me which site first."
+        ),
     ),
     (
         "Plan work",
         "Break it into board cards",
-        "Help me plan some work. Ask me what it is, then break it into small cards on the PilotHouse board.",
+        concat!(
+            "Help me plan some work. Ask me what it is, then break it into small cards on the ",
+            ph_brand::name!(),
+            " board."
+        ),
     ),
     (
         "Start something new",
@@ -220,6 +252,8 @@ pub struct ChatPanel {
     history_menu: bool,
     /// What the panel is for, when not a workspace's plain chat.
     context: Option<ChatContext>,
+    /// A closed terminal's chat on screen, instead of `active`.
+    terminal_session: Option<terminal_session::TerminalSession>,
     /// Something readying the chat (a clone), or why it failed.
     busy: Option<SharedString>,
     /// The list of the turn's subagents is open above the composer.
@@ -309,6 +343,7 @@ impl ChatPanel {
             next_title: None,
             live: None,
             history_menu: false,
+            terminal_session: None,
             context: None,
             busy: None,
             subagents_open: false,
@@ -336,14 +371,31 @@ impl ChatPanel {
 
     /// Shows `session`, or a fresh draft for `None`.
     pub fn set_session(&mut self, session: Option<Session>, cx: &mut Context<Self>) {
+        self.terminal_session = None;
+        if let Some(session) = session
+            .as_ref()
+            .filter(|session| session.kind == "terminal")
+        {
+            self.show_terminal_session(session.clone(), cx);
+            cx.notify();
+            return;
+        }
         self.active = match session {
             Some(session) => self
                 .chats
                 .update(cx, |chats, cx| chats.thread_for(session, cx)),
             None => {
                 let agent = default_agent(&self.store);
-                let (store, project) = (self.store.clone(), self.draft_project());
-                cx.new(|cx| ChatThread::draft(store, project, agent, cx))
+                let project = self.draft_project();
+                // A new chat while the one shown is already a new, untouched
+                // one (⌘N twice): it stays, rather than another draft
+                // starting another agent session.
+                if self.active.read(cx).is_fresh_draft(agent, &project) {
+                    self.active.clone()
+                } else {
+                    let store = self.store.clone();
+                    cx.new(|cx| ChatThread::draft(store, project, agent, cx))
+                }
             }
         };
         self.failed = None;
@@ -503,6 +555,9 @@ impl ChatPanel {
     }
 
     pub fn active_session_id(&self, cx: &App) -> Option<SessionId> {
+        if let Some(shown) = &self.terminal_session {
+            return Some(shown.session.id);
+        }
         self.active.read(cx).session().map(|session| session.id)
     }
 

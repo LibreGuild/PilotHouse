@@ -14,6 +14,9 @@ impl ChatPanel {
     pub(super) fn choose_option(&mut self, option_id: &str, value: &str, cx: &mut Context<Self>) {
         self.active
             .update(cx, |thread, cx| thread.set_option(option_id, value, cx));
+        // An agent started again for it (Cline's provider) is warmed up
+        // again, so its models come in.
+        self.warm_up(cx);
     }
 
     /// Switches the agent to its next mode (Manual, Accept edits, Plan…),

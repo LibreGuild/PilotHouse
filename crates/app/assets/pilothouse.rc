@@ -1,3 +1,4 @@
 // Windows resources for pilothouse.exe. Icon 1 is the one GPUI loads for
-// the window and the taskbar.
-1 ICON "icon/PilotHouse.ico"
+// the window and the taskbar. The icon is the brand's (brand/icons/app.ico),
+// named relative to this file, as rc resolves it.
+1 ICON "../../../brand/icons/app.ico"

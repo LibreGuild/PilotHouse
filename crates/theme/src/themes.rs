@@ -373,7 +373,10 @@ pub fn save(
         bail!("give the theme a name");
     }
     if themes(cx).bundled.iter().any(|known| known.name == name) {
-        bail!("`{name}` is one of PilotHouse's own themes: save under another name");
+        bail!(
+            "`{name}` is one of {}'s own themes: save under another name",
+            ph_brand::NAME
+        );
     }
     let dir = themes(cx)
         .dir

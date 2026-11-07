@@ -32,6 +32,9 @@ enum Run {
     /// Start an agent CLI without a chat in a terminal.
     /// Open the Utilities dialog at one utility.
     Utility(&'static str),
+    /// One of the organisation's own commands (`ph_custom::commands`), by
+    /// its place in the list.
+    Custom(usize),
 }
 
 struct Entry {
@@ -106,8 +109,9 @@ fn chats(workspace: &Workspace, cx: &App) -> Vec<Entry> {
         .flat_map(|(id, place)| {
             workspace
                 .sessions_of(id, cx)
-                .into_iter()
-                .map(move |session| (place.clone(), session))
+                .iter()
+                .map(|session| (place.clone(), session.clone()))
+                .collect::<Vec<_>>()
         })
         .filter(|(_, session)| !seen.contains(&session.id))
         .collect();
@@ -266,6 +270,12 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         &["tokens", "cost", "spend", "context"],
     ));
     general.push(Entry::action(
+        "Quick chat",
+        Icons::MessageSquare,
+        QuickChat,
+        &["floating", "popup", "overlay", "ask", "spotlight", "hotkey"],
+    ));
+    general.push(Entry::action(
         "Toggle sidebar",
         IconName::PanelLeft,
         ToggleSidebar,
@@ -304,8 +314,7 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
     groups.push(("General", general));
 
     if workspace.active_space().is_some() {
-        let views = ContextTab::ALL
-            .into_iter()
+        let views = ContextTab::available()
             .map(|tab| Entry {
                 label: format!("Show {}", tab.label()).into(),
                 icon: tab.icon().into(),
@@ -368,7 +377,32 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
                 ShowGitHubView,
                 &["view", "pull", "review", "pr"],
             ),
-        ],
+        ]
+        .into_iter()
+        // The organisation's own views.
+        .chain(ph_custom::views().into_iter().map(|custom| Entry {
+            label: format!("Show the {} view", custom.label).into(),
+            icon: (custom.icon)(),
+            keywords: &["view"],
+            run: Run::Action(Box::new(ph_custom::ShowView {
+                id: custom.id.to_string(),
+            })),
+        }))
+        .collect(),
+    ));
+    // The organisation's own commands.
+    groups.push((
+        "Custom",
+        ph_custom::commands()
+            .into_iter()
+            .enumerate()
+            .map(|(index, command)| Entry {
+                label: command.label.into(),
+                icon: (command.icon)(),
+                keywords: command.keywords,
+                run: Run::Custom(index),
+            })
+            .collect(),
     ));
 
     let projects: Vec<Entry> = workspace
@@ -432,6 +466,15 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
             ),
         ],
     ));
+    // Not what this build leaves out (the brand's features).
+    for (_, entries) in &mut groups {
+        entries.retain(|entry| match &entry.run {
+            Run::Action(action) => crate::features::allows(action.as_ref()),
+            Run::Utility(_) => ph_brand::enabled(ph_brand::Feature::Utilities),
+            Run::OpenProject(_) | Run::OpenChat(..) | Run::Custom(_) => true,
+        });
+    }
+    groups.retain(|(_, entries)| !entries.is_empty());
     groups
 }
 
@@ -441,7 +484,7 @@ fn row(entry: &Entry) -> CommandItem {
     let icon = entry.icon.clone();
     let action = match &entry.run {
         Run::Action(action) => Some(action.boxed_clone()),
-        Run::OpenProject(_) | Run::OpenChat(..) | Run::Utility(_) => None,
+        Run::OpenProject(_) | Run::OpenChat(..) | Run::Utility(_) | Run::Custom(_) => None,
     };
     CommandItem::new()
         .label(entry.label.clone())
@@ -508,6 +551,14 @@ pub(crate) fn open(
                         });
                     }
                     Run::Utility(id) => crate::utilities::open(Some(id), window, cx),
+                    Run::Custom(index) => {
+                        if let Some(command) = ph_custom::commands().into_iter().nth(*index) {
+                            let context = ph_custom::CustomContext {
+                                store: crate::AppState::store(cx).clone(),
+                            };
+                            (command.run)(&context, window, cx);
+                        }
+                    }
                 }
             });
         for (title, entries) in groups.iter() {

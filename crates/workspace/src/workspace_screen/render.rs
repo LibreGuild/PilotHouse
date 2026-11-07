@@ -103,6 +103,9 @@ impl WorkspaceScreen {
                 Some(files) => files.cached(filled()).into_any_element(),
                 None => div().into_any_element(),
             },
+            // A tool this build leaves out never starts (a layout naming it
+            // is not loaded; this is the last guard).
+            Pane::Tool(tab) if !tab.in_build() => div().into_any_element(),
             Pane::Tool(tab) => {
                 self.ensure_panel(tab, window, cx);
                 self.render_tab_content(tab, cx)

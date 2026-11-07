@@ -18,9 +18,13 @@ pub const SUPPORTED: bool = cfg!(any(windows, target_os = "linux"));
 /// What the switch is called where it lives.
 pub fn label() -> &'static str {
     if cfg!(windows) {
-        "Show “Open with PilotHouse” in Explorer"
+        concat!("Show “Open with ", ph_brand::name!(), "” in Explorer")
     } else {
-        "List PilotHouse under “Open With” in the file manager"
+        concat!(
+            "List ",
+            ph_brand::name!(),
+            " under “Open With” in the file manager"
+        )
     }
 }
 
@@ -51,12 +55,21 @@ mod imp {
 
     /// The verb's key, and the placeholder Explorer fills with the path.
     const VERBS: [(&str, &str); 3] = [
-        (r"Software\Classes\Directory\shell\PilotHouse", "%1"),
         (
-            r"Software\Classes\Directory\Background\shell\PilotHouse",
+            concat!(r"Software\Classes\Directory\shell\", ph_brand::name!()),
+            "%1",
+        ),
+        (
+            concat!(
+                r"Software\Classes\Directory\Background\shell\",
+                ph_brand::name!()
+            ),
             "%V",
         ),
-        (r"Software\Classes\*\shell\PilotHouse", "%1"),
+        (
+            concat!(r"Software\Classes\*\shell\", ph_brand::name!()),
+            "%1",
+        ),
     ];
 
     fn wide(text: &str) -> Vec<u16> {
@@ -133,7 +146,10 @@ mod imp {
         for (verb, placeholder) in VERBS {
             write_key(
                 verb,
-                &[(None, "Open with PilotHouse"), (Some("Icon"), &icon)],
+                &[
+                    (None, concat!("Open with ", ph_brand::name!())),
+                    (Some("Icon"), &icon),
+                ],
             )?;
             let command = format!("\"{exe}\" \"{placeholder}\"");
             write_key(&format!(r"{verb}\command"), &[(None, &command)])?;
@@ -201,7 +217,10 @@ mod imp {
     }
 
     pub fn install(_: &Path) -> Result<()> {
-        bail!("Finder lists PilotHouse under Open With once the app is installed")
+        bail!(
+            "Finder lists {} under Open With once the app is installed",
+            ph_brand::NAME
+        )
     }
 
     pub fn uninstall() -> Result<()> {
@@ -223,12 +242,13 @@ fn desktop_entry(exe: &std::path::Path) -> String {
     format!(
         "[Desktop Entry]\n\
          Type=Application\n\
-         Name=PilotHouse\n\
+         Name={name}\n\
          Comment=Coding agents, editor, Git and more, on your machine\n\
          Exec=\"{exe}\" %F\n\
          Terminal=false\n\
          Categories=Development;IDE;TextEditor;\n\
-         MimeType=inode/directory;text/plain;text/x-log;application/json;application/x-yaml;\n"
+         MimeType=inode/directory;text/plain;text/x-log;application/json;application/x-yaml;\n",
+        name = ph_brand::NAME,
     )
 }
 

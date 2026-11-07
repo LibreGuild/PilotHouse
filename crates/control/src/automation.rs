@@ -207,10 +207,26 @@ fn resolve(params: Value, window: &mut Window) -> Result<ElementSnapshot> {
                 number.parse().ok()?,
             ))
         });
-        window
-            .try_find(ElementId::Name(SharedString::from(id.clone())))
-            .or_else(|| named_integer.and_then(|id| window.try_find(id)))
-            .ok_or_else(|| anyhow!("no element with id `{id}`"))?
+        // Never the panicking lookup: two elements with the id (a picker's
+        // field and the composer's) are an error here, not a crash of the
+        // app being driven.
+        let name = ElementId::Name(SharedString::from(id.clone()));
+        let mut found = Vec::new();
+        for wanted in std::iter::once(name).chain(named_integer) {
+            found = window
+                .elements()
+                .into_iter()
+                .filter(|element| element.path().last() == Some(&wanted))
+                .collect();
+            if !found.is_empty() {
+                break;
+            }
+        }
+        match found.len() {
+            0 => bail!("no element with id `{id}`"),
+            1 => found.remove(0),
+            n => bail!("{n} elements have the id `{id}`; use a `path`"),
+        }
     } else if let Some(label) = target.label {
         // Never the panicking lookup: an ambiguous label is an error here,
         // not a crash of the app being driven.

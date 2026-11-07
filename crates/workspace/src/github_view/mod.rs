@@ -700,6 +700,10 @@ impl GithubView {
                     Notification::info("Run with several agents from a workspace."),
                     cx,
                 ),
+                // Terminal agents' chats belong to workspaces, not here.
+                ChatPanelEvent::ResumeInTerminal { .. }
+                | ChatPanelEvent::ContinueInChat { .. }
+                | ChatPanelEvent::ResumeInChat { .. } => {}
             },
         );
         self.chats.insert(id.clone(), (chat.clone(), subscription));

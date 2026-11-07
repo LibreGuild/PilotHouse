@@ -14,7 +14,11 @@ fn text(result: &Value) -> String {
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: "slides_get",
-        description: "Shows the presentation open in PilotHouse Studio beside this chat: its size and theme, every slide with its elements in short (ids, kinds, frames in points, text), what the user has selected (\"this\" in their message), and a guide to the deck model and every operation. `slide` (a number or id) shows one slide in full; `render` (numbers or ids, up to 8, or \"all\" for small decks) attaches pictures of slides as drawn. Look before changing, and render after, to check the result.",
+        description: concat!(
+            "Shows the presentation open in ",
+            ph_brand::name!(),
+            " Studio beside this chat: its size and theme, every slide with its elements in short (ids, kinds, frames in points, text), what the user has selected (\"this\" in their message), and a guide to the deck model and every operation. `slide` (a number or id) shows one slide in full; `render` (numbers or ids, up to 8, or \"all\" for small decks) attaches pictures of slides as drawn. Look before changing, and render after, to check the result."
+        ),
         schema: || {
             json!({ "type": "object", "properties": {
                 "slide": { "description": "A slide number (from 1) or id, shown in full (and rendered unless `render` says otherwise)." },

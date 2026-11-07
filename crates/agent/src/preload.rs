@@ -99,7 +99,12 @@ pub(crate) fn start(store: Store, installed: Vec<&'static AgentSpec>, cx: &mut A
     let task = cx.spawn(async move |cx| {
         cx.background_executor().timer(DELAY).await;
         for spec in due {
-            let result = load(spec, cx).await;
+            let env = if spec.id == "cline" {
+                crate::cline::env_for(&store)
+            } else {
+                Vec::new()
+            };
+            let result = load(spec, env, cx).await;
             cx.update(|cx| match result {
                 Ok(offered) => {
                     tracing::info!("loaded {}'s options ({})", spec.name, offered.len());
@@ -124,13 +129,14 @@ pub(crate) fn start(store: Store, installed: Vec<&'static AgentSpec>, cx: &mut A
 /// it: what the session offers.
 async fn load(
     spec: &'static AgentSpec,
+    env: Vec<(String, String)>,
     cx: &mut AsyncApp,
 ) -> Result<Vec<AgentOption>, SharedString> {
     // The folder folderless chats use: nothing of the user's for the agent
     // to read, and no project's settings or hooks to run.
     let cwd = ph_store::paths::data_dir().join("agents");
     let _ = std::fs::create_dir_all(&cwd);
-    let connection = cx.new(|cx| AgentConnection::start(spec, cwd.clone(), cx));
+    let connection = cx.new(|cx| AgentConnection::start_with(spec, cwd.clone(), env, cx));
     let ready = cx.update(|cx| connection.read(cx).ready());
     let session = async move {
         let ready = ready.await?;

@@ -100,7 +100,8 @@ pub fn install_crash_handler() {
         let backtrace = std::backtrace::Backtrace::force_capture();
         let thread = std::thread::current();
         let report = format!(
-            "PilotHouse {} panicked on thread {} (on the UI thread it closes; elsewhere it may have been caught).\n\n{info}\n\nBacktrace:\n{backtrace}\n",
+            "{} {} panicked on thread {} (on the UI thread it closes; elsewhere it may have been caught).\n\n{info}\n\nBacktrace:\n{backtrace}\n",
+            ph_brand::NAME,
             env!("CARGO_PKG_VERSION"),
             thread.name().unwrap_or("(unnamed)"),
         );

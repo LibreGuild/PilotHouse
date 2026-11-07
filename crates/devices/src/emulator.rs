@@ -153,9 +153,10 @@ impl EmulatorControl {
             input,
         };
         // Fail early if the endpoint refuses us (e.g. an access policy).
-        control
-            .screenshot(64, 64)
-            .context("the emulator's gRPC endpoint refused PilotHouse")?;
+        control.screenshot(64, 64).context(concat!(
+            "the emulator's gRPC endpoint refused ",
+            ph_brand::name!()
+        ))?;
         Ok(control)
     }
 

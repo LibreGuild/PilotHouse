@@ -51,7 +51,12 @@ gpui_kit::actions!(
 /// Sets up the hub and the control methods. Call once at startup.
 pub fn init(store: ph_store::Store, cx: &mut gpui_kit::App) {
     BrowserHub::init(store.clone(), cx);
-    AgentChrome::init(store, cx);
+    // Agents in the user's own Chrome: not in a build whose brand leaves the
+    // extension out (no bridge, no extension files; its tools and Settings
+    // page are gone too).
+    if ph_brand::enabled(ph_brand::Feature::ChromeExtension) {
+        AgentChrome::init(store, cx);
+    }
     control::register(cx);
     agent_control::register(cx);
 }

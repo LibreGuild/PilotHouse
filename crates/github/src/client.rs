@@ -33,7 +33,7 @@ impl Client {
             .tls_config(tls)
             .timeout_global(Some(Duration::from_secs(60)))
             .http_status_as_error(false)
-            .user_agent(concat!("PilotHouse/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!(ph_brand::stem!(), "/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
         Self {

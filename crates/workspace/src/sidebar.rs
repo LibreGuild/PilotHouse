@@ -53,6 +53,8 @@ use crate::workspace::{View, Workspace};
 
 /// The chats an unfolded workspace lists before *Show all*.
 const NEWEST: usize = 5;
+/// How many chats the Chats list shows before *Show all*.
+const CHATS_SHOWN: usize = 50;
 
 /// The least height an open pane is given while both are open: its
 /// header and a few rows.
@@ -833,9 +835,11 @@ fn workspace_menu(
             }))
             .item(PopupMenuItem::submenu("Colour", colours))
             .separator()
-            .item(item("Remove from PilotHouse", Icons::Trash, || {
-                Box::new(RemoveWorkspace)
-            }))
+            .item(item(
+                concat!("Remove from ", ph_brand::name!()),
+                Icons::Trash,
+                || Box::new(RemoveWorkspace),
+            ))
         })
 }
 
@@ -848,7 +852,15 @@ fn chat_rows(
     limit: Option<usize>,
     cx: &mut Context<Workspace>,
 ) -> Vec<AnyElement> {
-    let sessions = workspace.sessions_of(project, cx);
+    // An agent CLI's chat whose terminal is open lists as that terminal.
+    let all = workspace.sessions_of(project, cx);
+    let sessions: Vec<&Session> = all
+        .iter()
+        .filter(|session| {
+            session.kind != "terminal"
+                || crate::terminal_agents::TerminalAgents::of_session(session.id, cx).is_none()
+        })
+        .collect();
     let active = (workspace.view() == View::Workspaces
         && workspace.active_project_id() == Some(project))
     .then(|| {
@@ -858,8 +870,13 @@ fn chat_rows(
     })
     .flatten();
     let nested = limit.is_some();
+    // The Chats list too shows its newest (it can hold thousands), all on
+    // request.
+    let limit = limit.unwrap_or(CHATS_SHOWN);
     let chats = ph_agent::ChatHub::existing(project, cx);
-    let (runs, own): (Vec<Session>, Vec<Session>) = sessions.into_iter().partition(is_automated);
+    let (runs, own): (Vec<&Session>, Vec<&Session>) = sessions
+        .into_iter()
+        .partition(|session| is_automated(session));
     // Chats marked done list apart, unless at work again.
     let busy = |session: &Session| {
         chats.as_ref().is_some_and(|chats| {
@@ -871,13 +888,14 @@ fn chat_rows(
                 })
         })
     };
-    let (done, own): (Vec<Session>, Vec<Session>) = own
+    let (done, own): (Vec<&Session>, Vec<&Session>) = own
         .into_iter()
         .partition(|session| workspace.is_settled(session.id) && !busy(session));
     let show_all = workspace.show_all.contains(&project);
-    let shown = match limit {
-        Some(limit) if !show_all => own.len().min(limit),
-        _ => own.len(),
+    let shown = if show_all {
+        own.len()
+    } else {
+        own.len().min(limit)
     };
     let entity = cx.entity().downgrade();
     let today = Zoned::now();
@@ -943,7 +961,7 @@ fn chat_rows(
             cx,
         ));
     }
-    if own.len() > shown || (show_all && limit.is_some_and(|limit| own.len() > limit)) {
+    if own.len() > shown || (show_all && own.len() > limit) {
         let more = own.len() > shown;
         let toggle = entity.clone();
         rows.push(
@@ -1094,7 +1112,14 @@ fn chat_row(
         .or_else(|| ph_agent::agents::find(&session.agent_id));
     let line = summary
         .and_then(|summary| summary.line)
-        .filter(|line| !line.is_empty());
+        .filter(|line| !line.is_empty())
+        // An agent CLI's chat, its terminal closed: what it said last.
+        .or_else(|| {
+            (session.kind == "terminal").then(|| match &session.last_line {
+                Some(line) if !line.is_empty() => format!("Terminal · {line}"),
+                _ => "Terminal session".to_string(),
+            })
+        });
     let line_color = match state {
         ChatState::NeedsYou => cx.theme().warning,
         ChatState::Failed => cx.theme().danger,
@@ -1634,6 +1659,7 @@ mod tests {
             updated_at: 0,
             cwd: None,
             kind: kind.into(),
+            last_line: None,
         };
         assert!(is_automated(&session(
             "Nightly summary (scheduled)",

@@ -393,15 +393,21 @@ impl BrowserPanel {
                                 )
                             })
                             .separator()
-                            .item(
-                                PopupMenuItem::new("Let agents use your Chrome…")
-                                    .icon(IconName::Globe)
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(
-                                            Box::new(crate::OpenChromeExtensionSettings),
-                                            cx,
-                                        )
-                                    }),
+                            // Not in a build whose brand leaves the extension out.
+                            .when(
+                                ph_brand::enabled(ph_brand::Feature::ChromeExtension),
+                                |menu| {
+                                    menu.item(
+                                        PopupMenuItem::new("Let agents use your Chrome…")
+                                            .icon(IconName::Globe)
+                                            .on_click(|_, window, cx| {
+                                                window.dispatch_action(
+                                                    Box::new(crate::OpenChromeExtensionSettings),
+                                                    cx,
+                                                )
+                                            }),
+                                    )
+                                },
                             )
                             .item(
                                 PopupMenuItem::new(if running {
@@ -515,7 +521,7 @@ impl BrowserPanel {
                 .into_any_element(),
             BrowserStatus::NoBrowser => EmptyState::new("No browser found")
                 .icon(Icons::Globe)
-                .description("PilotHouse drives a Chromium-family browser: Chrome, Edge, Brave or Chromium. Install one, or choose one you already have.")
+                .description(concat!(ph_brand::name!(), " drives a Chromium-family browser: Chrome, Edge, Brave or Chromium. Install one, or choose one you already have."))
                 .action(
                     h_flex()
                         .gap_2()

@@ -19,8 +19,6 @@ This product bundles third-party works under their own licences:
 - crates/ui/src/menu.rs is adapted from gpui-component's
   menu/dropdown_menu.rs, Apache License 2.0.
 
-The PilotHouse app icon (crates/app/assets/icon/, crates/ui/assets/app-icon.png)
-and title bar mark (crates/ui/assets/logo-mark.png) were drawn for this project
-as vector art (crates/app/assets/icon/PilotHouse.svg and PilotHouse-tile.svg are
-the sources) and are covered by the Apache License 2.0 with the rest of the
-repository.
+The PilotHouse app icon and title bar mark (brand/icons/) were drawn for this
+project as vector art (brand/icons/app.svg and app-tile.svg are the sources)
+and are covered by the Apache License 2.0 with the rest of the repository.

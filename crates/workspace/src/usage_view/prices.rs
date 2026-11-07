@@ -105,7 +105,9 @@ impl Prices {
             }
             _ => bare.clone(),
         };
-        [model.clone(), bare, undated]
+        // Cline writes some versions with a dot (`claude-sonnet-4.6`).
+        let dashed = undated.replace('.', "-");
+        [model.clone(), bare, undated, dashed]
             .into_iter()
             .flat_map(|name| {
                 ["", "anthropic/", "openai/", "gemini/", "vertex_ai/"]
@@ -133,7 +135,7 @@ fn fetch() -> Option<HashMap<String, Price>> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .tls_config(tls)
         .timeout_global(Some(Duration::from_secs(20)))
-        .user_agent(concat!("PilotHouse/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!(ph_brand::stem!(), "/", env!("CARGO_PKG_VERSION")))
         .build()
         .into();
     let bytes = agent

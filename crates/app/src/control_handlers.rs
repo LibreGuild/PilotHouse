@@ -16,6 +16,15 @@ pub fn register(cx: &mut App) {
     ControlServer::handle("app.state", |_, cx| app_state(cx), cx);
     ControlServer::handle("project.resolve", resolve_project, cx);
     ControlServer::handle("app.open", open_paths, cx);
+    // `pilothouse quick-chat`, from a shortcut set in the system.
+    ControlServer::handle(
+        "app.quick_chat",
+        |_, cx| {
+            ph_workspace::toggle_quick_chat(cx);
+            Ok(json!(true))
+        },
+        cx,
+    );
     ControlServer::handle("todo.list", list_todos, cx);
     ControlServer::handle("todo.add", add_todo, cx);
     ControlServer::handle("util.list", list_utilities, cx);
@@ -135,6 +144,7 @@ fn app_state(cx: &mut App) -> Result<Value> {
         "view": match workspace.view() {
             ph_workspace::View::Workspaces => "workspaces",
             ph_workspace::View::GitHub => "github",
+            ph_workspace::View::Custom(id) => id,
         },
         "sidebar_collapsed": workspace.is_sidebar_collapsed(),
         "context_panel_open": space.map(|space| space.is_context_open()),

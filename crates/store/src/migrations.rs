@@ -1,9 +1,15 @@
 //! Schema migrations, tracked with SQLite's `user_version` pragma.
 //!
 //! Append new migrations to [`MIGRATIONS`]; never edit one that has shipped.
+//!
+//! An organisation's build that keeps tables of its own puts their
+//! migrations on a track of its own ([`apply_track`]), counted in the
+//! `schema_tracks` table, never in [`MIGRATIONS`]: a migration it appended
+//! there would take the number of PilotHouse's next one, and a database that
+//! already had it would skip PilotHouse's.
 
-use anyhow::{Context as _, Result};
-use rusqlite::Connection;
+use anyhow::{Context as _, Result, bail};
+use rusqlite::{Connection, OptionalExtension as _};
 
 const MIGRATIONS: &[&str] = &[
     // 1: initial schema.
@@ -296,6 +302,9 @@ const MIGRATIONS: &[&str] = &[
                input_tokens, output_tokens, cached_tokens, cost, currency
         FROM session_usage;
     "#,
+    // 15: a chat's last line, for chats whose messages are not kept here
+    // (an agent CLI's in a terminal, shown under its title once closed).
+    "ALTER TABLE sessions ADD COLUMN last_line TEXT;",
 ];
 
 /// Backups kept of a database file, newest first; older ones are deleted.
@@ -303,10 +312,19 @@ const BACKUPS_KEPT: usize = 3;
 
 pub fn apply(connection: &Connection) -> Result<()> {
     let current: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if current as usize > MIGRATIONS.len() {
+        // A newer build updated this database. Its migrations only add, so
+        // this build still works with it; say so in the log for support.
+        tracing::warn!(
+            "the database is at schema {current}, newer than this build's {}",
+            MIGRATIONS.len()
+        );
+    }
     // An existing database about to change gets a copy first, so a
     // migration that goes wrong cannot cost the user their data.
     if current > 0 && (current as usize) < MIGRATIONS.len() {
-        backup(connection, current).context("backing up the database before updating it")?;
+        backup(connection, &format!("v{current}"))
+            .context("backing up the database before updating it")?;
     }
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(current.max(0) as usize) {
         let version = index + 1;
@@ -320,10 +338,71 @@ pub fn apply(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Applies `migrations` of the track `track` that this database does not
+/// have yet, each in a transaction, in order. The track's version (how many
+/// it has) is kept in `schema_tracks`; the core's stays in `user_version`.
+/// Like the core's, a track's migrations are append-only. `track` is a short
+/// name of lowercase letters, digits, `-` and `_` (an organisation's name);
+/// `core` is taken.
+pub fn apply_track(connection: &Connection, track: &str, migrations: &[&str]) -> Result<()> {
+    let valid = !track.is_empty()
+        && track.len() <= 64
+        && track != "core"
+        && track
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if !valid {
+        bail!(
+            "`{track}` is not a migration track name (lowercase letters, digits, - and _; not `core`)"
+        );
+    }
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_tracks (
+            track   TEXT PRIMARY KEY,
+            version INTEGER NOT NULL
+        );",
+    )?;
+    let current: i64 = connection
+        .query_row(
+            "SELECT version FROM schema_tracks WHERE track = ?1",
+            [track],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    if current as usize > migrations.len() {
+        tracing::warn!(
+            "the database's `{track}` track is at {current}, newer than this build's {}",
+            migrations.len()
+        );
+    }
+    if current > 0 && (current as usize) < migrations.len() {
+        backup(connection, &format!("{track}-v{current}"))
+            .with_context(|| format!("backing up the database before updating `{track}`"))?;
+    }
+    for (index, sql) in migrations.iter().enumerate().skip(current.max(0) as usize) {
+        let version = index as i64 + 1;
+        let transaction = connection.unchecked_transaction()?;
+        transaction
+            .execute_batch(sql)
+            .and_then(|()| {
+                transaction.execute(
+                    "INSERT INTO schema_tracks (track, version) VALUES (?1, ?2)
+                     ON CONFLICT(track) DO UPDATE SET version = excluded.version",
+                    rusqlite::params![track, version],
+                )
+            })
+            .and_then(|_| transaction.commit())
+            .with_context(|| format!("applying database migration {version} of `{track}`"))?;
+        tracing::info!("applied database migration {version} of `{track}`");
+    }
+    Ok(())
+}
+
 /// Copies the database (consistently, even while open in WAL mode) to
-/// `<file>.v<version>.bak` beside it, keeping the newest [`BACKUPS_KEPT`].
-/// An in-memory database has nothing to back up.
-fn backup(connection: &Connection, version: i64) -> Result<()> {
+/// `<file>.<label>.bak` beside it (`pilothouse.db.v13.bak`), keeping the
+/// newest [`BACKUPS_KEPT`]. An in-memory database has nothing to back up.
+fn backup(connection: &Connection, label: &str) -> Result<()> {
     let Some(file) = connection.path().filter(|path| !path.is_empty()) else {
         return Ok(());
     };
@@ -332,21 +411,27 @@ fn backup(connection: &Connection, version: i64) -> Result<()> {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let target = file.with_file_name(format!("{name}.v{version}.bak"));
+    let target = file.with_file_name(format!("{name}.{label}.bak"));
     let _ = std::fs::remove_file(&target);
     connection.execute("VACUUM INTO ?1", [target.to_string_lossy()])?;
     tracing::info!("backed up the database to {}", target.display());
-    // The oldest backups go.
+    // The oldest backups go: of this one's kind only (the core's, or this
+    // track's), so a track's updates never take the core's backups.
     let folder = file.parent().unwrap_or(std::path::Path::new("."));
+    let kind = backup_kind(label);
     let mut backups: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(folder)?
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
             path.file_name()
-                .map(|other| other.to_string_lossy())
-                .is_some_and(|other| {
-                    other.starts_with(&format!("{name}.v")) && other.ends_with(".bak")
+                .map(|other| other.to_string_lossy().into_owned())
+                .and_then(|other| {
+                    other
+                        .strip_prefix(&format!("{name}."))?
+                        .strip_suffix(".bak")
+                        .map(|other| backup_kind(other) == kind)
                 })
+                .unwrap_or(false)
         })
         .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
         .collect();
@@ -357,9 +442,25 @@ fn backup(connection: &Connection, version: i64) -> Result<()> {
     Ok(())
 }
 
+/// Whose backup a label is: `v13` the core's (``), `acme-v2` track
+/// `acme`'s (`acme-`).
+fn backup_kind(label: &str) -> &str {
+    label
+        .trim_end_matches(|c: char| c.is_ascii_digit())
+        .strip_suffix('v')
+        .unwrap_or(label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backups_are_kept_by_kind() {
+        assert_eq!(backup_kind("v14"), "");
+        assert_eq!(backup_kind("acme-v2"), "acme-");
+        assert_ne!(backup_kind("v3"), backup_kind("acme-v3"));
+    }
 
     #[test]
     fn an_existing_database_is_backed_up_before_it_changes() {
@@ -403,11 +504,105 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn track_version(connection: &Connection, track: &str) -> i64 {
+        connection
+            .query_row(
+                "SELECT version FROM schema_tracks WHERE track = ?1",
+                [track],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_track_applies_its_own_migrations_beside_the_core() {
+        let connection = Connection::open_in_memory().unwrap();
+        apply(&connection).unwrap();
+        let core: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let first = ["CREATE TABLE x_acme_notes (id INTEGER PRIMARY KEY, text TEXT NOT NULL)"];
+        apply_track(&connection, "acme", &first).unwrap();
+        assert_eq!(track_version(&connection, "acme"), 1);
+        // Again: nothing to do.
+        apply_track(&connection, "acme", &first).unwrap();
+        // A later build appends one; only that one runs.
+        let later = [
+            first[0],
+            "ALTER TABLE x_acme_notes ADD COLUMN done INTEGER NOT NULL DEFAULT 0",
+        ];
+        apply_track(&connection, "acme", &later).unwrap();
+        assert_eq!(track_version(&connection, "acme"), 2);
+        connection
+            .execute("INSERT INTO x_acme_notes (text, done) VALUES ('hi', 1)", [])
+            .unwrap();
+        // The core's version is untouched, and so is a later core update.
+        let after: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(after, core);
+        apply(&connection).unwrap();
+    }
+
+    #[test]
+    fn a_failing_track_migration_changes_nothing() {
+        let connection = Connection::open_in_memory().unwrap();
+        apply(&connection).unwrap();
+        let broken = [
+            "CREATE TABLE x_acme_a (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE x_acme_b (id INTEGER PRIMARY KEY); NOT SQL",
+        ];
+        assert!(apply_track(&connection, "acme", &broken).is_err());
+        // The first one stays applied; the broken one left no table behind.
+        assert_eq!(track_version(&connection, "acme"), 1);
+        let tables: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'x_acme_b'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0);
+    }
+
+    #[test]
+    fn track_names_are_checked() {
+        let connection = Connection::open_in_memory().unwrap();
+        for name in ["", "core", "Acme", "acme corp", "a/b"] {
+            assert!(apply_track(&connection, name, &[]).is_err(), "{name:?}");
+        }
+        apply_track(&connection, "acme-tools_2", &[]).unwrap();
+    }
+
+    #[test]
+    fn a_track_update_is_backed_up_first() {
+        let dir = std::env::temp_dir().join(format!("ph-track-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("pilothouse.db");
+        let first = ["CREATE TABLE x_acme_a (id INTEGER PRIMARY KEY)"];
+        {
+            let connection = Connection::open(&file).unwrap();
+            apply(&connection).unwrap();
+            apply_track(&connection, "acme", &first).unwrap();
+        }
+        let connection = Connection::open(&file).unwrap();
+        apply_track(
+            &connection,
+            "acme",
+            &[first[0], "CREATE TABLE x_acme_b (id INTEGER PRIMARY KEY)"],
+        )
+        .unwrap();
+        assert!(dir.join("pilothouse.db.acme-v1.bak").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn usage_kept_before_days_moves_to_its_last_day() {
         let connection = Connection::open_in_memory().unwrap();
         // A database just before usage by day, with a chat that used some.
-        let before = MIGRATIONS.len() - 1;
+        // Migration 14 made usage by day.
+        let before = 13;
         for sql in &MIGRATIONS[..before] {
             connection.execute_batch(sql).unwrap();
         }

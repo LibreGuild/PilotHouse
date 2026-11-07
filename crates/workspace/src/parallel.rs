@@ -69,6 +69,9 @@ pub fn open_start(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if !ph_brand::enabled(ph_brand::Feature::ParallelRuns) {
+        return;
+    }
     let view = cx.new(|cx| StartView::new(space, root, prompt, window, cx));
     window.open_dialog(cx, move |dialog, _, _| {
         dialog
@@ -202,9 +205,10 @@ impl Render for StartView {
         let picked = self.agents.iter().filter(|(_, picked)| *picked).count();
         let space_note = match self.size {
             Some(size) => format!(
-                "Each agent works on its own copy of the project ({} each, {} in all), made from its current state, uncommitted changes included. Copies live in PilotHouse's data folder; discard them from Parallel runs when done.",
+                "Each agent works on its own copy of the project ({} each, {} in all), made from its current state, uncommitted changes included. Copies live in {app}'s data folder; discard them from Parallel runs when done.",
                 size_text(size),
-                size_text(size * picked as u64)
+                size_text(size * picked as u64),
+                app = ph_brand::NAME,
             ),
             None => "Each agent works on its own copy of the project, made from its current state."
                 .to_string(),
@@ -262,6 +266,9 @@ pub fn open_runs(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if !ph_brand::enabled(ph_brand::Feature::ParallelRuns) {
+        return;
+    }
     let view = cx.new(|cx| RunsView::new(space, project, root, cx));
     window.open_dialog(cx, move |dialog, _, _| {
         dialog

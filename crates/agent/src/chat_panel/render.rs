@@ -16,7 +16,7 @@ impl ChatPanel {
                     Some(Icons::Github),
                     None,
                     project.name.clone(),
-                    format!("Reads {} in PilotHouse's own copy", project.name),
+                    format!("Reads {} in {}'s own copy", project.name, ph_brand::NAME),
                 )
             } else if project.empty {
                 (
@@ -1123,6 +1123,9 @@ impl ChatPanel {
 
 impl Render for ChatPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.terminal_session.is_some() {
+            return self.render_terminal_session(cx);
+        }
         v_flex()
             .size_full()
             .child(self.render_header(cx))
@@ -1136,6 +1139,7 @@ impl Render for ChatPanel {
                     .child(self.render_transcript(cx)),
             )
             .child(self.render_composer(cx))
+            .into_any_element()
     }
 }
 
@@ -1257,17 +1261,19 @@ pub(super) fn attach_button(panel: WeakEntity<ChatPanel>) -> impl IntoElement {
                         });
                     }),
             )
-            .separator()
-            .item(
-                PopupMenuItem::new("Run with several agents…")
-                    .icon(Icons::GitCompareArrows)
-                    .on_click(move |_, _, cx| {
-                        _ = parallel.update(cx, |panel, cx| {
-                            let prompt = panel.composer.read(cx).value().trim().to_string();
-                            cx.emit(ChatPanelEvent::RunParallel { prompt });
-                        });
-                    }),
-            )
+            // Not in a build whose brand leaves parallel runs out.
+            .when(ph_brand::enabled(ph_brand::Feature::ParallelRuns), |menu| {
+                menu.separator().item(
+                    PopupMenuItem::new("Run with several agents…")
+                        .icon(Icons::GitCompareArrows)
+                        .on_click(move |_, _, cx| {
+                            _ = parallel.update(cx, |panel, cx| {
+                                let prompt = panel.composer.read(cx).value().trim().to_string();
+                                cx.emit(ChatPanelEvent::RunParallel { prompt });
+                            });
+                        }),
+                )
+            })
         })
 }
 

@@ -110,7 +110,7 @@ impl Render for InstructionsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         let reader = |name: &str| match name {
-            "AGENTS.md" => "Codex, Antigravity and most agents",
+            "AGENTS.md" => "Codex, Antigravity, Cline and most agents",
             "CLAUDE.md" => "Claude Code",
             _ => "Gemini CLI",
         };

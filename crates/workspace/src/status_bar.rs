@@ -109,7 +109,7 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                 .text_color(cx.theme().muted_foreground)
                 .children(limits(cx))
                 .when(!stacks.is_empty(), |this| this.child(stacks.join(" · ")))
-                .child(format!("PilotHouse {}", ph_ui::version())),
+                .child(format!("{} {}", ph_brand::NAME, ph_ui::version())),
         )
 }
 
@@ -287,6 +287,9 @@ fn ports_item(ports: &[u16], _: &Context<Workspace>) -> Option<AnyElement> {
 /// The Android device in use, once devices are used at all: its menu
 /// switches devices, connects one, and opens Logcat or the Devices pane.
 fn device_item(cx: &Context<Workspace>) -> Option<AnyElement> {
+    if !ph_brand::enabled(ph_brand::Feature::Devices) {
+        return None;
+    }
     let manager = ph_devices::DeviceManager::existing(cx)?;
     let state = manager.read(cx);
     let device = state.selected().or_else(|| state.devices().first())?;
@@ -307,13 +310,16 @@ fn device_item(cx: &Context<Workspace>) -> Option<AnyElement> {
                 use gpui_kit::component::menu::PopupMenuItem;
                 ph_devices::device_menu(menu, &manager, window, cx)
                     .separator()
-                    .item(
-                        PopupMenuItem::new("Logcat")
-                            .icon(Icon::new(Icons::ScrollText))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(crate::actions::ShowLogcat), cx)
-                            }),
-                    )
+                    // Not in a build whose brand leaves Logcat out.
+                    .when(ph_brand::enabled(ph_brand::Feature::Logcat), |menu| {
+                        menu.item(
+                            PopupMenuItem::new("Logcat")
+                                .icon(Icon::new(Icons::ScrollText))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(crate::actions::ShowLogcat), cx)
+                                }),
+                        )
+                    })
                     .item(
                         PopupMenuItem::new("Devices")
                             .icon(Icon::new(Icons::TabletSmartphone))
@@ -332,6 +338,9 @@ fn drive_item(
     space: &crate::workspace_screen::WorkspaceScreen,
     cx: &Context<Workspace>,
 ) -> Option<AnyElement> {
+    if !ph_brand::enabled(ph_brand::Feature::NetworkDrives) {
+        return None;
+    }
     let (label, tip, color) = if let Some(server) = space.server() {
         (
             format!("SSH · {}", server.mapping.host),

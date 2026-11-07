@@ -1538,8 +1538,9 @@ impl Reader<'_> {
             what: what.to_string(),
         });
         self.note(format!(
-            "{} kept as it was (PilotHouse shows it and writes it back but does not edit it)",
-            what.to_lowercase()
+            "{} kept as it was ({} shows it and writes it back but does not edit it)",
+            what.to_lowercase(),
+            ph_brand::NAME
         ));
         self.remember(node, &element);
         Ok(Some(element))

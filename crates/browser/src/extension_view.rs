@@ -145,7 +145,7 @@ impl Render for ChromeExtensionView {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
-                            .child("1. Let Chrome reach PilotHouse"),
+                            .child(concat!("1. Let Chrome reach ", ph_brand::name!())),
                     )
                     .child(
                         h_flex()
@@ -153,7 +153,7 @@ impl Render for ChromeExtensionView {
                             .child(div().flex_1().min_w_0().text_xs().text_color(muted).child(if set_up {
                                 format!("Set up for {}.", self.registration.browsers.join(", "))
                             } else {
-                                "Registers PilotHouse with Chrome, Chromium, Edge and Brave for your user, so that only its extension can talk to the app. Nothing is installed in the browser.".to_string()
+                                format!("Registers {} with Chrome, Chromium, Edge and Brave for your user, so that only its extension can talk to the app. Nothing is installed in the browser.", ph_brand::NAME)
                             }))
                             .child(
                                 Button::new("chrome-extension-set-up")
@@ -175,7 +175,7 @@ impl Render for ChromeExtensionView {
                     )
                     .when(self.registration.elsewhere, |this| {
                         this.child(div().text_xs().text_color(theme.warning).child(
-                            "Another PilotHouse data folder is set up in a browser too: Set up here to use this one.",
+                            concat!("Another ", ph_brand::name!(), " data folder is set up in a browser too: Set up here to use this one."),
                         ))
                     })
                     .when_some(self.message.clone(), |this, (ok, message)| {
@@ -237,8 +237,8 @@ impl Render for ChromeExtensionView {
                     .child(step(4, "Pin PilotHouse from the puzzle-piece menu: its button shares the tab in front with agents, or stops sharing it."))
                     .child(step(5, "When an agent opens a page, a purple PilotHouse tab group appears. While an agent acts, its tab glows; Chrome also shows that PilotHouse is debugging the browser.")),
             )
-            .child(div().text_xs().text_color(muted).child(
-                "For agents to upload files, turn on “Allow access to file URLs” in the extension's Details. After PilotHouse updates, click the reload arrow on the extension in chrome://extensions.",
+            .child(div().text_xs().text_color(muted).child(concat!(
+                "For agents to upload files, turn on “Allow access to file URLs” in the extension's Details. After ", ph_brand::name!(), " updates, click the reload arrow on the extension in chrome://extensions."),
             ))
     }
 }

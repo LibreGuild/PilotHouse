@@ -24,7 +24,7 @@ The look is a calm graphite, cool rather than warm: near-black with a faint blue
 
 - A workspace's colour is a small mark beside its name, never a wash over chrome.
 - Agents' brand marks identify the agent, at 14–18 px, and nowhere else.
-- **The mark**: a white mast and pennant, the pennant the P's bowl (a signal flag: someone is steering), on a violet glass tile (`#A78BFA` → `#6D28D9` → `#3B0FA8`, a soft pink glow at the top right). Sources in `crates/app/assets/icon/` (`PilotHouse.svg` on Apple's icon grid, `PilotHouse-tile.svg` edge to edge). The title bar shows the tile at 20 px.
+- **The mark**: a white mast and pennant, the pennant the P's bowl (a signal flag: someone is steering), on a violet glass tile (`#A78BFA` → `#6D28D9` → `#3B0FA8`, a soft pink glow at the top right). Sources in `brand/icons/` (`app.svg` on Apple's icon grid, `app-tile.svg` edge to edge). The title bar shows the tile at 20 px.
 - To tint, mix an existing token (`token.opacity(0.12)`), never a new hex.
 
 ## 2. Type

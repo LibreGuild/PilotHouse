@@ -95,6 +95,20 @@ pub fn ask(spec: &AgentSpec, prompt: &str, cwd: &Path) -> Result<String> {
             Some(prompt),
         ),
         "antigravity" => (vec![format!("-p={prompt}")], None),
+        // Plan mode and no approvals: it only writes the answer. Its JSON
+        // lines end with the run's result (see `cline_answer`).
+        "cline" => (
+            vec![
+                "--plan".into(),
+                "--json".into(),
+                "--auto-approve".into(),
+                "false".into(),
+                "-t".into(),
+                (TIMEOUT.as_secs() - 10).to_string(),
+                "Do what the piped text asks.".into(),
+            ],
+            Some(prompt),
+        ),
         other => bail!("{other} cannot run one-off jobs"),
     };
     if !cwd.is_dir() {
@@ -105,6 +119,7 @@ pub fn ask(spec: &AgentSpec, prompt: &str, cwd: &Path) -> Result<String> {
     }
     let mut child = ph_env::command(&program)
         .args(&args)
+        .envs(spec.env.iter().copied())
         .current_dir(cwd)
         .stdin(if stdin.is_some() {
             Stdio::piped()
@@ -169,12 +184,15 @@ pub fn ask(spec: &AgentSpec, prompt: &str, cwd: &Path) -> Result<String> {
     };
     let stdout = collect(out);
     let stderr = collect(err);
-    let answer = if spec.id == "codex" {
-        let text = std::fs::read_to_string(&last_message).unwrap_or_default();
-        let _ = std::fs::remove_file(&last_message);
-        text
-    } else {
-        stdout
+    let answer = match spec.id {
+        "codex" => {
+            let text = std::fs::read_to_string(&last_message).unwrap_or_default();
+            let _ = std::fs::remove_file(&last_message);
+            text
+        }
+        "cline" => cline_answer(&stdout)
+            .map_err(|reason| anyhow::anyhow!("{} could not answer: {reason}", spec.name))?,
+        _ => stdout,
     };
     if !status.success() || answer.trim().is_empty() {
         let reason = stderr
@@ -185,4 +203,49 @@ pub fn ask(spec: &AgentSpec, prompt: &str, cwd: &Path) -> Result<String> {
         bail!("{} could not answer: {reason}", spec.name);
     }
     Ok(answer.trim().to_string())
+}
+
+/// The answer in Cline's JSON lines (`--json`): the text of its last
+/// `run_result`, when the run completed; else the error it reported.
+fn cline_answer(stdout: &str) -> std::result::Result<String, String> {
+    let mut error = None;
+    for line in stdout.lines().rev() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match event["type"].as_str() {
+            Some("run_result") => {
+                let reason = event["finishReason"].as_str().unwrap_or_default();
+                return match event["text"].as_str() {
+                    Some(text) if reason == "completed" => Ok(text.to_string()),
+                    _ => Err(format!("it stopped ({reason})")),
+                };
+            }
+            Some("error") if error.is_none() => {
+                error = event["message"].as_str().map(str::to_string);
+            }
+            _ => {}
+        }
+    }
+    Err(error.unwrap_or_else(|| "no answer".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cline_answer;
+
+    #[test]
+    fn clines_answer_is_its_runs_result() {
+        let out = concat!(
+            r#"{"type":"agent_event","event":{"type":"content_start","text":"hel"}}"#,
+            "\n",
+            r#"{"type":"run_result","finishReason":"completed","text":"hello"}"#,
+            "\n",
+        );
+        assert_eq!(cline_answer(out).as_deref(), Ok("hello"));
+        let stopped = r#"{"type":"run_result","finishReason":"aborted","text":""}"#;
+        assert!(cline_answer(stopped).is_err());
+        let failed = r#"{"type":"error","message":"Not signed in"}"#;
+        assert_eq!(cline_answer(failed), Err("Not signed in".to_string()));
+    }
 }

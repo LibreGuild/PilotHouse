@@ -16,6 +16,9 @@ permissions:
 
 jobs:
   deploy:
+    # PilotHouse's own site: a copy of the repository elsewhere (an
+    # organisation's build) does not publish it.
+    if: github.repository == 'LibreGuild/PilotHouse'
     runs-on: ubuntu-latest
     permissions:
       pages: write

@@ -33,13 +33,17 @@ pub(crate) enum Page {
 }
 
 impl Page {
-    /// Its place in the list of pages (see [`open`]).
+    /// Its place in the list of pages (see [`open`]): pages of features the
+    /// brand leaves out are not in it.
     fn index(self) -> usize {
+        use ph_brand::{Feature, enabled};
+        let chrome = usize::from(enabled(Feature::ChromeExtension));
+        let drives = usize::from(enabled(Feature::NetworkDrives));
         match self {
             Page::First => 0,
             Page::Chrome => 5,
-            Page::GitHub => 7,
-            Page::Storage => 10,
+            Page::GitHub => 6 + chrome,
+            Page::Storage => 8 + chrome + drives,
         }
     }
 }
@@ -135,28 +139,34 @@ pub(crate) fn open(
                                             group_ix: None,
                                         },
                                     )
-                                    .pages([
+                                    .pages(
                                         // In this order: see `Page::index`.
-                                        appearance_page(
-                                            &fonts,
-                                            &themes,
-                                            workspace,
-                                            prefs(cx).window,
-                                        ),
-                                        editor_page(&fonts),
-                                        terminal_page(),
-                                        chat_page(),
-                                        agents_page(),
-                                        chrome_page(chrome.clone()),
-                                        tools_page(tools.clone()),
-                                        github_page(accounts.clone()),
-                                        templates_page(templates.clone()),
-                                        drives_page(drives.clone()),
-                                        storage_page(storage.clone()),
-                                        features_page(),
-                                        shortcuts_page(),
-                                        about_page(),
-                                    ]),
+                                        [
+                                            Some(appearance_page(
+                                                &fonts,
+                                                &themes,
+                                                workspace,
+                                                prefs(cx).window,
+                                            )),
+                                            Some(editor_page(&fonts)),
+                                            Some(terminal_page()),
+                                            Some(chat_page()),
+                                            Some(agents_page()),
+                                            ph_brand::enabled(ph_brand::Feature::ChromeExtension)
+                                                .then(|| chrome_page(chrome.clone())),
+                                            Some(tools_page(tools.clone())),
+                                            Some(github_page(accounts.clone())),
+                                            Some(templates_page(templates.clone())),
+                                            ph_brand::enabled(ph_brand::Feature::NetworkDrives)
+                                                .then(|| drives_page(drives.clone())),
+                                            Some(storage_page(storage.clone())),
+                                            Some(features_page()),
+                                            Some(shortcuts_page()),
+                                            Some(about_page()),
+                                        ]
+                                        .into_iter()
+                                        .flatten(),
+                                    ),
                             ),
                     )
                     .child(
@@ -378,7 +388,10 @@ fn appearance_page(
                             .on_click(|_, _, cx| crate::theme_mods::choose_backdrop(cx))
                     }),
                 )
-                .description("PNG, JPEG, WebP, GIF or BMP. PilotHouse keeps its own copy, sized for a screen.")
+                .description(format!(
+                    "PNG, JPEG, WebP, GIF or BMP. {} keeps its own copy, sized for a screen.",
+                    ph_brand::NAME
+                ))
                 .keywords(["image", "wallpaper", "picture", "backdrop"]),
             );
         }
@@ -498,7 +511,7 @@ fn appearance_page(
                                 )
                         }),
                     )
-                    .description("Describe the look you want in a chat: the agent changes PilotHouse as you talk, and saves it as a theme of your own. Or import a VS Code theme.")
+                    .description(format!("Describe the look you want in a chat: the agent changes {} as you talk, and saves it as a theme of your own. Or import a VS Code theme.", ph_brand::NAME))
                     .keywords(["theme", "design", "customize", "colors", "mod", "agent"]),
                 )
                 .item(
@@ -744,7 +757,7 @@ fn agents_page() -> SettingPage {
 }
 
 fn chat_page() -> SettingPage {
-    SettingPage::new("Chat")
+    let page = SettingPage::new("Chat")
         .icon(Icon::new(Icons::MessageSquare))
         .group(
             SettingGroup::new().item(
@@ -760,7 +773,23 @@ fn chat_page() -> SettingPage {
                 .description("How wide messages get on a large window.")
                 .keywords(["chat", "width", "column"]),
             ),
-        )
+        );
+    if !ph_brand::enabled(ph_brand::Feature::QuickChat) {
+        return page;
+    }
+    page.group(
+                SettingGroup::new().title("Quick chat").item(
+                    SettingItem::new(
+                        "Shortcut",
+                        SettingField::render(|_, _, _| crate::quick_chat::ShortcutRecorder),
+                    )
+                    .description(format!(
+                        "Opens a small chat window over every app, from anywhere, while {app} runs; again, it hides it. Its chats are under Chats. The command “pilothouse quick-chat” opens it too: give that a shortcut in your system's keyboard settings (on Wayland, the only way).",
+                        app = ph_brand::NAME
+                    ))
+                    .keywords(["quick", "chat", "shortcut", "hotkey", "global", "floating", "popup", "spotlight"]),
+                ),
+            )
 }
 
 fn features_page() -> SettingPage {
@@ -771,7 +800,7 @@ fn features_page() -> SettingPage {
                 .description(
                     "Turn off tools you do not use. Nothing runs for a tool until you open it.",
                 )
-                .items(ContextTab::ALL.into_iter().map(|tab| {
+                .items(ContextTab::available().map(|tab| {
                     SettingItem::new(
                         tab.label(),
                         SettingField::switch(
@@ -792,12 +821,15 @@ fn system_group() -> SettingGroup {
     if !shell::SUPPORTED {
         return group.item(
             SettingItem::new(
-                "Open with PilotHouse",
+                format!("Open with {}", ph_brand::NAME),
                 SettingField::render(|_, _, cx| {
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("In Finder: right-click → Open With → PilotHouse")
+                        .child(format!(
+                            "In Finder: right-click → Open With → {}",
+                            ph_brand::NAME
+                        ))
                 }),
             )
             .description("Folders open as workspaces, files in the editor. From a terminal: pilothouse <path>.")
@@ -846,12 +878,25 @@ fn shortcuts_page() -> SettingPage {
 }
 
 fn about_page() -> SettingPage {
-    SettingPage::new("About")
+    let page = SettingPage::new("About")
         .icon(Icon::new(IconName::Info))
         .group(
             SettingGroup::new()
                 .item(SettingItem::render(|_, _, cx| {
-                    note(format!("PilotHouse {} · Apache-2.0", ph_ui::version()), cx)
+                    // A build with its own name says what it is built on.
+                    let based_on = if ph_brand::NAME == "PilotHouse" {
+                        ""
+                    } else {
+                        " · based on PilotHouse"
+                    };
+                    note(
+                        format!(
+                            "{} {}{based_on} · Apache-2.0",
+                            ph_brand::NAME,
+                            ph_ui::version()
+                        ),
+                        cx,
+                    )
                 }))
                 .item(SettingItem::render(|_, _, cx| {
                     let data = ph_store::paths::data_dir();
@@ -871,34 +916,35 @@ fn about_page() -> SettingPage {
                 }))
                 .item(SettingItem::render(|_, _, cx| {
                     note(
-                        "Everything stays on this computer: there is no PilotHouse server."
-                            .to_string(),
+                        format!(
+                            "Everything stays on this computer: there is no {} server.",
+                            ph_brand::NAME
+                        ),
                         cx,
                     )
                 })),
-        )
-        .group(
+        );
+    // A build whose brand turns updates off has no Updates section; the
+    // project's page is still linked.
+    if !crate::updates::enabled() {
+        return page.group(SettingGroup::new().item(SettingItem::render(|_, _, cx| {
+            repository_row(
+                format!("The project's page: {}", crate::updates::REPOSITORY_URL),
+                "Open",
+                cx,
+            )
+        })));
+    }
+    page.group(
             SettingGroup::new()
                 .title("Updates")
                 .item(SettingItem::render(|_, _, cx| update_status(cx)))
                 .item(SettingItem::render(|_, _, cx| {
-                    h_flex()
-                        .w_full()
-                        .justify_between()
-                        .gap_3()
-                        .child(note(
-                            "Release notes, every download and the source are on GitHub."
-                                .to_string(),
-                            cx,
-                        ))
-                        .child(
-                            Button::new("open-repository")
-                                .small()
-                                .outline()
-                                .icon(Icons::Github)
-                                .label("GitHub")
-                                .on_click(|_, _, cx| cx.open_url(crate::updates::REPOSITORY_URL)),
-                        )
+                    repository_row(
+                        "Release notes, every download and the source are on GitHub.".to_string(),
+                        "GitHub",
+                        cx,
+                    )
                 }))
                 .item(
                     SettingItem::new(
@@ -925,27 +971,46 @@ fn about_page() -> SettingPage {
         )
 }
 
+/// A note and a button that opens the project's page (the brand's
+/// `[links] repository`).
+fn repository_row(text: String, label: &'static str, cx: &App) -> impl IntoElement + use<> {
+    h_flex()
+        .w_full()
+        .justify_between()
+        .gap_3()
+        .child(note(text, cx))
+        .child(
+            Button::new("open-repository")
+                .small()
+                .outline()
+                .icon(Icons::Github)
+                .label(label)
+                .on_click(|_, _, cx| cx.open_url(crate::updates::REPOSITORY_URL)),
+        )
+}
+
 /// Where updates stand, with *Check now* (or *Restart to update*).
 fn update_status(cx: &App) -> impl IntoElement + use<> {
     use crate::updates::{self, Status};
+    use ph_brand::NAME;
     let status = updates::Updater::status(cx);
     let text = match &status {
         Status::Idle => "Not checked yet.".to_string(),
         Status::Checking => "Checking…".to_string(),
-        Status::UpToDate => format!("PilotHouse {} is the newest version.", ph_ui::version()),
-        Status::Available { version } => format!("PilotHouse {version} is available."),
+        Status::UpToDate => format!("{NAME} {} is the newest version.", ph_ui::version()),
+        Status::Available { version } => format!("{NAME} {version} is available."),
         Status::Downloading { version } => match updates::Updater::progress(cx) {
             Some((done, total)) if total > 0 => format!(
-                "Downloading PilotHouse {version}… {}%",
+                "Downloading {NAME} {version}… {}%",
                 (done * 100 / total).min(100)
             ),
-            _ => format!("Downloading PilotHouse {version}…"),
+            _ => format!("Downloading {NAME} {version}…"),
         },
         Status::Ready { version, .. } => {
-            format!("PilotHouse {version} is ready: it installs when you quit.")
+            format!("{NAME} {version} is ready: it installs when you quit.")
         }
         Status::Manual { version } => format!(
-            "PilotHouse {version} is available. This copy cannot update itself: download it from GitHub."
+            "{NAME} {version} is available. This copy cannot update itself: download it from GitHub."
         ),
         Status::Failed(reason) => format!("The update failed: {reason}"),
     };

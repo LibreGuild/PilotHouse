@@ -121,4 +121,33 @@ impl ContextTab {
             .position(|tab| *tab == self)
             .unwrap_or_default()
     }
+
+    /// The brand's feature that is this tool (`[features]` in
+    /// `brand/brand.toml`).
+    pub fn feature(self) -> ph_brand::Feature {
+        use ph_brand::Feature;
+        match self {
+            ContextTab::Files => Feature::Files,
+            ContextTab::Changes => Feature::Changes,
+            ContextTab::Pulls => Feature::Pulls,
+            ContextTab::Board => Feature::Board,
+            ContextTab::Terminal => Feature::Terminal,
+            ContextTab::Browser => Feature::Browser,
+            ContextTab::Devices => Feature::Devices,
+            ContextTab::Runs => Feature::Runs,
+            ContextTab::Tests => Feature::Tests,
+            ContextTab::Logcat => Feature::Logcat,
+        }
+    }
+
+    /// Whether this build has the tool at all (the brand can leave one out;
+    /// the user's own switches are in Settings → Features).
+    pub fn in_build(self) -> bool {
+        ph_brand::enabled(self.feature())
+    }
+
+    /// The tools this build has, in [`Self::ALL`]'s order.
+    pub fn available() -> impl Iterator<Item = ContextTab> {
+        Self::ALL.into_iter().filter(|tab| tab.in_build())
+    }
 }

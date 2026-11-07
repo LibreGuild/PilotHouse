@@ -11,8 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, Context, EventEmitter, ImageSource, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, ScrollHandle, SharedString, SharedUri,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, WeakEntity, Window, div, img,
-    px,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px,
 };
 
 use crate::PreviewEvent;
@@ -63,24 +62,25 @@ pub fn markdown_view(
             let theme = cx.theme();
             match node.data::<Result<Diagram, String>>() {
                 Some(Ok(diagram)) => {
-                    // As wide as it is drawn, or the column when that is
-                    // narrower; the frame keeps the diagram's shape.
+                    // A document's blocks have no ids of their own: the
+                    // diagram's source names it.
+                    let source = node.as_text().to_string();
+                    let key = {
+                        use std::hash::{Hash as _, Hasher as _};
+                        let mut hasher = std::hash::DefaultHasher::new();
+                        source.hash(&mut hasher);
+                        hasher.finish()
+                    };
                     div()
                         .w_full()
-                        .flex()
-                        .justify_center()
                         .py_3()
-                        .child(
-                            div()
-                                .w_full()
-                                .max_w(px(diagram.width.min(DIAGRAM_WIDTH)))
-                                .aspect_ratio(diagram.width / diagram.height)
-                                .child(
-                                    img(diagram.image.clone())
-                                        .size_full()
-                                        .object_fit(gpui_kit::ObjectFit::Contain),
-                                ),
-                        )
+                        .child(ph_ui::DiagramCard::new(
+                            ("mermaid", key),
+                            diagram.image.clone(),
+                            (diagram.width, diagram.height),
+                            source,
+                            DIAGRAM_WIDTH,
+                        ))
                         .into_any_element()
                 }
                 Some(Err(error)) => div()

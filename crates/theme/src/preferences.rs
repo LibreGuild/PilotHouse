@@ -44,6 +44,11 @@ pub struct Preferences {
     /// ones saved before; see [`Preferences::migrate_sizes`]).
     #[serde(default)]
     pub sizes_version: u32,
+    /// Fields this build does not know, kept as they were: ones a newer
+    /// PilotHouse or an organisation's build added. Without this, saving
+    /// here would drop them.
+    #[serde(flatten)]
+    pub other: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Default interface and code sizes. A Windows pixel reads smaller than a
@@ -84,6 +89,7 @@ impl Default for Preferences {
             gradient: Gradient::Dusk,
             backdrop_image: String::new(),
             sizes_version: SIZES_VERSION,
+            other: serde_json::Map::new(),
         }
     }
 }
@@ -723,8 +729,9 @@ pub fn prepare_backdrop_image(
         .decode()
         .with_context(|| {
             format!(
-                "{} is not an image PilotHouse can read (PNG, JPEG, WebP, GIF, BMP)",
-                source.display()
+                "{} is not an image {} can read (PNG, JPEG, WebP, GIF, BMP)",
+                source.display(),
+                ph_brand::NAME
             )
         })?;
     let (width, height) = BACKDROP_MAX;
@@ -851,5 +858,31 @@ mod tests {
             "Menlo"
         );
         assert_eq!(first_installed(&["Nope"], &[]), "Nope");
+    }
+
+    #[test]
+    fn fields_this_build_does_not_know_are_kept() {
+        // Saved by a newer build or an organisation's: "x.acme.sidebar_icon"
+        // means nothing here, and must survive this build saving.
+        let saved = r#"{"accent":"teal","x.acme.sidebar_icon":{"name":"rocket"},"future":3}"#;
+        let mut preferences: Preferences = serde_json::from_str(saved).unwrap();
+        assert_eq!(preferences.accent, Accent::Teal);
+        preferences.zoom(1);
+        let again: serde_json::Value =
+            serde_json::to_value(&preferences).expect("preferences serialize");
+        assert_eq!(again["x.acme.sidebar_icon"]["name"], "rocket");
+        assert_eq!(again["future"], 3);
+        assert_eq!(again["accent"], "teal");
+        // Known fields are not duplicated into the leftovers.
+        assert!(!preferences.other.contains_key("accent"));
+        // Defaults carry none.
+        assert!(
+            serde_json::to_value(Preferences::default())
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|key| !key.starts_with("x."))
+        );
     }
 }

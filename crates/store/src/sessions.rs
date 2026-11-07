@@ -24,8 +24,13 @@ pub struct Session {
     pub updated_at: i64,
     /// Where the agent works when not the project folder (a review worktree).
     pub cwd: Option<String>,
-    /// `chat`, or `review` for a pull request review.
+    /// `chat`; `review` for a pull request review, `parallel` for a lane,
+    /// `terminal` for an agent CLI run in a terminal (its messages are in
+    /// the agent's own session file).
     pub kind: String,
+    /// What it said last, for a chat whose messages are kept elsewhere (a
+    /// terminal's).
+    pub last_line: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +52,7 @@ impl Session {
             updated_at: row.get("updated_at")?,
             cwd: row.get("cwd")?,
             kind: row.get("kind")?,
+            last_line: row.get("last_line")?,
         })
     }
 }
@@ -75,6 +81,7 @@ impl Store {
             updated_at: now,
             cwd: None,
             kind: "chat".into(),
+            last_line: None,
         })
     }
 
@@ -123,6 +130,53 @@ impl Store {
         self.conn().execute(
             "UPDATE sessions SET acp_session_id = ?2 WHERE id = ?1",
             params![id, acp_session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Marks a session active at `at` (Unix milliseconds): one whose
+    /// messages are kept elsewhere (an agent CLI's, in a terminal).
+    pub fn touch_session(&self, id: SessionId, at: i64) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
+            params![id, at],
+        )?;
+        Ok(())
+    }
+
+    /// Puts `messages` (role and body each) in place of a chat's, without
+    /// marking it active: the searchable copy of a terminal session, whose
+    /// messages are the agent's own file.
+    pub fn replace_messages(
+        &self,
+        session_id: SessionId,
+        messages: &[(&str, String)],
+    ) -> Result<()> {
+        let mut conn = self.conn();
+        let transaction = conn.transaction()?;
+        transaction.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        {
+            let mut insert = transaction.prepare_cached(
+                "INSERT INTO messages (session_id, role, body, created_at) VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            let now = now_millis();
+            for (role, body) in messages {
+                insert.execute(params![session_id, role, body, now])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Keeps what a chat said last (one line), for one whose messages are
+    /// kept elsewhere.
+    pub fn set_session_line(&self, id: SessionId, line: Option<&str>) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET last_line = ?2 WHERE id = ?1",
+            params![id, line],
         )?;
         Ok(())
     }
@@ -249,6 +303,46 @@ mod tests {
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].body, r#"{"text":"hi there"}"#);
         assert!(store.session(session.id).unwrap().unwrap().updated_at >= session.updated_at);
+    }
+
+    #[test]
+    fn a_terminal_sessions_copy_is_searchable_and_kept_quiet() {
+        let store = Store::open_in_memory().unwrap();
+        let session = store
+            .create_session(project(&store), "Tide table", "codex")
+            .unwrap();
+        store
+            .set_session_place(session.id, "terminal", Some("/w"))
+            .unwrap();
+        store.touch_session(session.id, 1_000).unwrap();
+        let said = |text: &str| serde_json::json!({ "text": text }).to_string();
+        store
+            .replace_messages(
+                session.id,
+                &[
+                    ("user", said("fix the harbour clock")),
+                    ("agent", said("Done.")),
+                ],
+            )
+            .unwrap();
+        // Read again: the copy is replaced, not added to.
+        store
+            .replace_messages(
+                session.id,
+                &[
+                    ("user", said("fix the harbour clock")),
+                    ("agent", said("Fixed.")),
+                ],
+            )
+            .unwrap();
+        store.set_session_line(session.id, Some("Fixed.")).unwrap();
+        let row = store.session(session.id).unwrap().unwrap();
+        assert_eq!(row.updated_at, 1_000, "not marked active");
+        assert_eq!(row.last_line.as_deref(), Some("Fixed."));
+        assert_eq!(store.messages(session.id).unwrap().len(), 2);
+        let hits = store.search_messages(None, "harbour", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, session.id);
     }
 
     #[test]

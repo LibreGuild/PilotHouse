@@ -93,8 +93,6 @@ pub struct PullView {
     replying: Option<u64>,
     /// The user asked to hear about new commits and answers.
     watched: bool,
-    /// The Files tab shows only these (a walkthrough group), when set.
-    only_files: Option<Vec<String>>,
     /// The file (by index) whose "ask about lines" form is open, and its
     /// box: `start-end: question`.
     asking: Option<usize>,
@@ -156,12 +154,6 @@ impl PullView {
                         cx.emit(PullViewEvent::Agent(request.clone()))
                     }
                     WalkthroughEvent::ShowLine { path, line } => this.show_line(path, *line, cx),
-                    WalkthroughEvent::Filter(files) => {
-                        this.only_files = files.clone();
-                        this.tab = Tab::Files;
-                        this.reset_files();
-                        cx.notify();
-                    }
                 },
             ),
         ];
@@ -187,7 +179,6 @@ impl PullView {
             watched: false,
             findings,
             walkthrough,
-            only_files: None,
             asking: None,
             ask_box,
             _load: None,
@@ -225,8 +216,6 @@ impl PullView {
     /// Shows `path` (at `line`) in the Files tab.
     fn show_line(&mut self, path: &str, line: Option<u64>, cx: &mut Context<Self>) {
         let _ = line;
-        self.only_files = None;
-        self.reset_files();
         self.tab = Tab::Files;
         if let Some(ix) = self
             .data
@@ -236,25 +225,6 @@ impl PullView {
             self.files_list.scroll_to_reveal_item(ix);
         }
         cx.notify();
-    }
-
-    /// The files the Files tab lists: all, or a walkthrough group's.
-    fn shown_files(&self) -> Vec<usize> {
-        let Some(data) = &self.data else {
-            return Vec::new();
-        };
-        (0..data.files.len())
-            .filter(|ix| {
-                self.only_files
-                    .as_ref()
-                    .is_none_or(|only| only.contains(&data.files[*ix].filename))
-            })
-            .collect()
-    }
-
-    fn reset_files(&mut self) {
-        let count = self.shown_files().len();
-        self.files_list.reset(count);
     }
 
     /// An agent review of this pull request ended: its line in the header
@@ -381,7 +351,7 @@ impl PullView {
                         this.data = Some(std::rc::Rc::new(data));
                         this.error = None;
                         // The same files keep their place (a reply was posted).
-                        let shown = this.shown_files().len();
+                        let shown = changed.len();
                         if this.files_list.item_count() == shown {
                             this.files_list.remeasure();
                         } else {
@@ -992,61 +962,6 @@ impl PullView {
         .into_any_element()
     }
 
-    /// Above the files: the group shown (a walkthrough's), and the tour.
-    fn render_files_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let tour = self.walkthrough.read(cx).tour();
-        if self.only_files.is_none() && tour.is_empty() {
-            return None;
-        }
-        Some(
-            h_flex()
-                .gap_1()
-                .flex_wrap()
-                .px_3()
-                .py_1()
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .text_xs()
-                .when_some(self.only_files.as_ref(), |this, only| {
-                    this.child(div().text_color(cx.theme().muted_foreground).child(format!(
-                        "Showing {} of {} files",
-                        only.len(),
-                        self.data.as_ref().map_or(0, |d| d.files.len())
-                    )))
-                    .child(
-                        Button::new("files-show-all")
-                            .xsmall()
-                            .ghost()
-                            .label("Show all")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.only_files = None;
-                                this.reset_files();
-                                cx.notify();
-                            })),
-                    )
-                })
-                .when(!tour.is_empty(), |this| {
-                    this.child(div().text_color(cx.theme().muted_foreground).child("Tour:"))
-                        .children(tour.iter().enumerate().map(|(ix, stop)| {
-                            let path = stop.path.clone();
-                            let line = Some(stop.start);
-                            Button::new(("tour-stop", ix))
-                                .xsmall()
-                                .ghost()
-                                .label(format!("{} {}", ix + 1, stop.title))
-                                .tooltip(format!(
-                                    "{}:{}-{} · {}",
-                                    stop.path, stop.start, stop.end, stop.note
-                                ))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.show_line(&path, line, cx)
-                                }))
-                        }))
-                })
-                .into_any_element(),
-        )
-    }
-
     /// Asks the question typed for file `ix` (`start-end: question`).
     fn ask_lines(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(data) = self.data.clone() else {
@@ -1075,11 +990,8 @@ impl PullView {
         let Some(data) = self.data.clone() else {
             return div().into_any_element();
         };
-        let shown = self.shown_files();
-        let Some(&ix) = shown.get(list_ix) else {
-            return div().into_any_element();
-        };
-        let last = list_ix + 1 == shown.len();
+        let ix = list_ix;
+        let last = ix + 1 == data.files.len();
         let (Some(file), Some(change)) = (data.files.get(ix), data.changes.get(ix)) else {
             return div().into_any_element();
         };
@@ -1380,7 +1292,6 @@ impl Render for PullView {
             Tab::Files => v_flex()
                 .flex_1()
                 .min_h_0()
-                .children(self.render_files_bar(cx))
                 .child(
                     div()
                         .relative()

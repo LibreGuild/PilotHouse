@@ -5,7 +5,9 @@
 //! key (`latest.json.sig`). PilotHouse reads it over HTTPS at start and every
 //! six hours from GitHub or, where GitHub cannot be reached, from the
 //! project's mirrors ([`SOURCES`], in that order: the first that answers),
-//! and uses it only when the signature is the release key's. It downloads
+//! and uses it only when the signature is the release key's. The sources and
+//! the key are the brand's (`brand/brand.toml`); a build whose brand turns
+//! updates off never looks ([`install`] does nothing). It downloads
 //! the file for how it was installed from the same place (should that fail,
 //! the next source's `latest.json` and file), checks the SHA-256, unpacks
 //! it beside the data folder, and puts it in place when the app quits, or
@@ -35,40 +37,19 @@ const AUTO_INSTALL: &str = "updates.auto_install";
 const EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 const FIRST_CHECK: Duration = Duration::from_secs(20);
 
-/// Where a release is published: its `latest.json` (with `.sig` beside it),
-/// and the folder holding each release's files by tag (`<files><tag>/<name>`).
-struct Source {
-    name: &'static str,
-    manifest: &'static str,
-    files: &'static str,
-}
+/// Where releases are published, in order: PilotHouse's are GitHub, then the
+/// mirrors the Release workflow copies every release to (the same files, for
+/// networks where GitHub is blocked). Each has its `latest.json` (with
+/// `.sig` beside it) and the folder holding each release's files by tag
+/// (`<files><tag>/<name>`). `latest.json` names files by the first source's
+/// address; the others keep the same `<tag>/<name>` under their own folder.
+const SOURCES: &[ph_brand::UpdateSource] = ph_brand::UPDATE_SOURCES;
 
-/// GitHub, then the mirrors the Release workflow copies every release to
-/// (the same files, for networks where GitHub is blocked). `latest.json`
-/// names files by their GitHub address; the mirrors keep the same
-/// `<tag>/<name>` under their own folder.
-const SOURCES: [Source; 3] = [
-    Source {
-        name: "GitHub",
-        manifest: "https://github.com/LibreGuild/PilotHouse/releases/latest/download/latest.json",
-        files: "https://github.com/LibreGuild/PilotHouse/releases/download/",
-    },
-    Source {
-        name: "the mirror",
-        manifest: "https://libreguild.skatech.org/pilothouse/latest/latest.json",
-        files: "https://libreguild.skatech.org/pilothouse/releases/",
-    },
-    Source {
-        name: "the backup mirror",
-        manifest: "https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/latest/latest.json",
-        files: "https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/releases/",
-    },
-];
-
-/// The release key's public half (Ed25519, base64): `latest.json` is used
-/// only with its signature. The Release workflow signs with the private half
-/// (`scripts/package/sign-manifest.sh`), and refuses a key that is not this.
-const UPDATE_KEY: &str = include_str!("update_key.pub");
+/// The release key's public half (Ed25519, base64, `brand/update_key.pub`):
+/// `latest.json` is used only with its signature. The Release workflow signs
+/// with the private half (`scripts/package/sign-manifest.sh`), and refuses a
+/// key that is not this.
+const UPDATE_KEY: &str = ph_brand::UPDATE_KEY;
 
 /// What `latest.json` says.
 #[derive(Debug, Clone, Deserialize)]
@@ -263,7 +244,7 @@ fn test_manifest() -> Option<String> {
 /// The `<tag>/<name>` of `url` when it is a file of this repository's
 /// GitHub releases (no `..` or escapes that could lead out of them).
 fn release_file(url: &str) -> Option<&str> {
-    url.strip_prefix(SOURCES[0].files).filter(|rest| {
+    url.strip_prefix(SOURCES.first()?.files).filter(|rest| {
         !rest
             .split('/')
             .any(|part| part.is_empty() || part.starts_with('.'))
@@ -321,7 +302,7 @@ fn agent() -> ureq::Agent {
         .tls_config(tls)
         .timeout_connect(Some(Duration::from_secs(20)))
         .timeout_recv_response(Some(Duration::from_secs(30)))
-        .user_agent(concat!("PilotHouse/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!(ph_brand::stem!(), "/", env!("CARGO_PKG_VERSION")))
         .build()
         .into()
 }
@@ -413,7 +394,8 @@ fn download(
                 fetched = fetch_manifest_from(index)?;
                 if fetched.version != manifest.version {
                     bail!(
-                        "it has PilotHouse {}, not {}",
+                        "it has {} {}, not {}",
+                        ph_brand::NAME,
                         fetched.version,
                         manifest.version
                     );
@@ -424,8 +406,8 @@ fn download(
                 .platforms
                 .get(platform)
                 .context("its latest.json has no file for this install")?;
-            let url =
-                source_url(asset, index).context("the update is not from PilotHouse's releases")?;
+            let url = source_url(asset, index)
+                .with_context(|| format!("the update is not from {}'s releases", ph_brand::NAME))?;
             download_file(&url, asset, folder, done)
         })();
         match attempt {
@@ -527,11 +509,17 @@ fn stage(install: &Install, file: &Path, staging: &Path) -> Result<PathBuf> {
                     staging.as_os_str(),
                 ],
             )?;
-            let app = staging.join("PilotHouse.app");
-            if !app.join("Contents/MacOS/pilothouse").is_file() {
-                bail!("the update holds no PilotHouse.app");
-            }
-            Ok(app)
+            // The app in the zip has the brand's name (scripts/package/macos.sh),
+            // which may not be this build's: a build can be renamed between
+            // releases. Whatever its name, it is the one app in the zip.
+            std::fs::read_dir(staging)?
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|path| {
+                    path.extension().is_some_and(|ext| ext == "app")
+                        && path.join("Contents/MacOS/pilothouse").is_file()
+                })
+                .context("the update holds no app")
         }
         Install::WindowsSetup { .. } => Ok(file.to_path_buf()),
         Install::WindowsPortable { .. } => {
@@ -573,7 +561,7 @@ fn stage(install: &Install, file: &Path, staging: &Path) -> Result<PathBuf> {
             }
             Ok(binary)
         }
-        Install::Manual => bail!("this copy of PilotHouse cannot update itself"),
+        Install::Manual => bail!("this copy of {} cannot update itself", ph_brand::NAME),
     }
 }
 
@@ -690,7 +678,7 @@ fn ps_stop_programs_in(dir: &Path) -> String {
 /// Starts the script that installs `staged` after PilotHouse quits.
 fn apply(install: &Install, staged: &Path, relaunch: bool) -> Result<()> {
     let script = apply_script(install, staged, std::process::id(), relaunch)
-        .context("this copy of PilotHouse cannot update itself")?;
+        .with_context(|| format!("this copy of {} cannot update itself", ph_brand::NAME))?;
     let mut command = if cfg!(windows) {
         let mut command = std::process::Command::new("powershell");
         command.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script]);
@@ -746,10 +734,15 @@ pub(crate) struct Updater {
 impl Global for Updater {}
 
 /// The page of the newest release.
-pub(crate) const RELEASES_URL: &str = "https://github.com/LibreGuild/PilotHouse/releases/latest";
+pub(crate) const RELEASES_URL: &str = ph_brand::RELEASES_URL;
 
 /// The project's page.
-pub(crate) const REPOSITORY_URL: &str = "https://github.com/LibreGuild/PilotHouse";
+pub(crate) const REPOSITORY_URL: &str = ph_brand::REPOSITORY_URL;
+
+/// Whether this build looks for updates at all (the brand's `[updates]`).
+pub(crate) fn enabled() -> bool {
+    ph_brand::UPDATES_ENABLED && !SOURCES.is_empty()
+}
 
 pub(crate) fn auto_check(cx: &App) -> bool {
     crate::AppState::store(cx)
@@ -792,9 +785,11 @@ impl Updater {
 }
 
 /// Starts checking, at start and every six hours while allowed; an update
-/// downloaded installs when the app quits.
+/// downloaded installs when the app quits. Without updates in this build's
+/// brand, nothing: no checks, and no [`Updater`] (so [`check`] does nothing
+/// and the status stays [`Status::Idle`]).
 pub(crate) fn install(cx: &mut App) {
-    if cx.has_global::<Updater>() {
+    if cx.has_global::<Updater>() || !enabled() {
         return;
     }
     let schedule = cx.spawn(async move |cx| {
@@ -976,11 +971,20 @@ mod tests {
         assert!(is_newer("1.0.0-rc.1", "1.0.0-beta.2"));
     }
 
+    /// PilotHouse's own release key (`brand/update_key.pub`); a build with
+    /// its own key skips the checks made with a signature of this one.
+    const PILOTHOUSE_KEY: &str = "EHdbf9+PfysH1grHctlCmPgIt8DmM3YrheOF4iRcRz8=";
+
     #[test]
     fn reads_the_manifest() {
-        let manifest: Manifest = serde_json::from_str(
-            r#"{"version":"0.3.0","notes":"n","platforms":{"macos-universal":{"url":"https://github.com/LibreGuild/PilotHouse/releases/download/v0.3.0/PilotHouse-macOS-universal.zip","sha256":"ab","size":3}}}"#,
-        )
+        // The brand's first source names the files (PilotHouse's: GitHub).
+        let Some(first) = SOURCES.first() else {
+            return;
+        };
+        let files = first.files;
+        let manifest: Manifest = serde_json::from_str(&format!(
+            r#"{{"version":"0.3.0","notes":"n","platforms":{{"macos-universal":{{"url":"{files}v0.3.0/PilotHouse-macOS-universal.zip","sha256":"ab","size":3}}}}}}"#
+        ))
         .unwrap();
         assert_eq!(manifest.platforms["macos-universal"].size, 3);
         assert_eq!(
@@ -989,17 +993,12 @@ mod tests {
         );
         assert_eq!(release_file("https://example.com/PilotHouse.zip"), None);
         assert_eq!(
-            release_file(
-                "https://github.com/LibreGuild/PilotHouse/releases/download/../../../evil/x/releases/download/v1/a.zip"
-            ),
+            release_file(&format!(
+                "{files}../../../evil/x/releases/download/v1/a.zip"
+            )),
             None
         );
-        assert_eq!(
-            release_file(
-                "https://github.com/LibreGuild/PilotHouse/releases/download/v1/%2e%2e/a.zip"
-            ),
-            None
-        );
+        assert_eq!(release_file(&format!("{files}v1/%2e%2e/a.zip")), None);
         assert!(plain_version("0.3.0-beta.1"));
         assert!(!plain_version("../../x"));
         assert!(!plain_version("0.3/0"));
@@ -1007,45 +1006,61 @@ mod tests {
 
     #[test]
     fn finds_each_file_on_every_source() {
+        let Some(first) = SOURCES.first() else {
+            return;
+        };
+        let file = "v0.6.0/PilotHouse-Linux-x86_64.tar.gz";
         let asset = Asset {
-            url: "https://github.com/LibreGuild/PilotHouse/releases/download/v0.6.0/PilotHouse-Linux-x86_64.tar.gz".into(),
+            url: format!("{}{file}", first.files),
             sha256: "ab".into(),
             size: 3,
         };
         let urls: Vec<_> = (0..SOURCES.len())
             .map(|index| source_url(&asset, index).unwrap())
             .collect();
-        assert_eq!(
-            urls,
-            [
-                "https://github.com/LibreGuild/PilotHouse/releases/download/v0.6.0/PilotHouse-Linux-x86_64.tar.gz",
-                "https://libreguild.skatech.org/pilothouse/releases/v0.6.0/PilotHouse-Linux-x86_64.tar.gz",
-                "https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/releases/v0.6.0/PilotHouse-Linux-x86_64.tar.gz",
-            ]
-        );
+        let expected: Vec<_> = SOURCES
+            .iter()
+            .map(|source| format!("{}{file}", source.files))
+            .collect();
+        assert_eq!(urls, expected);
         assert_eq!(source_url(&asset, SOURCES.len()), None);
-        let elsewhere = Asset {
-            url: "https://libreguild.skatech.org/pilothouse/releases/v0.6.0/a.zip".into(),
-            ..asset
-        };
-        assert_eq!(
-            source_url(&elsewhere, 1),
-            None,
-            "named by its GitHub address only"
-        );
+        if let Some(second) = SOURCES.get(1) {
+            let elsewhere = Asset {
+                url: format!("{}v0.6.0/a.zip", second.files),
+                ..asset
+            };
+            assert_eq!(
+                source_url(&elsewhere, 1),
+                None,
+                "named by the first source's address only"
+            );
+        }
+        if ph_brand::UPDATE_KEY.trim() == PILOTHOUSE_KEY {
+            // PilotHouse's own: GitHub, then the two mirrors.
+            assert_eq!(
+                expected,
+                [
+                    "https://github.com/LibreGuild/PilotHouse/releases/download/v0.6.0/PilotHouse-Linux-x86_64.tar.gz",
+                    "https://libreguild.skatech.org/pilothouse/releases/v0.6.0/PilotHouse-Linux-x86_64.tar.gz",
+                    "https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/releases/v0.6.0/PilotHouse-Linux-x86_64.tar.gz",
+                ]
+            );
+        }
     }
 
     #[test]
     fn trusts_only_the_release_key() {
-        // Signed by `scripts/package/sign-manifest.sh` with the release key.
         let manifest = br#"{"version":"9.9.9","platforms":{}}"#;
-        let signature = "A41yq3ZvukGjr/HNgou97Kn8xl19ce8xdFI+yz6SAmBBs7DBJ8CdK40QejsN4hHqlFEFYYd/r2UaG3ClllPgAQ==";
-        assert!(signed(manifest, signature));
-        assert!(signed(manifest, &format!("{signature}\n")));
-        assert!(!signed(
-            br#"{"version":"9.9.10","platforms":{}}"#,
-            signature
-        ));
+        if UPDATE_KEY.trim() == PILOTHOUSE_KEY {
+            // Signed by `scripts/package/sign-manifest.sh` with the release key.
+            let signature = "A41yq3ZvukGjr/HNgou97Kn8xl19ce8xdFI+yz6SAmBBs7DBJ8CdK40QejsN4hHqlFEFYYd/r2UaG3ClllPgAQ==";
+            assert!(signed(manifest, signature));
+            assert!(signed(manifest, &format!("{signature}\n")));
+            assert!(!signed(
+                br#"{"version":"9.9.10","platforms":{}}"#,
+                signature
+            ));
+        }
         assert!(!signed(manifest, ""));
         assert!(!signed(manifest, "not base64"));
         // Another key's signature, however valid, is refused.

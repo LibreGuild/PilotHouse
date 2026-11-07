@@ -272,8 +272,8 @@ impl Store {
     /// it) say so instead, so their next run is not held back.
     pub fn end_interrupted_schedules(&self) -> Result<()> {
         self.conn().execute(
-            "UPDATE schedules SET last_result = 'Stopped when PilotHouse closed.' WHERE last_result = 'Running…'",
-            [],
+            "UPDATE schedules SET last_result = ?1 WHERE last_result = 'Running…'",
+            [format!("Stopped when {} closed.", ph_brand::NAME)],
         )?;
         Ok(())
     }

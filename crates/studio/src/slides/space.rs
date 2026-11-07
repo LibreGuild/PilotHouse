@@ -42,7 +42,7 @@ pub fn root() -> PathBuf {
     dirs::document_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(std::env::temp_dir)
-        .join("PilotHouse Presentations")
+        .join(format!("{} Presentations", ph_brand::NAME))
 }
 
 /// The folder of the user's own themes.
@@ -207,7 +207,11 @@ impl Space {
             "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "svg",
         ];
         if !known.contains(&extension.as_str()) {
-            bail!("{} is not a picture PilotHouse takes", source.display());
+            bail!(
+                "{} is not a picture {} takes",
+                source.display(),
+                ph_brand::NAME
+            );
         }
         let bytes = std::fs::read(source)
             .with_context(|| format!("could not read {}", source.display()))?;

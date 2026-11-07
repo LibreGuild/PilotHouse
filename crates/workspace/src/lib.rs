@@ -10,7 +10,6 @@
 //! See `docs/architecture.md` for how the pieces fit together.
 
 mod actions;
-mod agent_sessions;
 mod agents_board;
 mod app_state;
 mod arch_map;
@@ -20,6 +19,7 @@ mod command_palette;
 mod context_panel;
 mod copies;
 mod detect;
+mod features;
 mod file_window;
 mod github_view;
 mod housekeeping;
@@ -29,9 +29,11 @@ mod network_drives;
 mod open;
 mod parallel;
 mod presentations;
+mod quick_chat;
 mod rename_dialog;
 mod review;
 mod schedules;
+mod session_changes;
 mod settings_dialog;
 mod shell_integration;
 mod shortcuts;
@@ -58,6 +60,7 @@ pub use context_panel::ContextTab;
 pub use detect::Stack;
 pub use github_view::GithubView;
 pub use open::{main_workspace, open_paths, set_main_window};
+pub use quick_chat::toggle as toggle_quick_chat;
 
 /// Opens `path` (a picture or video) in Studio without a chat (testing).
 pub fn open_in_studio(path: std::path::PathBuf, cx: &mut gpui_kit::App) -> anyhow::Result<()> {
@@ -100,4 +103,11 @@ pub fn init(cx: &mut App) {
     ph_studio::bind_keys(cx);
     ph_terminal::init(cx);
     ph_terminal::TerminalHub::keep_between_runs(ph_store::paths::data_dir().join("terminals"), cx);
+    quick_chat::init(cx);
+    // The organisation's own additions (crates/custom): last, so they can
+    // use all of the above. PilotHouse's own does nothing.
+    let context = ph_custom::CustomContext {
+        store: AppState::store(cx).clone(),
+    };
+    ph_custom::init(&context, cx);
 }

@@ -12,6 +12,9 @@ usage:
   pilothouse <path>...               open folders as projects and files in the editor
                                      (in the running app, if there is one)
   pilothouse ctl <method> [json]     call the running app's control socket
+  pilothouse quick-chat              show (or hide) the quick chat window, starting the
+                                     app if needed; for a shortcut in your system's
+                                     keyboard settings
   pilothouse mcp [--project PATH] [--agent NAME] [--workspace ID]
                                      run the MCP server agents use for board tools
   pilothouse agy-acp                 run Google Antigravity (agy) as an ACP agent
@@ -27,6 +30,8 @@ pub enum Launch {
     Exit(i32),
     /// Start the app, then open these paths.
     App(Vec<PathBuf>),
+    /// Start the app with the quick chat open (none was running).
+    QuickChat,
 }
 
 /// Runs a subcommand if `args` names one, or hands paths to the running
@@ -37,6 +42,7 @@ pub fn run(args: &[String]) -> Launch {
     let args = args.as_slice();
     match args.first().map(String::as_str) {
         Some("ctl") => Launch::Exit(ctl(&args[1..])),
+        Some("quick-chat") => quick_chat(),
         Some("mcp") => Launch::Exit(mcp(&args[1..])),
         Some("agy-acp") => Launch::Exit(agy_acp()),
         Some("agent-hook") => Launch::Exit(agent_hook(&args[1..])),
@@ -94,7 +100,27 @@ fn hand_over(paths: Vec<PathBuf>) -> Launch {
     match client.call("app.open", serde_json::json!({ "paths": listed })) {
         Ok(_) => Launch::Exit(0),
         Err(err) => {
-            eprintln!("PilotHouse is running but could not open that: {err:#}");
+            eprintln!(
+                "{} is running but could not open that: {err:#}",
+                ph_brand::NAME
+            );
+            Launch::Exit(1)
+        }
+    }
+}
+
+/// `pilothouse quick-chat`: the running app shows its quick chat window (or
+/// hides it, when it is the one in front); with none running, it starts
+/// with the window open. For a shortcut set in the system's keyboard
+/// settings, which is the only kind there is on Wayland.
+fn quick_chat() -> Launch {
+    let Ok(mut client) = ControlClient::connect(&paths::control_socket_path()) else {
+        return Launch::QuickChat;
+    };
+    match client.call("app.quick_chat", serde_json::json!({})) {
+        Ok(_) => Launch::Exit(0),
+        Err(err) => {
+            eprintln!("{} could not show the quick chat: {err:#}", ph_brand::NAME);
             Launch::Exit(1)
         }
     }

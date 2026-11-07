@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ph-brand.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 dunce.workspace = true

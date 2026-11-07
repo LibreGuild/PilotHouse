@@ -63,6 +63,15 @@ pub struct AgentOption {
 }
 
 impl AgentOption {
+    /// Whether `value` is one the agent offers for this option now (a
+    /// remembered model may be gone, or belong to another provider).
+    pub fn offers(&self, value: &str) -> bool {
+        match &self.kind {
+            OptionKind::Select(choices) => choices.iter().any(|choice| choice.value == value),
+            OptionKind::Toggle => value == "true" || value == "false",
+        }
+    }
+
     /// The selected choice's display name.
     pub fn current_name(&self) -> String {
         match &self.kind {
@@ -115,6 +124,27 @@ impl AgentOption {
 /// `modes` lists when the config options have none.
 pub fn parse_session_options(result: &Value) -> Vec<AgentOption> {
     let mut options = parse_options(result.get("configOptions").unwrap_or(&Value::Null));
+    // One model picker: an agent may file another list as a model too
+    // (Cline's providers, before 3.0.74). The one named `model` wins.
+    let models = options
+        .iter()
+        .filter(|option| option.category == OptionCategory::Model)
+        .count();
+    if models > 1 {
+        let keep = options
+            .iter()
+            .position(|option| option.category == OptionCategory::Model && option.id == "model")
+            .or_else(|| {
+                options
+                    .iter()
+                    .position(|option| option.category == OptionCategory::Model)
+            });
+        for (ix, option) in options.iter_mut().enumerate() {
+            if option.category == OptionCategory::Model && Some(ix) != keep {
+                option.category = OptionCategory::Other;
+            }
+        }
+    }
     let has = |options: &[AgentOption], category| {
         options.iter().any(|option| option.category == category)
     };
@@ -298,7 +328,7 @@ pub fn with_preferences(
     prefs: &HashMap<String, String>,
 ) -> Vec<AgentOption> {
     for option in &mut options {
-        if let Some(value) = prefs.get(&option.id) {
+        if let Some(value) = prefs.get(&option.id).filter(|value| option.offers(value)) {
             option.current = value.clone();
         }
     }
@@ -386,6 +416,37 @@ mod tests {
         let options = parse_session_options(&result);
         assert_eq!(options.len(), 1);
         assert_eq!(options[0].source, OptionSource::ConfigOption);
+    }
+
+    #[test]
+    fn remembered_choices_only_when_still_offered() {
+        let result = json!({
+            "configOptions": [
+                { "id": "model", "name": "Model", "category": "model", "type": "select",
+                  "currentValue": "a", "options": [ { "value": "a", "name": "A" }, { "value": "b", "name": "B" } ] }
+            ]
+        });
+        let offered = parse_session_options(&result);
+        let prefs = HashMap::from([("model".to_string(), "gone".to_string())]);
+        assert_eq!(with_preferences(offered.clone(), &prefs)[0].current, "a");
+        let prefs = HashMap::from([("model".to_string(), "b".to_string())]);
+        assert_eq!(with_preferences(offered, &prefs)[0].current, "b");
+    }
+
+    #[test]
+    fn one_list_is_the_model() {
+        // Cline 3.0.46 files its providers as a model list too.
+        let result = json!({
+            "configOptions": [
+                { "id": "provider", "name": "Provider", "category": "model", "type": "select",
+                  "currentValue": "cline", "options": [ { "value": "cline", "name": "Cline" } ] },
+                { "id": "model", "name": "Model", "category": "model", "type": "select",
+                  "currentValue": "a", "options": [ { "value": "a", "name": "A" } ] }
+            ]
+        });
+        let options = parse_session_options(&result);
+        assert_eq!(options[0].category, OptionCategory::Other);
+        assert_eq!(options[1].category, OptionCategory::Model);
     }
 
     #[test]

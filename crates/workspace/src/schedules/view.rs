@@ -25,9 +25,13 @@ use crate::workspace::Workspace;
 const PRESETS: &[(&str, &str)] = &[
     (
         "Morning summary",
-        "Summarize, in one screen, what changed in this workspace since yesterday: the commits in each Git folder \
-         (git log --since=yesterday), open pull requests, the PilotHouse board's columns (board_list), and how the UI \
-         tests last went (test_list). End with what looks most important to do next.",
+        concat!(
+            "Summarize, in one screen, what changed in this workspace since yesterday: the commits in each Git folder \
+             (git log --since=yesterday), open pull requests, the ",
+            ph_brand::name!(),
+            " board's columns (board_list), and how the UI \
+             tests last went (test_list). End with what looks most important to do next."
+        ),
     ),
     (
         "Nightly check",
@@ -158,6 +162,9 @@ pub fn open(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if !ph_brand::enabled(ph_brand::Feature::Schedules) {
+        return;
+    }
     let schedules = AppState::store(cx)
         .schedules(project_id)
         .unwrap_or_default();
@@ -653,9 +660,10 @@ impl SchedulesView {
                     .when(
                         matches!(form.every, Every::PullRequest | Every::ChecksFail),
                         |this| {
-                            this.child(div().text_xs().text_color(muted).child(
-                                "PilotHouse asks GitHub every 5 minutes, with the account in Settings → GitHub.",
-                            ))
+                            this.child(div().text_xs().text_color(muted).child(concat!(
+                                ph_brand::name!(),
+                                " asks GitHub every 5 minutes, with the account in Settings → GitHub."
+                            )))
                         },
                     )
                     .when(form.every == Every::After, |this| {
@@ -768,7 +776,7 @@ impl Render for SchedulesView {
                             .min_w_0()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Schedules run while PilotHouse is open, at set times or when something happens. One that came due while it was closed runs once when it opens."),
+                            .child(concat!("Schedules run while ", ph_brand::name!(), " is open, at set times or when something happens. One that came due while it was closed runs once when it opens.")),
                     )
                     .when(self.form.is_none(), |this| {
                         this.child(

@@ -138,10 +138,18 @@ impl TemplatesView {
         };
         let hint = match kind {
             TemplateKind::Review => {
-                "The reviewing guide: what to look for, what each severity means, what counts as evidence. PilotHouse adds the pull request, the repository's own rules (.pilothouse/review.md on the base branch) and the answer format its findings card reads, where each finding has the issue, its evidence and the fix."
+                concat!(
+                    "The reviewing guide: what to look for, what each severity means, what counts as evidence. ",
+                    ph_brand::name!(),
+                    " adds the pull request, the repository's own rules (.pilothouse/review.md on the base branch) and the answer format its findings card reads, where each finding has the issue, its evidence and the fix."
+                )
             }
             TemplateKind::Prompt => {
-                "A request about the pull request. PilotHouse adds where the PR is checked out and how to see its diff; the answer is Markdown, with Mermaid diagrams drawn as pictures."
+                concat!(
+                    "A request about the pull request. ",
+                    ph_brand::name!(),
+                    " adds where the PR is checked out and how to see its diff; the answer is Markdown, with Mermaid diagrams drawn as pictures."
+                )
             }
         };
         v_flex()

@@ -8,7 +8,7 @@ Many teams keep code on a Linux server and reach it as a network drive: a Samba 
 |---|---|
 | Git (status, diffs, commits, branches, history, blame, stashes, conflicts, checkpoints) | Reading and saving files (through the drive) |
 | Terminals (a shell on the server, in the same folder) | The file tree, editor, ⌘P and search |
-| Run configurations (they run in a terminal) | Agents (Claude Code, Codex, Gemini CLI, Antigravity) |
+| Run configurations (they run in a terminal) | Agents (Claude Code, Codex, Gemini CLI, Antigravity, Cline) |
 | The ports panel (the server's ports) | Language servers |
 
 ## Setting one up

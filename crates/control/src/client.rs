@@ -8,7 +8,7 @@ use crate::protocol::{Request, Response};
 use crate::transport;
 
 /// The error when the app closes the connection.
-const CLOSED: &str = "PilotHouse closed the control connection";
+const CLOSED: &str = concat!(ph_brand::name!(), " closed the control connection");
 
 /// A blocking connection to the running app's control endpoint.
 pub struct ControlClient {

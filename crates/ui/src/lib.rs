@@ -7,6 +7,7 @@
 mod agent_logos;
 mod assets;
 mod copy_button;
+mod diagram;
 mod dialog_buttons;
 mod empty_state;
 mod file_icons;
@@ -23,8 +24,9 @@ mod truncated;
 mod workspace_colors;
 
 pub use agent_logos::{agent_logo, app_icon, logo_mark};
-pub use assets::PilotHouseAssets;
+pub use assets::{PilotHouseAssets, custom_icon};
 pub use copy_button::{CopyButton, copy_with_toast};
+pub use diagram::DiagramCard;
 pub use dialog_buttons::dialog_buttons;
 pub use empty_state::EmptyState;
 pub use file_icons::{

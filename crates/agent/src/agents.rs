@@ -1,16 +1,17 @@
 //! The coding agents PilotHouse knows how to start.
 //!
-//! Each agent is launched as an ACP server on stdio: Gemini CLI natively,
-//! Claude Code and Codex through their official ACP adapters (run with `npx`,
-//! which downloads them once), and Antigravity through PilotHouse's own
-//! bridge (`pilothouse agy-acp`, see the `ph-agy` crate). The agents use the
-//! user's own installs and logins; PilotHouse never sees credentials.
+//! Each agent is launched as an ACP server on stdio: Gemini CLI and Cline
+//! natively, Claude Code and Codex through their official ACP adapters (run
+//! with `npx`, which downloads them once), and Antigravity through
+//! PilotHouse's own bridge (`pilothouse agy-acp`, see the `ph-agy` crate).
+//! The agents use the user's own installs and logins; PilotHouse never sees
+//! credentials.
 
 use std::path::PathBuf;
 
 /// How to start an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Launch {
+pub(crate) enum Launch {
     /// The CLI speaks ACP itself: `program args…`.
     Native {
         program: &'static str,
@@ -32,7 +33,7 @@ pub struct AgentSpec {
     pub name: &'static str,
     /// The user-facing CLI, needed for logging in.
     pub cli: &'static str,
-    launch: Launch,
+    pub(crate) launch: Launch,
     /// What to run once to log in, shown when the agent reports no auth.
     pub login_hint: &'static str,
     /// How to install the CLI: (macOS and Linux, Windows) shell commands.
@@ -43,6 +44,32 @@ pub struct AgentSpec {
     pub glyph: AgentGlyph,
     /// Where the models come from, shown under each model.
     pub provider: &'static str,
+    /// Set for the agent's process, over the user's environment.
+    pub env: &'static [(&'static str, &'static str)],
+    pub quirks: Quirks,
+}
+
+/// Where an agent's ACP side does not do what the protocol (or its own
+/// handshake) says, so PilotHouse works around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quirks {
+    /// Reads only a prompt's text blocks: links to files and images would
+    /// be dropped, so they go as text naming the file.
+    pub text_prompts: bool,
+    /// Its `session/load` cannot be relied on: a chat goes on in a new
+    /// session, told what was said before.
+    pub no_session_load: bool,
+    /// Ignores the MCP servers a session is given and reads its own
+    /// settings file, from the path in this environment variable.
+    pub mcp_settings_env: Option<&'static str>,
+}
+
+impl Quirks {
+    pub const NONE: Quirks = Quirks {
+        text_prompts: false,
+        no_session_load: false,
+        mcp_settings_env: None,
+    };
 }
 
 /// Generic glyphs that tell agents apart at a glance.
@@ -52,6 +79,7 @@ pub enum AgentGlyph {
     Hexagon,
     Sparkle,
     Orbit,
+    Bot,
 }
 
 impl AgentSpec {
@@ -61,6 +89,7 @@ impl AgentSpec {
             AgentGlyph::Hexagon => ph_ui::Icons::Hexagon,
             AgentGlyph::Sparkle => ph_ui::Icons::Sparkle,
             AgentGlyph::Orbit => ph_ui::Icons::Orbit,
+            AgentGlyph::Bot => ph_ui::Icons::Bot,
         }
     }
 
@@ -106,6 +135,8 @@ pub const AGENTS: &[AgentSpec] = &[
         color: 0xd97757,
         glyph: AgentGlyph::Asterisk,
         provider: "Anthropic",
+        env: &[],
+        quirks: Quirks::NONE,
     },
     AgentSpec {
         id: "codex",
@@ -122,6 +153,8 @@ pub const AGENTS: &[AgentSpec] = &[
         color: 0x10a37f,
         glyph: AgentGlyph::Hexagon,
         provider: "OpenAI",
+        env: &[],
+        quirks: Quirks::NONE,
     },
     AgentSpec {
         id: "gemini",
@@ -139,6 +172,8 @@ pub const AGENTS: &[AgentSpec] = &[
         color: 0x4f8df7,
         glyph: AgentGlyph::Sparkle,
         provider: "Google",
+        env: &[],
+        quirks: Quirks::NONE,
     },
     AgentSpec {
         id: "antigravity",
@@ -155,6 +190,37 @@ pub const AGENTS: &[AgentSpec] = &[
         color: 0x8b6cf6,
         glyph: AgentGlyph::Orbit,
         provider: "Google",
+        env: &[],
+        quirks: Quirks::NONE,
+    },
+    AgentSpec {
+        id: "cline",
+        name: "Cline",
+        cli: "cline",
+        launch: Launch::Native {
+            program: "cline",
+            args: &["--acp"],
+        },
+        login_hint: "Run `cline auth` in a terminal once and sign in with your Cline account or ChatGPT subscription.",
+        install: ("npm install -g cline", "npm install -g cline"),
+        color: 0xd9a03f,
+        glyph: AgentGlyph::Bot,
+        provider: "Cline",
+        // Cline updates itself (a global npm install) on every start; the
+        // user's own runs of it still do. And it runs sessions through a
+        // background hub it starts, which outlives it: here they run in its
+        // own process, which ends with it.
+        env: &[
+            ("CLINE_NO_AUTO_UPDATE", "1"),
+            ("CLINE_SESSION_BACKEND_MODE", "local"),
+        ],
+        quirks: Quirks {
+            text_prompts: true,
+            // Missing before 3.0.74; there, the first prompt after a load
+            // comes back empty.
+            no_session_load: true,
+            mcp_settings_env: Some("CLINE_MCP_SETTINGS_PATH"),
+        },
     },
 ];
 
@@ -183,6 +249,7 @@ impl AgentSpec {
             "claude" => "https://www.npmjs.com/package/@anthropic-ai/claude-code",
             "codex" => "https://www.npmjs.com/package/@openai/codex",
             "gemini" => "https://www.npmjs.com/package/@google/gemini-cli",
+            "cline" => "https://www.npmjs.com/package/cline",
             _ => "https://antigravity.google",
         }
     }
@@ -275,7 +342,9 @@ impl AgentSpec {
                     program,
                     args: vec![subcommand.into()],
                 },
-                Err(err) => Availability::Missing(format!("PilotHouse cannot find itself: {err}")),
+                Err(err) => {
+                    Availability::Missing(format!("{} cannot find itself: {err}", ph_brand::NAME))
+                }
             },
         }
     }

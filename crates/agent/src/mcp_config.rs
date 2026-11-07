@@ -91,7 +91,7 @@ pub fn validate(server: &McpServerConfig, existing: &[McpServerConfig]) -> Resul
         bail!("A server needs a name and a command.");
     }
     if name.eq_ignore_ascii_case(RESERVED) {
-        bail!("“{RESERVED}” is PilotHouse's own server.");
+        bail!("“{RESERVED}” is {}'s own server.", ph_brand::NAME);
     }
     if existing
         .iter()
@@ -170,8 +170,8 @@ pub struct FoundServer {
     pub server: McpServerConfig,
 }
 
-/// The local servers configured in Claude Code, Codex and Gemini CLI, for
-/// everyone and for `project`.
+/// The local servers configured in Claude Code, Codex, Gemini CLI and
+/// Cline, for everyone and for `project`.
 pub fn discover(home: &Path, project: &Path) -> Vec<FoundServer> {
     let mut found = Vec::new();
     let mut from_json = |agent, path: PathBuf, pick: &dyn Fn(&Value) -> Option<Value>| {
@@ -214,6 +214,11 @@ pub fn discover(home: &Path, project: &Path) -> Vec<FoundServer> {
         project.join(".gemini/settings.json"),
         &|json| json.get("mcpServers").cloned(),
     );
+    from_json(
+        "Cline",
+        crate::cline::Paths::under(home, &|_| None).mcp_settings,
+        &|json| json.get("mcpServers").cloned(),
+    );
     let codex = home.join(".codex/config.toml");
     if let Some(table) = std::fs::read_to_string(&codex)
         .ok()
@@ -228,15 +233,20 @@ pub fn discover(home: &Path, project: &Path) -> Vec<FoundServer> {
     found
 }
 
-/// `{"name": {"command": …, "args": […], "env": {…}}}`; servers with only a
-/// URL are left out.
+/// `{"name": {"command": …, "args": […], "env": {…}}}`, or Cline's
+/// `{"name": {"transport": {"type": "stdio", "command": …}}}`; servers with
+/// only a URL are left out.
 fn json_servers(servers: &Value) -> Vec<McpServerConfig> {
     let Some(servers) = servers.as_object() else {
         return Vec::new();
     };
     servers
         .iter()
-        .filter_map(|(name, server)| {
+        .filter_map(|(name, entry)| {
+            let server = entry
+                .get("transport")
+                .filter(|transport| transport.is_object())
+                .unwrap_or(entry);
             let command = server.get("command")?.as_str()?.to_string();
             let strings = |value: Option<&Value>| -> Vec<String> {
                 value
@@ -265,7 +275,10 @@ fn json_servers(servers: &Value) -> Vec<McpServerConfig> {
                 command,
                 args: strings(server.get("args")),
                 env,
-                enabled: true,
+                enabled: !entry
+                    .get("disabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             })
         })
         .collect()
@@ -409,6 +422,13 @@ mod tests {
             r#"{"mcpServers": {"local": {"command": "./tool"}}}"#,
         )
         .unwrap();
+        std::fs::create_dir_all(home.join(".cline/data/settings")).unwrap();
+        std::fs::write(
+            home.join(".cline/data/settings/cline_mcp_settings.json"),
+            r#"{"mcpServers": {"docs": {"transport": {"type": "stdio", "command": "docs-mcp", "args": ["-q"]}, "disabled": true},
+                               "web": {"transport": {"type": "sse", "url": "https://example.com/sse"}}}}"#,
+        )
+        .unwrap();
 
         let found = discover(&home, &project);
         let names: Vec<_> = found
@@ -422,12 +442,15 @@ mod tests {
                 ("Claude Code", "db"),
                 ("Claude Code", "local"),
                 ("Gemini CLI", "git"),
+                ("Cline", "docs"),
                 ("Codex", "search")
             ],
             "remote servers are left out"
         );
         assert_eq!(found[0].server.env, [("K".to_string(), "v".to_string())]);
-        assert_eq!(found[4].server.args, ["--fast"]);
-        assert_eq!(found[4].server.env, [("KEY".to_string(), "1".to_string())]);
+        assert_eq!(found[4].server.args, ["-q"]);
+        assert!(!found[4].server.enabled, "it is off in Cline");
+        assert_eq!(found[5].server.args, ["--fast"]);
+        assert_eq!(found[5].server.env, [("KEY".to_string(), "1".to_string())]);
     }
 }

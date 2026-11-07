@@ -19,6 +19,9 @@ use ph_utils::{Input, UTILITIES, Utility};
 
 /// Opens the dialog, at utility `id` (or the first).
 pub fn open(id: Option<&str>, window: &mut Window, cx: &mut App) {
+    if !ph_brand::enabled(ph_brand::Feature::Utilities) {
+        return;
+    }
     let selected = id
         .and_then(|id| UTILITIES.iter().position(|utility| utility.id == id))
         .unwrap_or(0);

@@ -1,6 +1,6 @@
 # Packaging and releases
 
-Installers are built by `scripts/package/` and published by the **Release** workflow (`.github/workflows/release.yml`).
+Installers are built by `scripts/package/` and published by the **Release** workflow (`.github/workflows/release.yml`). Their name, maker, bundle id and icons come from `brand/` (`brand.toml`, read by `scripts/package/brand.sh`, and `icons/`); file names start with the name without spaces. An organisation's build changes those; see [customizing.md](customizing.md).
 
 | System | Files | Script |
 |---|---|---|
@@ -8,7 +8,7 @@ Installers are built by `scripts/package/` and published by the **Release** work
 | Windows 10/11 x64 | `PilotHouse-Windows-Setup-x64.exe` (NSIS, per user, no admin), `PilotHouse-Windows-Portable-x64.zip` | `scripts/package/windows.ps1` (needs NSIS) |
 | Linux x86-64 | `PilotHouse-Linux-x86_64.AppImage`, `PilotHouse-Linux-amd64.deb`, `PilotHouse-Linux-x86_64.tar.gz` | `scripts/package/linux.sh` (build on Ubuntu 22.04 or older) |
 
-Everything lands in `dist/` (git-ignored). The version comes from `Cargo.toml` (`scripts/package/version.sh`), now `0.6.0`. A pre-release version such as `1.0.0-beta` is shown as "1.0.0 beta"; where only numbers are allowed the suffix is dropped (the macOS bundle version and Windows file version read `1.0.0`), and the `.deb` is `1.0.0~beta`, which Debian sorts before `1.0.0`.
+Everything lands in `dist/` (git-ignored). The version comes from `Cargo.toml` (`scripts/package/version.sh`), now `0.6.1`. A pre-release version such as `1.0.0-beta` is shown as "1.0.0 beta"; where only numbers are allowed the suffix is dropped (the macOS bundle version and Windows file version read `1.0.0`), and the `.deb` is `1.0.0~beta`, which Debian sorts before `1.0.0`.
 
 - **macOS:** the script builds both architectures, joins them with `lipo`, makes `PilotHouse.app` (`Info.plist` with the folder and text document types that Finder's *Open With* uses, the icon), signs it ad hoc and wraps it in a DMG with a shortcut to Applications.
 - **Windows:** the icon is built into `pilothouse.exe` by `crates/app/build.rs` (resource 1, which GPUI shows for the window and the taskbar). The installer puts the app in `%LOCALAPPDATA%\Programs\PilotHouse`, adds a Start menu entry (a desktop shortcut is optional) and an uninstaller; uninstalling keeps your data.
@@ -17,7 +17,7 @@ Everything lands in `dist/` (git-ignored). The version comes from `Cargo.toml` (
 ## Releases
 
 - **Before a release:** run `scripts/update-prices.py` to refresh the model prices the usage dashboard ships with (`crates/workspace/src/usage_view/prices.json`) and commit the result.
-- **Release:** push a tag `vX.Y.Z` matching `Cargo.toml` (`v0.6.0` now). Only maintainers can create `v*` tags. The release becomes the latest; a version with a suffix (`-beta`) is published as a pre-release instead. There are no nightly builds.
+- **Release:** push a tag `vX.Y.Z` matching `Cargo.toml` (`v0.6.1` now). Only maintainers can create `v*` tags. The release becomes the latest; a version with a suffix (`-beta`) is published as a pre-release instead. There are no nightly builds.
 - **Check a branch:** start the Release workflow by hand on any other branch (`gh workflow run release.yml --ref <branch>`): it builds every installer and keeps them as run artifacts, without publishing.
 
 Each build job attests its files ([build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations)), and the release carries `SHA256SUMS`. Check a download with `gh attestation verify <file> -R LibreGuild/PilotHouse`.
@@ -39,11 +39,11 @@ The `publish` and `mirror` jobs run in the repository's `release` environment, w
 
 | Secret | What |
 |---|---|
-| `UPDATE_SIGNING_KEY` | the Ed25519 private key (PEM) that signs `latest.json`; its public half is `crates/workspace/src/update_key.pub` |
+| `UPDATE_SIGNING_KEY` | the Ed25519 private key (PEM) that signs `latest.json`; its public half is `brand/update_key.pub` |
 | `R2_ACCOUNT_ID` | the Cloudflare account that holds the bucket |
 | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | an R2 API token with *Object Read & Write* on the `libreguild` bucket only |
 
-Keep a copy of the signing key outside GitHub (a password manager): every copy of PilotHouse checks updates against its public half, so a lost key means a new one has to ship in an app release before updates can be signed again, and copies older than that release would no longer update by themselves. To replace it: `openssl genpkey -algorithm ed25519 -out key.pem`, put its public half in `update_key.pub` (`openssl pkey -in key.pem -pubout -outform DER | tail -c 32 | base64`), and store the PEM as the secret. `scripts/package/sign-manifest.sh` refuses to sign with a key whose public half is not the one in the source.
+Keep a copy of the signing key outside GitHub (a password manager): every copy of PilotHouse checks updates against its public half, so a lost key means a new one has to ship in an app release before updates can be signed again, and copies older than that release would no longer update by themselves. To replace it: `openssl genpkey -algorithm ed25519 -out key.pem`, put its public half in `brand/update_key.pub` (`openssl pkey -in key.pem -pubout -outform DER | tail -c 32 | base64`), and store the PEM as the secret. `scripts/package/sign-manifest.sh` refuses to sign with a key whose public half is not the one in the source.
 
 ## Updates
 

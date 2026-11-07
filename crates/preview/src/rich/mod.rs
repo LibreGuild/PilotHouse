@@ -1602,20 +1602,14 @@ impl RichEditor {
                 match drawn {
                     Ok(diagram) => div()
                         .w_full()
-                        .flex()
-                        .justify_center()
                         .py_2()
-                        .child(
-                            div()
-                                .w_full()
-                                .max_w(px(diagram.width.min(READING_WIDTH - 64.)))
-                                .aspect_ratio(diagram.width / diagram.height)
-                                .child(
-                                    gpui_kit::img(diagram.image.clone())
-                                        .size_full()
-                                        .object_fit(gpui_kit::ObjectFit::Contain),
-                                ),
-                        )
+                        .child(ph_ui::DiagramCard::new(
+                            ("rich-diagram", id),
+                            diagram.image.clone(),
+                            (diagram.width, diagram.height),
+                            block.body.clone(),
+                            READING_WIDTH - 64.,
+                        ))
                         .into_any_element(),
                     Err(err) => div()
                         .text_xs()

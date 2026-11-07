@@ -155,7 +155,9 @@ impl Session {
                 if self.options.project_id.is_none() {
                     self.project_id = None;
                 }
-                return Err(err.context("PilotHouse restarted; try the tool again"));
+                return Err(
+                    err.context(concat!(ph_brand::name!(), " restarted; try the tool again"))
+                );
             }
             Err(err) => return Err(err),
         };
@@ -171,10 +173,9 @@ impl Session {
 
     fn client(&mut self) -> Result<&mut ControlClient> {
         if self.client.is_none() {
-            self.client = Some(
-                ControlClient::connect(&self.options.socket_path)
-                    .context("PilotHouse must be running for its tools to work")?,
-            );
+            self.client = Some(ControlClient::connect(&self.options.socket_path).context(
+                concat!(ph_brand::name!(), " must be running for its tools to work"),
+            )?);
         }
         Ok(self.client.as_mut().expect("connected above"))
     }
@@ -188,7 +189,10 @@ impl Session {
             .client()?
             .call("project.resolve", json!({ "path": path }))?;
         let id = result.get("id").and_then(Value::as_i64).with_context(|| {
-            format!("{path} is not in a PilotHouse workspace; open it in PilotHouse first")
+            format!(
+                "{path} is not in a {app} workspace; open it in {app} first",
+                app = ph_brand::NAME
+            )
         })?;
         self.project_id = Some(id);
         Ok(id)

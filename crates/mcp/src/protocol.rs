@@ -22,16 +22,38 @@ pub fn initialize_result(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "pilothouse", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "PilotHouse tools for this project.\n\
-            Board: the plan as cards in four columns (todo, in_progress, review, done). Use \
+        "instructions": instructions(),
+    })
+}
+
+/// What the server tells agents about its main tools: only those of the
+/// features this build has (the brand's `[features]`).
+fn instructions() -> String {
+    use ph_brand::{Feature, enabled};
+    let mut text = concat!(ph_brand::name!(), " tools for this project.").to_string();
+    if enabled(Feature::Board) {
+        text.push_str(
+            "\nBoard: the plan as cards in four columns (todo, in_progress, review, done). Use \
             board_add_cards to plan, board_next_card to claim work, board_add_note to report \
-            progress and board_update_card to move a card when you finish it.\n\
-            Browser: the project's browser, shown to the user in PilotHouse (logins persist). Use \
+            progress and board_update_card to move a card when you finish it.",
+        );
+    }
+    if enabled(Feature::Browser) {
+        text.push_str(concat!(
+            "\nBrowser: the project's browser, shown to the user in ",
+            ph_brand::name!(),
+            " (logins persist). Use \
             browser_open, then browser_snapshot to find elements and their selectors, \
             browser_click / browser_type / browser_press to act, and browser_screenshot to check \
-            the result visually. browser_logs shows console errors and failed requests.\n\
-            Devices: Android emulators and phones connected over adb. device_list first, then \
+            the result visually. browser_logs shows console errors and failed requests."
+        ));
+    }
+    if enabled(Feature::Devices) {
+        text.push_str(
+            "\nDevices: Android emulators and phones connected over adb. device_list first, then \
             device_screenshot and device_ui to see the screen, device_tap / device_swipe / \
             device_type / device_key to act, device_logcat for logs.",
-    })
+        );
+    }
+    text
 }

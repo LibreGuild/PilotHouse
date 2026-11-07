@@ -92,7 +92,7 @@ impl Render for ConnectForm {
                 v_flex()
                     .gap_2()
                     .child(div().text_sm().child(
-                        "Connect the phone with a cable once, with USB debugging on and the phone on the same Wi-Fi as this computer. PilotHouse switches it to Wi-Fi; then the cable can go.",
+                        concat!("Connect the phone with a cable once, with USB debugging on and the phone on the same Wi-Fi as this computer. ", ph_brand::name!(), " switches it to Wi-Fi; then the cable can go."),
                     ))
                     .when(phones.is_empty(), |this| {
                         this.child(

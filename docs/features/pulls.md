@@ -46,8 +46,8 @@ What agents are asked to do with a pull request (`ph_review::templates`). Shippe
 
 - **Overview**: the description and conversation (Markdown), reviews with their state, then Comment / Request changes / Approve, and Merge (merge, squash or rebase; asks to confirm).
 - **Findings**: what agent reviews found, kept across rounds (see [Findings](#findings)). The tab shows how many are open; opening it reads the author's ticks and replies.
-- **Walkthrough**: the change explained (see [Walkthrough](#walkthrough)).
-- **Files**: each file's diff with its line comment threads; Reply in a thread. Only the files in sight are drawn (patches are parsed once), and a diff over 400 lines is folded behind *Show diff*. **Ask about lines** under a file asks an agent about some of its lines (type `start-end: question`). When there is a walkthrough, its tour runs along the top: each stop shows its file.
+- **Walkthrough**: a briefing on the change for whoever reviews it (see [Walkthrough](#walkthrough)).
+- **Files**: each file's diff with its line comment threads; Reply in a thread. Only the files in sight are drawn (patches are parsed once), and a diff over 400 lines is folded behind *Show diff*. **Ask about lines** under a file asks an agent about some of its lines (type `start-end: question`).
 - **Commits**, **Checks** (click to open a check's page).
 - **Watch**: PilotHouse looks at the pull request every three minutes and tells you (a system notification) when the author pushes or answers a finding; answers are applied. Merged or closed pull requests stop being watched.
 - **Address comments** (your own pull requests): a [task](#fix-in-a-task) on the branch whose agent works through the reviewers' comments not yet resolved, changes what is right and drafts a reply for each.
@@ -100,14 +100,18 @@ And for all: **Post to GitHub** / **Update on GitHub**, **Summary only**, **Read
 
 ## Walkthrough
 
-**Walk me through it** (Walkthrough tab) asks an agent to explain the change, in three parts (`ph_review::walkthrough`):
+For whoever reviews the pull request (a tech lead, a manager) and has to understand it first, often without knowing that part of the code. **Explain this pull request** (Walkthrough tab) has an agent read the change and the code around it (what calls it and what it calls, the modules it lives in, the repository's documentation), then write a briefing that goes from plain words to detail (`ph_review::walkthrough`):
 
-- **The gist**: what it does, why, and where the why comes from (the description, the commits, or a guess, marked as such), and before and after, one line each.
-- **At a glance**: the changed files grouped by purpose (core logic, API, UI, data, tests, config, docs…); a group shows only its files in the Files tab.
-- **Read in this order**: three to six stops, each a few lines of a changed file with one sentence; each opens its file, and the tour runs along the top of the Files tab.
-- When calls cross several files, a small **flow** of who calls what, drawn by PilotHouse from the agent's steps.
+- **In short**: what changes and why it matters, in two or three sentences.
+- **Why**: the problem or goal, and where that comes from (the description, the commits, an issue, or the agent's reading of the code, marked as a guess).
+- **How it works today**: the part of the system the change touches, as it is before it, for someone new to the code, with a diagram.
+- **What changes**: step by step, with a diagram of the new flow when it differs.
+- **How it is done**: the main choices, by area.
+- **What it affects**: users, APIs, data and migrations, configuration, security, performance, compatibility, rollout, whichever apply.
+- **Where to look closely**: the places that most deserve a reviewer's attention, each with what to check, and what is safe to skim.
+- **How it is tested**, **Questions for the author** and **Terms** (the domain words used).
 
-Stops in files the change does not touch are dropped. **Copy** gives it as Markdown (with the flow as a Mermaid diagram) for a description or a message.
+It is shown as the chat shows a reply: Markdown with its Mermaid diagrams drawn (hover one to zoom it or open it large), and text you can select and copy (⌘C or Ctrl+C), as on the Overview. A reference to a changed file (`src/store.rs:40-58`) opens it in the Files tab; one to any other file opens it on the web at the commit the briefing read. **Copy** copies all of it as Markdown, for a description or a message; **Again** writes it again (the header says when new commits came since). The agent works in the chat beside, where you can ask it more.
 
 ## Review your changes before pushing
 

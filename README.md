@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="crates/app/assets/icon/PilotHouse-1024.png" alt="PilotHouse" width="128">
+  <img src="brand/icons/app-1024.png" alt="PilotHouse" width="128">
 </p>
 
 <h1 align="center">PilotHouse</h1>
 
 <p align="center">
   One fast, native desktop app for working with coding agents.<br>
-  Chat with Claude Code, Codex, Gemini CLI or Antigravity, with your code, Git, a board, terminals, a browser and Android devices beside the chat, and let the agents use them too. Make the pictures, videos and slides that go with the work in the same app.
+  Chat with Claude Code, Codex, Gemini CLI, Antigravity or Cline, with your code, Git, a board, terminals, a browser and Android devices beside the chat, and let the agents use them too. Make the pictures, videos and slides that go with the work in the same app.
 </p>
 
 <p align="center">
@@ -28,7 +28,7 @@ A day with coding agents usually means several agent CLIs in terminals, an edito
 
 - **Workspaces** with any number of folders (each Git repository has its own tools) or none, all in the sidebar with their chats: each has a colour and shows what it is doing (working, needs your answer, tests failing, finished). A workspace can move to a window of its own. Chats that need no folder have their own place, so PilotHouse is ready to chat on first start.
 - **A GitHub view** beside the workspaces: pull requests waiting for your review across repositories, yours, those assigned to you, and agent reviews that run in PilotHouse's own clone of the repository, with the review chat beside the PR.
-- **Agent chat** over the [Agent Client Protocol](https://agentclientprotocol.com) with Claude Code, Codex, Gemini CLI and Antigravity: tool calls with diffs, plans, permissions, a model picker with effort and mode, `@` mentions of files, definitions, screenshots, logs, pull requests and test runs, checkpoints with restore, hand-off between agents, search across chats, usage, and parallel runs of one prompt in separate worktrees.
+- **Agent chat** over the [Agent Client Protocol](https://agentclientprotocol.com) with Claude Code, Codex, Gemini CLI, Antigravity and Cline: tool calls with diffs, plans, permissions, a model picker with effort and mode, `@` mentions of files, definitions, screenshots, logs, pull requests and test runs, checkpoints with restore, hand-off between agents, search across chats, usage, and parallel runs of one prompt in separate worktrees.
 - **Code**: a file tree with icons per file type and Git marks, an editor with language servers (diagnostics, hover, definition, references, rename, outline), workspace search, a viewer for multi-gigabyte logs, and *ask about this code*.
 - **Git and GitHub**: commit, branches, history graph, stashes, conflicts, blame, review of agent edits per hunk; pull requests in the app, and agent reviews whose findings you post as comments.
 - **Board**: a Kanban board agents plan on and work through card by card, through PilotHouse's MCP server.
@@ -41,7 +41,10 @@ A day with coding agents usually means several agent CLIs in terminals, an edito
   - **Video**: cut and speed up parts of a screen recording on a timeline, add labels and blurs that show at set times, and export MP4, HEVC, WebM or GIF.
   - **Slides**: decks drafted by an agent from a few lines, with charts, tables, diagrams, icons, themes and your PowerPoint templates; present with notes; open any `.pptx` and export editable PowerPoint, PDF or pictures.
 - **Themes and layout**: eight themes, or one you describe to an agent (or import from VS Code); an accent, density, and a gradient or picture behind the window. Panes dock and split where you want them, and terminals run side by side.
+- **Quick chat**: a small chat window over every app, from anywhere, with a global shortcut (⌥Space; Alt+Shift+Space on Windows and Linux) or `pilothouse quick-chat`. Its chats are under Chats.
+- **Agents in terminals**: Claude Code, Codex, Gemini CLI, Antigravity or Cline in a workspace terminal, followed (working, needs you, done) and kept in the chat list once closed, to read, search and go on with in the terminal or in a chat.
 - **Inbox and to-dos**, and an offline utilities toolbox (JSON, JWT, hashes, times, cron, regex, SQLite…) for people and agents.
+- **Your own build**: an organisation sets its name, icons and features in `brand/`, adds views of its own beside Workspaces and GitHub, and keeps merging PilotHouse releases ([docs/customizing.md](docs/customizing.md)).
 
 <p align="center">
   <img src="site/shots/studio-picture.webp" alt="Studio marking up a screenshot: an email blurred, one row spotlit and a label added" width="290">
@@ -84,6 +87,7 @@ cargo run --release -p pilothouse
 
 - [User guide](docs/user-guide.md): first steps, the screen, shortcuts.
 - [Docs index](docs/README.md): architecture, testing, performance, security, and a short page per feature.
+- [Customizing](docs/customizing.md): building PilotHouse for your organisation, with your own name, icons, features and additions, and merging new releases.
 
 ## Contributing
 
