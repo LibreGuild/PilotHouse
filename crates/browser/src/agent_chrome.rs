@@ -47,6 +47,9 @@ use crate::cdp::{Cdp, CdpEvent, CdpInbox};
 use crate::extension;
 use crate::logs::{Level, Logs};
 
+mod inbox;
+pub use inbox::{BrowserHost, ChatNews, ChatNote, Delivery, SendTo};
+
 /// How long navigation waits for the page's load event.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// The glow stays this long after an agent's last action: long enough to
@@ -202,6 +205,14 @@ pub struct AgentChrome {
     tabs: Vec<Tab>,
     owners: HashMap<String, Owner>,
     downloads: Vec<(String, Download)>,
+    /// Where what the extension brings goes (set by the workspace shell).
+    host: Option<BrowserHost>,
+    /// Chats waiting for the user, and at work, for the extension.
+    chats: (Vec<ChatNote>, Vec<ChatNote>),
+    /// What the extension was last told of them.
+    sent_status: Option<Value>,
+    /// When each tab was last handed to the user.
+    handed_off: HashMap<String, Instant>,
     _bridge: Option<Task<()>>,
 }
 
@@ -262,6 +273,10 @@ impl AgentChrome {
                 tabs: Vec::new(),
                 owners: HashMap::new(),
                 downloads: Vec::new(),
+                host: None,
+                chats: (Vec::new(), Vec::new()),
+                sent_status: None,
+                handed_off: HashMap::new(),
                 _bridge: None,
             };
             match bridge::listen() {
@@ -392,6 +407,8 @@ impl AgentChrome {
                     self.status = AgentChromeStatus::Connected {
                         browser: browser.into(),
                     };
+                    self.sent_status = None;
+                    self.push_status();
                     cx.notify();
                     cx.emit(AgentChromeEvent::Changed);
                 }
@@ -413,6 +430,8 @@ impl AgentChrome {
                     self.status = AgentChromeStatus::Connected {
                         browser: browser.into(),
                     };
+                    self.sent_status = None;
+                    self.push_status();
                     cx.notify();
                     cx.emit(AgentChromeEvent::Changed);
                 }
@@ -611,6 +630,9 @@ impl AgentChrome {
     /// What the extension tells of the PilotHouse group's tabs.
     fn handle_browser_event(&mut self, event: &CdpEvent, cx: &mut Context<Self>) {
         let params = &event.params;
+        if self.extension_note(&event.method, params, cx) {
+            return;
+        }
         let Some(target) = params["tabId"].as_u64().map(|id| id.to_string()) else {
             return;
         };
@@ -1580,6 +1602,13 @@ impl AgentChrome {
                 None => in_world(&this, &page, "window.__phAgent.focusedIsPassword()", cx).await? == json!(true),
             };
             if password {
+                let _ = this.update(cx, |this, _| {
+                    this.hand_off(
+                        &page.target,
+                        &page.label,
+                        &format!("Sign in on this page yourself (agents never type passwords), then tell {} to go on.", page.label),
+                    )
+                });
                 bail!("{ASK_TO_SIGN_IN}");
             }
             let cdp = page.cdp.clone();
@@ -1655,6 +1684,13 @@ impl AgentChrome {
                 && in_world(&this, &page, "window.__phAgent.focusedIsPassword()", cx).await?
                     == json!(true)
             {
+                let _ = this.update(cx, |this, _| {
+                    this.hand_off(
+                        &page.target,
+                        &page.label,
+                        &format!("Sign in on this page yourself (agents never type passwords), then tell {} to go on.", page.label),
+                    )
+                });
                 bail!("{ASK_TO_SIGN_IN}");
             }
             let cdp = page.cdp.clone();
@@ -2650,6 +2686,18 @@ async fn summary(this: &WeakEntity<AgentChrome>, page: &Page, cx: &mut AsyncApp)
         })?;
     }
     let mut notes = notes(this, &page, cx)?;
+    if human_check {
+        let _ = this.update(cx, |this, _| {
+            this.hand_off(
+                &page.target,
+                &page.label,
+                &format!(
+                    "This page asks to prove a person is here. Complete it in the tab, then tell {} to go on.",
+                    page.label
+                ),
+            )
+        });
+    }
     if human_check && let Some(notes) = notes.as_array_mut() {
         notes.push(json!(
             "The page asks to prove a person is here (a CAPTCHA or similar check). Do not try to \

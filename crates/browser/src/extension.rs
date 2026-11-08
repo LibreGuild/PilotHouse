@@ -36,32 +36,33 @@ pub fn origin() -> String {
     format!("chrome-extension://{EXTENSION_ID}/")
 }
 
+/// The extension's files (paths in `extension/`), built into the app.
+macro_rules! extension_files {
+    ($($name:literal),* $(,)?) => {
+        &[$(($name, include_bytes!(concat!("../extension/", $name)) as &[u8])),*]
+    };
+}
+
 /// The extension's files, as built into the app.
-const FILES: &[(&str, &[u8])] = &[
-    (
-        "manifest.json",
-        include_bytes!("../extension/manifest.json"),
-    ),
-    (
-        "background.js",
-        include_bytes!("../extension/background.js"),
-    ),
-    (
-        "icons/icon16.png",
-        include_bytes!("../extension/icons/icon16.png"),
-    ),
-    (
-        "icons/icon32.png",
-        include_bytes!("../extension/icons/icon32.png"),
-    ),
-    (
-        "icons/icon48.png",
-        include_bytes!("../extension/icons/icon48.png"),
-    ),
-    (
-        "icons/icon128.png",
-        include_bytes!("../extension/icons/icon128.png"),
-    ),
+const FILES: &[(&str, &[u8])] = extension_files![
+    "manifest.json",
+    "background.js",
+    "lib/link.js",
+    "lib/page.js",
+    "lib/settings.js",
+    "lib/tabs.js",
+    "features/send.js",
+    "features/status.js",
+    "page/area.js",
+    "page/clip.js",
+    "page/picker.js",
+    "sidepanel.html",
+    "sidepanel.css",
+    "sidepanel.js",
+    "icons/icon16.png",
+    "icons/icon32.png",
+    "icons/icon48.png",
+    "icons/icon128.png",
 ];
 
 /// Where the extension is written for the user to load.
@@ -654,13 +655,53 @@ mod tests {
         assert_eq!(id, EXTENSION_ID);
         // The extension's version is the app's.
         assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
-        // Only what it needs.
+        // Only what it needs. No site is reachable by default: pages are read
+        // only when the user asks (activeTab), sites the user allows one by
+        // one (optional), and nothing runs in pages by itself.
         assert_eq!(
             manifest["permissions"],
-            json!(["debugger", "nativeMessaging", "tabs", "tabGroups"])
+            json!([
+                "debugger",
+                "nativeMessaging",
+                "tabs",
+                "tabGroups",
+                "activeTab",
+                "scripting",
+                "contextMenus",
+                "notifications",
+                "sidePanel",
+                "storage",
+                "offscreen",
+                "tabCapture"
+            ])
         );
         assert!(manifest.get("host_permissions").is_none());
         assert!(manifest.get("content_scripts").is_none());
+        assert_eq!(manifest["optional_host_permissions"], json!(["<all_urls>"]));
+    }
+
+    #[test]
+    fn every_file_of_the_extension_is_built_in() {
+        fn walk(dir: &Path, base: &Path, found: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, base, found);
+                } else if path.file_name().is_some_and(|name| name != ".DS_Store") {
+                    let relative = path.strip_prefix(base).unwrap();
+                    found.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("extension");
+        let mut found = Vec::new();
+        walk(&base, &base, &mut found);
+        for file in found {
+            assert!(
+                FILES.iter().any(|(name, _)| *name == file),
+                "extension/{file} is not in FILES, so it would not be shipped"
+            );
+        }
     }
 
     #[test]

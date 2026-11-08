@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PilotHouse</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <header class="top">
+    <img class="logo" src="icons/icon32.png" alt="" width="20" height="20">
+    <h1>PilotHouse</h1>
+    <span id="connection" class="connection" role="status"></span>
+  </header>
+
+  <div id="offline" class="banner" hidden>
+    <strong>PilotHouse is not connected.</strong>
+    Open PilotHouse. If it is open, set the extension up in PilotHouse’s Settings → Chrome extension.
+  </div>
+
+  <main>
+    <section id="waiting-section" hidden aria-labelledby="waiting-title">
+      <h2 id="waiting-title">Waiting for you</h2>
+      <ul id="waiting" class="list"></ul>
+    </section>
+
+    <section aria-labelledby="tab-title">
+      <h2 id="tab-title">This tab</h2>
+      <p id="tab-name" class="tab-name"></p>
+      <label class="switch-row">
+        <span>
+          <span class="row-title">Let agents use this tab</span>
+          <span class="row-hint">It joins the purple PilotHouse tab group. Agents never see your other tabs.</span>
+        </span>
+        <input id="share" type="checkbox" role="switch">
+      </label>
+      <div class="actions" role="group" aria-label="Send from this tab">
+        <button data-action="page" title="The page’s text, as Markdown">Send page</button>
+        <button data-action="selection" title="The text you selected on the page">Send selection</button>
+        <button data-action="area" title="Drag over part of the page; a click takes the visible page">Screenshot area</button>
+        <button data-action="element" title="Click an element: its selector, styles, source file and a picture">Pick element</button>
+      </div>
+      <p id="result" class="result" role="status" aria-live="polite"></p>
+    </section>
+
+    <section aria-labelledby="sendto-title">
+      <h2 id="sendto-title">Send to</h2>
+      <div class="segmented" role="radiogroup" aria-labelledby="sendto-title">
+        <label><input type="radio" name="destination" value="current"><span>Chat on screen</span></label>
+        <label><input type="radio" name="destination" value="new"><span>New chat</span></label>
+        <label><input type="radio" name="destination" value="quick"><span>Quick chat</span></label>
+      </div>
+      <p class="hint">What you send waits in the chat’s message box until you send it.</p>
+      <label class="switch-row">
+        <span class="row-title">Bring PilotHouse forward</span>
+        <input id="bringForward" type="checkbox" role="switch">
+      </label>
+    </section>
+
+    <section id="agents-section" aria-labelledby="agents-title">
+      <h2 id="agents-title">Agents in Chrome</h2>
+      <ul id="agents" class="list"></ul>
+      <p id="no-agents" class="hint">No agent is using Chrome now.</p>
+    </section>
+
+    <section aria-labelledby="options-title">
+      <h2 id="options-title">Options</h2>
+      <label class="switch-row">
+        <span>
+          <span class="row-title">Count waiting chats on the toolbar icon</span>
+        </span>
+        <input id="badge" type="checkbox" role="switch">
+      </label>
+      <label class="switch-row">
+        <span>
+          <span class="row-title">Notify in Chrome when chats finish or need you</span>
+          <span class="row-hint">PilotHouse already notifies you; turn this on if you live in Chrome.</span>
+        </span>
+        <input id="notifyNews" type="checkbox" role="switch">
+      </label>
+      <label class="switch-row">
+        <span>
+          <span class="row-title">Notify when an agent needs you in a tab</span>
+          <span class="row-hint">To sign in, or to prove you are a person. The tab comes forward either way.</span>
+        </span>
+        <input id="notifyHandoff" type="checkbox" role="switch">
+      </label>
+
+      <h3>Sites the panel may read</h3>
+      <p class="hint">The right-click menu and shortcuts work on any page without this. The panel’s buttons ask once per site.</p>
+      <ul id="sites" class="list compact"></ul>
+      <p id="no-sites" class="hint">None yet.</p>
+
+      <h3>Shortcuts</h3>
+      <ul id="shortcuts" class="list compact"></ul>
+      <button id="change-shortcuts" class="link">Change shortcuts…</button>
+    </section>
+  </main>
+
+  <footer class="hint">
+    Agents act only in the PilotHouse tab group. Other tabs are read only when you use the PilotHouse menu, a shortcut or this panel.
+  </footer>
+
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>

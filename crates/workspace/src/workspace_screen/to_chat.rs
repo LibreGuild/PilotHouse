@@ -157,7 +157,7 @@ impl WorkspaceScreen {
     }
 
     /// Adds attachments to the composer, bringing the chat into view.
-    pub(super) fn attach_to_chat(
+    pub(crate) fn attach_to_chat(
         &mut self,
         attachments: Vec<Attachment>,
         window: &mut Window,

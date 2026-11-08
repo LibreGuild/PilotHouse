@@ -415,6 +415,48 @@ impl Workspace {
     }
 
     /// A new chat in workspace (or Chats space) `project`.
+    /// Puts what the user sent from Chrome in a composer: the chat on screen
+    /// (the workspace on screen, else the Chats space), or a new chat there.
+    /// Says where, for the extension to tell the user.
+    pub(crate) fn receive_from_browser(
+        &mut self,
+        new_chat: bool,
+        attachments: Vec<ph_agent::Attachment>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<String> {
+        if self.view != View::Workspaces {
+            self.set_view(View::Workspaces, window, cx);
+        }
+        let project = self
+            .active_project
+            .or_else(|| self.chats_space().map(|chats| chats.id))
+            .ok_or_else(|| anyhow::anyhow!("Open a workspace in {} first.", ph_brand::NAME))?;
+        self.open_project(project, window, cx);
+        let space = self
+            .spaces
+            .get(&project)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("The workspace could not be opened."))?;
+        let name = if self.is_chats(project) {
+            "Chats".to_string()
+        } else {
+            space.read(cx).project().name.clone()
+        };
+        space.update(cx, |space, cx| {
+            if new_chat {
+                space.new_session(window, cx);
+            }
+            space.attach_to_chat(attachments, window, cx);
+        });
+        cx.notify();
+        Ok(if new_chat {
+            format!("a new chat in “{name}”")
+        } else {
+            format!("the chat in “{name}”")
+        })
+    }
+
     pub fn new_chat_in(&mut self, project: ProjectId, window: &mut Window, cx: &mut Context<Self>) {
         self.open_project(project, window, cx);
         if let Some(space) = self.spaces.get(&project) {

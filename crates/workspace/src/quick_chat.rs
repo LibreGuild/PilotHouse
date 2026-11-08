@@ -490,6 +490,42 @@ pub fn toggle(cx: &mut App) {
     }
 }
 
+/// Opens the window (or brings it forward) with `attachments` in its
+/// composer, for the user to write about and send.
+pub(crate) fn deliver(attachments: Vec<ph_agent::Attachment>, cx: &mut App) -> anyhow::Result<()> {
+    if !ph_brand::enabled(Feature::QuickChat) {
+        anyhow::bail!(
+            "Quick chat is not part of this build of {}.",
+            ph_brand::NAME
+        );
+    }
+    let open_now = cx
+        .default_global::<QuickChat>()
+        .window
+        .clone()
+        .filter(|(handle, _)| handle.update(cx, |_, _, _| ()).is_ok());
+    if open_now.is_none() {
+        open(cx)?;
+    }
+    let (handle, view) = cx
+        .default_global::<QuickChat>()
+        .window
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("The quick chat window did not open."))?;
+    handle.update(cx, |_, window, cx| {
+        cx.activate(true);
+        window.activate_window();
+        view.update(cx, |view, cx| {
+            view.chat.update(cx, |chat, cx| {
+                for attachment in attachments {
+                    chat.attach(attachment, window, cx);
+                }
+            })
+        })
+    })??;
+    Ok(())
+}
+
 /// Hides the window; its chat goes on (in the Chats space).
 fn close(cx: &mut App) {
     if let Some((handle, _)) = cx.default_global::<QuickChat>().window.take() {
