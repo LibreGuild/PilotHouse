@@ -47,6 +47,7 @@ use crate::cdp::{Cdp, CdpEvent, CdpInbox};
 use crate::extension;
 use crate::logs::{Level, Logs};
 
+mod devtools;
 mod inbox;
 mod shared_text;
 pub use inbox::{BrowserHost, ChatNews, ChatNote, Delivery, SendTo};
@@ -194,6 +195,16 @@ struct Tab {
     /// The debugger being let go of (idle): attaching again waits for it,
     /// or its detach, arriving after, would undo the attach.
     letting_go: Option<Shared<Task<()>>>,
+    /// What the agent emulates in it (a device, a network…), and its
+    /// mocked responses: they end when the debugger lets go.
+    emulating: Vec<String>,
+    mocks: Vec<devtools::Mock>,
+    /// The debugger stays at least until then (emulation and mocks).
+    keep_until: Option<Instant>,
+    /// A heap snapshot being read, and the last one's summary.
+    heap: Option<String>,
+    heap_too_large: bool,
+    heap_summary: Option<devtools::HeapSummary>,
     _glow: Option<Task<()>>,
     _idle: Option<Task<()>>,
 }
@@ -569,6 +580,14 @@ impl AgentChrome {
                 tab.dialog = Some(dialog);
             }
             "Page.javascriptDialogClosed" => self.tabs[index].dialog = None,
+            "Fetch.requestPaused" => {
+                self.answer_paused(index, params, cx);
+                return;
+            }
+            "HeapProfiler.addHeapSnapshotChunk" => {
+                self.heap_chunk(index, params);
+                return;
+            }
             "Page.windowOpen" => {
                 self.tabs[index].opened_window = Some(Instant::now());
                 return;
@@ -703,6 +722,7 @@ impl AgentChrome {
                 tab.loading = false;
                 tab._idle = None;
                 let (owner, url) = (tab.owner.clone(), tab.url.clone());
+                self.overrides_ended(&target, "Chrome's debugger let go of the tab");
                 // The user closed Chrome's "started debugging" bar.
                 if reason == "canceled_by_user"
                     && let Some(owner) = self.owners.get_mut(&owner)
@@ -790,6 +810,32 @@ impl AgentChrome {
         let label = state.label.clone();
         let targets = state.tabs.clone();
         for target in targets {
+            // Stop gives the user their tab back as it was: no emulation,
+            // no mocked requests.
+            if paused
+                && let Some(tab) = self.tab(&target)
+                && tab.attached
+                && (!tab.emulating.is_empty() || !tab.mocks.is_empty())
+            {
+                let cdp = tab.cdp.clone();
+                cx.background_spawn(async move {
+                    for (method, params) in [
+                        ("Emulation.clearDeviceMetricsOverride", json!({})),
+                        ("Emulation.setTouchEmulationEnabled", json!({ "enabled": false })),
+                        ("Network.emulateNetworkConditions", json!({ "offline": false, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1 })),
+                        ("Emulation.setCPUThrottlingRate", json!({ "rate": 1 })),
+                        ("Emulation.setEmulatedMedia", json!({ "media": "", "features": [] })),
+                        ("Emulation.clearGeolocationOverride", json!({})),
+                        ("Emulation.setTimezoneOverride", json!({ "timezoneId": "" })),
+                        ("Emulation.setLocaleOverride", json!({})),
+                        ("Fetch.disable", json!({})),
+                    ] {
+                        cdp.call(method, params).await.ok();
+                    }
+                })
+                .detach();
+                self.overrides_ended(&target, "the user pressed Stop");
+            }
             if let Some(tab) = self.tab_mut(&target) {
                 if !tab.attached {
                     continue;
@@ -809,6 +855,33 @@ impl AgentChrome {
         }
         cx.notify();
         cx.emit(AgentChromeEvent::Changed);
+    }
+
+    /// Emulation and mocks in tab `target` ended (`why`): its agent hears.
+    fn overrides_ended(&mut self, target: &str, why: &str) {
+        let Some(tab) = self.tab_mut(target) else {
+            return;
+        };
+        let mut ended = Vec::new();
+        if !tab.emulating.is_empty() {
+            ended.push(format!("the emulation ({})", tab.emulating.join(", ")));
+        }
+        if !tab.mocks.is_empty() {
+            ended.push(format!("{} mocked request rule(s)", tab.mocks.len()));
+        }
+        tab.emulating.clear();
+        tab.mocks.clear();
+        tab.keep_until = None;
+        if ended.is_empty() {
+            return;
+        }
+        let owner = tab.owner.clone();
+        if let Some(owner) = self.owners.get_mut(&owner) {
+            owner.notes.push(format!(
+                "{} ended: {why}. Set them again if you still need them.",
+                ended.join(" and ")
+            ));
+        }
     }
 
     // ---- Tabs ------------------------------------------------------------
@@ -943,6 +1016,12 @@ impl AgentChrome {
             hinted: 0,
             opened_window: None,
             letting_go: None,
+            emulating: Vec::new(),
+            mocks: Vec::new(),
+            keep_until: None,
+            heap: None,
+            heap_too_large: false,
+            heap_summary: None,
             _glow: None,
             _idle: None,
         });
@@ -1032,7 +1111,8 @@ impl AgentChrome {
                     let idle = tab.attached
                         && !paused
                         && tab.dialog.is_none()
-                        && tab.busy.load(Ordering::SeqCst) == 0;
+                        && tab.busy.load(Ordering::SeqCst) == 0
+                        && tab.keep_until.is_none_or(|until| Instant::now() >= until);
                     Some(idle.then(|| (this.browser().ok(), tab.cdp.clone(), tab.world)))
                 });
                 match ready {
@@ -1050,6 +1130,10 @@ impl AgentChrome {
                                 tab.loading = false;
                                 tab.letting_go = Some(going.clone());
                             }
+                            this.overrides_ended(
+                                &target,
+                                "the tab was idle, so Chrome's debugger let go",
+                            );
                         });
                         going.await;
                         return;

@@ -124,6 +124,41 @@ pub fn register(cx: &mut App) {
             cx,
         ))
     });
+    action("chrome.performance", cx, |chrome, who, params, cx| {
+        Ok(chrome.performance(
+            &who,
+            params["reload"].as_bool().unwrap_or(true),
+            params["no_cache"].as_bool().unwrap_or(false),
+            cx,
+        ))
+    });
+    action("chrome.audit", cx, |chrome, who, params, cx| {
+        let categories = params["categories"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        Ok(chrome.audit(&who, categories, cx))
+    });
+    action("chrome.emulate", cx, |chrome, who, params, cx| {
+        Ok(chrome.emulate(&who, params, cx))
+    });
+    action("chrome.mock", cx, |chrome, who, params, cx| {
+        Ok(chrome.mock(&who, params, cx))
+    });
+    action("chrome.memory", cx, |chrome, who, params, cx| {
+        Ok(chrome.memory(&who, params["compare"].as_bool().unwrap_or(false), cx))
+    });
+    action("chrome.errors", cx, |chrome, who, params, cx| {
+        Ok(chrome.errors(
+            &who,
+            params["project_id"].as_i64(),
+            params["limit"].as_u64().unwrap_or(20).clamp(1, 100) as usize,
+            cx,
+        ))
+    });
     action("chrome.evaluate", cx, |chrome, who, params, cx| {
         Ok(chrome.evaluate(&who, string(&params, "expression")?, cx))
     });

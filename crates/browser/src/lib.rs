@@ -32,6 +32,7 @@ mod hub;
 mod input;
 pub mod logs;
 mod scripts;
+mod sourcemap;
 pub mod workflows;
 
 pub use agent_chrome::{
