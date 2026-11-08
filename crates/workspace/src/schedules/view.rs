@@ -162,6 +162,18 @@ pub fn open(
     window: &mut Window,
     cx: &mut App,
 ) {
+    open_with(workspace, project_id, None, window, cx);
+}
+
+/// Opens the dialog with a new schedule's form filled in (`name`, `prompt`)
+/// for the user to choose when, check and save.
+pub(crate) fn open_with(
+    workspace: WeakEntity<Workspace>,
+    project_id: ProjectId,
+    draft: Option<(String, String)>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     if !ph_brand::enabled(ph_brand::Feature::Schedules) {
         return;
     }
@@ -191,6 +203,17 @@ pub fn open(
             }
         }),
     });
+    if let Some((name, prompt)) = draft {
+        view.update(cx, |view, cx| {
+            view.open_form(None, window, cx);
+            if let Some(form) = &view.form {
+                form.name
+                    .update(cx, |input, cx| input.set_value(name, window, cx));
+                form.prompt
+                    .update(cx, |input, cx| input.set_value(prompt, window, cx));
+            }
+        });
+    }
     window.open_dialog(cx, move |dialog, _, _| {
         dialog.title("Schedules").w(px(660.)).child(view.clone())
     });

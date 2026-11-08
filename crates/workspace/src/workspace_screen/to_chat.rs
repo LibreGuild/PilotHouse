@@ -156,6 +156,22 @@ impl WorkspaceScreen {
         self.attach_to_chat(attachments, window, cx);
     }
 
+    /// Drafts a message about `attachment` in the chat, for the user to
+    /// change and send.
+    pub(crate) fn draft_in_chat(
+        &mut self,
+        attachment: Attachment,
+        prompt: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal_chat(cx);
+        self.chat.update(cx, |chat, cx| {
+            chat.draft_about(attachment, prompt, window, cx)
+        });
+        cx.notify();
+    }
+
     /// Adds attachments to the composer, bringing the chat into view.
     pub(crate) fn attach_to_chat(
         &mut self,

@@ -56,12 +56,24 @@ pub struct Delivery {
 pub type DeliverFn = dyn Fn(Delivery, &mut App) -> Result<String>;
 /// Opens the chat a notification's tag names.
 pub type OpenChatFn = dyn Fn(&str, &mut App);
+/// Turns a saved workflow into a test or a schedule (Settings).
+pub type UseWorkflowFn = dyn Fn(crate::workflows::Workflow, WorkflowUse, &mut App);
+
+/// What the user makes of a saved workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowUse {
+    /// A chat drafts a Playwright test of it.
+    Test,
+    /// A schedule runs it.
+    Schedule,
+}
 
 /// How the workspace shell takes what the extension brings.
 #[derive(Clone)]
 pub struct BrowserHost {
     pub deliver: Rc<DeliverFn>,
     pub open_chat: Rc<OpenChatFn>,
+    pub use_workflow: Rc<UseWorkflowFn>,
 }
 
 /// A chat, for the extension's badge and panel.
@@ -89,6 +101,10 @@ impl AgentChrome {
     /// The workspace shell says where things from the extension go.
     pub fn set_host(&mut self, host: BrowserHost) {
         self.host = Some(host);
+    }
+
+    pub fn host(&self) -> Option<BrowserHost> {
+        self.host.clone()
     }
 
     /// The chats waiting for the user and at work; the extension hears of
@@ -263,6 +279,7 @@ impl AgentChrome {
                 .map(|workflow| json!({ "id": workflow.id, "name": workflow.name }));
                 reply(self, saved);
                 cx.emit(AgentChromeEvent::Changed);
+                cx.notify();
             }
             other => reply(
                 self,

@@ -457,6 +457,34 @@ impl Workspace {
         })
     }
 
+    /// Drafts a message about `attachment` (`prompt` in the composer, for
+    /// the user to change and send) in the chat on screen.
+    pub(crate) fn draft_from_browser(
+        &mut self,
+        attachment: ph_agent::Attachment,
+        prompt: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        if self.view != View::Workspaces {
+            self.set_view(View::Workspaces, window, cx);
+        }
+        let project = self
+            .active_project
+            .or_else(|| self.chats_space().map(|chats| chats.id))
+            .ok_or_else(|| anyhow::anyhow!("Open a workspace in {} first.", ph_brand::NAME))?;
+        self.open_project(project, window, cx);
+        let space = self
+            .spaces
+            .get(&project)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("The workspace could not be opened."))?;
+        space.update(cx, |space, cx| {
+            space.draft_in_chat(attachment, prompt, window, cx)
+        });
+        Ok(())
+    }
+
     pub fn new_chat_in(&mut self, project: ProjectId, window: &mut Window, cx: &mut Context<Self>) {
         self.open_project(project, window, cx);
         if let Some(space) = self.spaces.get(&project) {

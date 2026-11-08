@@ -257,6 +257,30 @@ pub const TOOLS: &[Tool] = &[
         format: text_result,
     },
     Tool {
+        name: "chrome_workflows",
+        description: "Workflows the user recorded in Chrome (PilotHouse menu → Record a workflow): steps on a website they do often. Without a name, the list; with a name, its steps. chrome_run_workflow runs one.",
+        schema: || json!({ "type": "object", "properties": { "name": { "type": "string" } } }),
+        build: |arguments, project_id, _| {
+            Ok(("chrome.workflows", with_project(arguments, project_id)))
+        },
+        format: text_result,
+    },
+    Tool {
+        name: "chrome_run_workflow",
+        description: "Runs a recorded workflow in your Chrome tab, step by step with your own actions (the user sees them and can press Stop): it opens its first page, then clicks, types, chooses and presses as recorded. values replaces what was typed, by the field's label or selector ({\"Amount\": \"40\"}). It stops where a person is needed (a password, files to choose) or a step fails, and says which from_step to go on with.",
+        schema: || {
+            json!({ "type": "object", "required": ["name"], "properties": {
+            "name": { "type": "string" },
+            "values": { "type": "object", "description": "What to type instead, by field label or selector." },
+            "from_step": { "type": "integer", "description": "Go on from this step (1-based) after a stop." }
+        } })
+        },
+        build: |arguments, project_id, _| {
+            Ok(("chrome.run_workflow", with_project(arguments, project_id)))
+        },
+        format: text_result,
+    },
+    Tool {
         name: "chrome_performance",
         description: "How fast your Chrome page is, as Chrome DevTools' Performance panel would tell: Core Web Vitals (Largest Contentful Paint with its element, Cumulative Layout Shift with what shifted, Interaction to Next Paint, First Contentful Paint, time to first byte), long animation frames with the scripts in them, render-blocking resources, the slowest and heaviest requests, page weight, DOM size and main-thread time. Reloads the page to measure (reload: false measures it as it is, for interaction timings after you click or type; no_cache: true for a cold load).",
         schema: || {

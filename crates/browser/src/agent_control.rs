@@ -124,6 +124,31 @@ pub fn register(cx: &mut App) {
             cx,
         ))
     });
+    action("chrome.run_workflow", cx, |chrome, who, params, cx| {
+        let values = params["values"]
+            .as_object()
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            value
+                                .as_str()
+                                .map_or_else(|| value.to_string(), str::to_string),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(chrome.run_workflow(
+            &who,
+            string(&params, "name")?,
+            params["from_step"].as_u64().unwrap_or(1) as usize,
+            values,
+            cx,
+        ))
+    });
     action("chrome.performance", cx, |chrome, who, params, cx| {
         Ok(chrome.performance(
             &who,
@@ -214,6 +239,9 @@ pub fn register(cx: &mut App) {
             params["new_only"].as_bool().unwrap_or(false),
             params["limit"].as_u64().unwrap_or(100).clamp(1, 1000) as usize,
         )
+    });
+    read("chrome.workflows", cx, |chrome, _, params| {
+        chrome.workflows_text(params["name"].as_str())
     });
     read("chrome.downloads", cx, |chrome, _, _| {
         Ok(chrome.downloads_text())

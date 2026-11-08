@@ -8,7 +8,8 @@
 use anyhow::{Context as _, Result};
 use gpui_kit::App;
 use ph_agent::Attachment;
-use ph_browser::{AgentChrome, BrowserHost, ChatNews, ChatNote, Delivery, SendTo};
+use ph_browser::workflows::Workflow;
+use ph_browser::{AgentChrome, BrowserHost, ChatNews, ChatNote, Delivery, SendTo, WorkflowUse};
 use ph_media::ToChat;
 use std::rc::Rc;
 
@@ -20,6 +21,10 @@ pub(crate) fn install(cx: &mut App) {
     let host = BrowserHost {
         deliver: Rc::new(deliver),
         open_chat: Rc::new(crate::schedules::open_from_notification),
+        use_workflow: Rc::new(|workflow, using, cx| {
+            // After the Settings dialog this comes from has closed.
+            cx.defer(move |cx| use_workflow(workflow, using, cx))
+        }),
     };
     chrome.update(cx, |chrome, _| chrome.set_host(host));
 }
@@ -63,6 +68,49 @@ pub(crate) fn attachments(items: Vec<ToChat>) -> Vec<Attachment> {
         }
     }
     out
+}
+
+/// A saved workflow becomes a chat drafting its Playwright test, or a
+/// schedule (its form filled in, for the user to choose when and save).
+fn use_workflow(workflow: Workflow, using: WorkflowUse, cx: &mut App) {
+    let Some((handle, workspace)) = crate::main_workspace(cx) else {
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        window.activate_window();
+        workspace.update(cx, |workspace, cx| match using {
+            WorkflowUse::Test => {
+                let attachment = Attachment::Text {
+                    label: format!("Workflow: {}", workflow.name),
+                    text: format!(
+                        "A workflow recorded in Chrome, starting at {}:\n{}",
+                        workflow.start_url,
+                        workflow.describe()
+                    ),
+                };
+                let prompt = "Write a Playwright test of this recorded workflow, where this project keeps its tests and following its setup (add Playwright if it has none, and say so). Check what each step should show, not only that it runs. Ask me for anything you cannot tell, such as passwords (use environment variables for them).";
+                if let Err(err) = workspace.draft_from_browser(attachment, prompt, window, cx) {
+                    tracing::warn!("drafting a test of a workflow: {err:#}");
+                }
+            }
+            WorkflowUse::Schedule => {
+                let Some(project) = workspace.active_project_id() else {
+                    return;
+                };
+                let prompt = format!(
+                    "Run the Chrome workflow “{}” with chrome_run_workflow, then tell me what the last page showed and anything that went wrong or looked different. If a step needs a password or a person, stop and tell me.",
+                    workflow.name
+                );
+                crate::schedules::view::open_with(
+                    cx.entity().downgrade(),
+                    project,
+                    Some((format!("Run “{}”", workflow.name), prompt)),
+                    window,
+                    cx,
+                );
+            }
+        })
+    });
 }
 
 /// Puts what the user sent from Chrome where they chose; says where.

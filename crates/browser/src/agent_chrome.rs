@@ -50,7 +50,8 @@ use crate::logs::{Level, Logs};
 mod devtools;
 mod inbox;
 mod shared_text;
-pub use inbox::{BrowserHost, ChatNews, ChatNote, Delivery, SendTo};
+mod workflow_run;
+pub use inbox::{BrowserHost, ChatNews, ChatNote, Delivery, SendTo, WorkflowUse};
 pub use shared_text::TabText;
 
 /// How long navigation waits for the page's load event.
