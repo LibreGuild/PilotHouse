@@ -149,6 +149,18 @@ pub fn register(cx: &mut App) {
             cx,
         ))
     });
+    action("chrome.site_tools", cx, |chrome, who, params, cx| {
+        let call = params["name"].as_str().map(|name| {
+            (
+                name.to_string(),
+                params
+                    .get("input")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(Default::default())),
+            )
+        });
+        Ok(chrome.site_tools(&who, call, cx))
+    });
     action("chrome.performance", cx, |chrome, who, params, cx| {
         Ok(chrome.performance(
             &who,

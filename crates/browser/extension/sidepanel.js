@@ -12,7 +12,7 @@ const SITE_ORIGINS = {
 import { reachable } from './lib/tabs.js';
 
 const $ = (id) => document.getElementById(id);
-const PAGE_ACTIONS = new Set(['page', 'selection', 'area', 'element']);
+const PAGE_ACTIONS = new Set(['page', 'selection', 'area', 'element', 'summary']);
 const RECORDINGS = { bug: 'Recording a bug report', workflow: 'Recording a workflow' };
 
 let windowId = null;
@@ -197,6 +197,10 @@ async function act(action) {
     }
     return;
   }
+  if (action === 'summary') {
+    await sendSummary();
+    return;
+  }
   if (action === 'area' || action === 'element') {
     say(action === 'area' ? 'Drag over the page (Esc cancels)…' : 'Click an element on the page (Esc cancels)…');
   } else {
@@ -208,6 +212,64 @@ async function act(action) {
     else say(result.where ? `Sent to ${result.where}.` : 'Sent to PilotHouse.', 'ok');
   } catch (error) {
     say(error.message, 'error');
+  }
+}
+
+/** Chrome's built-in summarizer (Gemini Nano), where this Chrome has it. */
+async function summarizerReady() {
+  if (!('Summarizer' in self)) return false;
+  try {
+    return (await Summarizer.availability()) !== 'unavailable';
+  } catch (error) {
+    return false;
+  }
+}
+
+/** The page summarised on this computer, sent instead of the page. */
+async function sendSummary() {
+  say('Reading the page…');
+  let summarizer;
+  try {
+    const clip = await request({ type: 'clip', tabId: tab.id });
+    if (!clip?.markdown) throw new Error('This page has no text to summarise.');
+    summarizer = await Summarizer.create({
+      type: 'key-points',
+      format: 'markdown',
+      length: 'long',
+      sharedContext: `A web page (${clip.title}) a developer sends to a coding agent as context.`,
+      monitor(monitor) {
+        monitor.addEventListener('downloadprogress', (event) => {
+          say(`Getting Chrome’s on-device model… ${Math.round(event.loaded * 100)}%`);
+        });
+      },
+    });
+    say('Summarising on this computer…');
+    let text = clip.markdown;
+    // Within what the model reads at once.
+    if (summarizer.inputQuota && summarizer.measureInputUsage) {
+      while (text.length > 1000 && (await summarizer.measureInputUsage(text)) > summarizer.inputQuota) {
+        text = text.slice(0, Math.floor(text.length * 0.75));
+      }
+    } else {
+      text = text.slice(0, 12000);
+    }
+    const summary = await summarizer.summarize(text);
+    const cut = text.length < clip.markdown.length ? ' (of the page’s start: it is long)' : '';
+    const result = await request({
+      type: 'deliver',
+      tabId: tab.id,
+      title: clip.title,
+      items: [{
+        kind: 'text',
+        label: `Summary: ${clip.title}`.slice(0, 80),
+        text: `Summary${cut} of ${clip.title}\n${clip.url}\n(Made on this computer by Chrome’s built-in AI; the page itself was not sent.)\n\n${summary}`,
+      }],
+    });
+    say(result?.where ? `Sent to ${result.where}.` : 'Sent to PilotHouse.', 'ok');
+  } catch (error) {
+    say(error.message, 'error');
+  } finally {
+    summarizer?.destroy?.();
   }
 }
 
@@ -323,6 +385,7 @@ async function start() {
   chrome.permissions.onRemoved.addListener(() => void renderSites());
 
   renderStatus();
+  $('summary').hidden = !(await summarizerReady());
   await Promise.all([refreshTab(), renderSettings(), renderSites(), renderShortcuts()]);
 }
 

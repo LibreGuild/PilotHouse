@@ -281,6 +281,20 @@ pub const TOOLS: &[Tool] = &[
         format: text_result,
     },
     Tool {
+        name: "chrome_site_tools",
+        description: "Tools the website in your Chrome tab offers agents itself (WebMCP), such as search or add to cart: without a name, the list with each tool's input; with name and input, calls one and returns its answer. Faster and surer than clicking through the page when a site offers them. Ask the user before calling one that changes something (orders, sends, pays, deletes). Only Chrome's early preview offers WebMCP; elsewhere the answer says so.",
+        schema: || {
+            json!({ "type": "object", "properties": {
+            "name": { "type": "string", "description": "The tool to call; leave out to list them." },
+            "input": { "type": "object", "description": "The tool's input, as its schema says." }
+        } })
+        },
+        build: |arguments, project_id, _| {
+            Ok(("chrome.site_tools", with_project(arguments, project_id)))
+        },
+        format: text_result,
+    },
+    Tool {
         name: "chrome_performance",
         description: "How fast your Chrome page is, as Chrome DevTools' Performance panel would tell: Core Web Vitals (Largest Contentful Paint with its element, Cumulative Layout Shift with what shifted, Interaction to Next Paint, First Contentful Paint, time to first byte), long animation frames with the scripts in them, render-blocking resources, the slowest and heaviest requests, page weight, DOM size and main-thread time. Reloads the page to measure (reload: false measures it as it is, for interaction timings after you click or type; no_cache: true for a cold load).",
         schema: || {

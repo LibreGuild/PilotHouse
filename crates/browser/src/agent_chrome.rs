@@ -50,6 +50,7 @@ use crate::logs::{Level, Logs};
 mod devtools;
 mod inbox;
 mod shared_text;
+mod site_tools;
 mod workflow_run;
 pub use inbox::{BrowserHost, ChatNews, ChatNote, Delivery, SendTo, SiteAction, WorkflowUse};
 pub use shared_text::TabText;
@@ -206,6 +207,9 @@ struct Tab {
     heap: Option<String>,
     heap_too_large: bool,
     heap_summary: Option<devtools::HeapSummary>,
+    /// The page's own tools for agents (WebMCP), and calls waiting.
+    site_tools: Vec<Value>,
+    site_tool_waiters: Vec<(String, smol::channel::Sender<Value>)>,
     _glow: Option<Task<()>>,
     _idle: Option<Task<()>>,
 }
@@ -513,6 +517,7 @@ impl AgentChrome {
                     }
                     tab.url = url;
                     tab.world = None;
+                    tab.site_tools.clear();
                 }
             }
             "Page.frameStartedLoading" => {
@@ -587,6 +592,10 @@ impl AgentChrome {
             }
             "HeapProfiler.addHeapSnapshotChunk" => {
                 self.heap_chunk(index, params);
+                return;
+            }
+            "WebMCP.toolsAdded" | "WebMCP.toolsRemoved" | "WebMCP.toolResponded" => {
+                self.site_tools_event(index, &event.method, params);
                 return;
             }
             "Page.windowOpen" => {
@@ -1023,6 +1032,8 @@ impl AgentChrome {
             heap: None,
             heap_too_large: false,
             heap_summary: None,
+            site_tools: Vec::new(),
+            site_tool_waiters: Vec::new(),
             _glow: None,
             _idle: None,
         });

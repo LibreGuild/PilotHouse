@@ -15,6 +15,7 @@
 import { connect, onConnection, post, send, setRequestHandler } from './lib/link.js';
 import { attached, allowed, allowedTabs, frontTab, inGroup, known, openTab, popups, setShared } from './lib/tabs.js';
 import { onSettings, settings, update } from './lib/settings.js';
+import { inPage } from './lib/page.js';
 import * as sending from './features/send.js';
 import * as statusFeature from './features/status.js';
 import * as recording from './features/record.js';
@@ -67,6 +68,8 @@ const ALLOWED = new Set([
   'Runtime.addBinding',
   'Runtime.enable',
   'Runtime.evaluate',
+  'WebMCP.enable',
+  'WebMCP.invokeTool',
 ]);
 
 // ---- Requests from the app ------------------------------------------------
@@ -426,6 +429,15 @@ async function panelRequest(message) {
     }
     case 'recording':
       return recording.current();
+    // The page's text, for a summary the panel makes on this computer.
+    case 'clip': {
+      const tab = await chrome.tabs.get(message.tabId);
+      return inPage(tab, 'clip.js', () => globalThis.__pilothouse.clip({}));
+    }
+    case 'deliver': {
+      const tab = await chrome.tabs.get(message.tabId);
+      return sending.deliver(tab, message.items, message.title);
+    }
     case 'agent':
       send('PilotHouse.agentControl', { owner: String(message.owner), paused: !!message.paused });
       return {};
