@@ -305,6 +305,7 @@ impl WorkspaceScreen {
         // `@test-run` from its UI test reports.
         let (screenshot_space, logs_space) = (cx.weak_entity(), cx.weak_entity());
         let (tests_project, tests_root) = (project.id, project.path.clone());
+        let tabs = shared_tabs_source(cx);
         chat.update(cx, |chat, _| {
             chat.set_live_sources(LiveSources {
                 screenshot: Box::new(move |cx| {
@@ -312,6 +313,7 @@ impl WorkspaceScreen {
                 }),
                 logs: Box::new(move |cx| logs_space.upgrade()?.read(cx).live_logs(cx)),
                 tests: Box::new(move |_| to_chat::test_results(tests_project, &tests_root)),
+                tabs,
             })
         });
 
@@ -1302,4 +1304,36 @@ fn first_column_tool(cx: &App) -> Option<ContextTab> {
     AppState::enabled_tabs(cx)
         .into_iter()
         .find(|tab| !tab.in_bottom_panel())
+}
+
+/// `@tabs`: the text of the Chrome tabs the user shared with PilotHouse,
+/// through its extension (none in a build without it).
+fn shared_tabs_source(cx: &App) -> Option<Box<ph_agent::attachments::AsyncLiveSource>> {
+    let chrome = ph_browser::AgentChrome::global(cx)?;
+    Some(Box::new(move |cx: &mut App| {
+        let reading = chrome.update(cx, |chrome, cx| chrome.shared_tab_texts(cx));
+        cx.foreground_executor().spawn(async move {
+            let tabs = reading.await?;
+            Ok(tabs
+                .into_iter()
+                .map(|tab| Attachment::Text {
+                    label: format!("Tab: {}", short(&tab.title, &tab.url)),
+                    text: format!("{}\n{}\n\n{}", tab.title, tab.url, tab.markdown),
+                })
+                .collect())
+        })
+    }))
+}
+
+fn short(title: &str, url: &str) -> String {
+    let name = if title.trim().is_empty() {
+        url
+    } else {
+        title.trim()
+    };
+    let mut out: String = name.chars().take(50).collect();
+    if name.chars().count() > 50 {
+        out.push('…');
+    }
+    out
 }

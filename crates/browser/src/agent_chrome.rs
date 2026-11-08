@@ -48,7 +48,9 @@ use crate::extension;
 use crate::logs::{Level, Logs};
 
 mod inbox;
+mod shared_text;
 pub use inbox::{BrowserHost, ChatNews, ChatNote, Delivery, SendTo};
+pub use shared_text::TabText;
 
 /// How long navigation waits for the page's load event.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);

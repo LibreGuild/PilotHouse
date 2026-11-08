@@ -197,9 +197,16 @@ pub struct LiveSources {
     pub logs: Box<LiveSource>,
     /// The newest UI test results, and the failing step's screen.
     pub tests: Box<ManyLiveSource>,
+    /// The text of the Chrome tabs the user shared with PilotHouse
+    /// (`@tabs`), read when asked (it takes a moment); none without
+    /// PilotHouse's Chrome extension.
+    pub tabs: Option<Box<AsyncLiveSource>>,
 }
 
 pub type LiveSource = dyn Fn(&mut gpui_kit::App) -> Option<Attachment>;
+/// A source read in the background, attached when it is ready.
+pub type AsyncLiveSource =
+    dyn Fn(&mut gpui_kit::App) -> gpui_kit::Task<anyhow::Result<Vec<Attachment>>>;
 /// A source that may give several attachments.
 pub type ManyLiveSource = dyn Fn(&mut gpui_kit::App) -> Vec<Attachment>;
 

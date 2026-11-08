@@ -217,7 +217,8 @@ impl AgentChrome {
                     return reply(
                         self,
                         Err(anyhow!(
-                            "{} is still starting. Try again in a moment.", ph_brand::NAME
+                            "{} is still starting. Try again in a moment.",
+                            ph_brand::NAME
                         )),
                     );
                 };

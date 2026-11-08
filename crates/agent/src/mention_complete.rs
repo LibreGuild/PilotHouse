@@ -73,6 +73,8 @@ pub struct Extra<'a> {
     pub pulls: &'a [(u64, String)],
     /// The agent's commands: name (without `/`) and description.
     pub commands: &'a [(String, String)],
+    /// `@tabs` can read the Chrome tabs the user shared.
+    pub tabs: bool,
 }
 
 /// What to offer for `typing`, best first.
@@ -179,8 +181,10 @@ pub fn suggestions(
                     "The newest UI test results, with the failing screen",
                 ),
                 ("pr:", "A pull request of this workspace"),
+                ("tabs", "The text of the Chrome tabs you shared with agents"),
             ]
             .into_iter()
+            .filter(|(name, _)| *name != "tabs" || extra.tabs)
             .filter(|(name, _)| name.starts_with(query))
             .map(|(name, detail)| Suggestion {
                 label: format!("@{name}"),
@@ -335,6 +339,7 @@ mod tests {
             ("compact".to_string(), "Summarize the chat".to_string()),
         ];
         let extra = Extra {
+            tabs: false,
             commands: &commands,
             ..Extra::default()
         };
@@ -355,6 +360,7 @@ mod tests {
         };
         let pulls = [(12, "Fix login".to_string()), (7, "Docs".to_string())];
         let extra = Extra {
+            tabs: false,
             symbols: std::slice::from_ref(&symbol),
             pulls: &pulls,
             ..Extra::default()

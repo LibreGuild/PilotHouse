@@ -36,7 +36,7 @@ pub mod workflows;
 
 pub use agent_chrome::{
     AgentChrome, AgentChromeEvent, AgentChromeStatus, BrowserHost, ChatNews, ChatNote, Delivery,
-    SendTo,
+    SendTo, TabText,
 };
 pub use browser::{Browser, BrowserEvent, BrowserStatus, Emulation, Viewport, normalize_url};
 pub use browser_panel::BrowserPanel;

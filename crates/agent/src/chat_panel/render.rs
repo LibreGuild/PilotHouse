@@ -1229,11 +1229,19 @@ pub(super) fn attach_button(panel: WeakEntity<ChatPanel>) -> impl IntoElement {
         .icon(IconName::Plus)
         .tooltip("Attach")
         .accessibility_label("Attach")
-        .menu(gpui_kit::Anchor::BottomLeft, move |menu, _, _| {
+        .menu(gpui_kit::Anchor::BottomLeft, move |menu, _, cx| {
             let capture = panel.clone();
             let logs = panel.clone();
             let mention = panel.clone();
             let parallel = panel.clone();
+            let tabs = panel.clone();
+            let has_tabs = panel.upgrade().is_some_and(|panel| {
+                panel
+                    .read(cx)
+                    .live
+                    .as_ref()
+                    .is_some_and(|live| live.tabs.is_some())
+            });
             menu.item(
                 PopupMenuItem::new("Screenshot of browser or device")
                     .icon(Icons::Camera)
@@ -1248,6 +1256,15 @@ pub(super) fn attach_button(panel: WeakEntity<ChatPanel>) -> impl IntoElement {
                         _ = logs.update(cx, |panel, cx| panel.attach_live(true, window, cx));
                     }),
             )
+            .when(has_tabs, |menu| {
+                menu.item(
+                    PopupMenuItem::new("Tabs you shared in Chrome")
+                        .icon(Icons::Globe)
+                        .on_click(move |_, window, cx| {
+                            _ = tabs.update(cx, |panel, cx| panel.attach_shared_tabs(window, cx));
+                        }),
+                )
+            })
             .item(
                 PopupMenuItem::new("File… (type @path)")
                     .icon(IconName::File)
