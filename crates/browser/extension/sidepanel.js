@@ -3,6 +3,12 @@
 // choices. Built with DOM calls only (no innerHTML).
 
 import { settings, update } from './lib/settings.js';
+
+const SITE_ORIGINS = {
+  github: ['https://github.com/*'],
+  jira: ['https://*.atlassian.net/*'],
+  linear: ['https://linear.app/*'],
+};
 import { reachable } from './lib/tabs.js';
 
 const $ = (id) => document.getElementById(id);
@@ -213,6 +219,26 @@ async function renderSettings() {
     radio.checked = radio.value === chosen.destination;
   }
   for (const key of ['bringForward', 'badge', 'notifyNews', 'notifyHandoff']) $(key).checked = !!chosen[key];
+  for (const site of Object.keys(SITE_ORIGINS)) $(`site-${site}`).checked = !!chosen.sites[site];
+}
+
+/** Turns a site's buttons on (asking Chrome for the site) or off (giving
+ * the access back). */
+async function setSite(site, on) {
+  const origins = SITE_ORIGINS[site];
+  if (on) {
+    const granted = await chrome.permissions.request({ origins }).catch(() => false);
+    if (!granted) {
+      $(`site-${site}`).checked = false;
+      say('Chrome did not give access to the site, so its buttons stay off.', 'error');
+      return;
+    }
+    await update({ sites: { [site]: true } });
+    say('Reload the site’s open pages to see the button.', 'ok');
+  } else {
+    await update({ sites: { [site]: false } });
+    await chrome.permissions.remove({ origins }).catch(() => false);
+  }
 }
 
 async function renderSites() {
@@ -278,6 +304,9 @@ async function start() {
   }
   for (const key of ['bringForward', 'badge', 'notifyNews', 'notifyHandoff']) {
     $(key).addEventListener('change', () => void update({ [key]: $(key).checked }));
+  }
+  for (const site of Object.keys(SITE_ORIGINS)) {
+    $(`site-${site}`).addEventListener('change', () => void setSite(site, $(`site-${site}`).checked));
   }
   $('change-shortcuts').addEventListener('click', () => void chrome.tabs.create({ url: 'chrome://extensions/shortcuts' }));
 

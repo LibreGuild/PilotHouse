@@ -51,7 +51,7 @@ mod devtools;
 mod inbox;
 mod shared_text;
 mod workflow_run;
-pub use inbox::{BrowserHost, ChatNews, ChatNote, Delivery, SendTo, WorkflowUse};
+pub use inbox::{BrowserHost, ChatNews, ChatNote, Delivery, SendTo, SiteAction, WorkflowUse};
 pub use shared_text::TabText;
 
 /// How long navigation waits for the page's load event.

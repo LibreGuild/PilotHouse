@@ -463,9 +463,10 @@ impl Workspace {
         &mut self,
         attachment: ph_agent::Attachment,
         prompt: &str,
+        new_chat: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<String> {
         if self.view != View::Workspaces {
             self.set_view(View::Workspaces, window, cx);
         }
@@ -479,10 +480,22 @@ impl Workspace {
             .get(&project)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("The workspace could not be opened."))?;
+        let name = if self.is_chats(project) {
+            "Chats".to_string()
+        } else {
+            space.read(cx).project().name.clone()
+        };
         space.update(cx, |space, cx| {
+            if new_chat {
+                space.new_session(window, cx);
+            }
             space.draft_in_chat(attachment, prompt, window, cx)
         });
-        Ok(())
+        Ok(if new_chat {
+            format!("a new chat in “{name}”")
+        } else {
+            format!("the chat in “{name}”")
+        })
     }
 
     pub fn new_chat_in(&mut self, project: ProjectId, window: &mut Window, cx: &mut Context<Self>) {

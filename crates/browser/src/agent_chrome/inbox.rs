@@ -59,6 +59,35 @@ pub type OpenChatFn = dyn Fn(&str, &mut App);
 /// Turns a saved workflow into a test or a schedule (Settings).
 pub type UseWorkflowFn = dyn Fn(crate::workflows::Workflow, WorkflowUse, &mut App);
 
+/// A button of PilotHouse's on a GitHub, Jira or Linear page.
+pub type SiteFn = dyn Fn(SiteAction, &mut App) -> Result<String>;
+
+/// What a button on a site asks for.
+#[derive(Debug, Clone)]
+pub enum SiteAction {
+    /// A new chat about the page (an issue, a pull request, a failed run),
+    /// its draft `prompt` in the composer for the user to send.
+    Chat {
+        title: String,
+        url: String,
+        text: String,
+        prompt: String,
+    },
+    /// The pull request in PilotHouse, to review.
+    Review {
+        host: String,
+        owner: String,
+        repo: String,
+        number: u64,
+    },
+    /// A card on the board of the workspace on screen.
+    Card {
+        title: String,
+        url: String,
+        text: String,
+    },
+}
+
 /// What the user makes of a saved workflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowUse {
@@ -74,6 +103,7 @@ pub struct BrowserHost {
     pub deliver: Rc<DeliverFn>,
     pub open_chat: Rc<OpenChatFn>,
     pub use_workflow: Rc<UseWorkflowFn>,
+    pub site: Rc<SiteFn>,
 }
 
 /// A chat, for the extension's badge and panel.
@@ -265,6 +295,35 @@ impl AgentChrome {
                 })
                 .detach();
             }
+            "siteAction" => {
+                let Some(host) = self.host.clone() else {
+                    return reply(
+                        self,
+                        Err(anyhow!(
+                            "{} is still starting. Try again in a moment.",
+                            ph_brand::NAME
+                        )),
+                    );
+                };
+                // Done after this update: the shell reaches every window.
+                match site_action(&params) {
+                    Ok(action) => {
+                        let reference = reference.clone();
+                        cx.spawn(async move |this, cx| {
+                            let done = cx.update(|cx| (host.site)(action, cx));
+                            let _ = this.update(cx, |this, _| {
+                                let answer = match done {
+                                    Ok(place) => json!({ "ref": reference, "result": { "where": place } }),
+                                    Err(err) => json!({ "ref": reference, "error": { "message": format!("{err:#}") } }),
+                                };
+                                this.tell_extension("PilotHouse.answer", answer);
+                            });
+                        })
+                        .detach();
+                    }
+                    Err(err) => reply(self, Err(err)),
+                }
+            }
             "saveWorkflow" => {
                 let steps = params["steps"]
                     .as_array()
@@ -291,6 +350,42 @@ impl AgentChrome {
             ),
         }
     }
+}
+
+/// Reads a site button's action.
+fn site_action(params: &Value) -> Result<SiteAction> {
+    let text = |key: &str, max: usize| -> String {
+        params[key]
+            .as_str()
+            .unwrap_or_default()
+            .chars()
+            .take(max)
+            .collect()
+    };
+    let url = text("url", 2000);
+    if !url.starts_with("https://") {
+        bail!("that page's address is not one PilotHouse acts on");
+    }
+    Ok(match params["kind"].as_str() {
+        Some("review") => SiteAction::Review {
+            host: text("host", 200),
+            owner: text("owner", 200),
+            repo: text("repo", 200),
+            number: params["number"].as_u64().context("which pull request?")?,
+        },
+        Some("card") => SiteAction::Card {
+            title: text("title", 200),
+            url,
+            text: text("text", 8000),
+        },
+        Some("chat") => SiteAction::Chat {
+            title: text("title", 200),
+            url,
+            text: text("text", 60_000),
+            prompt: text("prompt", 2000),
+        },
+        _ => bail!("unknown site action"),
+    })
 }
 
 /// Reads a `send` from the extension: texts, and images (and videos) saved

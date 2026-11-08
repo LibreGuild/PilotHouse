@@ -18,6 +18,7 @@ import { onSettings, settings, update } from './lib/settings.js';
 import * as sending from './features/send.js';
 import * as statusFeature from './features/status.js';
 import * as recording from './features/record.js';
+import * as sites from './features/sites.js';
 
 const PROTOCOL = '1.3';
 
@@ -395,6 +396,15 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.tab) {
     if (typeof message?.type === 'string' && message.type.startsWith('recorder-')) {
       recording.fromRecorder(message, sender);
+      return false;
+    }
+    // A button of PilotHouse's on GitHub, Jira or Linear.
+    if (message?.type === 'site-action') {
+      void sites.act(message.action, sender).then(
+        (result) => respond({ ok: true, result }),
+        (error) => respond({ ok: false, error: String(error?.message ?? error) }),
+      );
+      return true;
     }
     return false;
   }
@@ -456,6 +466,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
 statusFeature.install();
 recording.install();
+sites.install();
 
 chrome.runtime.onInstalled.addListener(async () => {
   await createMenus();
