@@ -7,10 +7,13 @@ import { reachable } from './lib/tabs.js';
 
 const $ = (id) => document.getElementById(id);
 const PAGE_ACTIONS = new Set(['page', 'selection', 'area', 'element']);
+const RECORDINGS = { bug: 'Recording a bug report', workflow: 'Recording a workflow' };
 
 let windowId = null;
 let tab = null;
 let status = { connected: false, waiting: [], working: [], agents: [] };
+let recording = null;
+let recordingTimer = null;
 
 function el(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -81,6 +84,37 @@ function renderStatus() {
     }, agent.paused ? 'Continue' : 'Stop'))));
 }
 
+function renderRecording() {
+  const box = $('recording');
+  clearInterval(recordingTimer);
+  box.hidden = !recording;
+  for (const button of document.querySelectorAll('[data-action=bug], [data-action=workflow]')) {
+    button.hidden = !!recording;
+  }
+  if (!recording) return;
+  $('recording-title').textContent = RECORDINGS[recording.kind] ?? 'Recording';
+  $('recording-stop').textContent = recording.kind === 'workflow' ? 'Stop and save' : 'Stop and send';
+  const tick = () => {
+    const seconds = Math.max(0, Math.floor((Date.now() - recording.startedAt) / 1000));
+    const steps = recording.steps === 1 ? '1 step' : `${recording.steps} steps`;
+    $('recording-sub').textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} · ${steps}`;
+  };
+  tick();
+  recordingTimer = setInterval(tick, 1000);
+}
+
+async function finishRecording(keep) {
+  if (!recording) return;
+  say(keep ? (recording.kind === 'workflow' ? 'Saving…' : 'Sending…') : '');
+  try {
+    const result = await request({ type: 'act', action: keep ? 'stop' : 'cancel', tabId: recording.tabId });
+    if (keep) say(result?.where ? `Sent to ${result.where}.` : 'Done.', 'ok');
+    else say('Recording cancelled.');
+  } catch (error) {
+    say(error.message, 'error');
+  }
+}
+
 function openChat(tag) {
   void request({ type: 'openChat', tag }).catch((error) => say(error.message, 'error'));
 }
@@ -140,6 +174,22 @@ async function act(action) {
       return;
     }
     void renderSites();
+  }
+  if (action === 'bug' || action === 'workflow') {
+    let streamId;
+    if (action === 'bug') {
+      // Asked in the click, as Chrome wants for recording a tab.
+      streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id }).catch(() => undefined);
+    }
+    try {
+      await request({ type: 'act', action, tabId: tab.id, streamId });
+      say(action === 'bug'
+        ? 'Recording. Do what goes wrong, then press Stop and send.'
+        : 'Recording. Do the steps, then press Stop and save.');
+    } catch (error) {
+      say(error.message, 'error');
+    }
+    return;
   }
   if (action === 'area' || action === 'element') {
     say(action === 'area' ? 'Drag over the page (Esc cancels)…' : 'Click an element on the page (Esc cancels)…');
@@ -201,10 +251,16 @@ async function start() {
   windowId = (await chrome.windows.getCurrent()).id;
   const port = chrome.runtime.connect({ name: 'panel' });
   port.onMessage.addListener((message) => {
-    if (message?.type !== 'status') return;
-    status = message.status;
-    renderStatus();
+    if (message?.type === 'status') {
+      status = message.status;
+      renderStatus();
+    } else if (message?.type === 'recording') {
+      recording = message.recording;
+      renderRecording();
+    }
   });
+  $('recording-stop').addEventListener('click', () => void finishRecording(true));
+  $('recording-cancel').addEventListener('click', () => void finishRecording(false));
 
   for (const button of document.querySelectorAll('.actions button')) {
     button.addEventListener('click', () => void act(button.dataset.action));

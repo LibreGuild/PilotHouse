@@ -217,7 +217,7 @@ impl AgentChrome {
                     return reply(
                         self,
                         Err(anyhow!(
-                            "PilotHouse is still starting. Try again in a moment."
+                            "{} is still starting. Try again in a moment.", ph_brand::NAME
                         )),
                     );
                 };
@@ -248,10 +248,27 @@ impl AgentChrome {
                 })
                 .detach();
             }
+            "saveWorkflow" => {
+                let steps = params["steps"]
+                    .as_array()
+                    .map(|steps| steps.iter().take(500).cloned().collect())
+                    .unwrap_or_default();
+                let saved = crate::workflows::save(
+                    &self.store,
+                    params["name"].as_str().unwrap_or("Workflow"),
+                    params["startUrl"].as_str().unwrap_or_default(),
+                    steps,
+                )
+                .map(|workflow| json!({ "id": workflow.id, "name": workflow.name }));
+                reply(self, saved);
+                cx.emit(AgentChromeEvent::Changed);
+            }
             other => reply(
                 self,
                 Err(anyhow!(
-                    "PilotHouse does not know `{other}`: update PilotHouse"
+                    "{} does not know `{other}`: update {}",
+                    ph_brand::NAME,
+                    ph_brand::NAME
                 )),
             ),
         }

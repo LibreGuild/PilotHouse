@@ -39,6 +39,17 @@
         <button data-action="selection" title="The text you selected on the page">Send selection</button>
         <button data-action="area" title="Drag over part of the page; a click takes the visible page">Screenshot area</button>
         <button data-action="element" title="Click an element: its selector, styles, source file and a picture">Pick element</button>
+        <button data-action="bug" title="Record what you do, with video, console errors and failed requests, then send it as a bug report">Record a bug report</button>
+        <button data-action="workflow" title="Record what you do, to save as a workflow agents can run again">Record a workflow</button>
+      </div>
+      <div id="recording" class="recording" hidden role="status">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="grow">
+          <span id="recording-title" class="row-title"></span>
+          <span id="recording-sub" class="row-hint"></span>
+        </span>
+        <button id="recording-stop" class="primary">Stop and send</button>
+        <button id="recording-cancel">Cancel</button>
       </div>
       <p id="result" class="result" role="status" aria-live="polite"></p>
     </section>

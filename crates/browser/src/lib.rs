@@ -32,6 +32,7 @@ mod hub;
 mod input;
 pub mod logs;
 mod scripts;
+pub mod workflows;
 
 pub use agent_chrome::{
     AgentChrome, AgentChromeEvent, AgentChromeStatus, BrowserHost, ChatNews, ChatNote, Delivery,

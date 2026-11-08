@@ -17,6 +17,7 @@ import { attached, allowed, allowedTabs, frontTab, inGroup, known, openTab, popu
 import { onSettings, settings, update } from './lib/settings.js';
 import * as sending from './features/send.js';
 import * as statusFeature from './features/status.js';
+import * as recording from './features/record.js';
 
 const PROTOCOL = '1.3';
 
@@ -228,6 +229,15 @@ async function act(action, tab, info = {}, fromPanel = false) {
         return await sending.sendArea(tab);
       case 'element':
         return await sending.sendElement(tab);
+      case 'bug':
+      case 'workflow':
+        await recording.start(action, tab, info.streamId);
+        return {};
+      case 'stop':
+        return await recording.finish(true);
+      case 'cancel':
+        await recording.finish(false);
+        return null;
       case 'share':
         await setShared(tab, !(await inGroup(tab)));
         await refreshMenus(await chrome.tabs.get(tab.id));
@@ -250,6 +260,9 @@ const MENU = {
   image: 'Send this image',
   area: 'Screenshot an area…',
   element: 'Pick an element…',
+  bug: 'Record a bug report…',
+  workflow: 'Record a workflow…',
+  stop: 'Stop recording and send',
   share: 'Let agents use this tab',
   panel: 'Open the PilotHouse panel',
 };
@@ -265,6 +278,10 @@ async function createMenus() {
   add('area', MENU.area, ['page', 'frame', 'image', 'link', 'selection']);
   add('element', MENU.element, ['page', 'frame', 'image', 'link']);
   add('sep-1', '', ['all'], { type: 'separator' });
+  add('bug', MENU.bug, ['page', 'frame']);
+  add('workflow', MENU.workflow, ['page', 'frame']);
+  add('stop', MENU.stop, ['all'], { visible: false });
+  add('sep-4', '', ['all'], { type: 'separator' });
   add('share', MENU.share, ['page', 'frame'], { type: 'checkbox', checked: false });
   add('sep-2', '', ['all'], { type: 'separator' });
   const chosen = await settings();
@@ -289,6 +306,25 @@ onSettings((chosen) => {
   }
 });
 
+// While recording: Stop in the menu, not Record.
+recording.watch((now) => {
+  const update = (id, props) => chrome.contextMenus.update(id, props, () => void chrome.runtime.lastError);
+  update('stop', { visible: !!now, title: now?.kind === 'workflow' ? 'Stop recording and save' : MENU.stop });
+  update('bug', { visible: !now });
+  update('workflow', { visible: !now });
+});
+
+// The bar's Stop and Cancel in the page.
+recording.onBarFinish(async (keep) => {
+  const now = recording.current();
+  const tab = now ? await chrome.tabs.get(now.tabId).catch(() => null) : null;
+  try {
+    await recording.finish(keep);
+  } catch (error) {
+    await sending.failed(tab, error);
+  }
+});
+
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const id = String(info.menuItemId);
   if (id.startsWith('to-')) {
@@ -297,6 +333,12 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
   if (id === 'panel') {
     if (tab?.windowId !== undefined) await chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
+    return;
+  }
+  if (id === 'stop') {
+    const now = recording.current();
+    const recorded = now ? await chrome.tabs.get(now.tabId).catch(() => null) : null;
+    await act('stop', recorded ?? tab).catch(() => {});
     return;
   }
   if (!tab?.id) return;
@@ -326,7 +368,15 @@ chrome.commands.onCommand.addListener(async (command, tab) => {
 
 // Messages from the side panel: what it shows, and the user's actions.
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  if (sender.id !== chrome.runtime.id || sender.tab) return false;
+  if (sender.id !== chrome.runtime.id) return false;
+  // The recorder in a page (its steps, and the bar's buttons).
+  if (sender.tab) {
+    if (typeof message?.type === 'string' && message.type.startsWith('recorder-')) {
+      recording.fromRecorder(message, sender);
+    }
+    return false;
+  }
+  if (message?.target === 'offscreen') return false;
   void panelRequest(message).then(
     (result) => respond({ ok: true, result }),
     (error) => respond({ ok: false, error: String(error?.message ?? error) }),
@@ -340,8 +390,10 @@ async function panelRequest(message) {
       return statusFeature.status();
     case 'act': {
       const tab = await chrome.tabs.get(message.tabId);
-      return act(message.action, tab, {}, true);
+      return act(message.action, tab, { streamId: message.streamId }, true);
     }
+    case 'recording':
+      return recording.current();
     case 'agent':
       send('PilotHouse.agentControl', { owner: String(message.owner), paused: !!message.paused });
       return {};
@@ -363,13 +415,25 @@ chrome.runtime.onConnect.addListener((port) => {
       stop();
     }
   });
+  const stopRecording = recording.watch((now) => {
+    try {
+      port.postMessage({ type: 'recording', recording: now });
+    } catch (error) {
+      stopRecording();
+    }
+  });
   port.postMessage({ type: 'status', status: statusFeature.status() });
-  port.onDisconnect.addListener(stop);
+  port.postMessage({ type: 'recording', recording: recording.current() });
+  port.onDisconnect.addListener(() => {
+    stop();
+    stopRecording();
+  });
 });
 
 // ---- Start ----------------------------------------------------------------
 
 statusFeature.install();
+recording.install();
 
 chrome.runtime.onInstalled.addListener(async () => {
   await createMenus();
