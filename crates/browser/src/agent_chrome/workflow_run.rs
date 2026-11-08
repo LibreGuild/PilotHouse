@@ -118,6 +118,7 @@ async fn run(
                 .map(|(_, value)| value.clone())
                 .or_else(|| recorded.map(str::to_string))
         };
+        let mut typed = None;
         let result: Result<()> = match step["type"].as_str().unwrap_or_default() {
             "click" => click(&this, &who, selector.clone(), &text, cx).await,
             "fill" => {
@@ -135,11 +136,12 @@ async fn run(
                         ));
                     }
                     value => {
+                        let value = value.unwrap_or_default();
                         let element = json!({ "selector": selector });
                         let typing = this.update(cx, |this, cx| {
                             this.type_text(
                                 &who,
-                                value.unwrap_or_default(),
+                                value.clone(),
                                 Some(element),
                                 true,
                                 false,
@@ -147,7 +149,7 @@ async fn run(
                                 cx,
                             )
                         })?;
-                        typing.await.map(|_| ())
+                        typing.await.map(|_| typed = Some(value))
                     }
                 }
             }
@@ -197,7 +199,14 @@ async fn run(
             other => Err(anyhow!("a step of an unknown kind ({other})")),
         };
         match result {
-            Ok(()) => done.push(describe_step(step)),
+            // What was typed, which `values` may have changed.
+            Ok(()) => done.push(match typed.take() {
+                Some(value) if step["secret"] != true => format!(
+                    "Type “{value}” into “{text}” ({})",
+                    selector.as_deref().unwrap_or_default()
+                ),
+                _ => describe_step(step),
+            }),
             Err(err) => {
                 return Ok(stopped(
                     &workflow,

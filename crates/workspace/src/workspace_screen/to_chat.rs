@@ -156,6 +156,12 @@ impl WorkspaceScreen {
         self.attach_to_chat(attachments, window, cx);
     }
 
+    /// Whether the chat on screen can take a message (not a read-only
+    /// terminal session).
+    pub(crate) fn chat_takes_messages(&self, cx: &gpui_kit::App) -> bool {
+        self.chat.read(cx).takes_messages()
+    }
+
     /// Drafts a message about `attachment` in the chat, for the user to
     /// change and send.
     pub(crate) fn draft_in_chat(

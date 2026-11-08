@@ -40,10 +40,6 @@ const ALLOWED = new Set([
   'Fetch.enable',
   'Fetch.failRequest',
   'Fetch.fulfillRequest',
-  'HeapProfiler.collectGarbage',
-  'HeapProfiler.disable',
-  'HeapProfiler.enable',
-  'HeapProfiler.takeHeapSnapshot',
   'Input.dispatchKeyEvent',
   'Input.dispatchMouseEvent',
   'Input.insertText',
@@ -68,6 +64,7 @@ const ALLOWED = new Set([
   'Runtime.addBinding',
   'Runtime.enable',
   'Runtime.evaluate',
+  'Runtime.getHeapUsage',
   'WebMCP.enable',
   'WebMCP.invokeTool',
 ]);

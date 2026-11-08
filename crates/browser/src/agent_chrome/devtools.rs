@@ -2,7 +2,7 @@
 //! Chrome's DevTools: performance (Core Web Vitals, what blocks and what is
 //! slow), audits (accessibility, SEO, best practices), emulation (device,
 //! network, CPU, colour scheme, place, time zone), mocked responses, memory
-//! snapshots compared over time, and errors with their stacks mapped
+//! measured and compared over time, and errors with their stacks mapped
 //! through source maps to the workspace's files.
 //!
 //! Emulation and mocks change the user's own tab, so they last only while
@@ -20,8 +20,6 @@ use crate::sourcemap::{SourceMap, tidy_source};
 
 /// Emulation and mocks keep the debugger this long after the last action.
 pub(super) const OVERRIDES_KEEP: Duration = Duration::from_secs(120);
-/// The largest heap snapshot read, in bytes.
-const MAX_HEAP: usize = 400 * 1024 * 1024;
 /// The largest source map read, in bytes.
 const MAX_SOURCE_MAP: usize = 24 * 1024 * 1024;
 
@@ -42,8 +40,20 @@ pub(super) struct Mock {
     pub hits: u32,
 }
 
-/// What a heap snapshot holds, by kind of object: count and bytes.
-pub(super) type HeapSummary = HashMap<String, (u64, u64)>;
+/// What the page holds in memory at one moment (Chrome lets extensions
+/// measure, not take heap snapshots).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(super) struct MemorySample {
+    pub heap_used: f64,
+    pub heap_total: f64,
+    /// Every DOM node alive, and those in the page now (the rest are
+    /// detached: removed but still referenced, a common leak).
+    pub nodes: f64,
+    pub attached: f64,
+    pub listeners: f64,
+    pub documents: f64,
+    pub frames: f64,
+}
 
 impl AgentChrome {
     /// Core Web Vitals and what slows the page, after reloading it (unless
@@ -410,8 +420,9 @@ impl AgentChrome {
         .detach();
     }
 
-    /// A heap snapshot of the page, by kind of object; with `compare`, what
-    /// grew since the previous one (for leaks).
+    /// What the page holds in memory: its JavaScript heap, DOM nodes (and
+    /// how many are detached), event listeners, documents and frames; with
+    /// `compare`, what grew since the agent's previous look (for leaks).
     pub fn memory(
         &mut self,
         who: &Who,
@@ -423,52 +434,39 @@ impl AgentChrome {
             let page = page.await?;
             begin(&this, &page, cx).await;
             let cdp = page.cdp.clone();
-            cdp.call("HeapProfiler.enable", json!({})).await?;
-            cdp.call("HeapProfiler.collectGarbage", json!({})).await.ok();
-            this.update(cx, |this, _| {
-                if let Some(tab) = this.tab_mut(&page.target) {
-                    tab.heap = Some(String::new());
-                    tab.heap_too_large = false;
-                }
-            })?;
-            let taken = cdp
-                .call("HeapProfiler.takeHeapSnapshot", json!({ "reportProgress": false }))
-                .await;
-            let (text, previous) = this.update(cx, |this, _| {
+            cdp.call("Performance.enable", json!({})).await?;
+            let heap = cdp.call("Runtime.getHeapUsage", json!({})).await?;
+            let metrics = cdp.call("Performance.getMetrics", json!({})).await?;
+            let attached = evaluate_main(
+                &cdp,
+                "(() => { let n = 0; const w = document.createTreeWalker(document, NodeFilter.SHOW_ALL); while (w.nextNode()) n++; return n + 1; })()",
+            )
+            .await
+            .unwrap_or(Value::Null);
+            let metric = |name: &str| {
+                metrics["metrics"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|metric| metric["name"] == name)
+                    .and_then(|metric| metric["value"].as_f64())
+                    .unwrap_or(0.0)
+            };
+            let sample = MemorySample {
+                heap_used: heap["usedSize"].as_f64().unwrap_or_else(|| metric("JSHeapUsedSize")),
+                heap_total: heap["totalSize"].as_f64().unwrap_or_else(|| metric("JSHeapTotalSize")),
+                nodes: metric("Nodes"),
+                attached: attached.as_f64().unwrap_or(0.0),
+                listeners: metric("JSEventListeners"),
+                documents: metric("Documents"),
+                frames: metric("Frames"),
+            };
+            let previous = this.update(cx, |this, _| {
                 this.tab_mut(&page.target)
-                    .map(|tab| (tab.heap.take().unwrap_or_default(), tab.heap_summary.clone()))
-                    .unwrap_or_default()
+                    .and_then(|tab| tab.memory.replace(sample.clone()))
             })?;
-            cdp.call("HeapProfiler.disable", json!({})).await.ok();
-            taken?;
-            if text.is_empty() {
-                bail!("the heap snapshot was too large to read here ({} MB at most); use Chrome DevTools' Memory panel", MAX_HEAP / 1024 / 1024);
-            }
-            let summary = cx
-                .background_spawn(async move { heap_summary(&text) })
-                .await?;
-            let report = memory_text(&summary, previous.as_ref().filter(|_| compare));
-            this.update(cx, |this, _| {
-                if let Some(tab) = this.tab_mut(&page.target) {
-                    tab.heap_summary = Some(summary);
-                }
-            })?;
-            Ok(json!({ "text": report }))
+            Ok(json!({ "text": memory_text(&sample, previous.as_ref().filter(|_| compare)) }))
         })
-    }
-
-    /// A heap snapshot's next chunk (`HeapProfiler.addHeapSnapshotChunk`).
-    pub(super) fn heap_chunk(&mut self, index: usize, params: &Value) {
-        let tab = &mut self.tabs[index];
-        if let Some(heap) = tab.heap.as_mut() {
-            let chunk = params["chunk"].as_str().unwrap_or_default();
-            if heap.len() + chunk.len() > MAX_HEAP {
-                tab.heap = Some(String::new());
-                tab.heap_too_large = true;
-            } else if !tab.heap_too_large {
-                heap.push_str(chunk);
-            }
-        }
     }
 
     /// The page's errors, newest last, with their stacks mapped through
@@ -676,128 +674,45 @@ async fn source_map_of(cdp: &Cdp, url: &str) -> Result<Option<String>> {
     Ok(value.as_str().map(str::to_string))
 }
 
-/// Counts and bytes by kind of object in a heap snapshot's JSON.
-fn heap_summary(text: &str) -> Result<HeapSummary> {
-    let snapshot: Value = serde_json::from_str(text).context("the heap snapshot did not read")?;
-    let meta = &snapshot["snapshot"]["meta"];
-    let fields: Vec<&str> = meta["node_fields"]
-        .as_array()
-        .context("no node fields")?
-        .iter()
-        .filter_map(Value::as_str)
-        .collect();
-    let types: Vec<&str> = meta["node_types"][0]
-        .as_array()
-        .context("no node types")?
-        .iter()
-        .filter_map(Value::as_str)
-        .collect();
-    let at = |name: &str| fields.iter().position(|field| *field == name);
-    let (type_at, name_at, size_at) = (
-        at("type").context("no type field")?,
-        at("name").context("no name field")?,
-        at("self_size").context("no size field")?,
-    );
-    let detached_at = at("detachedness");
-    let strings: Vec<&str> = snapshot["strings"]
-        .as_array()
-        .context("no strings")?
-        .iter()
-        .map(|value| value.as_str().unwrap_or_default())
-        .collect();
-    let nodes = snapshot["nodes"].as_array().context("no nodes")?;
-    let width = fields.len();
-    let mut summary: HeapSummary = HashMap::new();
-    for node in nodes.chunks(width) {
-        let kind = types
-            .get(node[type_at].as_u64().unwrap_or(0) as usize)
-            .copied()
-            .unwrap_or("?");
-        let size = node[size_at].as_u64().unwrap_or(0);
-        let name = strings
-            .get(node[name_at].as_u64().unwrap_or(0) as usize)
-            .copied()
-            .unwrap_or("");
-        let key = match kind {
-            "object" | "native" => {
-                let detached = detached_at.is_some_and(|at| node[at].as_u64() == Some(2));
-                let name: String = name
-                    .split(' ')
-                    .next()
-                    .unwrap_or(name)
-                    .chars()
-                    .take(60)
-                    .collect();
-                if detached {
-                    format!("Detached {name}")
-                } else {
-                    name
-                }
-            }
-            "closure" => "(closures)".into(),
-            "string" | "concatenated string" | "sliced string" => "(strings)".into(),
-            "array" => "(internal arrays)".into(),
-            "code" => "(compiled code)".into(),
-            other => format!("({other})"),
-        };
-        let entry = summary.entry(key).or_default();
-        entry.0 += 1;
-        entry.1 += size;
-    }
-    Ok(summary)
-}
-
-fn memory_text(summary: &HeapSummary, previous: Option<&HeapSummary>) -> String {
-    let total: u64 = summary.values().map(|(_, bytes)| bytes).sum();
-    let mut lines = vec![format!(
-        "Heap after garbage collection: {}",
-        human_size(total)
-    )];
-    let detached: u64 = summary
-        .iter()
-        .filter(|(name, _)| name.starts_with("Detached "))
-        .map(|(_, (count, _))| count)
-        .sum();
-    if detached > 0 {
-        lines.push(format!(
-            "{detached} detached DOM nodes (removed from the page but still referenced: a common leak)."
-        ));
-    }
-    let mut biggest: Vec<_> = summary.iter().collect();
-    biggest.sort_by_key(|(_, (_, bytes))| std::cmp::Reverse(*bytes));
-    lines.push("\nLargest by kind (count, bytes):".into());
-    for (name, (count, bytes)) in biggest.into_iter().take(20) {
-        lines.push(format!("- {name}: {count}, {}", human_size(*bytes)));
-    }
-    if let Some(previous) = previous {
-        let mut grew: Vec<(String, i64, i64)> = summary
-            .iter()
-            .map(|(name, (count, bytes))| {
-                let (before_count, before_bytes) = previous.get(name).copied().unwrap_or_default();
-                (
-                    name.clone(),
-                    *count as i64 - before_count as i64,
-                    *bytes as i64 - before_bytes as i64,
+fn memory_text(now: &MemorySample, before: Option<&MemorySample>) -> String {
+    let detached = (now.nodes - now.attached).max(0.0);
+    let mut lines = vec![
+        format!(
+            "JavaScript heap: {} used of {}.",
+            human_size(now.heap_used as u64),
+            human_size(now.heap_total as u64)
+        ),
+        format!(
+            "DOM nodes: {} alive, {} in the page{}.",
+            now.nodes,
+            now.attached,
+            if detached > 0.0 {
+                format!(
+                    ", so about {detached} detached (removed but still referenced; they may be collected later)"
                 )
-            })
-            .filter(|(_, count, bytes)| *count > 0 || *bytes > 0)
-            .collect();
-        grew.sort_by_key(|grown| std::cmp::Reverse(grown.2));
-        let before: u64 = previous.values().map(|(_, bytes)| bytes).sum();
-        lines.push(format!(
-            "\nSince the previous snapshot: {} → {} ({:+} bytes). Grew most (count, bytes):",
-            human_size(before),
-            human_size(total),
-            total as i64 - before as i64
-        ));
-        if grew.is_empty() {
-            lines.push("- nothing grew".into());
+            } else {
+                String::new()
+            }
+        ),
+        format!(
+            "Event listeners: {}; documents: {}; frames: {}.",
+            now.listeners, now.documents, now.frames
+        ),
+    ];
+    match before {
+        Some(before) => {
+            let change = |now: f64, before: f64| format!("{:+}", now - before);
+            lines.push(format!(
+                "\nSince your previous look: heap {} bytes, nodes {}, detached about {}, listeners {}, documents {}.",
+                change(now.heap_used, before.heap_used),
+                change(now.nodes, before.nodes),
+                change(detached, (before.nodes - before.attached).max(0.0)),
+                change(now.listeners, before.listeners),
+                change(now.documents, before.documents)
+            ));
+            lines.push("Steady growth over several rounds of the same action points to a leak; one round can be noise (the garbage collector runs when it likes).".into());
         }
-        for (name, count, bytes) in grew.into_iter().take(15) {
-            lines.push(format!("- {name}: {count:+}, {bytes:+} bytes"));
-        }
-    } else {
-        lines.push("\nDo what might leak (open and close a dialog a few times), then call chrome_memory with compare: true to see what grew.".into());
+        None => lines.push("\nTo look for a leak: do the action that may leak a few times, then call chrome_memory with compare: true. For what the objects are, the user can take a heap snapshot in Chrome DevTools' Memory panel (extensions cannot).".into()),
     }
     lines.join("\n")
 }
@@ -1223,18 +1138,26 @@ mod tests {
     }
 
     #[test]
-    fn heap_snapshots_are_summed_by_kind() {
-        let snapshot = r#"{"snapshot":{"meta":{"node_fields":["type","name","id","self_size","edge_count","trace_node_id","detachedness"],"node_types":[["hidden","array","string","object","code","closure","regexp","number","native"]]}},
-          "nodes":[3,0,1,100,0,0,0, 3,0,2,50,0,0,0, 8,1,3,30,0,0,2, 5,2,4,10,0,0,0],
-          "strings":["Thing","HTMLDivElement","fn"]}"#;
-        let summary = heap_summary(snapshot).unwrap();
-        assert_eq!(summary["Thing"], (2, 150));
-        assert_eq!(summary["Detached HTMLDivElement"], (1, 30));
-        assert_eq!(summary["(closures)"], (1, 10));
-        let mut later = summary.clone();
-        later.insert("Thing".into(), (5, 400));
-        let text = memory_text(&later, Some(&summary));
-        assert!(text.contains("Thing: +3, +250 bytes"));
-        assert!(text.contains("1 detached DOM nodes"));
+    fn memory_reads_and_compares() {
+        let before = MemorySample {
+            heap_used: 1_000_000.0,
+            heap_total: 2_000_000.0,
+            nodes: 500.0,
+            attached: 480.0,
+            listeners: 40.0,
+            documents: 1.0,
+            frames: 1.0,
+        };
+        let now = MemorySample {
+            heap_used: 1_500_000.0,
+            nodes: 900.0,
+            listeners: 90.0,
+            ..before.clone()
+        };
+        let text = memory_text(&now, Some(&before));
+        assert!(text.contains("about 420 detached"));
+        assert!(text.contains("nodes +400"));
+        assert!(text.contains("listeners +50"));
+        assert!(memory_text(&before, None).contains("compare: true"));
     }
 }

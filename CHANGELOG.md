@@ -4,6 +4,25 @@ What changed in each release, newest first. The full notes are on the [releases 
 
 Each release also has **Merge notes** for organisations that build their own copy of PilotHouse ([docs/customizing.md](docs/customizing.md)): what to look at when merging it. These cover new `[features]` keys (new features arrive switched on), new or renamed keys in `brand/brand.toml`, changes to `crates/custom` or `Store::apply_track`, and moved files.
 
+## Unreleased
+
+- **Chrome extension: from Chrome to PilotHouse.** Always on your own action, and into a chat's message box (the chat on screen, a new chat or quick chat) for you to send:
+  - **Send** the selection, the page as Markdown, a link, an image, a screenshot of an area, or an element you click (selector, styles, the source file a dev build names, and a picture), from the right-click menu, shortcuts (⌥⇧P, ⌥⇧S, ⌥⇧E) or the panel.
+  - **Record a bug report** (the steps, a video with still frames, the page's console errors and failed requests) or **a workflow** (steps that agents can run again), with a bar in the page that says so.
+  - **`@tabs`** in a chat attaches the text of the tabs you shared with agents.
+  - **Buttons on GitHub, Jira and Linear** (off until you turn a site on): review a pull request in PilotHouse, start a chat from an issue or a failed run, add an issue to the board.
+  - **Send a summary** made on your computer, where Chrome has its built-in summarizer.
+- **The PilotHouse panel** in Chrome's side panel (the toolbar button): chats waiting for you, agents in Chrome with Stop and Continue, sharing the tab, sending, recording and the options. The toolbar icon counts chats waiting for you; Chrome notifications when you choose; a tab comes forward when an agent needs you to sign in or prove you are a person.
+- **Debugging tools for agents in your Chrome:** `chrome_performance` (Core Web Vitals and what slows the page), `chrome_audit` (accessibility, SEO, best practices), `chrome_emulate` (device, network, CPU, colour scheme, place, time zone), `chrome_mock` (answer requests to test empty, failing and slow states), `chrome_memory` (heap, detached DOM nodes and listeners, compared for leaks), `chrome_errors` (stacks mapped through source maps to the workspace's files), `chrome_site_tools` (sites' own tools, WebMCP, in Chrome's early preview). Emulation and mocks end by themselves once the agent leaves the tab idle, or when you press Stop.
+- **Workflows:** agents run them (`chrome_workflows`, `chrome_run_workflow`), stopping where a password or a person is needed. Settings → Chrome extension lists them, makes a Playwright test or a schedule of one, renames and deletes them.
+- A managed Chrome whose policy keeps extensions' debugger out now says so clearly, and what to do instead.
+- **After updating**, reload the extension in `chrome://extensions` (it asks Chrome for more permissions now; nothing reaches a site without your click or your yes).
+
+### Merge notes
+
+- `ph_agent::LiveSources` has a new field, `tabs` (`None` where there is no `@tabs`): a copy that builds `LiveSources` itself adds `tabs: None`.
+- The extension's files are listed in `crates/browser/src/extension.rs` (`FILES`); a test fails when a file in `crates/browser/extension/` is missing there.
+
 ## 0.6.1
 
 - **Builds for organisations.** Everything an organisation changes now lives in a few places of its own. [docs/customizing.md](docs/customizing.md) explains each:

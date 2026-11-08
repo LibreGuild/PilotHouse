@@ -365,10 +365,10 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "chrome_memory",
-        description: "A heap snapshot of your Chrome page after garbage collection: its size, the largest kinds of objects and detached DOM nodes. To find a leak: snapshot, do the action that may leak a few times, then call again with compare: true to see what grew.",
+        description: "What your Chrome page holds in memory: its JavaScript heap, DOM nodes (about how many are detached: removed but still referenced), event listeners, documents and frames. To find a leak: look, do the action that may leak a few times, then call again with compare: true to see what grew. (Heap snapshots by kind of object are DevTools' Memory panel's: extensions cannot take them.)",
         schema: || {
             json!({ "type": "object", "properties": {
-            "compare": { "type": "boolean", "description": "Show what grew since your previous snapshot of this tab." }
+            "compare": { "type": "boolean", "description": "Show what grew since your previous look at this tab." }
         } })
         },
         build: |arguments, project_id, _| {

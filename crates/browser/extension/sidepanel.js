@@ -219,7 +219,11 @@ async function act(action) {
 async function summarizerReady() {
   if (!('Summarizer' in self)) return false;
   try {
-    return (await Summarizer.availability()) !== 'unavailable';
+    const answer = await Promise.race([
+      Summarizer.availability(),
+      new Promise((resolve) => setTimeout(() => resolve('unavailable'), 5000)),
+    ]);
+    return answer !== 'unavailable';
   } catch (error) {
     return false;
   }
@@ -385,7 +389,10 @@ async function start() {
   chrome.permissions.onRemoved.addListener(() => void renderSites());
 
   renderStatus();
-  $('summary').hidden = !(await summarizerReady());
+  // On the side: Chrome can take its time to say whether its model is there.
+  void summarizerReady().then((ready) => {
+    $('summary').hidden = !ready;
+  });
   await Promise.all([refreshTab(), renderSettings(), renderSites(), renderShortcuts()]);
 }
 

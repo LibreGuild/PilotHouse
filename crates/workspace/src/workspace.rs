@@ -443,6 +443,8 @@ impl Workspace {
         } else {
             space.read(cx).project().name.clone()
         };
+        // A read-only chat on screen (a closed terminal's): a new one.
+        let new_chat = new_chat || !space.read(cx).chat_takes_messages(cx);
         space.update(cx, |space, cx| {
             if new_chat {
                 space.new_session(window, cx);
@@ -485,6 +487,7 @@ impl Workspace {
         } else {
             space.read(cx).project().name.clone()
         };
+        let new_chat = new_chat || !space.read(cx).chat_takes_messages(cx);
         space.update(cx, |space, cx| {
             if new_chat {
                 space.new_session(window, cx);

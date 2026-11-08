@@ -203,10 +203,8 @@ struct Tab {
     mocks: Vec<devtools::Mock>,
     /// The debugger stays at least until then (emulation and mocks).
     keep_until: Option<Instant>,
-    /// A heap snapshot being read, and the last one's summary.
-    heap: Option<String>,
-    heap_too_large: bool,
-    heap_summary: Option<devtools::HeapSummary>,
+    /// What the agent last measured of its memory (`chrome_memory`).
+    memory: Option<devtools::MemorySample>,
     /// The page's own tools for agents (WebMCP), and calls waiting.
     site_tools: Vec<Value>,
     site_tool_waiters: Vec<(String, smol::channel::Sender<Value>)>,
@@ -588,10 +586,6 @@ impl AgentChrome {
             "Page.javascriptDialogClosed" => self.tabs[index].dialog = None,
             "Fetch.requestPaused" => {
                 self.answer_paused(index, params, cx);
-                return;
-            }
-            "HeapProfiler.addHeapSnapshotChunk" => {
-                self.heap_chunk(index, params);
                 return;
             }
             "WebMCP.toolsAdded" | "WebMCP.toolsRemoved" | "WebMCP.toolResponded" => {
@@ -1029,9 +1023,7 @@ impl AgentChrome {
             emulating: Vec::new(),
             mocks: Vec::new(),
             keep_until: None,
-            heap: None,
-            heap_too_large: false,
-            heap_summary: None,
+            memory: None,
             site_tools: Vec::new(),
             site_tool_waiters: Vec::new(),
             _glow: None,

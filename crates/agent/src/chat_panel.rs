@@ -554,6 +554,12 @@ impl ChatPanel {
         &self.chats
     }
 
+    /// Whether the chat on screen has a message box (a closed terminal
+    /// session's, shown read only, has none).
+    pub fn takes_messages(&self) -> bool {
+        self.terminal_session.is_none()
+    }
+
     pub fn active_session_id(&self, cx: &App) -> Option<SessionId> {
         if let Some(shown) = &self.terminal_session {
             return Some(shown.session.id);

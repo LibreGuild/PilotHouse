@@ -56,7 +56,7 @@ Agents and terminals use your **login shell's** environment (`ph-env`), so tools
 - `@src/main.rs` attaches that file as a resource link the agent can read.
 - `@src/` (a folder, offered with a trailing slash) attaches what the folder holds, folders first, up to 200 entries, so the agent sees its shape and reads what it needs.
 - `#12` attaches board card 12 (title, description, acceptance criteria).
-- `@screenshot` and `@log` attach the browser or device screen and recent logs ([live-panes.md](live-panes.md)); `@test-run` (or `@tests`) attaches how each UI test last went, with the first failing step's screen ([tests.md](tests.md)).
+- `@screenshot` and `@log` attach the browser or device screen and recent logs ([live-panes.md](live-panes.md)); `@test-run` (or `@tests`) attaches how each UI test last went, with the first failing step's screen ([tests.md](tests.md)). With PilotHouse's Chrome extension, choosing `@tabs` (or *Tabs you shared in Chrome* in the **+** menu) attaches the text of the Chrome tabs you shared with agents, once read ([browser.md](browser.md)).
 - Typing `@` and a name offers definitions (functions, types, classes in Rust, TypeScript/JavaScript, Python, Go, Kotlin/Java/Swift/C#, C/C++; found by reading the files, `ph_files::symbols`); one inserts `@path:line`, which attaches the code from that line to the end of the definition. Any `@path:line` works the same.
 - `@pr:12` attaches a pull request of the workspace's GitHub repository (title, author, branches, description, and how to get its diff); typing `@pr` lists the open ones.
 
@@ -141,7 +141,7 @@ Transcripts are stored per session, with the agent's ACP session id. After a res
 | `options.rs` | Agent config options (model, mode, effort…), remembered choices |
 | `installed.rs` | Which agents are installed, looked for at start and on request |
 | `preload.rs` | Agents' models, loaded in the background after start |
-| `attachments.rs` | Attachments, mentions and live sources (`@screenshot`, `@log`, `@test-run`) |
+| `attachments.rs` | Attachments, mentions and live sources (`@screenshot`, `@log`, `@test-run`, `@tabs`) |
 | `attachment_view.rs` | Chips with hover preview and a full-view dialog |
 | `model_picker.rs` | The model picker popover |
 | `setup.rs`, `setup_view.rs` | Per-agent setup checks and the setup card |
