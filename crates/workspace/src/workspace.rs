@@ -415,6 +415,115 @@ impl Workspace {
     }
 
     /// A new chat in workspace (or Chats space) `project`.
+    /// Puts what the user sent from Chrome in a composer: the chat on screen
+    /// (the workspace on screen, else the Chats space), or a new chat there.
+    /// Says where, for the extension to tell the user.
+    pub(crate) fn receive_from_browser(
+        &mut self,
+        new_chat: bool,
+        attachments: Vec<ph_agent::Attachment>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<String> {
+        if self.view != View::Workspaces {
+            self.set_view(View::Workspaces, window, cx);
+        }
+        let project = self
+            .active_project
+            .or_else(|| self.chats_space().map(|chats| chats.id))
+            .ok_or_else(|| anyhow::anyhow!("Open a workspace in {} first.", ph_brand::NAME))?;
+        self.open_project(project, window, cx);
+        let space = self
+            .spaces
+            .get(&project)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("The workspace could not be opened."))?;
+        let name = if self.is_chats(project) {
+            "Chats".to_string()
+        } else {
+            space.read(cx).project().name.clone()
+        };
+        // A read-only chat on screen (a closed terminal's): a new one.
+        let new_chat = new_chat || !space.read(cx).chat_takes_messages(cx);
+        space.update(cx, |space, cx| {
+            if new_chat {
+                space.new_session(window, cx);
+            }
+            space.attach_to_chat(attachments, window, cx);
+        });
+        cx.notify();
+        Ok(if new_chat {
+            format!("a new chat in “{name}”")
+        } else {
+            format!("the chat in “{name}”")
+        })
+    }
+
+    /// Drafts a message about `attachment` (`prompt` in the composer, for
+    /// the user to change and send) in the chat on screen.
+    pub(crate) fn draft_from_browser(
+        &mut self,
+        attachment: ph_agent::Attachment,
+        prompt: &str,
+        new_chat: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<String> {
+        if self.view != View::Workspaces {
+            self.set_view(View::Workspaces, window, cx);
+        }
+        let project = self
+            .active_project
+            .or_else(|| self.chats_space().map(|chats| chats.id))
+            .ok_or_else(|| anyhow::anyhow!("Open a workspace in {} first.", ph_brand::NAME))?;
+        self.open_project(project, window, cx);
+        let space = self
+            .spaces
+            .get(&project)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("The workspace could not be opened."))?;
+        let name = if self.is_chats(project) {
+            "Chats".to_string()
+        } else {
+            space.read(cx).project().name.clone()
+        };
+        let new_chat = new_chat || !space.read(cx).chat_takes_messages(cx);
+        space.update(cx, |space, cx| {
+            if new_chat {
+                space.new_session(window, cx);
+            }
+            space.draft_in_chat(attachment, prompt, window, cx)
+        });
+        Ok(if new_chat {
+            format!("a new chat in “{name}”")
+        } else {
+            format!("the chat in “{name}”")
+        })
+    }
+
+    /// An agent started using workspace `project`'s built-in browser: its
+    /// Browser tab comes into view, so the user sees the testing. Another
+    /// workspace on screen stays on screen, and a Browser tool the user
+    /// switched off (Settings → Features) stays off. Says whether it showed.
+    pub(crate) fn show_browser_for_agent(
+        &mut self,
+        project: ProjectId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(space) = self.spaces.get(&project).cloned() else {
+            return false;
+        };
+        if !AppState::enabled_tabs(cx).contains(&ContextTab::Browser) {
+            return false;
+        }
+        space.update(cx, |space, cx| {
+            space.show_tab(ContextTab::Browser, window, cx)
+        });
+        cx.notify();
+        true
+    }
+
     pub fn new_chat_in(&mut self, project: ProjectId, window: &mut Window, cx: &mut Context<Self>) {
         self.open_project(project, window, cx);
         if let Some(space) = self.spaces.get(&project) {
@@ -776,6 +885,7 @@ impl Workspace {
 
     /// Reads the workspace list again (another window changed it).
     pub(crate) fn reload_projects(&mut self, cx: &mut Context<Self>) {
+        crate::attention::forget_names(cx);
         let projects = workspaces(AppState::store(cx));
         let chats = self.chats_space.as_ref().map(|chats| chats.id);
         let kept =
@@ -1192,6 +1302,7 @@ impl Workspace {
 
     /// Shows a workspace's new folders (or name) everywhere.
     fn workspace_changed(&mut self, project: Project, window: &mut Window, cx: &mut Context<Self>) {
+        crate::attention::forget_names(cx);
         if let Some(existing) = self
             .projects
             .iter_mut()

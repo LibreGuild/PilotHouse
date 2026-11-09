@@ -105,6 +105,7 @@ fn method(name: &'static str, cx: &mut App, body: BrowserMethod) {
             let Some(project_id) = params["project_id"].as_i64() else {
                 return Task::ready(Err(anyhow::anyhow!("missing `project_id`")));
             };
+            BrowserHub::agent_uses(project_id, cx);
             let browser: Entity<Browser> = BrowserHub::browser(project_id, cx);
             match browser.update(cx, |browser, cx| body(browser, params, cx)) {
                 Ok(task) => task,

@@ -124,6 +124,78 @@ pub fn register(cx: &mut App) {
             cx,
         ))
     });
+    action("chrome.run_workflow", cx, |chrome, who, params, cx| {
+        let values = params["values"]
+            .as_object()
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            value
+                                .as_str()
+                                .map_or_else(|| value.to_string(), str::to_string),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(chrome.run_workflow(
+            &who,
+            string(&params, "name")?,
+            params["from_step"].as_u64().unwrap_or(1) as usize,
+            values,
+            cx,
+        ))
+    });
+    action("chrome.site_tools", cx, |chrome, who, params, cx| {
+        let call = params["name"].as_str().map(|name| {
+            (
+                name.to_string(),
+                params
+                    .get("input")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(Default::default())),
+            )
+        });
+        Ok(chrome.site_tools(&who, call, cx))
+    });
+    action("chrome.performance", cx, |chrome, who, params, cx| {
+        Ok(chrome.performance(
+            &who,
+            params["reload"].as_bool().unwrap_or(true),
+            params["no_cache"].as_bool().unwrap_or(false),
+            cx,
+        ))
+    });
+    action("chrome.audit", cx, |chrome, who, params, cx| {
+        let categories = params["categories"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        Ok(chrome.audit(&who, categories, cx))
+    });
+    action("chrome.emulate", cx, |chrome, who, params, cx| {
+        Ok(chrome.emulate(&who, params, cx))
+    });
+    action("chrome.mock", cx, |chrome, who, params, cx| {
+        Ok(chrome.mock(&who, params, cx))
+    });
+    action("chrome.memory", cx, |chrome, who, params, cx| {
+        Ok(chrome.memory(&who, params["compare"].as_bool().unwrap_or(false), cx))
+    });
+    action("chrome.errors", cx, |chrome, who, params, cx| {
+        Ok(chrome.errors(
+            &who,
+            params["project_id"].as_i64(),
+            params["limit"].as_u64().unwrap_or(20).clamp(1, 100) as usize,
+            cx,
+        ))
+    });
     action("chrome.evaluate", cx, |chrome, who, params, cx| {
         Ok(chrome.evaluate(&who, string(&params, "expression")?, cx))
     });
@@ -179,6 +251,9 @@ pub fn register(cx: &mut App) {
             params["new_only"].as_bool().unwrap_or(false),
             params["limit"].as_u64().unwrap_or(100).clamp(1, 1000) as usize,
         )
+    });
+    read("chrome.workflows", cx, |chrome, _, params| {
+        chrome.workflows_text(params["name"].as_str())
     });
     read("chrome.downloads", cx, |chrome, _, _| {
         Ok(chrome.downloads_text())

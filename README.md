@@ -33,6 +33,7 @@ A day with coding agents usually means several agent CLIs in terminals, an edito
 - **Git and GitHub**: commit, branches, history graph, stashes, conflicts, blame, review of agent edits per hunk; pull requests in the app, and agent reviews whose findings you post as comments.
 - **Board**: a Kanban board agents plan on and work through card by card, through PilotHouse's MCP server.
 - **Browser and Android**: a browser pane and Android emulators or phones that you and the agents can see and drive; annotate a screen and send it to the chat.
+- **Chrome extension**: agents work in your own Chrome, with your sign-ins, in tabs you share, with tools for debugging pages (performance, audits, emulation, mocks, memory, mapped errors); you send pages, selections, screenshots, recorded bug reports and workflows from Chrome to a chat, and its side panel shows the chats waiting for you.
 - **UI tests** recorded from what an agent does, replayed without AI on several screen sizes or devices, compared with accepted screens, and repaired by an agent. A board card can require them to pass before it is Done.
 - **Automation**: agent prompts and test runs at set times, or when files change, a commit lands, a pull request opens or checks fail.
 - **Network drives**: for code on a server's share (a mapped drive), Git, terminals and run configurations work on the server over SSH, next to the files.

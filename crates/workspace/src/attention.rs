@@ -32,6 +32,9 @@ struct Attention {
     seen: HashMap<Watched, ChatState>,
     /// The badge on the Dock icon, as last set.
     badge: usize,
+    /// Workspaces' names, for Chrome's side panel (read once each, again
+    /// after a rename: [`forget_names`]).
+    names: HashMap<ProjectId, String>,
     _poll: Task<()>,
 }
 
@@ -52,6 +55,7 @@ pub(crate) fn install(cx: &mut App) {
     cx.set_global(Attention {
         seen: HashMap::new(),
         badge: 0,
+        names: HashMap::new(),
         _poll: poll,
     });
 }
@@ -73,9 +77,25 @@ fn look(cx: &mut App) {
     let mut notes = Vec::new();
     let mut now = HashMap::new();
     let mut waiting = 0;
+    // For PilotHouse's Chrome extension: its badge, side panel and news.
+    let mut chrome_waiting = Vec::new();
+    let mut chrome_working = Vec::new();
+    let mut chrome_news = Vec::new();
     for (project, chats) in ChatHub::all(cx) {
+        let workspace = name_of(project, cx);
         let chats = chats.read(cx);
         for (session, summary) in chats.live(cx) {
+            let note = || ph_browser::ChatNote {
+                tag: format!("{TAG_PREFIX}{project}-{session}"),
+                title: summary.title.to_string(),
+                workspace: workspace.clone(),
+                line: summary.line.clone().unwrap_or_default(),
+            };
+            match summary.state {
+                ChatState::NeedsYou => chrome_waiting.push(note()),
+                ChatState::Working => chrome_working.push(note()),
+                _ => {}
+            }
             if summary.state == ChatState::NeedsYou {
                 waiting += 1;
             }
@@ -86,6 +106,12 @@ fn look(cx: &mut App) {
                 .copied()
                 .unwrap_or(ChatState::Idle);
             if let Some(title) = news(before, summary.state, chats.is_viewing(session)) {
+                chrome_news.push(ph_browser::ChatNews {
+                    tag: format!("{TAG_PREFIX}{project}-{session}"),
+                    title: format!("{}: {title}", summary.title),
+                    body: summary.line.clone().unwrap_or_default(),
+                    kind: kind(summary.state),
+                });
                 notes.push(SystemNotification {
                     tag: SharedString::from(format!("{TAG_PREFIX}{project}-{session}")),
                     title: format!("{}: {title}", summary.title).into(),
@@ -102,6 +128,21 @@ fn look(cx: &mut App) {
     for agent in crate::terminal_agents::TerminalAgents::all(cx) {
         if agent.state == ChatState::NeedsYou {
             waiting += 1;
+        }
+        let tag = format!("{TERMINAL_TAG_PREFIX}{}-{}", agent.project, agent.pane);
+        let note = || ph_browser::ChatNote {
+            tag: tag.clone(),
+            title: agent
+                .title
+                .clone()
+                .unwrap_or_else(|| agent.agent.name.to_string()),
+            workspace: String::new(),
+            line: agent.line.clone().unwrap_or_default(),
+        };
+        match agent.state {
+            ChatState::NeedsYou => chrome_waiting.push(note()),
+            ChatState::Working => chrome_working.push(note()),
+            _ => {}
         }
         let key = Watched::Terminal(agent.pane.clone());
         let before = cx
@@ -120,6 +161,12 @@ fn look(cx: &mut App) {
                 .title
                 .clone()
                 .unwrap_or_else(|| agent.agent.name.to_string());
+            chrome_news.push(ph_browser::ChatNews {
+                tag: tag.clone(),
+                title: format!("{name}: {title}"),
+                body: agent.line.clone().unwrap_or_default(),
+                kind: kind(agent.state),
+            });
             notes.push(SystemNotification {
                 tag: SharedString::from(format!(
                     "{TERMINAL_TAG_PREFIX}{}-{}",
@@ -141,6 +188,42 @@ fn look(cx: &mut App) {
     }
     for note in notes {
         cx.show_system_notification(note);
+    }
+    crate::browser_inbox::report(chrome_waiting, chrome_working, chrome_news, cx);
+}
+
+/// Workspaces were renamed (or added, or removed): their names are read
+/// again, so Chrome's side panel does not show old ones.
+pub(crate) fn forget_names(cx: &mut App) {
+    if cx.has_global::<Attention>() {
+        cx.global_mut::<Attention>().names.clear();
+    }
+}
+
+/// A workspace's name (read from the store the first time; it is asked
+/// every second).
+fn name_of(project: ProjectId, cx: &mut App) -> String {
+    if let Some(name) = cx.global::<Attention>().names.get(&project) {
+        return name.clone();
+    }
+    let name = crate::AppState::store(cx)
+        .project(project)
+        .ok()
+        .flatten()
+        .map(|project| project.name)
+        .unwrap_or_default();
+    cx.global_mut::<Attention>()
+        .names
+        .insert(project, name.clone());
+    name
+}
+
+/// What kind of news a new state is, for Chrome's notifications.
+fn kind(state: ChatState) -> &'static str {
+    match state {
+        ChatState::NeedsYou => "needs",
+        ChatState::Failed => "failed",
+        _ => "done",
     }
 }
 

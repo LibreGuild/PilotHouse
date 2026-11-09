@@ -156,8 +156,30 @@ impl WorkspaceScreen {
         self.attach_to_chat(attachments, window, cx);
     }
 
+    /// Whether the chat on screen can take a message (not a read-only
+    /// terminal session).
+    pub(crate) fn chat_takes_messages(&self, cx: &gpui_kit::App) -> bool {
+        self.chat.read(cx).takes_messages()
+    }
+
+    /// Drafts a message about `attachment` in the chat, for the user to
+    /// change and send.
+    pub(crate) fn draft_in_chat(
+        &mut self,
+        attachment: Attachment,
+        prompt: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal_chat(cx);
+        self.chat.update(cx, |chat, cx| {
+            chat.draft_about(attachment, prompt, window, cx)
+        });
+        cx.notify();
+    }
+
     /// Adds attachments to the composer, bringing the chat into view.
-    pub(super) fn attach_to_chat(
+    pub(crate) fn attach_to_chat(
         &mut self,
         attachments: Vec<Attachment>,
         window: &mut Window,

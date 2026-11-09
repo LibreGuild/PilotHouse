@@ -1,38 +1,53 @@
-// PilotHouse's Chrome extension: lets PilotHouse's agents work in tabs of the
-// "PilotHouse" tab group of this browser, with the user's own sign-ins.
+// PilotHouse's Chrome extension.
 //
+// - Agents work in tabs of the "PilotHouse" tab group of this browser, with
+//   the user's own sign-ins (`lib/tabs.js`). Tabs outside it are never
+//   listed, read or controlled for agents. Pages are driven with
+//   chrome.debugger, attached only while an agent works in the tab, and only
+//   with the DevTools methods listed in ALLOWED.
+// - The user sends things to PilotHouse from any tab (`features/send.js`),
+//   only when they ask: the right-click menu, a shortcut or the side panel.
+// - The toolbar button opens the side panel: what agents do, what waits for
+//   the user, and the extension's choices.
 // - It talks only to the PilotHouse app, through Chrome's native messaging
-//   (host `com.libreguild.pilothouse`, which Chrome lets no other extension
-//   start). There is no network port and no remote code.
-// - Only tabs in a group named "PilotHouse" (and popups such a tab opened) are
-//   ever listed, read or controlled. The user's other tabs are never reported.
-// - The toolbar button shares the tab in front (it joins the group) or stops
-//   sharing it (it leaves the group, and PilotHouse lets go of it).
-// - Pages are driven with chrome.debugger, attached only while an agent works
-//   in the tab, and only with the DevTools methods listed in ALLOWED.
-'use strict';
+//   (`lib/link.js`). There is no network port and no remote code.
 
-const HOST = 'com.libreguild.pilothouse';
-const GROUP_TITLE = 'PilotHouse';
+import { connect, onConnection, post, send, setRequestHandler } from './lib/link.js';
+import { attached, allowed, allowedTabs, frontTab, inGroup, known, openTab, popups, setShared } from './lib/tabs.js';
+import { onSettings, settings, update } from './lib/settings.js';
+import { inPage } from './lib/page.js';
+import * as sending from './features/send.js';
+import * as statusFeature from './features/status.js';
+import * as recording from './features/record.js';
+import * as sites from './features/sites.js';
+
 const PROTOCOL = '1.3';
-/** The largest message accepted from the app, assembled from its chunks. */
-const MAX_MESSAGE = 32 * 1024 * 1024;
-const MAX_CHUNKS = 256;
-const RETRY_MIN = 5000;
-const RETRY_MAX = 60000;
-/** After the app said another browser is connected. */
-const BUSY_PAUSE = 5 * 60 * 1000;
-const NO_GROUP = -1;
 
 /** The DevTools methods PilotHouse uses, and the only ones passed on. */
 const ALLOWED = new Set([
   'DOM.setFileInputFiles',
+  'Emulation.clearDeviceMetricsOverride',
+  'Emulation.clearGeolocationOverride',
+  'Emulation.setCPUThrottlingRate',
+  'Emulation.setDeviceMetricsOverride',
+  'Emulation.setEmulatedMedia',
+  'Emulation.setGeolocationOverride',
+  'Emulation.setLocaleOverride',
+  'Emulation.setTimezoneOverride',
+  'Emulation.setTouchEmulationEnabled',
+  'Fetch.continueRequest',
+  'Fetch.disable',
+  'Fetch.enable',
+  'Fetch.failRequest',
+  'Fetch.fulfillRequest',
   'Input.dispatchKeyEvent',
   'Input.dispatchMouseEvent',
   'Input.insertText',
   'Log.enable',
+  'Network.emulateNetworkConditions',
   'Network.enable',
   'Network.getResponseBody',
+  'Network.setCacheDisabled',
   'Page.addScriptToEvaluateOnNewDocument',
   'Page.captureScreenshot',
   'Page.createIsolatedWorld',
@@ -44,165 +59,28 @@ const ALLOWED = new Set([
   'Page.navigateToHistoryEntry',
   'Page.reload',
   'Page.setLifecycleEventsEnabled',
+  'Performance.enable',
+  'Performance.getMetrics',
   'Runtime.addBinding',
   'Runtime.enable',
   'Runtime.evaluate',
+  'Runtime.getHeapUsage',
+  'WebMCP.enable',
+  'WebMCP.invokeTool',
 ]);
-
-let port = null;
-let retryDelay = RETRY_MIN;
-let lastAttempt = 0;
-let pausedUntil = 0;
-/** Tabs the debugger is attached to, by this extension. */
-const attached = new Set();
-/** Tabs of popup windows (which cannot be grouped) opened by an allowed tab. */
-const popups = new Set();
-/** Allowed tabs PilotHouse knows of. */
-const known = new Set();
-/** Chunks of large messages from the app, by message. */
-const chunks = new Map();
-
-// ---- The connection -------------------------------------------------------
-
-function connect() {
-  const now = Date.now();
-  if (port || now < pausedUntil || now - lastAttempt < retryDelay) return;
-  lastAttempt = now;
-  try {
-    port = chrome.runtime.connectNative(HOST);
-  } catch (error) {
-    port = null;
-    return;
-  }
-  port.onMessage.addListener(fromApp);
-  port.onDisconnect.addListener(() => {
-    void chrome.runtime.lastError;
-    port = null;
-    for (const tabId of attached) chrome.debugger.detach({ tabId }).catch(() => {});
-    attached.clear();
-    known.clear();
-    chunks.clear();
-    retryDelay = Math.min(retryDelay * 2, RETRY_MAX);
-    // Retried later, or sooner when a tab event wakes this worker.
-    setTimeout(connect, retryDelay);
-    void refreshAction();
-  });
-  post({
-    method: 'PilotHouse.hello',
-    params: { browser: browserName(), extension: chrome.runtime.getManifest().version },
-  });
-  void refreshAction();
-}
-
-function post(message) {
-  if (!port) return;
-  try {
-    port.postMessage(message);
-  } catch (error) {
-    // The port closed meanwhile; onDisconnect tidies up.
-  }
-}
-
-function reply(id, result) {
-  post({ id, result: result ?? {} });
-}
-
-function fail(id, message) {
-  post({ id, error: { message: String(message) } });
-}
-
-function browserName() {
-  const agent = navigator.userAgent;
-  const edge = /Edg\/(\d+)/.exec(agent);
-  if (edge) return `Microsoft Edge ${edge[1]}`;
-  const chrome = /Chrome\/(\d+)/.exec(agent);
-  const version = chrome ? ` ${chrome[1]}` : '';
-  return navigator.brave ? `Brave${version}` : `Chrome${version}`;
-}
-
-function fromApp(message) {
-  if (!isObject(message)) return;
-  // The app answered: retry quickly next time. Not when the host only says
-  // the app is not running (or busy), or retries would never back off.
-  if (message.method !== 'PilotHouse.unavailable' && message.method !== 'PilotHouse.busy') {
-    retryDelay = RETRY_MIN;
-  }
-  if (isObject(message.chunk)) {
-    const whole = assemble(message.chunk);
-    if (whole !== undefined) void handle(whole);
-    return;
-  }
-  void handle(message);
-}
-
-/** Puts a large message back together; undefined until it is whole. */
-function assemble(chunk) {
-  const { id, index, count, data } = chunk;
-  if (!Number.isSafeInteger(id) || !Number.isSafeInteger(count) || !Number.isSafeInteger(index)
-      || count < 1 || count > MAX_CHUNKS || index < 0 || index >= count || typeof data !== 'string') {
-    return undefined;
-  }
-  let parts = chunks.get(id);
-  if (!parts) {
-    parts = { count, received: 0, size: 0, data: new Array(count) };
-    chunks.set(id, parts);
-  }
-  if (parts.count !== count || parts.data[index] !== undefined) return undefined;
-  parts.data[index] = data;
-  parts.received += 1;
-  parts.size += data.length;
-  if (parts.size > MAX_MESSAGE) {
-    chunks.delete(id);
-    return undefined;
-  }
-  if (parts.received < count) return undefined;
-  chunks.delete(id);
-  try {
-    const whole = JSON.parse(parts.data.join(''));
-    return isObject(whole) ? whole : undefined;
-  } catch (error) {
-    return undefined;
-  }
-}
-
-function isObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
 
 // ---- Requests from the app ------------------------------------------------
 
-async function handle(message) {
-  const { id, method, params, sessionId } = message;
-  // Notes from the app, with no answer expected.
-  if (id === undefined) {
-    if (method === 'PilotHouse.busy') {
-      pausedUntil = Date.now() + BUSY_PAUSE;
-      port?.disconnect();
-      port = null;
-    }
-    return;
+setRequestHandler(async ({ method, params, sessionId }) => {
+  if (sessionId !== undefined) {
+    if (typeof sessionId !== 'string' || !/^\d{1,12}$/.test(sessionId)) throw new Error('malformed request');
+    const tabId = Number(sessionId);
+    if (!attached.has(tabId)) throw new Error('PilotHouse is not attached to that tab');
+    if (!ALLOWED.has(method)) throw new Error(`${method} is not allowed`);
+    return chrome.debugger.sendCommand({ tabId }, method, params ?? {});
   }
-  if (!Number.isSafeInteger(id) || id < 1) return;
-  if (typeof method !== 'string' || method.length > 100 || !/^[A-Za-z]+\.[A-Za-z]+$/.test(method)) {
-    return fail(id, 'malformed request');
-  }
-  if (params !== undefined && !isObject(params)) return fail(id, 'malformed request');
-  try {
-    if (sessionId !== undefined) {
-      if (typeof sessionId !== 'string' || !/^\d{1,12}$/.test(sessionId)) {
-        return fail(id, 'malformed request');
-      }
-      const tabId = Number(sessionId);
-      if (!attached.has(tabId)) return fail(id, 'PilotHouse is not attached to that tab');
-      if (!ALLOWED.has(method)) return fail(id, `${method} is not allowed`);
-      reply(id, await chrome.debugger.sendCommand({ tabId }, method, params ?? {}));
-      return;
-    }
-    reply(id, await command(method, params ?? {}));
-  } catch (error) {
-    fail(id, error?.message ?? error);
-  }
-}
+  return command(method, params ?? {});
+});
 
 async function command(method, params) {
   switch (method) {
@@ -217,7 +95,11 @@ async function command(method, params) {
     case 'PilotHouse.attach': {
       const tabId = await allowed(params.tabId);
       if (!attached.has(tabId)) {
-        await chrome.debugger.attach({ tabId }, PROTOCOL);
+        try {
+          await chrome.debugger.attach({ tabId }, PROTOCOL);
+        } catch (error) {
+          throw new Error(attachError(error));
+        }
         attached.add(tabId);
       }
       return {};
@@ -237,87 +119,26 @@ async function command(method, params) {
   }
 }
 
-/** The tab, when PilotHouse may use it: in a PilotHouse group, or a popup one opened. */
-async function allowed(tabId) {
-  if (!Number.isSafeInteger(tabId)) throw new Error('give a tabId');
-  if (popups.has(tabId)) return tabId;
-  let tab;
-  try {
-    tab = await chrome.tabs.get(tabId);
-  } catch (error) {
-    throw new Error('that tab is closed');
+/** Why Chrome would not let the debugger attach, in words the agent can
+ * pass on. A managed Chrome (Chrome 155 and later) checks the
+ * organisation's policies when an extension attaches its debugger. */
+function attachError(error) {
+  const message = String(error?.message ?? error);
+  if (/policy/i.test(message)) {
+    return `Your organisation's Chrome policy does not let extensions control this tab (Chrome said: ${message}). Ask the user: their IT admin can allow it, or use PilotHouse's own browser pane (the browser_ tools) meanwhile.`;
   }
-  if (!(await inGroup(tab))) {
-    throw new Error('that tab is not in the PilotHouse group: the user has not shared it');
+  if (/another debugger|already attached/i.test(message)) {
+    return 'Chrome DevTools (or another extension) is debugging this tab. Ask the user to close DevTools on it, then try again.';
   }
-  return tabId;
+  return message;
 }
 
-async function inGroup(tab) {
-  if (tab.groupId === undefined || tab.groupId === NO_GROUP) return false;
-  try {
-    const group = await chrome.tabGroups.get(tab.groupId);
-    return group.title === GROUP_TITLE;
-  } catch (error) {
-    return false;
-  }
-}
-
-async function groups() {
-  return chrome.tabGroups.query({ title: GROUP_TITLE });
-}
-
-async function allowedTabs() {
-  const focused = await chrome.windows.getLastFocused({ windowTypes: ['normal', 'popup'] }).catch(() => null);
-  const tabs = [];
-  for (const group of await groups()) {
-    tabs.push(...(await chrome.tabs.query({ groupId: group.id })));
-  }
-  for (const tabId of popups) {
-    const tab = await chrome.tabs.get(tabId).catch(() => null);
-    if (tab) tabs.push(tab);
-  }
-  return tabs.map((tab) => {
-    known.add(tab.id);
-    return {
-      tabId: tab.id,
-      url: tab.url ?? tab.pendingUrl ?? '',
-      title: tab.title ?? '',
-      active: tab.active,
-      focused: focused !== null && focused.id === tab.windowId && focused.focused,
-    };
-  });
-}
-
-/** A new tab for an agent, in the PilotHouse group (made when there is none). */
-async function openTab(url) {
-  if (url !== undefined && url !== 'about:blank') {
-    throw new Error('new tabs start blank; navigate them after');
-  }
-  const window = await chrome.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null);
-  const all = await groups();
-  const group = all.find((g) => window && g.windowId === window.id) ?? all[0];
-  let tab;
-  if (group) {
-    tab = await chrome.tabs.create({ windowId: group.windowId, url: 'about:blank', active: true });
-    await chrome.tabs.group({ groupId: group.id, tabIds: [tab.id] });
-  } else if (window) {
-    tab = await chrome.tabs.create({ windowId: window.id, url: 'about:blank', active: true });
-    await newGroup(tab.id);
-  } else {
-    const created = await chrome.windows.create({ url: 'about:blank', focused: false });
-    tab = created.tabs[0];
-    await newGroup(tab.id);
-  }
-  known.add(tab.id);
-  return tab.id;
-}
-
-async function newGroup(tabId) {
-  const groupId = await chrome.tabs.group({ tabIds: [tabId] });
-  await chrome.tabGroups.update(groupId, { title: GROUP_TITLE, color: 'purple', collapsed: false });
-  return groupId;
-}
+onConnection((isConnected) => {
+  if (isConnected) return;
+  for (const tabId of attached) chrome.debugger.detach({ tabId }).catch(() => {});
+  attached.clear();
+  known.clear();
+});
 
 // ---- Events to the app ----------------------------------------------------
 
@@ -340,7 +161,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 chrome.tabs.onCreated.addListener(async (tab) => {
   connect();
   const opener = tab.openerTabId;
-  if (!port || opener === undefined || !known.has(opener) || known.has(tab.id)) return;
+  if (opener === undefined || !known.has(opener) || known.has(tab.id)) return;
   if (!(await inGroup(tab))) {
     if (!attached.has(opener)) return;
     const window = await chrome.windows.get(tab.windowId).catch(() => null);
@@ -365,8 +186,8 @@ function opened(tab, opener) {
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
   connect();
   if ('groupId' in change) {
-    void refreshAction(tab);
-    if (!port || popups.has(tabId)) return;
+    void refreshMenus(tab);
+    if (popups.has(tabId)) return;
     const inside = await inGroup(tab);
     if (inside && !known.has(tabId)) {
       // Chrome may group a tab opened from a group tab only after creating it.
@@ -381,7 +202,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
     }
     return;
   }
-  if (!port || !known.has(tabId)) return;
+  if (!known.has(tabId)) return;
   if (change.url !== undefined || change.title !== undefined) {
     post({ method: 'PilotHouse.tabUpdated', params: { tabId, url: tab.url ?? '', title: tab.title ?? '' } });
   }
@@ -396,12 +217,19 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   connect();
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (tab) void refreshAction(tab);
+  if (tab) void refreshMenus(tab);
+});
+
+// With several windows, the tab in front changes with no tab activated.
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  const [tab] = await chrome.tabs.query({ active: true, windowId }).catch(() => []);
+  if (tab) void refreshMenus(tab);
 });
 
 // A group renamed away from "PilotHouse" takes its tabs out of reach.
 chrome.tabGroups.onUpdated.addListener(async (group) => {
-  if (group.title === GROUP_TITLE) return;
+  if (group.title === 'PilotHouse') return;
   const tabs = await chrome.tabs.query({ groupId: group.id }).catch(() => []);
   for (const tab of tabs) if (known.has(tab.id)) leave(tab.id);
 });
@@ -413,41 +241,264 @@ function leave(tabId) {
   post({ method: 'PilotHouse.tabLeft', params: { tabId } });
 }
 
-// ---- The toolbar button ---------------------------------------------------
+// ---- What the user does ---------------------------------------------------
 
-chrome.action.onClicked.addListener(async (tab) => {
-  connect();
-  if (tab.id === undefined) return;
+/** Runs one of the user's actions on `tab`, telling them how it went. */
+async function act(action, tab, info = {}, fromPanel = false) {
   try {
-    if (await inGroup(tab)) {
-      await chrome.tabs.ungroup(tab.id);
-    } else {
-      const all = await groups();
-      const here = all.find((group) => group.windowId === tab.windowId);
-      if (here) {
-        await chrome.tabs.group({ groupId: here.id, tabIds: [tab.id] });
-      } else {
-        await newGroup(tab.id);
-      }
+    switch (action) {
+      case 'page':
+        return await sending.sendPage(tab);
+      case 'selection':
+        return await sending.sendSelection(tab, info.selectionText);
+      case 'link':
+        return await sending.sendLink(tab, info.linkUrl, info.selectionText ?? info.linkText);
+      case 'image':
+        return await sending.sendImage(tab, info.srcUrl);
+      case 'area':
+        return await sending.sendArea(tab);
+      case 'element':
+        return await sending.sendElement(tab);
+      case 'bug':
+      case 'workflow':
+        await recording.start(action, tab, info.streamId);
+        return {};
+      case 'stop':
+        return await recording.finish(true);
+      case 'cancel':
+        await recording.finish(false);
+        return null;
+      case 'share':
+        // What the checkbox now says (the menu's can be stale for this tab).
+        await setShared(tab, typeof info.checked === 'boolean' ? info.checked : !(await inGroup(tab)));
+        await refreshMenus(await chrome.tabs.get(tab.id));
+        return {};
+      default:
+        throw new Error(`unknown action ${action}`);
     }
   } catch (error) {
-    // A tab of a popup window or an app cannot join a group.
+    // The panel shows the error itself; elsewhere a notification says it.
+    if (fromPanel) void sending.flash(tab.id, false, String(error?.message ?? error));
+    else await sending.failed(tab, error);
+    throw error;
   }
-  const now = await chrome.tabs.get(tab.id).catch(() => null);
-  if (now) void refreshAction(now);
-});
-
-async function refreshAction(tab) {
-  const state = port ? '' : ' (PilotHouse is not connected)';
-  if (!tab) {
-    await chrome.action.setTitle({ title: `Share this tab with PilotHouse${state}` }).catch(() => {});
-    return;
-  }
-  const shared = await inGroup(tab);
-  const title = shared ? 'Stop sharing this tab with PilotHouse' : 'Share this tab with PilotHouse';
-  await chrome.action.setTitle({ tabId: tab.id, title: title + state }).catch(() => {});
 }
 
-chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onInstalled.addListener(connect);
+const MENU = {
+  selection: 'Send the selection',
+  page: 'Send this page',
+  link: 'Send this link',
+  image: 'Send this image',
+  area: 'Screenshot an area…',
+  element: 'Pick an element…',
+  bug: 'Record a bug report…',
+  workflow: 'Record a workflow…',
+  stop: 'Stop recording and send',
+  share: 'Let agents use this tab',
+  panel: 'Open the PilotHouse panel',
+};
+
+async function createMenus() {
+  await chrome.contextMenus.removeAll();
+  const add = (id, title, contexts, extra = {}) =>
+    chrome.contextMenus.create({ id, title, contexts, ...extra }, () => void chrome.runtime.lastError);
+  add('selection', MENU.selection, ['selection']);
+  add('link', MENU.link, ['link']);
+  add('image', MENU.image, ['image']);
+  add('page', MENU.page, ['page', 'frame']);
+  add('area', MENU.area, ['page', 'frame', 'image', 'link', 'selection']);
+  add('element', MENU.element, ['page', 'frame', 'image', 'link']);
+  add('sep-1', '', ['all'], { type: 'separator' });
+  add('bug', MENU.bug, ['page', 'frame']);
+  add('workflow', MENU.workflow, ['page', 'frame']);
+  add('stop', MENU.stop, ['all'], { visible: false });
+  add('sep-4', '', ['all'], { type: 'separator' });
+  add('share', MENU.share, ['page', 'frame'], { type: 'checkbox', checked: false });
+  add('sep-2', '', ['all'], { type: 'separator' });
+  const chosen = await settings();
+  for (const [id, where] of Object.entries(sending.DESTINATIONS)) {
+    add(`to-${id}`, `Send to ${where}`, ['all'], { type: 'radio', checked: chosen.destination === id });
+  }
+  add('sep-3', '', ['all'], { type: 'separator' });
+  add('panel', MENU.panel, ['all']);
+}
+
+/** The share checkbox follows the tab in front of the window in front. */
+async function refreshMenus(tab) {
+  if (!tab?.active) return;
+  const front = await chrome.windows.getLastFocused().catch(() => null);
+  if (front && front.id !== tab.windowId) return;
+  const shared = await inGroup(tab);
+  chrome.contextMenus.update('share', { checked: shared }, () => void chrome.runtime.lastError);
+}
+
+// The "Send to" choice made in the panel shows in the menu too.
+onSettings((chosen) => {
+  for (const id of Object.keys(sending.DESTINATIONS)) {
+    chrome.contextMenus.update(`to-${id}`, { checked: chosen.destination === id }, () => void chrome.runtime.lastError);
+  }
+});
+
+// While recording: Stop in the menu, not Record.
+function recordingMenus(now) {
+  const update = (id, props) => chrome.contextMenus.update(id, props, () => void chrome.runtime.lastError);
+  update('stop', { visible: !!now, title: now?.kind === 'workflow' ? 'Stop recording and save' : MENU.stop });
+  update('bug', { visible: !now });
+  update('workflow', { visible: !now });
+}
+recording.watch(recordingMenus);
+// Menus outlive this worker; a recording does not (see record.js).
+recordingMenus(recording.current());
+
+// The bar's Stop and Cancel in the page.
+recording.onBarFinish(async (keep) => {
+  const now = recording.current();
+  const tab = now ? await chrome.tabs.get(now.tabId).catch(() => null) : null;
+  try {
+    await recording.finish(keep);
+  } catch (error) {
+    await sending.failed(tab, error);
+  }
+});
+
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  const id = String(info.menuItemId);
+  if (id.startsWith('to-')) {
+    await update({ destination: id.slice(3) });
+    return;
+  }
+  if (id === 'panel') {
+    if (tab?.windowId !== undefined) await chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
+    return;
+  }
+  if (id === 'stop') {
+    const now = recording.current();
+    const recorded = now ? await chrome.tabs.get(now.tabId).catch(() => null) : null;
+    await act('stop', recorded ?? tab).catch(() => {});
+    return;
+  }
+  if (!tab?.id) return;
+  connect();
+  await act(id, tab, info).catch(() => {});
+});
+
+chrome.commands.onCommand.addListener(async (command, tab) => {
+  connect();
+  const target = tab ?? (await frontTab());
+  if (!target) return;
+  const action = { 'send-to-pilothouse': 'selection-or-page', 'screenshot-area': 'area', 'pick-element': 'element' }[command];
+  if (!action) return;
+  if (action === 'selection-or-page') {
+    // The selection when there is one, else the page.
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId: target.id },
+      func: () => String(getSelection() ?? '').trim().length > 0,
+    }).catch(() => []);
+    await act(result?.result ? 'selection' : 'page', target).catch(() => {});
+    return;
+  }
+  await act(action, target).catch(() => {});
+});
+
+// ---- The side panel -------------------------------------------------------
+
+// Messages from the side panel: what it shows, and the user's actions.
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (sender.id !== chrome.runtime.id) return false;
+  // The recorder in a page (its steps, and the bar's buttons).
+  if (sender.tab) {
+    if (typeof message?.type === 'string' && message.type.startsWith('recorder-')) {
+      recording.fromRecorder(message, sender);
+      return false;
+    }
+    // A button of PilotHouse's on GitHub, Jira or Linear.
+    if (message?.type === 'site-action') {
+      void sites.act(message.action, sender).then(
+        (result) => respond({ ok: true, result }),
+        (error) => respond({ ok: false, error: String(error?.message ?? error) }),
+      );
+      return true;
+    }
+    return false;
+  }
+  if (message?.target === 'offscreen') return false;
+  void panelRequest(message).then(
+    (result) => respond({ ok: true, result }),
+    (error) => respond({ ok: false, error: String(error?.message ?? error) }),
+  );
+  return true;
+});
+
+async function panelRequest(message) {
+  switch (message?.type) {
+    case 'status':
+      return statusFeature.status();
+    case 'act': {
+      const tab = await chrome.tabs.get(message.tabId);
+      return act(message.action, tab, { streamId: message.streamId, checked: message.checked }, true);
+    }
+    case 'recording':
+      return recording.current();
+    // The page's text, for a summary the panel makes on this computer.
+    case 'clip': {
+      const tab = await chrome.tabs.get(message.tabId);
+      return inPage(tab, 'clip.js', () => globalThis.__pilothouse.clip({}));
+    }
+    case 'deliver': {
+      const tab = await chrome.tabs.get(message.tabId);
+      return sending.deliver(tab, message.items, message.title);
+    }
+    case 'agent':
+      send('PilotHouse.agentControl', { owner: String(message.owner), paused: !!message.paused });
+      return {};
+    case 'openChat':
+      send('PilotHouse.openChat', { tag: String(message.tag) });
+      return {};
+    default:
+      throw new Error('unknown request');
+  }
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  // Content scripts are this extension too, but run in pages: only the
+  // panel (no tab) hears what agents do.
+  if (port.name !== 'panel' || port.sender?.id !== chrome.runtime.id || port.sender.tab) return;
+  connect();
+  const stop = statusFeature.watch((status) => {
+    try {
+      port.postMessage({ type: 'status', status });
+    } catch (error) {
+      stop();
+    }
+  });
+  const stopRecording = recording.watch((now) => {
+    try {
+      port.postMessage({ type: 'recording', recording: now });
+    } catch (error) {
+      stopRecording();
+    }
+  });
+  port.postMessage({ type: 'status', status: statusFeature.status() });
+  port.postMessage({ type: 'recording', recording: recording.current() });
+  port.onDisconnect.addListener(() => {
+    stop();
+    stopRecording();
+  });
+});
+
+// ---- Start ----------------------------------------------------------------
+
+statusFeature.install();
+recording.install();
+sites.install();
+
+chrome.runtime.onInstalled.addListener(async () => {
+  await createMenus();
+  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  connect();
+});
+chrome.runtime.onStartup.addListener(async () => {
+  await createMenus();
+  connect();
+});
 connect();

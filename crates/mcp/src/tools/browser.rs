@@ -8,9 +8,9 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "browser_open",
         description: concat!(
-            "Open a URL in the project's browser (the pane the user sees in ",
+            "Open a URL in ",
             ph_brand::name!(),
-            ") and wait for it to load. Logins made there persist for this project. Local addresses like localhost:3000 work."
+            "'s built-in browser (a pane the user sees in the app) and wait for it to load. When chrome_ tools are offered (the user's own Chrome), use them first; use this one when they answer that the extension is not connected, or when the user asks for this browser. Logins made here persist for this project. Local addresses like localhost:3000 work."
         ),
         schema: || json!({ "type": "object", "required": ["url"], "properties": { "url": { "type": "string" } } }),
         build: |arguments, project_id, _| Ok(("browser.open", with_project(arguments, project_id))),

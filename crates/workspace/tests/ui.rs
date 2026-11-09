@@ -553,3 +553,24 @@ fn idle_hidden_workspaces_close_their_screens(cx: &mut TestAppContext) {
         assert_eq!(workspace.active_project_id(), Some(alpha));
     });
 }
+
+/// ⌘V with an image on the clipboard (a screenshot) attaches it to the
+/// next message instead of pasting nothing.
+#[gpui_kit::test]
+fn a_pasted_image_becomes_an_attachment(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let png = gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, vec![0x89, b'P', b'N', b'G']);
+    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(&png));
+    cx.update_window(window, |_, window, cx| {
+        let space = workspace.read(cx).active_space().unwrap().clone();
+        space.update(cx, |space, cx| space.focus_chat(window, cx));
+        window.press("secondary-v", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find_by_label("Remove attachment").is_some());
+    })
+    .unwrap();
+}

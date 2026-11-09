@@ -26,7 +26,7 @@ fn with(mut properties: Value, extra: Value) -> Value {
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: "chrome_open",
-        description: "Open a URL in your tab of the user's own Chrome (through PilotHouse's Chrome extension), with the sites they are signed in to. Waits for the page to load. Your tabs live in Chrome's PilotHouse tab group; you can use only tabs in that group (ones you open, and ones the user shared: see chrome_tabs). Use it for real websites (web apps, dashboards, docs, accounts); use browser_open for the project's own dev server in the PilotHouse pane. If the extension is not connected, the answer says how the user sets it up; use the browser_ tools meanwhile. Each chat has its own tab; new_tab opens another. Never try to solve a CAPTCHA or other check that a person is there: ask the user to complete it in that tab.",
+        description: "Open a URL in your tab of the user's own Chrome (through the PilotHouse extension), with the sites they are signed in to. Waits for the page to load. Your tabs live in Chrome's PilotHouse tab group; you can use only tabs in that group (ones you open, and ones the user shared: see chrome_tabs). Use it first for any web page: websites (web apps, dashboards, docs, accounts) and the project's own dev server (localhost) alike. Only when it answers that the extension is not connected, use the built-in browser's tools if you have them; otherwise ask the user to set the extension up. Each chat has its own tab; new_tab opens another. Never try to solve a CAPTCHA or other check that a person is there: ask the user to complete it in that tab.",
         schema: || {
             json!({ "type": "object", "required": ["url"], "properties": {
             "url": { "type": "string" },
@@ -253,6 +253,139 @@ pub const TOOLS: &[Tool] = &[
         schema: || json!({ "type": "object", "required": ["expression"], "properties": { "expression": { "type": "string" } } }),
         build: |arguments, project_id, _| {
             Ok(("chrome.evaluate", with_project(arguments, project_id)))
+        },
+        format: text_result,
+    },
+    Tool {
+        name: "chrome_workflows",
+        description: "Workflows the user recorded in Chrome (PilotHouse menu → Record a workflow): steps on a website they do often. Without a name, the list; with a name, its steps. chrome_run_workflow runs one.",
+        schema: || json!({ "type": "object", "properties": { "name": { "type": "string" } } }),
+        build: |arguments, project_id, _| {
+            Ok(("chrome.workflows", with_project(arguments, project_id)))
+        },
+        format: text_result,
+    },
+    Tool {
+        name: "chrome_run_workflow",
+        description: "Runs a recorded workflow in your Chrome tab, step by step with your own actions (the user sees them and can press Stop): it opens its first page, then clicks, types, chooses and presses as recorded. values replaces what was typed, by the field's label or selector ({\"Amount\": \"40\"}). It stops where a person is needed (a password, files to choose) or a step fails, and says which from_step to go on with.",
+        schema: || {
+            json!({ "type": "object", "required": ["name"], "properties": {
+            "name": { "type": "string" },
+            "values": { "type": "object", "description": "What to type instead, by field label or selector." },
+            "from_step": { "type": "integer", "description": "Go on from this step (1-based) after a stop." }
+        } })
+        },
+        build: |arguments, project_id, _| {
+            Ok(("chrome.run_workflow", with_project(arguments, project_id)))
+        },
+        format: text_result,
+    },
+    Tool {
+        name: "chrome_site_tools",
+        description: "Tools the website in your Chrome tab offers agents itself (WebMCP), such as search or add to cart: without a name, the list with each tool's input; with name and input, calls one and returns its answer. Faster and surer than clicking through the page when a site offers them. Ask the user before calling one that changes something (orders, sends, pays, deletes). Only Chrome's early preview offers WebMCP; elsewhere the answer says so.",
+        schema: || {
+            json!({ "type": "object", "properties": {
+            "name": { "type": "string", "description": "The tool to call; leave out to list them." },
+            "input": { "type": "object", "description": "The tool's input, as its schema says." }
+        } })
+        },
+        build: |arguments, project_id, _| {
+            Ok(("chrome.site_tools", with_project(arguments, project_id)))
+        },
+        format: text_result,
+    },
+    Tool {
+        name: "chrome_performance",
+        description: "How fast your Chrome page is, as Chrome DevTools' Performance panel would tell: Core Web Vitals (Largest Contentful Paint with its element, Cumulative Layout Shift with what shifted, Interaction to Next Paint, First Contentful Paint, time to first byte), long animation frames with the scripts in them, render-blocking resources, the slowest and heaviest requests, page weight, DOM size and main-thread time. Reloads the page to measure (reload: false measures it as it is, for interaction timings after you click or type; no_cache: true for a cold load).",
+        schema: || {
+            json!({ "type": "object", "properties": {
+            "reload": { "type": "boolean", "description": "Reload first (default true)." },
+            "no_cache": { "type": "boolean", "description": "Reload without the cache." }
+        } })
+        },
+        build: |arguments, project_id, _| {
+            Ok(("chrome.performance", with_project(arguments, project_id)))
+        },
+        format: text_result,
+    },
+    Tool {
+        name: "chrome_audit",
+        description: "Checks your Chrome page for accessibility (alt text, names of buttons and links, labels, contrast, headings, touch targets, zoom), SEO (title, description, h1, canonical, indexing) and best-practice problems (HTTPS, mixed content, oversized images, images without size, quirks mode, console errors), each with the element's selector. A part of what Lighthouse checks; performance is chrome_performance.",
+        schema: || {
+            json!({ "type": "object", "properties": {
+            "categories": { "type": "array", "items": { "type": "string", "enum": ["accessibility", "seo", "best-practices"] }, "description": "Default all three." }
+        } })
+        },
+        build: |arguments, project_id, _| Ok(("chrome.audit", with_project(arguments, project_id))),
+        format: text_result,
+    },
+    Tool {
+        name: "chrome_emulate",
+        description: "Emulates in your Chrome tab: a device (phone, tablet, laptop, desktop, or width and height), a network (offline, slow-3g, fast-3g, 4g, none), a slower CPU (cpu: 4 is four times slower), a colour scheme (dark, light), reduced motion, a location (geolocation: {latitude, longitude}), a time zone (IANA) or a locale. It is the user's own tab: it lasts while you work there and ends by itself a few minutes after your last action, when the user presses Stop, or with reset: true. Reload the page when it should load under it.",
+        schema: || {
+            json!({ "type": "object", "properties": {
+            "device": { "type": "string", "enum": ["phone", "tablet", "laptop", "desktop"] },
+            "width": { "type": "integer" },
+            "height": { "type": "integer" },
+            "scale": { "type": "number", "description": "Device pixel ratio with width and height." },
+            "mobile": { "type": "boolean" },
+            "network": { "type": "string", "enum": ["offline", "slow-3g", "fast-3g", "4g", "none"] },
+            "cpu": { "type": "number", "description": "Times slower, 1 to 20." },
+            "color_scheme": { "type": "string", "enum": ["dark", "light"] },
+            "reduced_motion": { "type": "boolean" },
+            "geolocation": { "type": "object", "properties": { "latitude": { "type": "number" }, "longitude": { "type": "number" } } },
+            "timezone": { "type": "string", "description": "Like Europe/Paris." },
+            "locale": { "type": "string", "description": "Like fr-FR." },
+            "reset": { "type": "boolean", "description": "Back to normal." }
+        } })
+        },
+        build: |arguments, project_id, _| {
+            Ok(("chrome.emulate", with_project(arguments, project_id)))
+        },
+        format: text_result,
+    },
+    Tool {
+        name: "chrome_mock",
+        description: "Answers your Chrome page's requests yourself, to test states the server will not give (empty lists, errors, slow or failing requests): add a rule (url with * for any part, optional method, status, body as text or JSON, headers, delay_ms, or fail: failed, timed_out, offline, aborted), list the rules, or clear them. The page sees the answer as the server's. It lasts while you work in this tab and ends by itself a few minutes after your last action, when the user presses Stop, or with clear.",
+        schema: || {
+            json!({ "type": "object", "properties": {
+            "action": { "type": "string", "enum": ["add", "list", "clear"], "description": "Default add." },
+            "url": { "type": "string", "description": "Addresses to answer, like */api/orders*." },
+            "method": { "type": "string" },
+            "status": { "type": "integer", "description": "Default 200." },
+            "body": { "description": "Text, or JSON (sent as application/json)." },
+            "content_type": { "type": "string" },
+            "headers": { "type": "object" },
+            "delay_ms": { "type": "integer" },
+            "fail": { "type": "string", "enum": ["failed", "timed_out", "offline", "aborted"] }
+        } })
+        },
+        build: |arguments, project_id, _| Ok(("chrome.mock", with_project(arguments, project_id))),
+        format: text_result,
+    },
+    Tool {
+        name: "chrome_memory",
+        description: "What your Chrome page holds in memory: its JavaScript heap, DOM nodes (about how many are detached: removed but still referenced), event listeners, documents and frames. To find a leak: look, do the action that may leak a few times, then call again with compare: true to see what grew. (Heap snapshots by kind of object are DevTools' Memory panel's: extensions cannot take them.)",
+        schema: || {
+            json!({ "type": "object", "properties": {
+            "compare": { "type": "boolean", "description": "Show what grew since your previous look at this tab." }
+        } })
+        },
+        build: |arguments, project_id, _| {
+            Ok(("chrome.memory", with_project(arguments, project_id)))
+        },
+        format: text_result,
+    },
+    Tool {
+        name: "chrome_errors",
+        description: "Your Chrome page's errors (uncaught ones and console errors), newest last, with their stacks mapped through the page's source maps to the original files, marked when the file is not in this workspace. Use it to go from an error in the browser to the line to fix.",
+        schema: || {
+            json!({ "type": "object", "properties": {
+            "limit": { "type": "integer", "description": "Default 20." }
+        } })
+        },
+        build: |arguments, project_id, _| {
+            Ok(("chrome.errors", with_project(arguments, project_id)))
         },
         format: text_result,
     },

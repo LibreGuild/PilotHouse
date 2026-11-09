@@ -14,6 +14,7 @@ mod agents_board;
 mod app_state;
 mod arch_map;
 mod attention;
+mod browser_inbox;
 mod chat_search;
 mod command_palette;
 mod context_panel;
@@ -104,6 +105,7 @@ pub fn init(cx: &mut App) {
     ph_terminal::init(cx);
     ph_terminal::TerminalHub::keep_between_runs(ph_store::paths::data_dir().join("terminals"), cx);
     quick_chat::init(cx);
+    browser_inbox::install(cx);
     // The organisation's own additions (crates/custom): last, so they can
     // use all of the above. PilotHouse's own does nothing.
     let context = ph_custom::CustomContext {

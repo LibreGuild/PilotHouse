@@ -16,6 +16,9 @@ use crate::transcript::AttachmentSummary;
 
 /// Text kept with a sent message for its preview (the agent got all of it).
 const SUMMARY_TEXT_LIMIT: usize = 64 * 1024;
+/// The largest image sent as an image (the limit of Claude's API); a larger
+/// one goes as a link to its file.
+const MAX_IMAGE: u64 = 5 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attachment {
@@ -23,7 +26,8 @@ pub enum Attachment {
     File(String),
     /// A board card, sent as its title, description and acceptance criteria.
     Card(i64),
-    /// A PNG on disk (a capture or annotation), sent as an image.
+    /// An image on disk (a capture, an annotation, a pasted or dropped
+    /// image), sent as an image when it is PNG, JPEG, GIF or WebP.
     Image { label: String, path: PathBuf },
     /// Plain text with a label, e.g. selected log lines or an element's details.
     Text { label: String, text: String },
@@ -113,18 +117,40 @@ impl Attachment {
             Attachment::Card(id) => card_text(store, project_id, *id)
                 .map(|text| vec![ContentBlock::Text(TextContent::new(text))])
                 .unwrap_or_default(),
-            Attachment::Image { label, path } => match std::fs::read(path) {
-                Ok(bytes) if accepts_images => {
-                    vec![ContentBlock::Image(ImageContent::new(
-                        base64(&bytes),
-                        "image/png",
-                    ))]
-                }
-                _ => vec![ContentBlock::ResourceLink(ResourceLink::new(
+            Attachment::Image { label, path } => {
+                let link = ContentBlock::ResourceLink(ResourceLink::new(
                     label.clone(),
                     ph_ui::platform::file_url(path),
-                ))],
-            },
+                ));
+                if !accepts_images {
+                    return vec![link];
+                }
+                // Agents refuse the whole message over one image that is
+                // too large or of a kind (or type) they do not take, so
+                // such an image goes as its file instead.
+                let why = match std::fs::metadata(path) {
+                    Err(_) => return vec![link],
+                    Ok(meta) if meta.len() > MAX_IMAGE => "larger than 5 MB",
+                    Ok(_) => {
+                        let Ok(bytes) = std::fs::read(path) else {
+                            return vec![link];
+                        };
+                        if let Some(media_type) = image_media_type(&bytes) {
+                            return vec![ContentBlock::Image(ImageContent::new(
+                                base64(&bytes),
+                                media_type,
+                            ))];
+                        }
+                        "not PNG, JPEG, GIF or WebP"
+                    }
+                };
+                vec![
+                    ContentBlock::Text(TextContent::new(format!(
+                        "{label}: an image not sent as one ({why}), linked instead."
+                    ))),
+                    link,
+                ]
+            }
             Attachment::Text { label, text } => {
                 vec![ContentBlock::Text(TextContent::new(format!(
                     "{label}:\n{text}"
@@ -197,9 +223,16 @@ pub struct LiveSources {
     pub logs: Box<LiveSource>,
     /// The newest UI test results, and the failing step's screen.
     pub tests: Box<ManyLiveSource>,
+    /// The text of the Chrome tabs the user shared with PilotHouse
+    /// (`@tabs`), read when asked (it takes a moment); none without
+    /// PilotHouse's Chrome extension.
+    pub tabs: Option<Box<AsyncLiveSource>>,
 }
 
 pub type LiveSource = dyn Fn(&mut gpui_kit::App) -> Option<Attachment>;
+/// A source read in the background, attached when it is ready.
+pub type AsyncLiveSource =
+    dyn Fn(&mut gpui_kit::App) -> gpui_kit::Task<anyhow::Result<Vec<Attachment>>>;
 /// A source that may give several attachments.
 pub type ManyLiveSource = dyn Fn(&mut gpui_kit::App) -> Vec<Attachment>;
 
@@ -209,6 +242,8 @@ pub struct LiveMentions {
     pub screenshot: bool,
     pub logs: bool,
     pub tests: bool,
+    /// The shared Chrome tabs, read before the message goes.
+    pub tabs: bool,
 }
 
 pub fn live_mentions(text: &str) -> LiveMentions {
@@ -218,6 +253,7 @@ pub fn live_mentions(text: &str) -> LiveMentions {
             "@screenshot" => found.screenshot = true,
             "@log" | "@logs" => found.logs = true,
             "@test-run" | "@tests" => found.tests = true,
+            "@tabs" => found.tabs = true,
             _ => {}
         }
     }
@@ -404,6 +440,33 @@ fn inside(roots: &Roots, path: &str) -> bool {
     file.starts_with(&root) && file.is_file()
 }
 
+/// The media type of an image agents take (PNG, JPEG, GIF, WebP), told by
+/// its first bytes: a file's extension can lie, and a wrong type is
+/// refused.
+pub fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => Some("image/webp"),
+        _ => None,
+    }
+}
+
 /// Standard base64 (RFC 4648) without a dependency for one encoder.
 pub fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -452,6 +515,20 @@ mod tests {
     }
 
     #[test]
+    fn images_are_told_by_their_first_bytes() {
+        assert_eq!(image_media_type(b"\x89PNG\r\n"), Some("image/png"));
+        assert_eq!(image_media_type(b"\xFF\xD8\xFF\xE0"), Some("image/jpeg"));
+        assert_eq!(image_media_type(b"GIF89a"), Some("image/gif"));
+        assert_eq!(
+            image_media_type(b"RIFF\0\0\0\0WEBPVP8 "),
+            Some("image/webp")
+        );
+        assert_eq!(image_media_type(b"II*\0"), None, "TIFF is not taken");
+        assert_eq!(image_media_type(b"BM"), None);
+        assert_eq!(image_media_type(b"<svg"), None);
+    }
+
+    #[test]
     fn base64_matches_rfc_examples() {
         assert_eq!(base64(b""), "");
         assert_eq!(base64(b"f"), "Zg==");
@@ -473,7 +550,8 @@ mod tests {
             vec![Attachment::File("src/main.rs".into()), Attachment::Card(12)]
         );
         let found = live_mentions("see @screenshot, and @logs. Why does @test-run fail?");
-        assert!(found.screenshot && found.logs && found.tests);
+        assert!(found.screenshot && found.logs && found.tests && !found.tabs);
+        assert!(live_mentions("what do @tabs say?").tabs);
         assert_eq!(live_mentions("email me@log.com"), LiveMentions::default());
     }
 

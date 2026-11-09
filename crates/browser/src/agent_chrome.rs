@@ -47,6 +47,14 @@ use crate::cdp::{Cdp, CdpEvent, CdpInbox};
 use crate::extension;
 use crate::logs::{Level, Logs};
 
+mod devtools;
+mod inbox;
+mod shared_text;
+mod site_tools;
+mod workflow_run;
+pub use inbox::{BrowserHost, ChatNews, ChatNote, Delivery, SendTo, SiteAction, WorkflowUse};
+pub use shared_text::TabText;
+
 /// How long navigation waits for the page's load event.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// The glow stays this long after an agent's last action: long enough to
@@ -189,6 +197,19 @@ struct Tab {
     /// The debugger being let go of (idle): attaching again waits for it,
     /// or its detach, arriving after, would undo the attach.
     letting_go: Option<Shared<Task<()>>>,
+    /// What the agent emulates in it (a device, a network…), and its
+    /// mocked responses: they end when the debugger lets go.
+    emulating: Vec<String>,
+    mocks: Vec<devtools::Mock>,
+    /// The debugger stays at least until then (emulation and mocks).
+    keep_until: Option<Instant>,
+    /// What the agent last measured of its memory (`chrome_memory`).
+    memory: Option<devtools::MemorySample>,
+    /// The page's own tools for agents (WebMCP), and calls waiting.
+    site_tools: Vec<Value>,
+    site_tool_waiters: Vec<(String, smol::channel::Sender<Value>)>,
+    /// Answers that came before their call began waiting (the newest).
+    site_tool_answers: VecDeque<Value>,
     _glow: Option<Task<()>>,
     _idle: Option<Task<()>>,
 }
@@ -202,6 +223,17 @@ pub struct AgentChrome {
     tabs: Vec<Tab>,
     owners: HashMap<String, Owner>,
     downloads: Vec<(String, Download)>,
+    /// Where what the extension brings goes (set by the workspace shell).
+    host: Option<BrowserHost>,
+    /// Chats waiting for the user, and at work, for the extension.
+    chats: (Vec<ChatNote>, Vec<ChatNote>),
+    /// What the extension was last told of them.
+    sent_status: Option<Value>,
+    /// When each tab was last handed to the user.
+    handed_off: HashMap<String, Instant>,
+    /// Counts changes to the saved workflows, so views read them again
+    /// only then (this entity notifies many times per page load).
+    workflows_version: u64,
     _bridge: Option<Task<()>>,
 }
 
@@ -262,6 +294,11 @@ impl AgentChrome {
                 tabs: Vec::new(),
                 owners: HashMap::new(),
                 downloads: Vec::new(),
+                host: None,
+                chats: (Vec::new(), Vec::new()),
+                sent_status: None,
+                handed_off: HashMap::new(),
+                workflows_version: 0,
                 _bridge: None,
             };
             match bridge::listen() {
@@ -392,6 +429,8 @@ impl AgentChrome {
                     self.status = AgentChromeStatus::Connected {
                         browser: browser.into(),
                     };
+                    self.sent_status = None;
+                    self.push_status();
                     cx.notify();
                     cx.emit(AgentChromeEvent::Changed);
                 }
@@ -413,6 +452,8 @@ impl AgentChrome {
                     self.status = AgentChromeStatus::Connected {
                         browser: browser.into(),
                     };
+                    self.sent_status = None;
+                    self.push_status();
                     cx.notify();
                     cx.emit(AgentChromeEvent::Changed);
                 }
@@ -461,7 +502,7 @@ impl AgentChrome {
 
     fn handle_event(&mut self, event: CdpEvent, cx: &mut Context<Self>) {
         let Some(session) = event.session.clone() else {
-            self.handle_browser_event(&event, cx);
+            self.handle_browser_event(event, cx);
             return;
         };
         let Some(index) = self.tabs.iter().position(|tab| tab.target == session) else {
@@ -480,6 +521,7 @@ impl AgentChrome {
                     }
                     tab.url = url;
                     tab.world = None;
+                    tab.site_tools.clear();
                 }
             }
             "Page.frameStartedLoading" => {
@@ -548,6 +590,14 @@ impl AgentChrome {
                 tab.dialog = Some(dialog);
             }
             "Page.javascriptDialogClosed" => self.tabs[index].dialog = None,
+            "Fetch.requestPaused" => {
+                self.answer_paused(index, params, cx);
+                return;
+            }
+            "WebMCP.toolsAdded" | "WebMCP.toolsRemoved" | "WebMCP.toolResponded" => {
+                self.site_tools_event(index, &event.method, params);
+                return;
+            }
             "Page.windowOpen" => {
                 self.tabs[index].opened_window = Some(Instant::now());
                 return;
@@ -609,7 +659,10 @@ impl AgentChrome {
     }
 
     /// What the extension tells of the PilotHouse group's tabs.
-    fn handle_browser_event(&mut self, event: &CdpEvent, cx: &mut Context<Self>) {
+    fn handle_browser_event(&mut self, mut event: CdpEvent, cx: &mut Context<Self>) {
+        if self.extension_note(&event.method, &mut event.params, cx) {
+            return;
+        }
         let params = &event.params;
         let Some(target) = params["tabId"].as_u64().map(|id| id.to_string()) else {
             return;
@@ -679,6 +732,7 @@ impl AgentChrome {
                 tab.loading = false;
                 tab._idle = None;
                 let (owner, url) = (tab.owner.clone(), tab.url.clone());
+                self.overrides_ended(&target, "Chrome's debugger let go of the tab");
                 // The user closed Chrome's "started debugging" bar.
                 if reason == "canceled_by_user"
                     && let Some(owner) = self.owners.get_mut(&owner)
@@ -766,6 +820,32 @@ impl AgentChrome {
         let label = state.label.clone();
         let targets = state.tabs.clone();
         for target in targets {
+            // Stop gives the user their tab back as it was: no emulation,
+            // no mocked requests.
+            if paused
+                && let Some(tab) = self.tab(&target)
+                && tab.attached
+                && (!tab.emulating.is_empty() || !tab.mocks.is_empty())
+            {
+                let cdp = tab.cdp.clone();
+                cx.background_spawn(async move {
+                    for (method, params) in [
+                        ("Emulation.clearDeviceMetricsOverride", json!({})),
+                        ("Emulation.setTouchEmulationEnabled", json!({ "enabled": false })),
+                        ("Network.emulateNetworkConditions", json!({ "offline": false, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1 })),
+                        ("Emulation.setCPUThrottlingRate", json!({ "rate": 1 })),
+                        ("Emulation.setEmulatedMedia", json!({ "media": "", "features": [] })),
+                        ("Emulation.clearGeolocationOverride", json!({})),
+                        ("Emulation.setTimezoneOverride", json!({ "timezoneId": "" })),
+                        ("Emulation.setLocaleOverride", json!({})),
+                        ("Fetch.disable", json!({})),
+                    ] {
+                        cdp.call(method, params).await.ok();
+                    }
+                })
+                .detach();
+                self.overrides_ended(&target, "the user pressed Stop");
+            }
             if let Some(tab) = self.tab_mut(&target) {
                 if !tab.attached {
                     continue;
@@ -785,6 +865,33 @@ impl AgentChrome {
         }
         cx.notify();
         cx.emit(AgentChromeEvent::Changed);
+    }
+
+    /// Emulation and mocks in tab `target` ended (`why`): its agent hears.
+    fn overrides_ended(&mut self, target: &str, why: &str) {
+        let Some(tab) = self.tab_mut(target) else {
+            return;
+        };
+        let mut ended = Vec::new();
+        if !tab.emulating.is_empty() {
+            ended.push(format!("the emulation ({})", tab.emulating.join(", ")));
+        }
+        if !tab.mocks.is_empty() {
+            ended.push(format!("{} mocked request rule(s)", tab.mocks.len()));
+        }
+        tab.emulating.clear();
+        tab.mocks.clear();
+        tab.keep_until = None;
+        if ended.is_empty() {
+            return;
+        }
+        let owner = tab.owner.clone();
+        if let Some(owner) = self.owners.get_mut(&owner) {
+            owner.notes.push(format!(
+                "{} ended: {why}. Set them again if you still need them.",
+                ended.join(" and ")
+            ));
+        }
     }
 
     // ---- Tabs ------------------------------------------------------------
@@ -919,6 +1026,13 @@ impl AgentChrome {
             hinted: 0,
             opened_window: None,
             letting_go: None,
+            emulating: Vec::new(),
+            mocks: Vec::new(),
+            keep_until: None,
+            memory: None,
+            site_tools: Vec::new(),
+            site_tool_waiters: Vec::new(),
+            site_tool_answers: VecDeque::new(),
             _glow: None,
             _idle: None,
         });
@@ -1008,7 +1122,8 @@ impl AgentChrome {
                     let idle = tab.attached
                         && !paused
                         && tab.dialog.is_none()
-                        && tab.busy.load(Ordering::SeqCst) == 0;
+                        && tab.busy.load(Ordering::SeqCst) == 0
+                        && tab.keep_until.is_none_or(|until| Instant::now() >= until);
                     Some(idle.then(|| (this.browser().ok(), tab.cdp.clone(), tab.world)))
                 });
                 match ready {
@@ -1026,6 +1141,10 @@ impl AgentChrome {
                                 tab.loading = false;
                                 tab.letting_go = Some(going.clone());
                             }
+                            this.overrides_ended(
+                                &target,
+                                "the tab was idle, so Chrome's debugger let go",
+                            );
                         });
                         going.await;
                         return;
@@ -1580,6 +1699,14 @@ impl AgentChrome {
                 None => in_world(&this, &page, "window.__phAgent.focusedIsPassword()", cx).await? == json!(true),
             };
             if password {
+                let _ = this.update(cx, |this, _| {
+                    let site = this.site_of(&page.target);
+                    this.hand_off(
+                        &page.target,
+                        &page.label,
+                        &format!("Sign in to {site} yourself (agents never type passwords), then tell {} to go on.", page.label),
+                    )
+                });
                 bail!("{ASK_TO_SIGN_IN}");
             }
             let cdp = page.cdp.clone();
@@ -1655,6 +1782,14 @@ impl AgentChrome {
                 && in_world(&this, &page, "window.__phAgent.focusedIsPassword()", cx).await?
                     == json!(true)
             {
+                let _ = this.update(cx, |this, _| {
+                    let site = this.site_of(&page.target);
+                    this.hand_off(
+                        &page.target,
+                        &page.label,
+                        &format!("Sign in to {site} yourself (agents never type passwords), then tell {} to go on.", page.label),
+                    )
+                });
                 bail!("{ASK_TO_SIGN_IN}");
             }
             let cdp = page.cdp.clone();
@@ -2650,6 +2785,19 @@ async fn summary(this: &WeakEntity<AgentChrome>, page: &Page, cx: &mut AsyncApp)
         })?;
     }
     let mut notes = notes(this, &page, cx)?;
+    if human_check {
+        let _ = this.update(cx, |this, _| {
+            let site = this.site_of(&page.target);
+            this.hand_off(
+                &page.target,
+                &page.label,
+                &format!(
+                    "A check that a person is here, on {site}: complete it in the tab, then tell {} to go on.",
+                    page.label
+                ),
+            )
+        });
+    }
     if human_check && let Some(notes) = notes.as_array_mut() {
         notes.push(json!(
             "The page asks to prove a person is here (a CAPTCHA or similar check). Do not try to \

@@ -59,7 +59,7 @@ impl Target {
 
 /// `targets` without those inside another of them (a folder picked with
 /// something in it: the folder brings it along).
-fn outermost(targets: Vec<Target>) -> Vec<Target> {
+pub(crate) fn outermost(targets: Vec<Target>) -> Vec<Target> {
     targets
         .iter()
         .filter(|target| {
@@ -72,7 +72,7 @@ fn outermost(targets: Vec<Target>) -> Vec<Target> {
 }
 
 /// The tree path of the folder holding `path` (`""` at the top).
-fn parent_of(path: &str) -> String {
+pub(crate) fn parent_of(path: &str) -> String {
     path.rsplit_once('/')
         .map(|(dir, _)| dir.to_string())
         .unwrap_or_default()
@@ -855,15 +855,40 @@ impl FilesPanel {
                 return window.push_notification(Notification::warning(message), cx);
             }
         }
-        let sources = clip.paths.clone();
-        let work = cx.background_spawn(async move { file_ops::paste(&sources, &into, clip.cut) });
+        self.transfer(clip.paths.clone(), into, clip.cut, true, window, cx);
+    }
+
+    /// Copies (or, with `cut`, moves) `sources` into folder `into`, in the
+    /// background: moved files' open tabs follow them, and the last one is
+    /// shown. `from_clipboard`: Paste after Cut, which empties it.
+    pub(crate) fn transfer(
+        &mut self,
+        sources: Vec<PathBuf>,
+        into: PathBuf,
+        cut: bool,
+        from_clipboard: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let moved = sources.clone();
+        let work = cx.background_spawn(async move { file_ops::paste(&sources, &into, cut) });
         cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
             _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(pasted) => {
-                    if clip.cut {
-                        this.clipboard = None;
-                        for (from, to) in clip.paths.iter().zip(&pasted) {
+                    if cut {
+                        if from_clipboard {
+                            this.clipboard = None;
+                        }
+                        // Picks and a Cut elsewhere would name the old paths.
+                        this.marked.clear();
+                        if let Some(clip) = &mut this.clipboard {
+                            clip.paths.retain(|path| !moved.contains(path));
+                            if clip.paths.is_empty() {
+                                this.clipboard = None;
+                            }
+                        }
+                        for (from, to) in moved.iter().zip(&pasted) {
                             if let (Some(from), Some(to)) =
                                 (this.roots.path_of(from), this.roots.path_of(to))
                             {
@@ -989,12 +1014,12 @@ impl FilesPanel {
 
     /// Whether files can go in tree folder `dir`: the top of a workspace
     /// with several folders lists only the folders.
-    fn can_hold(&self, dir: &str) -> bool {
+    pub(crate) fn can_hold(&self, dir: &str) -> bool {
         !(self.roots.is_multi() && dir.is_empty())
     }
 
     /// An open file under `path` with unsaved changes, by name.
-    fn unsaved_under(&self, path: &str, cx: &App) -> Option<String> {
+    pub(crate) fn unsaved_under(&self, path: &str, cx: &App) -> Option<String> {
         self.open_files.iter().find_map(|file| {
             let file = file.read(cx);
             (file.is_dirty() && moved_path(file.relative_path(), path, path).is_some())

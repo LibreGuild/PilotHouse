@@ -577,6 +577,16 @@ impl TerminalPanel {
                                 terminals.select_terminal(terminal_id, cx)
                             })
                         }),
+                    )
+                    // A right click too: its menu's Split works from the
+                    // pane in front.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _, _, cx| {
+                            this.terminals.update(cx, |terminals, cx| {
+                                terminals.select_terminal(terminal_id, cx)
+                            })
+                        }),
                     );
                 group.child(
                     resizable_panel()

@@ -269,7 +269,7 @@ fn announce_reminders(cx: &mut App) {
 /// A notification was clicked: show what it was about (the schedule's
 /// workspace and the chat it ran, a chat that finished or needs an answer,
 /// or the reminder's workspace).
-fn open_from_notification(tag: &str, cx: &mut App) {
+pub(crate) fn open_from_notification(tag: &str, cx: &mut App) {
     // An agent in a terminal.
     if let Some((project, pane)) = crate::attention::terminal_of_tag(tag) {
         if let Some((handle, workspace)) = crate::main_workspace(cx) {

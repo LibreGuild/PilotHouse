@@ -6,7 +6,7 @@ A short tour of PilotHouse for people using it. For how it is built, see the [do
 
 1. **Chat right away**, or **open a folder** (⌘O, or *Open a folder…* in the sidebar). PilotHouse starts in a chat that needs no folder (the sidebar's *Chats*). A folder you open becomes a **workspace**; it can hold more folders (*Add a folder…* in its Files tool or its menu in the sidebar), or none.
 2. **Pick an agent.** The model button in the chat composer opens the picker: the agents on the left, their models on the right. An agent that is not installed or signed in says what is missing; the empty chat shows a setup card with the steps.
-3. **Ask.** Type in the composer and press Enter. Mention things with `@`: a file (`@src/main.rs`), a line (`@src/main.rs:42`), a function by name, `@screenshot` (the browser or device on screen), `@log`, `@pr:12`, `@test-run`, or a board card with `#12`.
+3. **Ask.** Type in the composer and press Enter. Mention things with `@`: a file (`@src/main.rs`), a line (`@src/main.rs:42`), a function by name, `@screenshot` (the browser or device on screen), `@log`, `@pr:12`, `@test-run`, `@tabs` (the Chrome tabs you shared, with PilotHouse's Chrome extension), or a board card with `#12`.
 4. **Approve.** When the agent wants to run a command or edit files, it asks in the chat (and in the title bar's inbox). The **Mode** button next to the model sets how much it may do without asking.
 
 ## The screen
