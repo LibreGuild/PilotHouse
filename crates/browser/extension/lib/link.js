@@ -19,6 +19,9 @@ const BUSY_PAUSE = 5 * 60 * 1000;
 const ASK_TIMEOUT = 15000;
 
 let port = null;
+/** The app itself answered on `port` (not only the host saying it is not
+ * running, or busy with another browser). */
+let linked = false;
 let retryDelay = RETRY_MIN;
 let lastAttempt = 0;
 let pausedUntil = 0;
@@ -48,7 +51,7 @@ export function onConnection(listener) {
 }
 
 export function connected() {
-  return port !== null;
+  return port !== null && linked;
 }
 
 export function connect() {
@@ -71,13 +74,17 @@ export function connect() {
     retryDelay = Math.min(retryDelay * 2, RETRY_MAX);
     // Retried later, or sooner when a tab event wakes this worker.
     setTimeout(connect, retryDelay);
-    tell(false);
+    if (linked) {
+      linked = false;
+      tell(false);
+    }
   });
+  // Connected once the app speaks (it sends its status for the hello): the
+  // host starts even when the app is not running, only to say so and quit.
   post({
     method: 'PilotHouse.hello',
     params: { browser: browserName(), extension: chrome.runtime.getManifest().version },
   });
-  tell(true);
 }
 
 function tell(isConnected) {
@@ -158,6 +165,10 @@ function fromApp(message) {
   // the app is not running (or busy), or retries would never back off.
   if (message.method !== 'PilotHouse.unavailable' && message.method !== 'PilotHouse.busy') {
     retryDelay = RETRY_MIN;
+    if (!linked) {
+      linked = true;
+      tell(true);
+    }
   }
   if (isObject(message.chunk)) {
     const whole = assemble(message.chunk);
@@ -209,6 +220,7 @@ async function handle(message) {
       pausedUntil = Date.now() + BUSY_PAUSE;
       port?.disconnect();
       port = null;
+      linked = false;
       tell(false);
       return;
     }

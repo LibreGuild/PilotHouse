@@ -32,7 +32,8 @@ struct Attention {
     seen: HashMap<Watched, ChatState>,
     /// The badge on the Dock icon, as last set.
     badge: usize,
-    /// Workspaces' names, for Chrome's side panel (read once each).
+    /// Workspaces' names, for Chrome's side panel (read once each, again
+    /// after a rename: [`forget_names`]).
     names: HashMap<ProjectId, String>,
     _poll: Task<()>,
 }
@@ -191,7 +192,16 @@ fn look(cx: &mut App) {
     crate::browser_inbox::report(chrome_waiting, chrome_working, chrome_news, cx);
 }
 
-/// A workspace's name (read from the store the first time).
+/// Workspaces were renamed (or added, or removed): their names are read
+/// again, so Chrome's side panel does not show old ones.
+pub(crate) fn forget_names(cx: &mut App) {
+    if cx.has_global::<Attention>() {
+        cx.global_mut::<Attention>().names.clear();
+    }
+}
+
+/// A workspace's name (read from the store the first time; it is asked
+/// every second).
 fn name_of(project: ProjectId, cx: &mut App) -> String {
     if let Some(name) = cx.global::<Attention>().names.get(&project) {
         return name.clone();

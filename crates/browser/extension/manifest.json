@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "PilotHouse",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Lets PilotHouse's agents use the tabs you put in the PilotHouse tab group, with your sign-ins, and lets you send pages, screenshots and elements to PilotHouse. Other tabs are read only when you ask.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuMjN6nVIwXL5rqrWDijYbTlE31Rsq/z7UJNUHKEcC3Kz21FhOhsGKDKWRgbn7W9gaa7H+se/+zTTOGFfSlihfJzWPsI9zOTMe6gBSrF8dDBzyjlSlRKoYxVlxX4Q198wH5cE+l3Y0Jwkv1EoZks/mIGrxwz/Vup6I9tEbjcB078oLBvQbKxXT2Mgbqdt75ho7P63zPe6YinDREPjItugVbpxDqcSGnsXoE81DP6Zlqen9y5APwWzQIEFpz3rHR3OAheeR50w2atnWQeLXLhg2DMy7N9/6ftb4U26VXmbge1p/17EAa+Anq+SP/TaIq/g3Kq/nynhrdP7iWnIPm2gBwIDAQAB",
-  "minimum_chrome_version": "116",
+  "minimum_chrome_version": "118",
   "permissions": [
     "debugger",
     "nativeMessaging",

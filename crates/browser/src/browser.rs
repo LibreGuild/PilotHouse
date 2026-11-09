@@ -110,6 +110,9 @@ pub struct Browser {
     starting: Option<StartTask>,
     /// Counts stops, so a start that finishes after one is dropped.
     generation: u64,
+    /// A page was asked for while Chrome starts: it does not go back to the
+    /// last page first (that navigation would abort the one asked for).
+    skip_restore: bool,
     url: String,
     title: String,
     loading: bool,
@@ -174,6 +177,7 @@ impl Browser {
             _resize: None,
             last_frame: Instant::now(),
             last_used: Instant::now(),
+            skip_restore: false,
             _events: None,
             _idle: None,
             _quit: quit,
@@ -275,6 +279,7 @@ impl Browser {
         self.generation += 1;
         self.running = None;
         self.starting = None;
+        self.skip_restore = false;
         self._events = None;
         self._idle = None;
         self.dialog = None;
@@ -357,6 +362,7 @@ impl Browser {
                         return;
                     }
                     this.starting = None;
+                    this.skip_restore = false;
                     this.status = BrowserStatus::Failed(message.clone());
                     cx.notify();
                     cx.emit(BrowserEvent::Changed);
@@ -417,13 +423,15 @@ impl Browser {
             self.start_screencast();
         }
         // Return to where this project's browser was last time; a new one
-        // opens at the home page.
-        let url = if !self.url.is_empty() && self.url != "about:blank" {
-            self.url.clone()
-        } else {
-            HOME_PAGE.to_string()
-        };
-        cdp.fire("Page.navigate", json!({ "url": url }));
+        // opens at the home page. Not when a page was asked for meanwhile.
+        if !std::mem::take(&mut self.skip_restore) {
+            let url = if !self.url.is_empty() && self.url != "about:blank" {
+                self.url.clone()
+            } else {
+                HOME_PAGE.to_string()
+            };
+            cdp.fire("Page.navigate", json!({ "url": url }));
+        }
         cx.notify();
         cx.emit(BrowserEvent::Changed);
     }
@@ -725,6 +733,7 @@ impl Browser {
         let url = normalize_url(input);
         self.url = url.clone();
         self.loading = true;
+        self.skip_restore |= self.running.is_none();
         let connection = self.connection(cx);
         cx.spawn(async move |_, _| {
             if let Ok(cdp) = connection.await {
@@ -832,6 +841,7 @@ impl Browser {
     /// Navigates and waits for that page's load event (or a timeout).
     pub fn navigate(&mut self, url: &str, cx: &mut Context<Self>) -> Task<Result<Value>> {
         let url = normalize_url(url);
+        self.skip_restore |= self.running.is_none();
         let connection = self.connection(cx);
         cx.spawn(async move |this, cx| {
             let cdp = connection.await?;

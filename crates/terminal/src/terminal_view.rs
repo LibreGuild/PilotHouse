@@ -15,7 +15,9 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Term, TermMode};
+use alacritty_terminal::vte::ansi::Handler as AnsiHandler;
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::{
     App, Bounds, ClipboardItem, Context, ElementInputHandler, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, Hsla,
@@ -26,7 +28,10 @@ use gpui_kit::{
 
 use crate::palette::Palette;
 use crate::terminal::{Listener, Terminal};
-use crate::{TerminalAsk, TerminalCopy, TerminalFind, TerminalPaste, keys};
+use crate::{
+    TerminalAsk, TerminalClear, TerminalCopy, TerminalFind, TerminalPaste, TerminalSelectAll,
+    TerminalSplit, keys,
+};
 
 pub const TERMINAL_CONTEXT: &str = "Terminal";
 
@@ -48,6 +53,10 @@ pub struct TerminalView {
     cell: Cell<(f32, f32)>,
     /// A mouse drag is selecting text.
     selecting: bool,
+    /// The drag went past the top (-1) or bottom (1) edge: the history
+    /// scrolls while it stays there, and the selection follows.
+    edge: i32,
+    _autoscroll: Option<gpui_kit::Task<()>>,
     /// Text an input method is composing, not sent yet.
     composing: String,
     /// Text typed since the last other key: an input method may replace
@@ -79,6 +88,8 @@ impl TerminalView {
             last_bounds: Rc::default(),
             cell: Cell::new((0., 0.)),
             selecting: false,
+            edge: 0,
+            _autoscroll: None,
             composing: String::new(),
             typed: String::new(),
             find: None,
@@ -320,16 +331,46 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn mouse_move(
+    /// The mouse moved anywhere in the window while a drag selects: the
+    /// selection follows it, and past the top or bottom edge the history
+    /// scrolls (as long as the mouse stays there).
+    fn drag_to(
         &mut self,
-        event: &gpui_kit::MouseMoveEvent,
-        _: &mut Window,
+        position: gpui_kit::Point<Pixels>,
+        pressed: Option<MouseButton>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
+        if !self.selecting {
             return;
         }
-        let Some((point, side)) = self.cell_at(event.position, cx) else {
+        // Released outside the window (no mouse up came): the drag is over.
+        if pressed != Some(MouseButton::Left) {
+            self.end_drag(cx);
+            return;
+        }
+        let edge = match self.last_bounds.get() {
+            Some(bounds) if position.y < bounds.top() => -1,
+            Some(bounds) if position.y > bounds.bottom() => 1,
+            _ => 0,
+        };
+        self.edge = edge;
+        if edge != 0 && self._autoscroll.is_none() {
+            self._autoscroll = Some(cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(60))
+                        .await;
+                    let going = this
+                        .update_in(cx, |this, window, cx| this.autoscroll_step(window, cx))
+                        .unwrap_or(false);
+                    if !going {
+                        break;
+                    }
+                }
+            }));
+        }
+        let Some((point, side)) = self.cell_at(position, cx) else {
             return;
         };
         let updated = match self.terminal.read(cx).term().lock().selection.as_mut() {
@@ -344,8 +385,44 @@ impl TerminalView {
         }
     }
 
-    fn mouse_up(&mut self, _: &gpui_kit::MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    /// One step of scrolling while a drag is past an edge; false once the
+    /// drag ended or came back inside.
+    fn autoscroll_step(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // The keyboard went elsewhere (the terminal was hidden mid-drag):
+        // its release may never reach this terminal, so the drag ends here.
+        if self.selecting && !self.focus_handle.is_focused(window) {
+            self.end_drag(cx);
+        }
+        if !self.selecting || self.edge == 0 {
+            self._autoscroll = None;
+            return false;
+        }
+        let terminal = self.terminal.read(cx);
+        let mut term = terminal.term().lock();
+        term.scroll_display(Scroll::Delta(-self.edge));
+        // The selection reaches the row now at that edge.
+        let offset = term.grid().display_offset() as i32;
+        let (columns, rows) = (term.columns(), term.screen_lines());
+        let (row, column, side) = if self.edge < 0 {
+            (0, 0, Side::Left)
+        } else {
+            (rows as i32 - 1, columns.saturating_sub(1), Side::Right)
+        };
+        if let Some(selection) = term.selection.as_mut() {
+            selection.update(Point::new(Line(row - offset), Column(column)), side);
+        }
+        drop(term);
+        cx.notify();
+        true
+    }
+
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if !self.selecting {
+            return;
+        }
         self.selecting = false;
+        self.edge = 0;
+        self._autoscroll = None;
         let mut term = self.terminal.read(cx).term().lock();
         // A click without a drag selects nothing.
         if term.selection.as_ref().is_some_and(Selection::is_empty) {
@@ -353,6 +430,57 @@ impl TerminalView {
         }
         drop(term);
         cx.notify();
+    }
+
+    fn select_all(&mut self, _: &TerminalSelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        let terminal = self.terminal.read(cx);
+        let mut term = terminal.term().lock();
+        let start = Point::new(term.topmost_line(), Column(0));
+        let end = Point::new(term.bottommost_line(), term.last_column());
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        term.selection = Some(selection);
+        drop(term);
+        cx.notify();
+    }
+
+    /// Clears the history and the screen but the cursor's line (the
+    /// prompt), which goes to the top, as in VS Code. Nothing is sent to the
+    /// program: a half-typed line, or a program reading its input, is left
+    /// alone. A full-screen program keeps its screen.
+    fn clear(&mut self, _: &TerminalClear, _: &mut Window, cx: &mut Context<Self>) {
+        // A match found before points into the history that goes.
+        if let Some(find) = self.find.as_mut() {
+            find.search.current = None;
+        }
+        clear_keeping_prompt(&mut self.terminal.read(cx).term().lock());
+        cx.notify();
+    }
+
+    /// The right-click menu: what a terminal offers, with its shortcuts.
+    fn context_menu(
+        &self,
+        menu: gpui_kit::component::menu::PopupMenu,
+        cx: &App,
+    ) -> gpui_kit::component::menu::PopupMenu {
+        let has_selection = self.terminal.read(cx).selected_text().is_some();
+        menu.action_context(self.focus_handle.clone())
+            .menu_with_disabled("Copy", Box::new(TerminalCopy), !has_selection)
+            .menu("Paste", Box::new(TerminalPaste))
+            .menu("Select All", Box::new(TerminalSelectAll))
+            .separator()
+            .menu("Find…", Box::new(TerminalFind))
+            .menu(
+                if has_selection {
+                    "Ask in Chat About the Selection"
+                } else {
+                    "Ask in Chat About the Screen"
+                },
+                Box::new(TerminalAsk),
+            )
+            .separator()
+            .menu("Split Terminal", Box::new(TerminalSplit))
+            .menu("Clear", Box::new(TerminalClear))
     }
 
     fn copy(&mut self, _: &TerminalCopy, _: &mut Window, cx: &mut Context<Self>) {
@@ -608,6 +736,7 @@ impl Render for TerminalView {
         // Report our bounds after layout; resize on the next frame if needed.
         let entity = cx.weak_entity();
         let last_bounds = self.last_bounds.clone();
+        let selecting = self.selecting;
         let measure = canvas(
             move |bounds, _, cx| {
                 if last_bounds.get() != Some(bounds) {
@@ -623,14 +752,46 @@ impl Render for TerminalView {
             {
                 let (focus, view) = (self.focus_handle.clone(), cx.entity());
                 move |bounds, _, window, cx| {
-                    window.handle_input(&focus, ElementInputHandler::new(bounds, view), cx)
+                    window.handle_input(&focus, ElementInputHandler::new(bounds, view.clone()), cx);
+                    // While a drag selects, the mouse anywhere in the window
+                    // extends it, and its release (even outside) ends it.
+                    if selecting {
+                        let moved = view.downgrade();
+                        window.on_mouse_event(
+                            move |event: &gpui_kit::MouseMoveEvent, phase, window, cx| {
+                                if phase == gpui_kit::DispatchPhase::Bubble {
+                                    _ = moved.update(cx, |this, cx| {
+                                        this.drag_to(
+                                            event.position,
+                                            event.pressed_button,
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                }
+                            },
+                        );
+                        let released = view.downgrade();
+                        window.on_mouse_event(
+                            move |event: &gpui_kit::MouseUpEvent, phase, _, cx| {
+                                if phase == gpui_kit::DispatchPhase::Bubble
+                                    && event.button == MouseButton::Left
+                                {
+                                    _ = released.update(cx, |this, cx| this.end_drag(cx));
+                                }
+                            },
+                        );
+                    }
                 }
             },
         )
         .absolute()
         .size_full();
 
-        div()
+        // The right-click menu sits on a wrapper, so it takes the app's font
+        // rather than the terminal's.
+        let ui_font = theme.font_family.clone();
+        let terminal = div()
             .id("terminal")
             .key_context(TERMINAL_CONTEXT)
             .track_focus(&self.focus_handle)
@@ -640,10 +801,22 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::ask))
             .on_action(cx.listener(Self::open_find))
+            .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::clear))
             .on_scroll(cx.listener(Self::scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
-            .on_mouse_move(cx.listener(Self::mouse_move))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+            // Also here, besides the window-wide listener painted while a
+            // drag selects, so a release over the terminal always ends it.
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.end_drag(cx)),
+            )
+            // A right click puts the keyboard here, so the menu's actions
+            // reach this terminal.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, window, cx| this.focus_handle.focus(window, cx)),
+            )
             .relative()
             .size_full()
             .px_3()
@@ -665,7 +838,18 @@ impl Render for TerminalView {
                             .child(StyledText::new(line.text).with_runs(line.runs))
                     })),
             )
-            .children(self.render_find(cx))
+            .children(self.render_find(cx));
+        div()
+            .size_full()
+            .font_family(ui_font)
+            .child(terminal)
+            .context_menu({
+                let view = cx.weak_entity();
+                move |menu, _, cx| match view.upgrade() {
+                    Some(view) => view.read(cx).context_menu(menu, cx),
+                    None => menu,
+                }
+            })
     }
 }
 
@@ -853,6 +1037,52 @@ fn wheel_report(button: u8, column: usize, row: usize, mode: TermMode) -> Vec<u8
     } else {
         let at = |n: usize| (n.min(223) + 32) as u8;
         vec![0x1b, b'[', b'M', button + 32, at(column), at(row)]
+    }
+}
+
+/// Drops the history and the screen above the cursor's line, which moves
+/// to the top. A full-screen program's screen stays.
+fn clear_keeping_prompt<T: alacritty_terminal::event::EventListener>(term: &mut Term<T>) {
+    term.selection = None;
+    term.scroll_display(Scroll::Bottom);
+    if !term.mode().contains(TermMode::ALT_SCREEN) {
+        let above = term.grid().cursor.point.line.0.max(0) as usize;
+        if above > 0 {
+            // The rows above the cursor scroll into the history, which is
+            // then dropped.
+            AnsiHandler::scroll_up(term, above);
+            AnsiHandler::move_up(term, above);
+        }
+    }
+    term.grid_mut().clear_history();
+}
+
+#[cfg(test)]
+mod clear_tests {
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::term::Config;
+    use alacritty_terminal::term::test::TermSize;
+    use alacritty_terminal::vte::ansi::Processor;
+
+    use super::*;
+
+    #[test]
+    fn clear_keeps_the_prompt_line_at_the_top() {
+        let mut term = Term::new(Config::default(), &TermSize::new(20, 5), VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(
+            &mut term,
+            b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\n$ ls",
+        );
+        assert!(term.grid().history_size() > 0);
+        clear_keeping_prompt(&mut term);
+        assert_eq!(term.grid().history_size(), 0);
+        assert_eq!(term.grid().cursor.point.line, Line(0));
+        let top: String = (0..4)
+            .map(|column| term.grid()[Line(0)][Column(column)].c)
+            .collect();
+        assert_eq!(top, "$ ls");
+        assert_eq!(term.grid()[Line(1)][Column(0)].c, ' ');
     }
 }
 

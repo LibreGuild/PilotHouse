@@ -17,7 +17,7 @@ use gpui_kit::component::{
     h_flex,
     input::{
         Enter, Escape, IndentInline, InputEvent, InputState, MoveDown, MoveUp, OutdentInline,
-        Textarea, TextareaState,
+        Paste, Textarea, TextareaState,
     },
     menu::{PopupMenu, PopupMenuItem},
     popover::Popover,
@@ -50,6 +50,7 @@ use crate::thread::{ChatThread, ThreadEvent, ThreadProject, ThreadStatus};
 use crate::transcript_scroll::TranscriptList;
 use crate::{setup, setup_view};
 
+mod dropped;
 mod mentions;
 mod picker;
 mod render;
@@ -256,6 +257,12 @@ pub struct ChatPanel {
     terminal_session: Option<terminal_session::TerminalSession>,
     /// Something readying the chat (a clone), or why it failed.
     busy: Option<SharedString>,
+    /// The shared Chrome tabs are being read (`@tabs`): the message waits
+    /// for them, so it does not go without them.
+    reading_tabs: bool,
+    /// The tabs a typed `@tabs` asks for are attached to the message in
+    /// the composer (so sending it does not read them again).
+    tabs_attached: bool,
     /// The list of the turn's subagents is open above the composer.
     subagents_open: bool,
     /// The side chat in front and the chat it stepped aside from.
@@ -346,6 +353,8 @@ impl ChatPanel {
             terminal_session: None,
             context: None,
             busy: None,
+            reading_tabs: false,
+            tabs_attached: false,
             subagents_open: false,
             sent_off: Vec::new(),
             side: None,
@@ -427,8 +436,8 @@ impl ChatPanel {
         cx.notify();
     }
 
-    /// Attaches `attachment` and puts `text` in an empty composer, to edit
-    /// and send.
+    /// Attaches `attachment` and puts `text` in the composer, to edit and
+    /// send: before what is there already, so neither is lost.
     pub fn draft_about(
         &mut self,
         attachment: Attachment,
@@ -436,11 +445,16 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.composer.read(cx).value().trim().is_empty() {
-            self.composer.update(cx, |composer, cx| {
-                composer.set_value(text.to_string(), window, cx)
-            });
-        }
+        let existing = self.composer.read(cx).value().trim().to_string();
+        let draft = if existing.is_empty() {
+            text.to_string()
+        } else if text.trim().is_empty() || existing.starts_with(text.trim()) {
+            existing
+        } else {
+            format!("{}\n\n{existing}", text.trim())
+        };
+        self.composer
+            .update(cx, |composer, cx| composer.set_value(draft, window, cx));
         self.attach(attachment, window, cx);
     }
 
@@ -1027,8 +1041,19 @@ impl ChatPanel {
         }
         // No agent installed yet: the message stays in the box, and the
         // welcome card and the line under the box say what to do.
-        if self.busy.is_some() || agents::installed().is_some_and(|installed| installed.is_empty())
+        if self.busy.is_some()
+            || self.reading_tabs
+            || agents::installed().is_some_and(|installed| installed.is_empty())
         {
+            return;
+        }
+        // `@tabs` typed: the tabs are read first (it takes a moment), and
+        // the message goes once they are attached.
+        if !self.tabs_attached
+            && attachments::live_mentions(&text).tabs
+            && self.live.as_ref().is_some_and(|live| live.tabs.is_some())
+        {
+            self.attach_shared_tabs(true, window, cx);
             return;
         }
         // While the agent works, the message waits its turn.
@@ -1078,8 +1103,9 @@ impl ChatPanel {
         let title = self.next_title.take().unwrap_or_else(|| title_from(&text));
 
         // Explicit attachments plus `@file` / `#card` / `@screenshot` / `@log`
-        // mentions in the text.
+        // mentions in the text (`@tabs` were attached by `send`).
         let mut attached = std::mem::take(&mut self.attachments);
+        self.tabs_attached = false;
         let wanted = attachments::live_mentions(&text);
         let mut live = Vec::new();
         if let Some(sources) = &self.live {

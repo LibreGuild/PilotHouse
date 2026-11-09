@@ -4,8 +4,12 @@ What changed in each release, newest first. The full notes are on the [releases 
 
 Each release also has **Merge notes** for organisations that build their own copy of PilotHouse ([docs/customizing.md](docs/customizing.md)): what to look at when merging it. These cover new `[features]` keys (new features arrive switched on), new or renamed keys in `brand/brand.toml`, changes to `crates/custom` or `Store::apply_track`, and moved files.
 
-## Unreleased
+## 0.6.2
 
+- **Files: drag and drop, as in VS Code.** Drag rows (or all the selected ones) onto a folder to move them, after a question you can turn off; hold ⌥ (Ctrl on Windows and Linux) to copy. A closed folder opens when the drag rests on it. Files from Finder or Explorer are copied in where they are dropped; a row dropped on the editor opens, and on a chat it is attached.
+- **Chat: paste images.** ⌘V with a screenshot or a copied image on the clipboard attaches it to the message; files copied or dropped from the system attach too.
+- **Terminal: selection and right-click menu.** A drag selection follows the pointer anywhere in the window, ends where the button is let go, and scrolls the history when held above or below the terminal. Right-click offers Copy, Paste, Select All, Find, Ask in Chat, Split Terminal and Clear.
+- **Agents use your Chrome first** for web pages, `localhost` included, and the built-in browser only when the extension is not connected. The first time an agent or a UI test run uses a workspace's built-in browser since PilotHouse started, its Browser tab comes to the front, so you see the test going on.
 - **Chrome extension: from Chrome to PilotHouse.** Always on your own action, and into a chat's message box (the chat on screen, a new chat or quick chat) for you to send:
   - **Send** the selection, the page as Markdown, a link, an image, a screenshot of an area, or an element you click (selector, styles, the source file a dev build names, and a picture), from the right-click menu, shortcuts (⌥⇧P, ⌥⇧S, ⌥⇧E) or the panel.
   - **Record a bug report** (the steps, a video with still frames, the page's console errors and failed requests) or **a workflow** (steps that agents can run again), with a bar in the page that says so.
@@ -16,7 +20,9 @@ Each release also has **Merge notes** for organisations that build their own cop
 - **Debugging tools for agents in your Chrome:** `chrome_performance` (Core Web Vitals and what slows the page), `chrome_audit` (accessibility, SEO, best practices), `chrome_emulate` (device, network, CPU, colour scheme, place, time zone), `chrome_mock` (answer requests to test empty, failing and slow states), `chrome_memory` (heap, detached DOM nodes and listeners, compared for leaks), `chrome_errors` (stacks mapped through source maps to the workspace's files), `chrome_site_tools` (sites' own tools, WebMCP, in Chrome's early preview). Emulation and mocks end by themselves once the agent leaves the tab idle, or when you press Stop.
 - **Workflows:** agents run them (`chrome_workflows`, `chrome_run_workflow`), stopping where a password or a person is needed. Settings → Chrome extension lists them, makes a Playwright test or a schedule of one, renames and deletes them.
 - A managed Chrome whose policy keeps extensions' debugger out now says so clearly, and what to do instead.
-- **After updating**, reload the extension in `chrome://extensions` (it asks Chrome for more permissions now; nothing reaches a site without your click or your yes).
+- **Fixes from a review of all of this:** recordings keep no secrets (shown passwords, card numbers, tokens in addresses); page text reaches agents marked as untrusted; sends go to the window in front; dropped and pasted images go to agents in a format they take; moving files never takes a workspace folder along and leaves no tab on an old path; mocks, emulation and site tools clean up after themselves; the panel reconnects by itself and says *Connected* only once PilotHouse answers.
+- **The built-in browser** no longer drops an agent's first page while it starts.
+- **After updating**, reload the extension in `chrome://extensions` (it asks Chrome for more permissions now; nothing reaches a site without your click or your yes). It needs Chrome 118 or later.
 
 ### Merge notes
 

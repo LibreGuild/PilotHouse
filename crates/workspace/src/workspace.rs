@@ -501,6 +501,29 @@ impl Workspace {
         })
     }
 
+    /// An agent started using workspace `project`'s built-in browser: its
+    /// Browser tab comes into view, so the user sees the testing. Another
+    /// workspace on screen stays on screen, and a Browser tool the user
+    /// switched off (Settings → Features) stays off. Says whether it showed.
+    pub(crate) fn show_browser_for_agent(
+        &mut self,
+        project: ProjectId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(space) = self.spaces.get(&project).cloned() else {
+            return false;
+        };
+        if !AppState::enabled_tabs(cx).contains(&ContextTab::Browser) {
+            return false;
+        }
+        space.update(cx, |space, cx| {
+            space.show_tab(ContextTab::Browser, window, cx)
+        });
+        cx.notify();
+        true
+    }
+
     pub fn new_chat_in(&mut self, project: ProjectId, window: &mut Window, cx: &mut Context<Self>) {
         self.open_project(project, window, cx);
         if let Some(space) = self.spaces.get(&project) {
@@ -862,6 +885,7 @@ impl Workspace {
 
     /// Reads the workspace list again (another window changed it).
     pub(crate) fn reload_projects(&mut self, cx: &mut Context<Self>) {
+        crate::attention::forget_names(cx);
         let projects = workspaces(AppState::store(cx));
         let chats = self.chats_space.as_ref().map(|chats| chats.id);
         let kept =
@@ -1278,6 +1302,7 @@ impl Workspace {
 
     /// Shows a workspace's new folders (or name) everywhere.
     fn workspace_changed(&mut self, project: Project, window: &mut Window, cx: &mut Context<Self>) {
+        crate::attention::forget_names(cx);
         if let Some(existing) = self
             .projects
             .iter_mut()

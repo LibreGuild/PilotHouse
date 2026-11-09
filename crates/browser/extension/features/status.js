@@ -11,7 +11,10 @@ const HANDOFF = 'pilothouse-handoff|';
 
 /** The latest from the app; side panels are told of each change. */
 let latest = { connected: false, waiting: [], working: [], agents: [] };
+/** Fields set since this worker started, which what was kept must not undo. */
+const live = new Set();
 const watchers = new Set();
+const BADGE_COLOR = '#d97706';
 
 export function status() {
   return latest;
@@ -24,6 +27,7 @@ export function watch(watcher) {
 }
 
 function changed(next) {
+  for (const key of Object.keys(next)) live.add(key);
   latest = { ...latest, ...next };
   void chrome.storage.session.set({ status: latest }).catch(() => {});
   void badge();
@@ -40,11 +44,13 @@ async function badge() {
   const chosen = await settings();
   const waiting = latest.connected ? latest.waiting.length : 0;
   const action = chrome.action;
+  // Set even with no badge: a tab's own colour is put back to this one.
+  await action.setBadgeBackgroundColor({ color: BADGE_COLOR }).catch(() => {});
   if (!chosen.badge || waiting === 0) {
     await action.setBadgeText({ text: '' }).catch(() => {});
+    await action.setTitle({ title: chrome.runtime.getManifest().action?.default_title ?? '' }).catch(() => {});
     return;
   }
-  await action.setBadgeBackgroundColor({ color: '#d97706' }).catch(() => {});
   await action.setBadgeText({ text: waiting > 99 ? '99+' : String(waiting) }).catch(() => {});
   await action.setTitle({
     title: waiting === 1 ? 'A chat is waiting for you in PilotHouse' : `${waiting} chats are waiting for you in PilotHouse`,
@@ -52,10 +58,16 @@ async function badge() {
 }
 
 export function install() {
-  // Kept across this worker's restarts, so the panel shows it at once.
+  // Kept across this worker's restarts, so the panel shows it at once; read
+  // after the connection may already have been made, so what is known by
+  // now wins (and `connected` is never taken from before the restart).
   void chrome.storage.session.get('status').then(({ status: kept }) => {
-    if (kept) latest = { ...kept, connected: false };
+    if (!kept) return;
+    const restored = Object.fromEntries(Object.entries(kept)
+      .filter(([key]) => key !== 'connected' && !live.has(key) && key in latest));
+    if (Object.keys(restored).length) changed(restored);
   }).catch(() => {});
+  void badge();
 
   onConnection((connected) => changed(connected ? { connected } : { connected, waiting: [], working: [], agents: [] }));
   onSettings(() => void badge());

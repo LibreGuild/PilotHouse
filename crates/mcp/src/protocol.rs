@@ -38,11 +38,27 @@ fn instructions() -> String {
             progress and board_update_card to move a card when you finish it.",
         );
     }
+    if enabled(Feature::ChromeExtension) {
+        text.push_str(
+            "\nWeb pages: use the user's own Chrome first (chrome_open, chrome_snapshot, \
+            chrome_click, chrome_type, chrome_screenshot, chrome_console…), for websites and the \
+            project's own dev server (localhost) alike.",
+        );
+        // A build without the built-in browser has no browser_ tools to
+        // fall back on: the user connects the extension instead.
+        text.push_str(if enabled(Feature::Browser) {
+            " Only when a chrome_ tool answers that the extension is not connected, use the \
+            built-in browser (browser_ tools)."
+        } else {
+            " When a chrome_ tool answers that the extension is not connected, ask the user to \
+            set it up (Settings → Chrome extension)."
+        });
+    }
     if enabled(Feature::Browser) {
         text.push_str(concat!(
-            "\nBrowser: the project's browser, shown to the user in ",
+            "\nBuilt-in browser: ",
             ph_brand::name!(),
-            " (logins persist). Use \
+            "'s own, shown to the user in the app (logins persist). Use \
             browser_open, then browser_snapshot to find elements and their selectors, \
             browser_click / browser_type / browser_press to act, and browser_screenshot to check \
             the result visually. browser_logs shows console errors and failed requests."

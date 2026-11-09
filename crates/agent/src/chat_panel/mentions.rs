@@ -116,38 +116,58 @@ impl ChatPanel {
             composer.replace(if tabs { String::new() } else { insert }, window, cx);
         });
         if tabs {
-            self.attach_shared_tabs(window, cx);
+            self.attach_shared_tabs(false, window, cx);
         }
         cx.notify();
     }
 
-    /// Attaches the text of the Chrome tabs the user shared, once read.
-    pub(super) fn attach_shared_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Attaches the text of the Chrome tabs the user shared, once read;
+    /// sends the message then when `then_send` (a typed `@tabs`). Sending
+    /// waits meanwhile, so a quick Enter does not leave the tabs behind.
+    pub(super) fn attach_shared_tabs(
+        &mut self,
+        then_send: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reading_tabs {
+            return;
+        }
         let Some(read) = self.live.as_ref().and_then(|live| live.tabs.as_ref()) else {
             return;
         };
         use gpui_kit::component::WindowExt as _;
         let reading = read(cx);
+        self.reading_tabs = true;
+        cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = reading.await;
-            _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(tabs) if tabs.is_empty() => window.push_notification(
-                    gpui_kit::component::notification::Notification::info(
-                        "No tab is shared yet. In Chrome, put tabs in the purple PilotHouse group (the PilotHouse panel: “Let agents use this tab”), then try again.",
+            _ = this.update_in(cx, |this, window, cx| {
+                this.reading_tabs = false;
+                cx.notify();
+                match result {
+                    Ok(tabs) if tabs.is_empty() => window.push_notification(
+                        gpui_kit::component::notification::Notification::info(
+                            "No tab is shared yet. In Chrome, put tabs in the purple PilotHouse group (the PilotHouse panel: “Let agents use this tab”), then try again.",
+                        ),
+                        cx,
                     ),
-                    cx,
-                ),
-                Ok(tabs) => {
-                    for tab in tabs {
-                        this.attach(tab, window, cx);
+                    Ok(tabs) => {
+                        for tab in tabs {
+                            this.attach(tab, window, cx);
+                        }
+                        if then_send {
+                            this.tabs_attached = true;
+                            this.send(window, cx);
+                        }
                     }
+                    Err(err) => window.push_notification(
+                        gpui_kit::component::notification::Notification::error(format!(
+                            "Could not read the shared tabs: {err:#}"
+                        )),
+                        cx,
+                    ),
                 }
-                Err(err) => window.push_notification(
-                    gpui_kit::component::notification::Notification::error(format!(
-                        "Could not read the shared tabs: {err:#}"
-                    )),
-                    cx,
-                ),
             });
         })
         .detach();

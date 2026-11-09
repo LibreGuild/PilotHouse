@@ -57,14 +57,16 @@ impl SourceMap {
         let segment = segments.get(index.checked_sub(1)?)?;
         Some(Original {
             source: self.sources.get(segment.1 as usize)?.clone(),
-            line: segment.2 + 1,
-            column: segment.3 + 1,
+            line: segment.2.saturating_add(1),
+            column: segment.3.saturating_add(1),
         })
     }
 }
 
 /// The `mappings` field: base64 VLQ segments, `,` between segments and
 /// `;` between generated lines; fields relative to the previous segment.
+/// The page wrote the map, so sums that overflow make it unusable (`None`)
+/// rather than a panic.
 fn decode(mappings: &str) -> Option<Vec<Vec<Segment>>> {
     let mut lines = Vec::new();
     let (mut source, mut line, mut column) = (0i64, 0i64, 0i64);
@@ -73,13 +75,19 @@ fn decode(mappings: &str) -> Option<Vec<Vec<Segment>>> {
         let mut generated = 0i64;
         for segment in text.split(',').filter(|segment| !segment.is_empty()) {
             let fields = vlq(segment)?;
-            generated += *fields.first()?;
+            generated = generated.checked_add(*fields.first()?)?;
             if fields.len() >= 4 {
-                source += fields[1];
-                line += fields[2];
-                column += fields[3];
-                if generated >= 0 && source >= 0 && line >= 0 && column >= 0 {
-                    segments.push((generated as u32, source as u32, line as u32, column as u32));
+                source = source.checked_add(fields[1])?;
+                line = line.checked_add(fields[2])?;
+                column = column.checked_add(fields[3])?;
+                // Negative or past `u32` places name nothing real: skipped.
+                if let (Ok(generated), Ok(source), Ok(line), Ok(column)) = (
+                    u32::try_from(generated),
+                    u32::try_from(source),
+                    u32::try_from(line),
+                    u32::try_from(column),
+                ) {
+                    segments.push((generated, source, line, column));
                 }
             }
         }
@@ -104,7 +112,9 @@ fn vlq(segment: &str) -> Option<Vec<i64>> {
         value += (digit & 31) << shift;
         if digit & 32 != 0 {
             shift += 5;
-            if shift > 60 {
+            // Source map values are 32-bit: seven digits at most, which
+            // keeps `value` far from overflowing.
+            if shift > 30 {
                 return None;
             }
             continue;
@@ -175,6 +185,25 @@ mod tests {
         assert!(SourceMap::parse(r#"{"version":2}"#).is_none());
         assert_eq!(vlq("D"), Some(vec![-1]));
         assert_eq!(vlq("2H"), Some(vec![123]));
+    }
+
+    #[test]
+    fn hostile_maps_neither_panic_nor_wrap() {
+        // 2^33, past `u32`: its segment is skipped, not truncated.
+        assert_eq!(vlq("ggggggQ"), Some(vec![1 << 33]));
+        let map =
+            SourceMap::parse(r#"{"version":3,"sources":["a.js"],"mappings":"ggggggQ,AAAA;AAAA"}"#)
+                .unwrap();
+        assert_eq!(map.lookup(1, 1), None);
+        assert!(map.lookup(2, 1).is_some());
+        // Too many digits for a 32-bit value.
+        assert_eq!(vlq("gggggggA"), None);
+        // The largest line a map can name still reads.
+        let largest = SourceMap {
+            sources: vec!["a.js".into()],
+            lines: vec![vec![(0, 0, u32::MAX, u32::MAX)]],
+        };
+        assert_eq!(largest.lookup(1, 1).map(|found| found.line), Some(u32::MAX));
     }
 
     #[test]

@@ -877,6 +877,7 @@ impl WorkspaceScreen {
         let roots = self.roots();
         let files = cx.new(|cx| {
             let mut panel = FilesPanel::new(roots, &watchers, window, cx);
+            panel.set_store(AppState::store(cx).clone());
             panel.restore(
                 &self.saved.open_files,
                 self.saved.active_file.as_deref(),
@@ -1318,7 +1319,10 @@ fn shared_tabs_source(cx: &App) -> Option<Box<ph_agent::attachments::AsyncLiveSo
                 .into_iter()
                 .map(|tab| Attachment::Text {
                     label: format!("Tab: {}", short(&tab.title, &tab.url)),
-                    text: format!("{}\n{}\n\n{}", tab.title, tab.url, tab.markdown),
+                    text: crate::browser_inbox::from_web(
+                        &tab.url,
+                        &format!("{}\n\n{}", tab.title, tab.markdown),
+                    ),
                 })
                 .collect())
         })

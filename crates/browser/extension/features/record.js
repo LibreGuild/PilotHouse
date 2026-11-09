@@ -11,7 +11,7 @@
 // One recording at a time. Passwords and card numbers are never kept.
 
 import { ask } from '../lib/link.js';
-import { inPage, visible, dataOf } from '../lib/page.js';
+import { inPage, visible, dataOf, notInvoked } from '../lib/page.js';
 import { attached, reachable } from '../lib/tabs.js';
 import { deliver, flash } from './send.js';
 
@@ -29,6 +29,9 @@ const MAX_STEPS = 500;
 const MAX_LOGS = 200;
 
 let recording = null;
+/** The last recording letting go of its video and debugger: a new one
+ * waits for it, or closing the old offscreen page would end its video. */
+let stopping = null;
 const watchers = new Set();
 
 /** The recording under way, for the side panel: kind, tab and start. */
@@ -57,12 +60,14 @@ function changed() {
 /** Starts recording `kind` (`bug` or `workflow`) in `tab`. */
 export async function start(kind, tab, streamId) {
   if (recording) throw new Error('A recording is already under way. Stop it first.');
+  await stopping;
+  if (recording) throw new Error('A recording is already under way. Stop it first.');
   if (!reachable(tab.url)) throw new Error('Chrome does not let extensions record this page.');
   recording = {
     kind,
     tabId: tab.id,
     startedAt: Date.now(),
-    startUrl: tab.url,
+    startUrl: redact(tab.url),
     title: tab.title ?? '',
     steps: [],
     console: [],
@@ -142,7 +147,9 @@ async function startVideo(tab, given) {
     if (!answer?.ok) throw new Error(answer?.error ?? 'could not record');
     recording.video = true;
   } catch (error) {
-    recording.notes.push(`No video: ${String(error?.message ?? error).replace(/\.+$/, '')}.`);
+    recording.notes.push(notInvoked(error)
+      ? 'No video: Chrome lets PilotHouse record a tab’s video only when the recording starts from the PilotHouse menu on the page (right-click).'
+      : `No video: ${String(error?.message ?? error).replace(/\.+$/, '')}.`);
   }
 }
 
@@ -168,11 +175,21 @@ export async function finish(keep) {
   recording = null;
   clearTimeout(done.timer);
   changed();
+  const letting = letGo(done, keep);
+  stopping = letting.catch(() => {});
+  const { tab, media } = await letting;
+  if (!keep) return null;
+  if (done.kind === 'workflow') return saveWorkflow(done, tab);
+  return sendBug(done, tab, media);
+}
+
+/** Stops the recorder in the page, the video and the debugger. */
+async function letGo(done, keep) {
   const tab = await chrome.tabs.get(done.tabId).catch(() => null);
-  const stopping = 'globalThis.__pilothouse?.recorder?.stop()';
+  const stopRecorder = 'globalThis.__pilothouse?.recorder?.stop()';
   if (done.debugger) {
     for (const contextId of done.worlds) {
-      await chrome.debugger.sendCommand({ tabId: done.tabId }, 'Runtime.evaluate', { expression: stopping, contextId }).catch(() => {});
+      await chrome.debugger.sendCommand({ tabId: done.tabId }, 'Runtime.evaluate', { expression: stopRecorder, contextId }).catch(() => {});
     }
   } else if (tab) {
     await chrome.scripting.executeScript({
@@ -180,6 +197,10 @@ export async function finish(keep) {
       func: () => globalThis.__pilothouse?.recorder?.stop(),
     }).catch(() => {});
   }
+  // A bar whose recorder ran in the debugger's world, which the user closed
+  // (Chrome's debugging bar): nothing there can stop it, but its element is
+  // the page's.
+  if (tab) await removeBar(tab.id);
   let media = { video: null, frames: [] };
   if (done.video) {
     const answer = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'stop', keep }).catch(() => null);
@@ -187,9 +208,14 @@ export async function finish(keep) {
   }
   await closeOffscreen();
   if (done.debugger) await chrome.debugger.detach({ tabId: done.tabId }).catch(() => {});
-  if (!keep) return null;
-  if (done.kind === 'workflow') return saveWorkflow(done, tab);
-  return sendBug(done, tab, media);
+  return { tab, media };
+}
+
+async function removeBar(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => document.querySelectorAll('pilothouse-recorder').forEach((bar) => bar.remove()),
+  }).catch(() => {});
 }
 
 async function saveWorkflow(done, tab) {
@@ -218,7 +244,7 @@ async function sendBug(done, tab, media) {
   }
   if (media.video) items.push({ kind: 'video', label: 'Bug report: video', webm: media.video });
   items.push({ kind: 'text', label: `Bug report: ${short(done.title || done.startUrl)}`, text: report(done, tab) });
-  return deliver(tab ?? { url: done.startUrl, title: done.title }, items, done.title);
+  return deliver(tab ? { ...tab, url: redact(tab.url ?? '') } : { url: done.startUrl, title: done.title }, items, done.title);
 }
 
 function report(done, tab) {
@@ -226,7 +252,7 @@ function report(done, tab) {
   const lines = [
     'Bug report recorded in Chrome',
     `Page: ${tab?.title || done.title}`,
-    tab?.url ?? done.startUrl,
+    tab?.url ? redact(tab.url) : done.startUrl,
     `Recorded for ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} on ${new Date(done.startedAt).toLocaleString()}.`,
     '',
     'What I did:',
@@ -306,7 +332,7 @@ export function install() {
     if (change.url && change.url !== recording.lastUrl) {
       recording.lastUrl = change.url;
       const steps = recording.steps;
-      if (steps.length && steps.length < MAX_STEPS) steps.push({ type: 'navigate', url: change.url, at: Date.now() });
+      if (steps.length && steps.length < MAX_STEPS) steps.push({ type: 'navigate', url: redact(change.url), at: Date.now() });
       changed();
     }
   });
@@ -334,8 +360,32 @@ export function install() {
   chrome.debugger.onDetach.addListener((source, reason) => {
     if (!recording?.debugger || source.tabId !== recording.tabId) return;
     recording.debugger = false;
-    if (reason === 'canceled_by_user') recording.notes.push('The console and requests stopped when Chrome’s debugging bar was closed.');
+    // The tab closing ends the recording (above).
+    if (reason !== 'target_closed') void carryOn(recording);
   });
+  // A recording does not outlive the worker that kept it: after a restart,
+  // the menu offers recording again, and a video nobody will stop ends.
+  void closeOffscreen();
+}
+
+/** Chrome's debugger left the tab mid-recording (the user closed its bar):
+ * its recorder there can no longer report, so the page's own recorder takes
+ * over this page; else the recording ends with what it has. */
+async function carryOn(was) {
+  was.notes.push('Chrome’s debugging bar was closed, so the console and requests stopped there, and only that page was recorded after it.');
+  const options = barOptions();
+  const tab = await chrome.tabs.get(was.tabId).catch(() => null);
+  if (recording !== was) return;
+  try {
+    if (!tab) throw new Error('the tab closed');
+    await removeBar(tab.id);
+    await inPage(tab, 'recorder.js', (given) => globalThis.__pilothouse.recorder.start(given), [options]);
+    was.pageOnly = true;
+  } catch (error) {
+    if (recording !== was) return;
+    was.notes.push('Steps after that may be missing: PilotHouse could not go on recording the page.');
+    void finishAndTell(true);
+  }
 }
 
 function log(method, params) {
@@ -396,6 +446,9 @@ function redact(url) {
     for (const key of [...parsed.searchParams.keys()]) {
       if (/token|secret|key|pass|session|auth|code|sig/i.test(key)) parsed.searchParams.set(key, '••••');
     }
+    // OAuth's implicit flow puts the access token in the fragment, as
+    // parameters; a hash-routed app's path (`#/settings`) has none.
+    if (parsed.hash.includes('=')) parsed.hash = '';
     return parsed.href.slice(0, 500);
   } catch (error) {
     return String(url).slice(0, 500);

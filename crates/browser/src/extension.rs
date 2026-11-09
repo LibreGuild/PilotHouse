@@ -631,11 +631,17 @@ pub(crate) fn read_line(input: &mut impl BufRead, max: usize) -> std::io::Result
 
 /// Why agents cannot use Chrome now, for their tools' answers.
 pub fn not_connected() -> anyhow::Error {
+    // The built-in browser is offered only where the brand keeps it.
+    let instead = if ph_brand::enabled(ph_brand::Feature::Browser) {
+        ", or use the built-in browser tools (browser_open, browser_snapshot…) meanwhile"
+    } else {
+        ""
+    };
     anyhow!(
-        "PilotHouse's Chrome extension is not connected, so you cannot use the user's Chrome. \
-         Ask the user to set it up in PilotHouse (Settings → Chrome extension) and to keep Chrome \
-         open, or use the built-in browser tools (browser_open, browser_snapshot…) for the \
-         project's own pages."
+        "The PilotHouse Chrome extension is not connected, so you cannot use the user's Chrome. \
+         Ask the user to set it up in {} (Settings → Chrome extension) and to keep Chrome \
+         open{instead}.",
+        ph_brand::NAME
     )
 }
 

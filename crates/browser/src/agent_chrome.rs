@@ -208,6 +208,8 @@ struct Tab {
     /// The page's own tools for agents (WebMCP), and calls waiting.
     site_tools: Vec<Value>,
     site_tool_waiters: Vec<(String, smol::channel::Sender<Value>)>,
+    /// Answers that came before their call began waiting (the newest).
+    site_tool_answers: VecDeque<Value>,
     _glow: Option<Task<()>>,
     _idle: Option<Task<()>>,
 }
@@ -229,6 +231,9 @@ pub struct AgentChrome {
     sent_status: Option<Value>,
     /// When each tab was last handed to the user.
     handed_off: HashMap<String, Instant>,
+    /// Counts changes to the saved workflows, so views read them again
+    /// only then (this entity notifies many times per page load).
+    workflows_version: u64,
     _bridge: Option<Task<()>>,
 }
 
@@ -293,6 +298,7 @@ impl AgentChrome {
                 chats: (Vec::new(), Vec::new()),
                 sent_status: None,
                 handed_off: HashMap::new(),
+                workflows_version: 0,
                 _bridge: None,
             };
             match bridge::listen() {
@@ -496,7 +502,7 @@ impl AgentChrome {
 
     fn handle_event(&mut self, event: CdpEvent, cx: &mut Context<Self>) {
         let Some(session) = event.session.clone() else {
-            self.handle_browser_event(&event, cx);
+            self.handle_browser_event(event, cx);
             return;
         };
         let Some(index) = self.tabs.iter().position(|tab| tab.target == session) else {
@@ -653,11 +659,11 @@ impl AgentChrome {
     }
 
     /// What the extension tells of the PilotHouse group's tabs.
-    fn handle_browser_event(&mut self, event: &CdpEvent, cx: &mut Context<Self>) {
-        let params = &event.params;
-        if self.extension_note(&event.method, params, cx) {
+    fn handle_browser_event(&mut self, mut event: CdpEvent, cx: &mut Context<Self>) {
+        if self.extension_note(&event.method, &mut event.params, cx) {
             return;
         }
+        let params = &event.params;
         let Some(target) = params["tabId"].as_u64().map(|id| id.to_string()) else {
             return;
         };
@@ -1026,6 +1032,7 @@ impl AgentChrome {
             memory: None,
             site_tools: Vec::new(),
             site_tool_waiters: Vec::new(),
+            site_tool_answers: VecDeque::new(),
             _glow: None,
             _idle: None,
         });
@@ -1693,10 +1700,11 @@ impl AgentChrome {
             };
             if password {
                 let _ = this.update(cx, |this, _| {
+                    let site = this.site_of(&page.target);
                     this.hand_off(
                         &page.target,
                         &page.label,
-                        &format!("Sign in on this page yourself (agents never type passwords), then tell {} to go on.", page.label),
+                        &format!("Sign in to {site} yourself (agents never type passwords), then tell {} to go on.", page.label),
                     )
                 });
                 bail!("{ASK_TO_SIGN_IN}");
@@ -1775,10 +1783,11 @@ impl AgentChrome {
                     == json!(true)
             {
                 let _ = this.update(cx, |this, _| {
+                    let site = this.site_of(&page.target);
                     this.hand_off(
                         &page.target,
                         &page.label,
-                        &format!("Sign in on this page yourself (agents never type passwords), then tell {} to go on.", page.label),
+                        &format!("Sign in to {site} yourself (agents never type passwords), then tell {} to go on.", page.label),
                     )
                 });
                 bail!("{ASK_TO_SIGN_IN}");
@@ -2778,11 +2787,12 @@ async fn summary(this: &WeakEntity<AgentChrome>, page: &Page, cx: &mut AsyncApp)
     let mut notes = notes(this, &page, cx)?;
     if human_check {
         let _ = this.update(cx, |this, _| {
+            let site = this.site_of(&page.target);
             this.hand_off(
                 &page.target,
                 &page.label,
                 &format!(
-                    "This page asks to prove a person is here. Complete it in the tab, then tell {} to go on.",
+                    "A check that a person is here, on {site}: complete it in the tab, then tell {} to go on.",
                     page.label
                 ),
             )

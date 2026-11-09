@@ -30,6 +30,11 @@ async function start(streamId) {
   recorder.ondataavailable = (event) => {
     if (event.data.size > 0) chunks.push(event.data);
   };
+  // Known from the start: the recorder stops by itself when the tab closes,
+  // before the worker asks it to.
+  const ended = new Promise((resolve) => {
+    recorder.onstop = resolve;
+  });
   recorder.start(1000);
 
   // Still frames, from the same stream.
@@ -48,18 +53,15 @@ async function start(streamId) {
   };
   const timer = setInterval(() => void grab(), FRAME_EVERY);
   setTimeout(() => void grab(), 300);
-  recording = { stream, recorder, chunks, frames, timer, video, grab };
+  recording = { stream, recorder, ended, chunks, frames, timer, video, grab };
 }
 
 async function stop(keep) {
   if (!recording) return { video: null, frames: [] };
-  const { stream, recorder, chunks, frames, timer, video, grab } = recording;
+  const { stream, recorder, ended, chunks, frames, timer, video, grab } = recording;
   recording = null;
   clearInterval(timer);
   if (keep) await grab();
-  const ended = new Promise((resolve) => {
-    recorder.onstop = resolve;
-  });
   if (recorder.state !== 'inactive') recorder.stop();
   await ended;
   for (const track of stream.getTracks()) track.stop();

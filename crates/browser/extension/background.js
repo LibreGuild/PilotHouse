@@ -220,6 +220,13 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   if (tab) void refreshMenus(tab);
 });
 
+// With several windows, the tab in front changes with no tab activated.
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  const [tab] = await chrome.tabs.query({ active: true, windowId }).catch(() => []);
+  if (tab) void refreshMenus(tab);
+});
+
 // A group renamed away from "PilotHouse" takes its tabs out of reach.
 chrome.tabGroups.onUpdated.addListener(async (group) => {
   if (group.title === 'PilotHouse') return;
@@ -262,7 +269,8 @@ async function act(action, tab, info = {}, fromPanel = false) {
         await recording.finish(false);
         return null;
       case 'share':
-        await setShared(tab, !(await inGroup(tab)));
+        // What the checkbox now says (the menu's can be stale for this tab).
+        await setShared(tab, typeof info.checked === 'boolean' ? info.checked : !(await inGroup(tab)));
         await refreshMenus(await chrome.tabs.get(tab.id));
         return {};
       default:
@@ -315,9 +323,11 @@ async function createMenus() {
   add('panel', MENU.panel, ['all']);
 }
 
-/** The share checkbox follows the tab in front. */
+/** The share checkbox follows the tab in front of the window in front. */
 async function refreshMenus(tab) {
   if (!tab?.active) return;
+  const front = await chrome.windows.getLastFocused().catch(() => null);
+  if (front && front.id !== tab.windowId) return;
   const shared = await inGroup(tab);
   chrome.contextMenus.update('share', { checked: shared }, () => void chrome.runtime.lastError);
 }
@@ -330,12 +340,15 @@ onSettings((chosen) => {
 });
 
 // While recording: Stop in the menu, not Record.
-recording.watch((now) => {
+function recordingMenus(now) {
   const update = (id, props) => chrome.contextMenus.update(id, props, () => void chrome.runtime.lastError);
   update('stop', { visible: !!now, title: now?.kind === 'workflow' ? 'Stop recording and save' : MENU.stop });
   update('bug', { visible: !now });
   update('workflow', { visible: !now });
-});
+}
+recording.watch(recordingMenus);
+// Menus outlive this worker; a recording does not (see record.js).
+recordingMenus(recording.current());
 
 // The bar's Stop and Cancel in the page.
 recording.onBarFinish(async (keep) => {
@@ -422,7 +435,7 @@ async function panelRequest(message) {
       return statusFeature.status();
     case 'act': {
       const tab = await chrome.tabs.get(message.tabId);
-      return act(message.action, tab, { streamId: message.streamId }, true);
+      return act(message.action, tab, { streamId: message.streamId, checked: message.checked }, true);
     }
     case 'recording':
       return recording.current();
@@ -447,7 +460,9 @@ async function panelRequest(message) {
 }
 
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== 'panel' || port.sender?.id !== chrome.runtime.id) return;
+  // Content scripts are this extension too, but run in pages: only the
+  // panel (no tab) hears what agents do.
+  if (port.name !== 'panel' || port.sender?.id !== chrome.runtime.id || port.sender.tab) return;
   connect();
   const stop = statusFeature.watch((status) => {
     try {

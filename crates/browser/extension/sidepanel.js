@@ -10,6 +10,7 @@ const SITE_ORIGINS = {
   linear: ['https://linear.app/*'],
 };
 import { reachable } from './lib/tabs.js';
+import { notInvoked } from './lib/page.js';
 
 const $ = (id) => document.getElementById(id);
 const PAGE_ACTIONS = new Set(['page', 'selection', 'area', 'element', 'summary']);
@@ -183,15 +184,23 @@ async function act(action) {
   }
   if (action === 'bug' || action === 'workflow') {
     let streamId;
+    let noVideo = false;
     if (action === 'bug') {
       // Asked in the click, as Chrome wants for recording a tab.
-      streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id }).catch(() => undefined);
+      streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id }).catch((error) => {
+        noVideo = notInvoked(error);
+        return undefined;
+      });
     }
     try {
       await request({ type: 'act', action, tabId: tab.id, streamId });
-      say(action === 'bug'
-        ? 'Recording. Do what goes wrong, then press Stop and send.'
-        : 'Recording. Do the steps, then press Stop and save.');
+      if (noVideo) {
+        say('Recording, without a video: Chrome lets PilotHouse record a tab’s video only when you start from the PilotHouse menu on the page (right-click). Do what goes wrong, then press Stop and send.');
+      } else {
+        say(action === 'bug'
+          ? 'Recording. Do what goes wrong, then press Stop and send.'
+          : 'Recording. Do the steps, then press Stop and save.');
+      }
     } catch (error) {
       say(error.message, 'error');
     }
@@ -339,9 +348,17 @@ async function renderShortcuts() {
 
 // ---- Start ----------------------------------------------------------------
 
-async function start() {
-  windowId = (await chrome.windows.getCurrent()).id;
-  const port = chrome.runtime.connect({ name: 'panel' });
+/** The worker's news (status, recording); it sends both first on each
+ * connection. The worker restarts now and then, closing the port: the
+ * panel connects again. */
+function listen() {
+  let port;
+  try {
+    port = chrome.runtime.connect({ name: 'panel' });
+  } catch (error) {
+    // The extension was reloaded: this panel is closing.
+    return;
+  }
   port.onMessage.addListener((message) => {
     if (message?.type === 'status') {
       status = message.status;
@@ -351,6 +368,15 @@ async function start() {
       renderRecording();
     }
   });
+  port.onDisconnect.addListener(() => {
+    void chrome.runtime.lastError;
+    setTimeout(listen, 1000);
+  });
+}
+
+async function start() {
+  windowId = (await chrome.windows.getCurrent()).id;
+  listen();
   $('recording-stop').addEventListener('click', () => void finishRecording(true));
   $('recording-cancel').addEventListener('click', () => void finishRecording(false));
 
@@ -359,7 +385,7 @@ async function start() {
   }
   $('share').addEventListener('change', async () => {
     try {
-      await request({ type: 'act', action: 'share', tabId: tab.id });
+      await request({ type: 'act', action: 'share', tabId: tab.id, checked: $('share').checked });
     } catch (error) {
       say(error.message, 'error');
     }

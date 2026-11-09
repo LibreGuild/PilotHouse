@@ -934,6 +934,7 @@ impl ChatPanel {
         let status_line: Option<SharedString> = match status {
             _ if no_agent => Some("Install one of the coding agents above to start a chat.".into()),
             _ if self.busy.is_some() => self.busy.clone(),
+            _ if self.reading_tabs => Some("Reading the shared Chrome tabs…".into()),
             ThreadStatus::Connecting => Some(format!("Starting {}…", agent.name).into()),
             // The transcript's working row says it.
             ThreadStatus::Working | ThreadStatus::Idle => None,
@@ -1099,6 +1100,20 @@ impl ChatPanel {
                                     cx.stop_propagation();
                                 }
                             }))
+                            // An image on the clipboard (a screenshot) is
+                            // attached; text pastes as usual.
+                            .capture_action(cx.listener(|this, _: &Paste, window, cx| {
+                                if this.paste_image(window, cx) {
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            // Something dragged over the chat can drop here.
+                            .drag_over::<ph_files::DraggedFiles>(|style, _, _, cx| {
+                                style.border_color(cx.theme().ring)
+                            })
+                            .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, cx| {
+                                style.border_color(cx.theme().ring)
+                            })
                             .children(self.render_mention_menu(cx))
                             .children(self.render_attachments(cx))
                             .child(
@@ -1128,6 +1143,17 @@ impl Render for ChatPanel {
         }
         v_flex()
             .size_full()
+            // Files and images dropped anywhere on the chat are attached.
+            .on_drop(
+                cx.listener(|this, dragged: &ph_files::DraggedFiles, window, cx| {
+                    this.attach_tree_files(dragged, window, cx)
+                }),
+            )
+            .on_drop(
+                cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
+                    this.drop_external(paths, window, cx)
+                }),
+            )
             .child(self.render_header(cx))
             // Clipped: in a short pane the empty chat's welcome is taller
             // than the room and would draw over the header.
@@ -1261,7 +1287,9 @@ pub(super) fn attach_button(panel: WeakEntity<ChatPanel>) -> impl IntoElement {
                     PopupMenuItem::new("Tabs you shared in Chrome")
                         .icon(Icons::Globe)
                         .on_click(move |_, window, cx| {
-                            _ = tabs.update(cx, |panel, cx| panel.attach_shared_tabs(window, cx));
+                            _ = tabs.update(cx, |panel, cx| {
+                                panel.attach_shared_tabs(false, window, cx)
+                            });
                         }),
                 )
             })

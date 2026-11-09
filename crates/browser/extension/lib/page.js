@@ -47,12 +47,22 @@ function access(error) {
   return message;
 }
 
+/** Whether Chrome refused a screenshot or a tab's video because the user did
+ * not ask from the page itself (its menu or a shortcut grant that; the side
+ * panel and a site's access do not). */
+export function notInvoked(error) {
+  return /activeTab|all_urls|not been invoked/i.test(String(error?.message ?? error));
+}
+
 /** The visible part of the tab as a PNG data URL (the tab must be in front). */
 export async function visible(tab) {
   if (!reachable(tab.url)) throw new Error(OUT_OF_REACH);
   try {
     return await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
   } catch (error) {
+    if (notInvoked(error)) {
+      throw new Error('Chrome lets PilotHouse take screenshots only when you ask from the page: press Alt+Shift+S (unless you changed the shortcut) or right-click the page and use the PilotHouse menu.');
+    }
     throw new Error(access(error));
   }
 }

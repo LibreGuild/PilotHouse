@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::AtomicU64;
 
 use base64::Engine as _;
 use ph_media::{CapturedImage, ToChat};
@@ -25,8 +26,10 @@ use super::*;
 const MAX_ITEMS: usize = 20;
 /// The longest text item kept, in bytes.
 const MAX_TEXT: usize = 1024 * 1024;
-/// The largest image or video kept, in bytes (decoded).
-const MAX_FILE: usize = 48 * 1024 * 1024;
+/// The largest image or video kept, in bytes (decoded). Its base64 (4/3 of
+/// it) and the rest of the send stay well under the link's 64 MB, so a
+/// larger one gets this limit's error rather than a dropped message.
+const MAX_FILE: usize = 40 * 1024 * 1024;
 /// An agent's tab is handed to the user at most this often.
 const HANDOFF_EVERY: Duration = Duration::from_secs(60);
 
@@ -197,6 +200,16 @@ impl AgentChrome {
         );
     }
 
+    /// The site of agent tab `target` as its address names it, for a hand
+    /// off's message: the page asks for the user's password or a check,
+    /// so the user must see whose page it is, not what the page says.
+    pub(super) fn site_of(&self, target: &str) -> String {
+        self.tab(target)
+            .map(|tab| site(&tab.url))
+            .filter(|site| !site.is_empty())
+            .unwrap_or_else(|| "this page".into())
+    }
+
     /// Brings agent tab `target` to the user: an agent needs them there.
     pub(super) fn hand_off(&mut self, target: &str, agent: &str, reason: &str) {
         let now = Instant::now();
@@ -221,14 +234,19 @@ impl AgentChrome {
     pub(super) fn extension_note(
         &mut self,
         method: &str,
-        params: &Value,
+        params: &mut Value,
         cx: &mut Context<Self>,
     ) -> bool {
         match method {
             "PilotHouse.ask" => {
                 let reference = params["ref"].clone();
                 let asked = params["method"].as_str().unwrap_or_default().to_string();
-                self.answer(reference, &asked, params["params"].clone(), cx);
+                // Taken, not copied: a send carries tens of MB of images.
+                let asked_params = params
+                    .get_mut("params")
+                    .map(Value::take)
+                    .unwrap_or_default();
+                self.answer(reference, &asked, asked_params, cx);
             }
             "PilotHouse.openChat" => {
                 if let (Some(tag), Some(host)) = (params["tag"].as_str(), self.host.clone()) {
@@ -337,8 +355,7 @@ impl AgentChrome {
                 )
                 .map(|workflow| json!({ "id": workflow.id, "name": workflow.name }));
                 reply(self, saved);
-                cx.emit(AgentChromeEvent::Changed);
-                cx.notify();
+                self.workflows_changed(cx);
             }
             other => reply(
                 self,
@@ -349,6 +366,26 @@ impl AgentChrome {
                 )),
             ),
         }
+    }
+}
+
+/// The host of `url` (`accounts.example.com`, with its port when it has
+/// one), without any user name or password before it; the address itself,
+/// shortened, when it has no host (`file:`, `data:`).
+fn site(url: &str) -> String {
+    let host = url
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or_default())
+        .map(|authority| {
+            authority
+                .rsplit_once('@')
+                .map_or(authority, |(_, host)| host)
+        })
+        .unwrap_or_default();
+    if host.is_empty() {
+        url.chars().take(80).collect()
+    } else {
+        host.to_string()
     }
 }
 
@@ -364,7 +401,7 @@ fn site_action(params: &Value) -> Result<SiteAction> {
     };
     let url = text("url", 2000);
     if !url.starts_with("https://") {
-        bail!("that page's address is not one PilotHouse acts on");
+        bail!("that page's address is not one {} acts on", ph_brand::NAME);
     }
     Ok(match params["kind"].as_str() {
         Some("review") => SiteAction::Review {
@@ -474,8 +511,12 @@ fn save(data: Option<&str>, extension: &str, index: usize, dir: &Path) -> Result
         .decode(data.trim())
         .context("an item's data is not base64")?;
     std::fs::create_dir_all(dir)?;
+    // Two sends in the same millisecond must not share a name (the second
+    // would overwrite the first's file).
+    static SAVED: AtomicU64 = AtomicU64::new(0);
     let stamp = millis();
-    let path = dir.join(format!("chrome-{stamp}-{index}.{extension}"));
+    let count = SAVED.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!("chrome-{stamp}-{count}-{index}.{extension}"));
     std::fs::write(&path, bytes).with_context(|| format!("saving {}", path.display()))?;
     Ok(path)
 }
@@ -491,6 +532,20 @@ fn millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hand_offs_name_the_site() {
+        assert_eq!(
+            site("https://accounts.example.com/signin?next=/"),
+            "accounts.example.com"
+        );
+        assert_eq!(
+            site("https://user:pw@evil.example:8443/x"),
+            "evil.example:8443"
+        );
+        assert_eq!(site("http://localhost:3000"), "localhost:3000");
+        assert_eq!(site("file:///tmp/a.html"), "file:///tmp/a.html");
+    }
 
     #[test]
     fn a_send_becomes_chat_items() {

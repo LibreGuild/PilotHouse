@@ -162,6 +162,10 @@ pub struct FilesPanel {
     tabs_scroll: gpui_kit::ScrollHandle,
     /// What Copy or Cut picked, for Paste.
     pub(crate) clipboard: Option<crate::tree_menu::Clipboard>,
+    /// A closed folder a drag rests on, and its opening after a moment.
+    pub(crate) drag_hover: Option<(String, gpui_kit::Task<()>)>,
+    /// PilotHouse's settings (the question before a drag moves files).
+    pub(crate) store: Option<ph_store::Store>,
     /// The file picked with Select for Compare.
     pub(crate) compare: Option<String>,
     /// Rows picked with Ctrl/⌘+click or Shift+click (tree paths, in the
@@ -268,6 +272,8 @@ impl FilesPanel {
             navigating: false,
             file_subscriptions: HashMap::new(),
             clipboard: None,
+            drag_hover: None,
+            store: None,
             compare: None,
             marked: Vec::new(),
             mark_anchor: None,
@@ -907,10 +913,32 @@ impl FilesPanel {
                     // (new file, paste…), as in VS Code; a row's menu
                     // stops the click before it gets here.
                     let panel = cx.weak_entity();
+                    let (internal, external) = (cx.weak_entity(), cx.weak_entity());
+                    // Dropped under the rows: the top folder.
+                    let top = if self.roots.is_multi() {
+                        self.roots.list().first().map(|root| root.name.clone())
+                    } else {
+                        Some(String::new())
+                    };
+                    let (top_internal, top_external) = (top.clone(), top);
                     div()
                         .id("files-tree-area")
                         .flex_1()
                         .min_h_0()
+                        .on_drop(move |dragged: &crate::DraggedFiles, window, cx| {
+                            if let Some(top) = &top_internal {
+                                _ = internal.update(cx, |panel, cx| {
+                                    panel.drop_files(dragged, top, true, window, cx)
+                                });
+                            }
+                        })
+                        .on_drop(move |paths: &gpui_kit::ExternalPaths, window, cx| {
+                            if let Some(top) = &top_external {
+                                _ = external.update(cx, |panel, cx| {
+                                    panel.drop_external(paths, top, true, window, cx)
+                                });
+                            }
+                        })
                         .child(self.render_tree(cx))
                         .on_click(cx.listener(|this, _, _, cx| {
                             if !this.marked.is_empty() {
@@ -1003,7 +1031,12 @@ impl FilesPanel {
 
     // ---- Tree --------------------------------------------------------------
 
-    fn expand_dir(&mut self, dir: String, cx: &mut Context<Self>) {
+    /// PilotHouse's settings, for the choices the panel remembers.
+    pub fn set_store(&mut self, store: ph_store::Store) {
+        self.store = Some(store);
+    }
+
+    pub(crate) fn expand_dir(&mut self, dir: String, cx: &mut Context<Self>) {
         if DirTree::is_placeholder(&dir) {
             return;
         }
@@ -1227,6 +1260,9 @@ impl FilesPanel {
         let primary = self.roots.list().first().map(|root| root.name.clone());
         let compare = self.compare.clone();
         let marked: Rc<HashSet<String>> = Rc::new(self.marked.iter().cloned().collect());
+        // What a drag from a picked row carries: all the picked rows (one
+        // list shared by their rows, built once per frame).
+        let marked_list: Rc<[String]> = self.marked.clone().into();
         let cut: Rc<HashSet<String>> = Rc::new(
             self.clipboard
                 .as_ref()
@@ -1239,7 +1275,7 @@ impl FilesPanel {
                 })
                 .unwrap_or_default(),
         );
-        tree(&self.tree_state, move |ix, entry, selected, _, cx| {
+        tree(&self.tree_state, move |_, entry, selected, _, cx| {
             let item = entry.item();
             let path = item.id.to_string();
             let is_file = !entry.is_folder();
@@ -1274,11 +1310,69 @@ impl FilesPanel {
                 .into_any_element()
             };
             let is_primary_root = multi && depth == 0 && primary.as_deref() == Some(&path);
+            // A workspace folder itself (with several) does not move.
+            let is_root = multi && depth == 0;
+            let dragged = (!placeholder && !is_root).then(|| crate::DraggedFiles {
+                paths: if marked.contains(&path) {
+                    marked_list.clone()
+                } else {
+                    Rc::from([path.clone()])
+                },
+                folder: !is_file,
+            });
+            let expanded = entry.is_expanded();
+            // "Loading…" or "Empty" takes drops for the folder it is in.
+            let (drop_path, drop_folder) = if placeholder {
+                (crate::tree_menu::parent_of(&path), true)
+            } else {
+                (path.clone(), !is_file)
+            };
+            let drops = {
+                let (panel, path) = (panel.clone(), drop_path);
+                move |row: ListItem| {
+                    let (internal, external, rest) = (panel.clone(), panel.clone(), panel.clone());
+                    let (to_internal, to_external, to_rest) =
+                        (path.clone(), path.clone(), path.clone());
+                    row.drag_over::<crate::DraggedFiles>(|style, _, _, cx| {
+                        style.bg(crate::tree_drag::drop_highlight(cx))
+                    })
+                    .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, cx| {
+                        style.bg(crate::tree_drag::drop_highlight(cx))
+                    })
+                    .on_drop(move |dragged: &crate::DraggedFiles, window, cx| {
+                        _ = internal.update(cx, |panel, cx| {
+                            panel.drop_files(dragged, &to_internal, drop_folder, window, cx)
+                        });
+                    })
+                    .on_drop(move |paths: &gpui_kit::ExternalPaths, window, cx| {
+                        _ = external.update(cx, |panel, cx| {
+                            panel.drop_external(paths, &to_external, drop_folder, window, cx)
+                        });
+                    })
+                    // A closed folder the drag rests on opens; one it only
+                    // crossed does not.
+                    .when(!is_file && !expanded && !placeholder, |row| {
+                        row.on_drag_move::<crate::DraggedFiles>(move |event, _, cx| {
+                            let over = event.bounds.contains(&event.event.position);
+                            _ = rest.update(cx, |panel, cx| {
+                                if over {
+                                    panel.drag_rest(&to_rest, cx)
+                                } else {
+                                    panel.drag_left(&to_rest)
+                                }
+                            });
+                        })
+                    })
+                }
+            };
             let panel = panel.clone();
             // Picked with Ctrl/⌘ or Shift: shown as selected (the tree
             // only knows its one selected row).
             let picked = !selected && marked.contains(&path);
-            ListItem::new(ix)
+            // Named by its path: a drag that starts as rows shift (files
+            // appearing while an agent writes) carries the row pressed.
+            let row_id = gpui_kit::ElementId::Name(path.clone().into());
+            ListItem::new(row_id.clone())
                 .selected(selected)
                 .when(picked, |this| {
                     this.bg(cx.theme().list_active)
@@ -1313,11 +1407,14 @@ impl FilesPanel {
                         .child(chevron)
                         .child(icon)
                         .child(
-                            ph_ui::truncated_label(("tree-label", ix), item.label.clone())
-                                .when_some(tint, |this, tint| this.text_color(tint))
-                                .when(holds_changes, |this| {
-                                    this.text_color(theme.warning.opacity(0.9))
-                                }),
+                            ph_ui::truncated_label(
+                                gpui_kit::ElementId::NamedChild(row_id.into(), "label".into()),
+                                item.label.clone(),
+                            )
+                            .when_some(tint, |this, tint| this.text_color(tint))
+                            .when(holds_changes, |this| {
+                                this.text_color(theme.warning.opacity(0.9))
+                            }),
                         )
                         .when(is_primary_root, |this| {
                             this.child(
@@ -1353,6 +1450,12 @@ impl FilesPanel {
                             .size(px(6.))
                             .rounded_full()
                             .bg(cx.theme().warning.opacity(0.8))
+                    })
+                })
+                .map(drops)
+                .when_some(dragged, |row, dragged| {
+                    row.on_drag(dragged, |dragged, _, _, cx| {
+                        crate::tree_drag::preview(dragged, cx)
                     })
                 })
                 .on_click(move |event, window, cx| {
@@ -1806,6 +1909,28 @@ impl Render for FilesPanel {
                     this.close_tab(ix, window, cx);
                 }
             }))
+            // Files dropped on the editor open: rows of the tree, and files
+            // from the system (those outside the workspace in a window of
+            // their own).
+            .on_drop(
+                cx.listener(|this, dragged: &crate::DraggedFiles, window, cx| {
+                    for path in dragged.paths.iter() {
+                        if !this.tree.is_dir(path) {
+                            this.open_file(path, None, window, cx);
+                        }
+                    }
+                }),
+            )
+            .on_drop(
+                cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
+                    for path in paths.paths().iter().filter(|path| path.is_file()) {
+                        match this.roots.path_of(path) {
+                            Some(tree_path) => this.open_file(&tree_path, None, window, cx),
+                            None => cx.emit(FilesPanelEvent::OpenInWindow(path.clone())),
+                        }
+                    }
+                }),
+            )
             .size_full()
             .min_w_0()
             .overflow_hidden()

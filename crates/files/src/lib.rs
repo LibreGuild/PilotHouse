@@ -28,6 +28,7 @@ pub mod roots;
 mod search;
 mod symbol_search;
 pub mod symbols;
+mod tree_drag;
 mod tree_menu;
 pub mod unsaved;
 mod watcher;
@@ -35,6 +36,7 @@ mod watcher;
 pub use file_index::{FileList, index_files};
 pub use file_view::{Ask, AskIntent, FileView, FileViewEvent};
 pub use files_panel::{FileTree, FilesPanel, FilesPanelEvent};
+pub use tree_drag::DraggedFiles;
 pub use watcher::{FilesChanged, ProjectWatcher, WatcherHub};
 
 use gpui_kit::{App, KeyBinding, actions};

@@ -23,6 +23,11 @@ Crate: `ph-files`.
   - In a repository: *Stage* or *Unstage*, *Compare with Last Commit*, *Discard Changes…* (after asking), *Add to .gitignore* (new files), *File History* (each commit's change to the file).
   - *Select for Compare*, then *Compare with “name”* on another file: their differences.
   - *Collapse All*; on a workspace's folders, *Make primary* and *Remove from workspace*.
+- **Drag and drop in the tree** (`tree_drag.rs`), as in VS Code:
+  - Drag a row (or all the selected rows, when it is one of them) onto a folder, or onto a file to use its folder, to move it there; the folder under the pointer lights up, and a closed folder opens when the drag rests on it. Moving asks first (*Don't ask again* turns that off, setting `files.confirm_drag_move`); open tabs follow, and a file with unsaved changes has to be saved first.
+  - Hold ⌥ (Ctrl on Windows and Linux) when dropping to copy instead; a name already taken becomes *name copy*.
+  - Files and folders dragged from Finder or Explorer are copied in where they are dropped.
+  - A row dropped on the editor opens there; dropped on a chat, it is attached to the message.
   A toolbar at the top of the tree has the search field, *New file*, *New folder*, *Collapse all* and *Add a folder*. While searching, the back arrow (or Esc) returns to the tree. File operations are in `file_ops.rs` (tested), the Git ones in `ph_git::files`; *Compare with last commit* opens in the editor's [Changes tab](changes.md#diffs-in-the-editor).
 - **Large files** (`large/`): text files over 4 MB open in a read-only viewer that handles many gigabytes. It reads with positioned reads (no memory map, so a file truncated underneath cannot crash the app) and keeps only where every 1024th line starts, built in the background (a 1 GB, 10-million-line log indexes in a few seconds; scrolling works while it counts). Only the lines on screen are read. Find (smart case, both ways, across chunk seams), go to line, click/⇧-click to select lines and ⌘C to copy them (up to 32 MB), sideways scroll for long lines (cut at 4 KB), and *Follow* to stay at the end of a growing log.
 - **⌘P** (`quick_open.rs`, `fuzzy.rs`): fuzzy file finder over a background file index (`file_index.rs`, capped at 200k files). Scoring favours consecutive matches, word starts and the file name.

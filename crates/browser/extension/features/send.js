@@ -34,11 +34,18 @@ export async function flash(tabId, ok, title) {
   await action.setBadgeBackgroundColor({ tabId, color: ok ? '#16a34a' : '#dc2626' }).catch(() => {});
   await action.setBadgeText({ tabId, text: ok ? '✓' : '!' }).catch(() => {});
   if (title) await action.setTitle({ tabId, title }).catch(() => {});
-  setTimeout(() => {
-    // Back to the window-wide badge (chats waiting), set without a tab.
-    void action.setBadgeText({ tabId, text: null }).catch(() => {});
-    void action.setBadgeBackgroundColor({ tabId, color: null }).catch(() => {});
-    void action.setTitle({ tabId, title: null }).catch(() => {});
+  setTimeout(async () => {
+    // Back to the window-wide badge (chats waiting), set without a tab. Only
+    // the text can drop its tab's value (null); Chrome refuses null for the
+    // colour and the title, so they take the window-wide ones. The text goes
+    // last, so the window-wide count never shows in this colour.
+    const color = await action.getBadgeBackgroundColor({}).catch(() => null);
+    if (color) await action.setBadgeBackgroundColor({ tabId, color }).catch(() => {});
+    if (title) {
+      const global = await action.getTitle({}).catch(() => null);
+      if (global !== null) await action.setTitle({ tabId, title: global }).catch(() => {});
+    }
+    await action.setBadgeText({ tabId, text: null }).catch(() => {});
   }, 2500);
 }
 

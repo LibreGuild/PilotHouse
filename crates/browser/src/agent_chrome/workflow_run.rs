@@ -12,22 +12,32 @@ use crate::workflows::{self, Workflow, describe_step};
 const PAGE_WAIT: Duration = Duration::from_secs(15);
 
 impl AgentChrome {
-    /// The saved workflows, newest first (for Settings).
+    /// The saved workflows, newest first (for Settings). Reads the
+    /// database: read again only when [`Self::workflows_version`] changed.
     pub fn workflows(&self) -> Vec<Workflow> {
         workflows::list(&self.store)
     }
 
-    pub fn rename_workflow(&mut self, id: u64, name: &str, cx: &mut Context<Self>) -> Result<()> {
-        workflows::rename(&self.store, id, name)?;
+    /// Changes whenever a workflow is saved, renamed or deleted.
+    pub fn workflows_version(&self) -> u64 {
+        self.workflows_version
+    }
+
+    pub(super) fn workflows_changed(&mut self, cx: &mut Context<Self>) {
+        self.workflows_version += 1;
         cx.emit(AgentChromeEvent::Changed);
         cx.notify();
+    }
+
+    pub fn rename_workflow(&mut self, id: u64, name: &str, cx: &mut Context<Self>) -> Result<()> {
+        workflows::rename(&self.store, id, name)?;
+        self.workflows_changed(cx);
         Ok(())
     }
 
     pub fn delete_workflow(&mut self, id: u64, cx: &mut Context<Self>) -> Result<()> {
         workflows::delete(&self.store, id)?;
-        cx.emit(AgentChromeEvent::Changed);
-        cx.notify();
+        self.workflows_changed(cx);
         Ok(())
     }
 

@@ -90,6 +90,7 @@ pub fn duplicate(path: &Path) -> Result<PathBuf> {
 pub fn paste(sources: &[PathBuf], dir: &Path, cut: bool) -> Result<Vec<PathBuf>> {
     // A move is checked whole before anything moves: one refused halfway
     // would leave the others moved and their open tabs on the old paths.
+    let mut names = std::collections::HashSet::new();
     for source in sources {
         if dir.starts_with(source) {
             bail!("cannot put {} inside itself", source.display());
@@ -98,6 +99,10 @@ pub fn paste(sources: &[PathBuf], dir: &Path, cut: bool) -> Result<Vec<PathBuf>>
         let to = dir.join(&name);
         if cut && to != *source && to.symlink_metadata().is_ok() {
             bail!("{name} already exists in {}", dir.display());
+        }
+        // Two picked from different folders under one name.
+        if cut && !names.insert(name.clone()) {
+            bail!("two of these are named {name}");
         }
     }
     let mut pasted = Vec::new();
@@ -316,5 +321,20 @@ mod tests {
         // A move onto a taken name is refused.
         let again = create_file(&dir, "one.txt").unwrap();
         assert!(paste(&[again], &folder, true).is_err());
+    }
+
+    /// Two picked files of one name, from two folders: nothing moves (the
+    /// second would be refused after the first moved).
+    #[test]
+    fn a_move_of_two_same_names_moves_nothing() {
+        let dir = temp("same-names");
+        let a = create_file(&create_dir(&dir, "a").unwrap(), "x.txt").unwrap();
+        let b = create_file(&create_dir(&dir, "b").unwrap(), "x.txt").unwrap();
+        let into = create_dir(&dir, "into").unwrap();
+        assert!(paste(&[a.clone(), b.clone()], &into, true).is_err());
+        assert!(a.is_file() && b.is_file());
+        // Copies get free names instead.
+        let copied = paste(&[a, b], &into, false).unwrap();
+        assert_eq!(copied, [into.join("x.txt"), into.join("x copy.txt")]);
     }
 }

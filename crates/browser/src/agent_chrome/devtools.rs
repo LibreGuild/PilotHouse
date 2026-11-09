@@ -22,6 +22,9 @@ use crate::sourcemap::{SourceMap, tidy_source};
 pub(super) const OVERRIDES_KEEP: Duration = Duration::from_secs(120);
 /// The largest source map read, in bytes.
 const MAX_SOURCE_MAP: usize = 24 * 1024 * 1024;
+/// The longest mocked address pattern, in bytes: every request the page
+/// makes is matched against each pattern on the UI thread.
+const MAX_PATTERN: usize = 2048;
 
 /// A mocked response for requests whose address matches `pattern`.
 #[derive(Debug, Clone)]
@@ -38,6 +41,9 @@ pub(super) struct Mock {
     pub fail: Option<String>,
     /// Requests answered so far.
     pub hits: u32,
+    /// Why Chrome last refused this answer (the request then went on to
+    /// the network), for `list`.
+    pub error: Option<String>,
 }
 
 /// What the page holds in memory at one moment (Chrome lets extensions
@@ -76,12 +82,22 @@ impl AgentChrome {
                     cdp.call("Network.setCacheDisabled", json!({ "cacheDisabled": true }))
                         .await?;
                 }
-                guarded(&this, &page, cx, async {
+                let reloaded = guarded(&this, &page, cx, async {
                     cdp.call("Page.reload", json!({ "ignoreCache": no_cache }))
                         .await
                         .map(|_| ())
                 })
-                .await?;
+                .await;
+                // The user's tab keeps no disabled cache behind a failure.
+                if reloaded.is_err() && no_cache {
+                    cdp.call(
+                        "Network.setCacheDisabled",
+                        json!({ "cacheDisabled": false }),
+                    )
+                    .await
+                    .ok();
+                }
+                reloaded?;
                 wait_until_ready(&this, &page, cx).await;
                 // The largest paint and late shifts come after the load.
                 cx.background_executor().timer(Duration::from_secs(3)).await;
@@ -187,18 +203,32 @@ impl AgentChrome {
                 )),
                 _ => preset,
             };
+            // Each override is noted on the tab as soon as Chrome took it: a
+            // later step failing must not leave one that Stop and the idle
+            // let-go do not know to undo.
+            let applied = |what: String, cx: &mut AsyncApp| {
+                this.update(cx, |this, _| {
+                    if let Some(tab) = this.tab_mut(&page.target) {
+                        tab.emulating.retain(|known| *known != what);
+                        tab.emulating.push(what);
+                        tab.keep_until = Some(Instant::now() + OVERRIDES_KEEP);
+                    }
+                })
+            };
             if let Some((width, height, scale, mobile)) = size {
                 cdp.call(
                     "Emulation.setDeviceMetricsOverride",
                     json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }),
                 )
                 .await?;
-                cdp.call("Emulation.setTouchEmulationEnabled", json!({ "enabled": mobile }))
-                    .await?;
-                done.push(format!(
+                let what = format!(
                     "{} {width}×{height} at {scale}×",
                     device.unwrap_or(if mobile { "mobile" } else { "screen" })
-                ));
+                );
+                applied(what.clone(), cx)?;
+                cdp.call("Emulation.setTouchEmulationEnabled", json!({ "enabled": mobile }))
+                    .await?;
+                done.push(what);
             }
             if let Some(network) = spec["network"].as_str() {
                 let (offline, latency, down, up) = match network {
@@ -215,25 +245,32 @@ impl AgentChrome {
                 )
                 .await?;
                 done.push(format!("{network} network"));
+                applied(format!("{network} network"), cx)?;
             }
             if let Some(rate) = spec["cpu"].as_f64() {
                 let rate = rate.clamp(1.0, 20.0);
                 cdp.call("Emulation.setCPUThrottlingRate", json!({ "rate": rate }))
                     .await?;
                 done.push(format!("CPU {rate}× slower"));
+                applied(format!("CPU {rate}× slower"), cx)?;
             }
             let mut features = Vec::new();
+            let mut media = Vec::new();
             if let Some(scheme) = spec["color_scheme"].as_str() {
                 features.push(json!({ "name": "prefers-color-scheme", "value": scheme }));
-                done.push(format!("{scheme} colour scheme"));
+                media.push(format!("{scheme} colour scheme"));
             }
             if spec["reduced_motion"] == true {
                 features.push(json!({ "name": "prefers-reduced-motion", "value": "reduce" }));
-                done.push("reduced motion".into());
+                media.push("reduced motion".into());
             }
             if !features.is_empty() {
                 cdp.call("Emulation.setEmulatedMedia", json!({ "features": features }))
                     .await?;
+                for what in media {
+                    done.push(what.clone());
+                    applied(what, cx)?;
+                }
             }
             if let (Some(latitude), Some(longitude)) = (
                 spec["geolocation"]["latitude"].as_f64(),
@@ -245,26 +282,23 @@ impl AgentChrome {
                 )
                 .await?;
                 done.push(format!("location {latitude:.4}, {longitude:.4}"));
+                applied(format!("location {latitude:.4}, {longitude:.4}"), cx)?;
             }
             if let Some(zone) = spec["timezone"].as_str() {
                 cdp.call("Emulation.setTimezoneOverride", json!({ "timezoneId": zone }))
                     .await?;
                 done.push(format!("time zone {zone}"));
+                applied(format!("time zone {zone}"), cx)?;
             }
             if let Some(locale) = spec["locale"].as_str() {
                 cdp.call("Emulation.setLocaleOverride", json!({ "locale": locale }))
                     .await?;
                 done.push(format!("locale {locale}"));
+                applied(format!("locale {locale}"), cx)?;
             }
             if done.is_empty() {
                 bail!("say what to emulate: device (or width and height), network, cpu, color_scheme, reduced_motion, geolocation, timezone or locale; or reset");
             }
-            this.update(cx, |this, _| {
-                if let Some(tab) = this.tab_mut(&page.target) {
-                    tab.emulating = done.clone();
-                    tab.keep_until = Some(Instant::now() + OVERRIDES_KEEP);
-                }
-            })?;
             Ok(json!({ "text": format!(
                 "Emulating {}. It lasts while you work in this tab and ends by itself a few minutes after your last action (or with reset). Reload (chrome_navigate) if the page should load under it; chrome_screenshot shows it.",
                 done.join(", ")
@@ -301,6 +335,9 @@ impl AgentChrome {
                         .filter(|url| !url.trim().is_empty())
                         .context("`url`: the addresses to answer, with * for any part (`*/api/orders*`)")?
                         .to_string();
+                    if pattern.len() > MAX_PATTERN {
+                        bail!("`url` is too long ({MAX_PATTERN} characters at most)");
+                    }
                     let fail = spec["fail"].as_str().map(str::to_string);
                     if let Some(reason) = &fail
                         && !["failed", "timed_out", "offline", "aborted"].contains(&reason.as_str())
@@ -319,7 +356,7 @@ impl AgentChrome {
                             "text/plain; charset=utf-8".into()
                         }
                     });
-                    let headers = spec["headers"]
+                    let headers: Vec<(String, String)> = spec["headers"]
                         .as_object()
                         .map(|headers| {
                             headers
@@ -328,6 +365,12 @@ impl AgentChrome {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    // Chrome refuses a response with a bad header, and the
+                    // page's request would wait for it: refused here instead.
+                    check_header("Content-Type", &content_type)?;
+                    for (name, value) in &headers {
+                        check_header(name, value)?;
+                    }
                     let mock = Mock {
                         pattern,
                         method: spec["method"].as_str().map(|method| method.to_ascii_uppercase()),
@@ -338,6 +381,7 @@ impl AgentChrome {
                         delay_ms: spec["delay_ms"].as_u64().unwrap_or(0).min(60_000),
                         fail,
                         hits: 0,
+                        error: None,
                     };
                     this.update(cx, |this, _| {
                         let tab = this.tab_mut(&page.target)?;
@@ -388,8 +432,9 @@ impl AgentChrome {
         };
         mock.hits += 1;
         let mock = mock.clone();
+        let target = tab.target.clone();
         let delay = Duration::from_millis(mock.delay_ms);
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
@@ -415,7 +460,23 @@ impl AgentChrome {
                     .await
                 }
             };
-            call.ok();
+            // A paused request Chrome would not let the mock answer would
+            // wait forever: it goes on to the network, and `list` says why.
+            if let Err(err) = call {
+                cdp.call("Fetch.continueRequest", json!({ "requestId": id }))
+                    .await
+                    .ok();
+                let _ = this.update(cx, |this, _| {
+                    let known = this.tab_mut(&target).and_then(|tab| {
+                        tab.mocks.iter_mut().find(|known| {
+                            known.pattern == mock.pattern && known.method == mock.method
+                        })
+                    });
+                    if let Some(known) = known {
+                        known.error = Some(format!("{err:#}"));
+                    }
+                });
+            }
         })
         .detach();
     }
@@ -527,46 +588,83 @@ impl AgentChrome {
                     }
                 }
             }
-            let mapped = |text: &str| map_places(text, &maps, &roots);
-            let mut out = Vec::new();
-            for (text, source, stack) in &lines {
-                let mut entry = format!("[error] {}", mapped(text));
-                if let Some(source) = source {
-                    entry.push_str(&format!("  ({})", mapped(source)));
-                }
-                if let Some(stack) = stack {
-                    for frame in stack.lines().take(10) {
-                        entry.push_str(&format!("\n    {}", mapped(frame)));
+            // Mapping looks for each source in the workspace's folders: disk
+            // work, kept off the UI thread.
+            let text = cx
+                .background_spawn(async move {
+                    let mapped = |text: &str| map_places(text, &maps, &roots);
+                    let mut out = Vec::new();
+                    for (text, source, stack) in &lines {
+                        let mut entry = format!("[error] {}", mapped(text));
+                        if let Some(source) = source {
+                            entry.push_str(&format!("  ({})", mapped(source)));
+                        }
+                        if let Some(stack) = stack {
+                            for frame in stack.lines().take(10) {
+                                entry.push_str(&format!("\n    {}", mapped(frame)));
+                            }
+                        }
+                        out.push(entry);
                     }
-                }
-                out.push(entry);
-            }
-            let note = if maps.is_empty() {
-                "\n(No source maps were found: places are in the built scripts.)"
-            } else {
-                ""
-            };
-            Ok(json!({ "text": format!("{}{note}", out.join("\n")) }))
+                    let note = if maps.is_empty() {
+                        "\n(No source maps were found: places are in the built scripts.)"
+                    } else {
+                        ""
+                    };
+                    format!("{}{note}", out.join("\n"))
+                })
+                .await;
+            Ok(json!({ "text": text }))
         })
     }
 }
 
 /// Whether `url` matches a Chrome-style pattern (`*` any run, `?` one).
+/// Iterative, going back only to the latest `*`: at most pattern × address
+/// steps, whatever the pattern (it runs on the UI thread per request).
 pub(super) fn matches_pattern(pattern: &str, url: &str) -> bool {
-    fn go(pattern: &[u8], text: &[u8]) -> bool {
-        match pattern.split_first() {
-            None => text.is_empty(),
-            Some((b'*', rest)) => (0..=text.len()).any(|skip| go(rest, &text[skip..])),
-            Some((b'?', rest)) => !text.is_empty() && go(rest, &text[1..]),
-            Some((byte, rest)) => text.first() == Some(byte) && go(rest, &text[1..]),
+    let (pattern, text) = (pattern.as_bytes(), url.as_bytes());
+    let (mut p, mut t) = (0, 0);
+    // The latest `*`, and where in the text its run would end next.
+    let mut star: Option<(usize, usize)> = None;
+    while t < text.len() {
+        match pattern.get(p) {
+            Some(b'*') => {
+                star = Some((p, t));
+                p += 1;
+            }
+            Some(&byte) if byte == b'?' || byte == text[t] => {
+                p += 1;
+                t += 1;
+            }
+            _ => match star {
+                Some((at, from)) => {
+                    p = at + 1;
+                    t = from + 1;
+                    star = Some((at, from + 1));
+                }
+                None => return false,
+            },
         }
     }
-    // Collapse runs of `*`, which would only slow the match.
-    let mut pattern = pattern.to_string();
-    while pattern.contains("**") {
-        pattern = pattern.replace("**", "*");
+    pattern[p..].iter().all(|&byte| byte == b'*')
+}
+
+/// A mocked response header Chrome takes: a token name (RFC 9110) and a
+/// value without line breaks.
+fn check_header(name: &str, value: &str) -> Result<()> {
+    const SEPARATORS: &[u8] = b"!#$%&'*+-.^_`|~";
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || SEPARATORS.contains(&byte))
+    {
+        bail!("`{name}` is not a header name (letters, digits and !#$%&'*+-.^_`|~ only)");
     }
-    go(pattern.as_bytes(), url.as_bytes())
+    if value.contains(['\r', '\n', '\0']) {
+        bail!("the `{name}` header's value has a line break in it");
+    }
+    Ok(())
 }
 
 fn mocks_text(mocks: &[Mock]) -> String {
@@ -590,8 +688,13 @@ fn mocks_text(mocks: &[Mock]) -> String {
             } else {
                 String::new()
             };
+            let error = mock
+                .error
+                .as_ref()
+                .map(|error| format!("; Chrome refused the last answer, so that request went to the network: {error}"))
+                .unwrap_or_default();
             format!(
-                "- {} {} → {answer}{delay}; answered {} time(s)",
+                "- {} {} → {answer}{delay}; answered {} time(s){error}",
                 mock.method.as_deref().unwrap_or("any"),
                 mock.pattern,
                 mock.hits
@@ -632,7 +735,7 @@ fn map_places(text: &str, maps: &HashMap<String, SourceMap>, roots: &[PathBuf]) 
             continue;
         };
         let source = tidy_source(&original.source);
-        let in_workspace = roots.iter().any(|root| root.join(&source).is_file());
+        let in_workspace = in_workspace(&source, roots);
         let replacement = format!(
             "{source}:{}:{}{}",
             original.line,
@@ -648,6 +751,31 @@ fn map_places(text: &str, maps: &HashMap<String, SourceMap>, roots: &[PathBuf]) 
     out
 }
 
+/// Whether `source` (a source map's, so the page's to choose) is a file
+/// inside one of `roots`. Paths that climb out (`..`) are not, and an
+/// absolute one only when it lies under a root: otherwise a page could ask
+/// whether any file on the computer exists.
+fn in_workspace(source: &str, roots: &[PathBuf]) -> bool {
+    use std::path::{Component, Path};
+    let path = Path::new(source);
+    if path
+        .components()
+        .any(|part| matches!(part, Component::ParentDir))
+    {
+        return false;
+    }
+    // A drive (`C:x`) or root replaces the root it is joined to.
+    if matches!(
+        path.components().next(),
+        Some(Component::Prefix(_) | Component::RootDir)
+    ) {
+        return roots
+            .iter()
+            .any(|root| path.starts_with(root) && path.is_file());
+    }
+    roots.iter().any(|root| root.join(path).is_file())
+}
+
 /// The source map of the script at `url`, read by the page itself (its
 /// own address, cookies and permissions), when it names one.
 async fn source_map_of(cdp: &Cdp, url: &str) -> Result<Option<String>> {
@@ -661,7 +789,9 @@ async fn source_map_of(cdp: &Cdp, url: &str) -> Result<Option<String>> {
   if (where.startsWith('data:')) {{
     const comma = where.indexOf(',');
     const data = where.slice(comma + 1);
-    return where.slice(0, comma).endsWith(';base64') ? atob(data) : decodeURIComponent(data);
+    if (data.length > {MAX_SOURCE_MAP} * 3) return null;
+    const body = where.slice(0, comma).endsWith(';base64') ? atob(data) : decodeURIComponent(data);
+    return body.length > {MAX_SOURCE_MAP} ? null : body;
   }}
   const map = await fetch(where, {{ credentials: 'include' }});
   if (!map.ok) return null;
@@ -1125,6 +1255,51 @@ mod tests {
         assert!(!matches_pattern("*/api/users", "https://x.dev/api/orders"));
         assert!(matches_pattern("https://x.dev/v?/a", "https://x.dev/v2/a"));
         assert!(matches_pattern("***", ""));
+        assert!(matches_pattern("*", "anything"));
+        assert!(!matches_pattern("a*", ""));
+        assert!(matches_pattern("*a*b", "xaxxab"));
+        assert!(!matches_pattern("*a*b", "xaxxa"));
+        assert!(!matches_pattern("?", ""));
+    }
+
+    #[test]
+    fn a_pathological_pattern_is_quick() {
+        // Exponential for a backtracking matcher.
+        let pattern = format!("{}b", "*a".repeat(40));
+        let url = "a".repeat(4000);
+        let started = std::time::Instant::now();
+        assert!(!matches_pattern(&pattern, &url));
+        assert!(matches_pattern(&pattern, &format!("{url}b")));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn sources_count_only_inside_the_workspace() {
+        let root = std::env::temp_dir().join(format!("ph-sources-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/App.tsx"), "").unwrap();
+        let roots = vec![root.clone()];
+        assert!(in_workspace("src/App.tsx", &roots));
+        assert!(in_workspace(
+            &root.join("src/App.tsx").display().to_string(),
+            &roots
+        ));
+        assert!(!in_workspace("src/../src/App.tsx", &roots));
+        assert!(!in_workspace("src/missing.ts", &roots));
+        // Exists, but outside every root.
+        let outside = std::env::current_exe().unwrap();
+        assert!(!in_workspace(&outside.display().to_string(), &roots));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mock_headers_are_checked() {
+        assert!(check_header("X-Request-Id", "abc").is_ok());
+        assert!(check_header("Set-Cookie", "a=b; Path=/").is_ok());
+        assert!(check_header("", "x").is_err());
+        assert!(check_header("Bad Name", "x").is_err());
+        assert!(check_header("X-Evil", "a\r\nInjected: 1").is_err());
+        assert!(check_header("X:Colon", "x").is_err());
     }
 
     #[test]

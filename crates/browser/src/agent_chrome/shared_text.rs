@@ -29,11 +29,23 @@ impl AgentChrome {
             Err(err) => return Task::ready(Err(err)),
         };
         let agents: Vec<String> = self.tabs.iter().map(|tab| tab.target.clone()).collect();
-        cx.spawn(async move |_, _| {
+        cx.spawn(async move |this, cx| {
             let tabs = shared_tabs(&browser, &agents).await?;
             let mut texts = Vec::new();
             for tab in tabs.into_iter().take(MAX_TABS) {
                 let reading = read(&browser, &tab.target).await;
+                // An agent may have taken the tab while it was read
+                // (chrome_tabs take): the debugger is its now, and letting
+                // go would end the agent's session.
+                let taken = this
+                    .read_with(cx, |this, _| this.tab(&tab.target).is_some())
+                    .unwrap_or(false);
+                if !taken && let Ok(id) = tab_id(&tab.target) {
+                    browser
+                        .call("PilotHouse.detach", json!({ "tabId": id }))
+                        .await
+                        .ok();
+                }
                 let markdown = match reading {
                     Ok(markdown) => markdown,
                     Err(err) => format!("(This tab could not be read: {err:#})"),
@@ -49,14 +61,15 @@ impl AgentChrome {
     }
 }
 
-/// One tab's text: attached, read in an isolated world, let go.
+/// One tab's text: attached and read in an isolated world. The caller lets
+/// go of the tab, unless an agent took it meanwhile.
 async fn read(browser: &Cdp, target: &str) -> Result<String> {
     browser
         .call("PilotHouse.attach", json!({ "tabId": tab_id(target)? }))
         .await
         .context("could not reach the tab")?;
     let page = browser.for_session(target);
-    let result = async {
+    async {
         let tree = page.call("Page.getFrameTree", json!({})).await?;
         let frame = tree["frameTree"]["frame"]["id"]
             .as_str()
@@ -95,10 +108,5 @@ async fn read(browser: &Cdp, target: &str) -> Result<String> {
         }
         anyhow::Ok(markdown)
     }
-    .await;
-    browser
-        .call("PilotHouse.detach", json!({ "tabId": tab_id(target)? }))
-        .await
-        .ok();
-    result
+    .await
 }

@@ -52,6 +52,10 @@
 
   const clean = (s) => (s || '').trim().replace(/\s+/g, ' ').slice(0, 80);
 
+  /** Fields someone types into; their value is what was typed, never a name for them. */
+  const typedInto = (el) => el.localName === 'textarea'
+    || (el.localName === 'input' && !['button', 'submit', 'reset', 'image', 'checkbox', 'radio'].includes(el.type));
+
   /** What a person would call the element: its label, words or role. */
   const labelOf = (el) => {
     const aria = el.getAttribute('aria-label');
@@ -59,14 +63,44 @@
     if (el.labels && el.labels[0]) return clean(el.labels[0].innerText);
     const placeholder = el.getAttribute('placeholder');
     if (placeholder) return clean(placeholder);
+    if (typedInto(el)) return clean(el.title || el.getAttribute('name') || el.id || '');
     return clean(el.innerText || el.value || el.title || el.alt || el.getAttribute('name') || '');
+  };
+
+  /** Fields that were passwords at some point: a "show password" toggle
+   * makes them text before their change is noted. */
+  const wasPassword = new WeakSet();
+  const notePassword = (event) => {
+    const target = event.target;
+    if (target instanceof Element && target.localName === 'input' && target.type === 'password') wasPassword.add(target);
+  };
+
+  const SECRET_NAME = /pass|pwd|secret|token|otp|card|cc-|cvc|cvv|iban|api.?key/i;
+
+  /** A card number: 13 to 19 digits that pass the Luhn check. */
+  const cardNumber = (value) => {
+    const digits = String(value || '').replace(/[\s-]/g, '');
+    if (!/^\d{13,19}$/.test(digits)) return false;
+    let sum = 0;
+    for (let i = 0; i < digits.length; i += 1) {
+      let digit = Number(digits[digits.length - 1 - i]);
+      if (i % 2 === 1) {
+        digit *= 2;
+        if (digit > 9) digit -= 9;
+      }
+      sum += digit;
+    }
+    return sum % 10 === 0;
   };
 
   /** Fields whose value is never kept. */
   const secret = (el) => {
     const type = (el.getAttribute('type') || '').toLowerCase();
     const auto = (el.getAttribute('autocomplete') || '').toLowerCase();
-    return type === 'password' || /cc-|one-time-code|current-password|new-password/.test(auto);
+    if (type === 'password' || wasPassword.has(el)) return true;
+    if (/cc-|one-time-code|current-password|new-password/.test(auto)) return true;
+    if ([auto, el.getAttribute('name') || '', el.id || ''].some((text) => SECRET_NAME.test(text))) return true;
+    return cardNumber(el.value);
   };
 
   /** The element a click means: the button or link around what was hit. */
@@ -144,6 +178,8 @@
     start({ label, startedAt, stopLabel }) {
       if (state) return;
       const listen = () => {
+        addEventListener('focusin', notePassword, true);
+        addEventListener('input', notePassword, true);
         addEventListener('click', onClick, true);
         addEventListener('change', onChange, true);
         addEventListener('keydown', onKey, true);
@@ -170,6 +206,8 @@
       if (state.timer) clearInterval(state.timer);
       state.host?.remove();
       state = null;
+      removeEventListener('focusin', notePassword, true);
+      removeEventListener('input', notePassword, true);
       removeEventListener('click', onClick, true);
       removeEventListener('change', onChange, true);
       removeEventListener('keydown', onKey, true);

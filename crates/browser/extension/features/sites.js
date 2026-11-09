@@ -3,13 +3,16 @@
 // Chrome has granted the extension those sites (the panel asks when the
 // user turns one on; removing the site's access turns it off).
 
-import { ask } from '../lib/link.js';
+import { ask, isObject } from '../lib/link.js';
 import { onSettings, settings, update } from '../lib/settings.js';
 
+/** `origins` are what Chrome grants and runs the buttons on; `host` says
+ * whether a page's host is the site, matched exactly (a pattern over the
+ * whole address would take `https://evil.example/a.atlassian.net/`). */
 export const SITES = Object.freeze({
-  github: { name: 'GitHub', origins: ['https://github.com/*'] },
-  jira: { name: 'Jira', origins: ['https://*.atlassian.net/*'] },
-  linear: { name: 'Linear', origins: ['https://linear.app/*'] },
+  github: { name: 'GitHub', origins: ['https://github.com/*'], host: (host) => host === 'github.com' },
+  jira: { name: 'Jira', origins: ['https://*.atlassian.net/*'], host: (host) => host.endsWith('.atlassian.net') },
+  linear: { name: 'Linear', origins: ['https://linear.app/*'], host: (host) => host === 'linear.app' },
 });
 
 const SCRIPT = 'pilothouse-site-buttons';
@@ -37,19 +40,28 @@ async function sync() {
   }]).catch(() => {});
 }
 
-/** A button pressed on one of those sites: PilotHouse does it. */
+/** A button pressed on one of those sites: PilotHouse does it. The page's
+ * address is the one Chrome gives for the frame that sent it, not the one
+ * the message says. */
 export async function act(action, sender) {
-  const url = sender.tab?.url ?? '';
+  let url = null;
+  try {
+    url = new URL(sender.url ?? '');
+  } catch (error) {
+    // No address: no site.
+  }
   const chosen = await settings();
-  const allowed = Object.entries(SITES)
-    .some(([key, site]) => chosen.sites[key] && site.origins.some((origin) => matches(origin, url)));
-  if (!allowed) throw new Error('PilotHouse’s buttons are not turned on for this site.');
-  return ask('siteAction', action);
-}
-
-function matches(origin, url) {
-  const pattern = new RegExp(`^${origin.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
-  return pattern.test(url);
+  const site = url?.protocol === 'https:'
+    ? Object.keys(SITES).find((key) => chosen.sites[key] && SITES[key].host(url.hostname))
+    : undefined;
+  if (!site || !isObject(action)) throw new Error('PilotHouse’s buttons are not turned on for this site.');
+  const given = { ...action, url: url.href, host: url.hostname };
+  if (given.kind === 'review') {
+    const pull = site === 'github' ? /^\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(url.pathname) : null;
+    if (!pull) throw new Error('This page is not a pull request.');
+    Object.assign(given, { owner: pull[1], repo: pull[2], number: Number(pull[3]) });
+  }
+  return ask('siteAction', given);
 }
 
 export function install() {

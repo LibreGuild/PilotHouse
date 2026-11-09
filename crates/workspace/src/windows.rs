@@ -44,6 +44,15 @@ pub(crate) fn window_showing(id: ProjectId, cx: &mut App) -> Option<AnyWindowHan
     cx.try_global::<Windows>()?.shown_in.get(&id).copied()
 }
 
+/// The root workspace of window `handle`, while it is open.
+pub(crate) fn workspace_of(handle: AnyWindowHandle, cx: &App) -> Option<Entity<Workspace>> {
+    cx.try_global::<Windows>()?
+        .open
+        .iter()
+        .find(|(open, _)| *open == handle)
+        .and_then(|(_, workspace)| workspace.upgrade())
+}
+
 /// The other window that shows workspace `id`, if it is still open.
 pub(crate) fn shown_elsewhere(
     id: ProjectId,

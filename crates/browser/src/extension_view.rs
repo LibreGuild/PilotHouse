@@ -27,8 +27,11 @@ pub struct ChromeExtensionView {
     registration: Registration,
     /// What the last Set up or Remove said.
     message: Option<(bool, SharedString)>,
-    /// Saved workflows (read again when the extension saves one).
+    /// Saved workflows, and the version they were read at: read again only
+    /// when one is saved, renamed or deleted, not on each of the many
+    /// notifications of the agents' tabs.
     workflows: Vec<Workflow>,
+    workflows_version: u64,
     /// Workflows whose steps are shown.
     open_steps: HashSet<u64>,
     /// The workflow being renamed, and its new name.
@@ -47,17 +50,25 @@ impl ChromeExtensionView {
         }
         let chrome = AgentChrome::global(cx).map(|chrome| {
             cx.observe(&chrome, |this: &mut Self, chrome, cx| {
-                this.workflows = chrome.read(cx).workflows();
+                let chrome = chrome.read(cx);
+                if chrome.workflows_version() != this.workflows_version {
+                    this.workflows_version = chrome.workflows_version();
+                    this.workflows = chrome.workflows();
+                }
                 cx.notify();
             })
         });
-        let workflows = AgentChrome::global(cx)
-            .map(|chrome| chrome.read(cx).workflows())
+        let (workflows, workflows_version) = AgentChrome::global(cx)
+            .map(|chrome| {
+                let chrome = chrome.read(cx);
+                (chrome.workflows(), chrome.workflows_version())
+            })
             .unwrap_or_default();
         Self {
             registration: registration(),
             message: None,
             workflows,
+            workflows_version,
             open_steps: HashSet::new(),
             renaming: None,
             deleting: None,
@@ -395,9 +406,14 @@ impl Render for ChromeExtensionView {
                                     .child(headline),
                             ),
                     )
-                    .child(div().text_xs().text_color(muted).child(
-                        "Agents can use your own Chrome, with your sign-ins, but only the tabs in its PilotHouse tab group: tabs they open, and tabs you put in the group (in the PilotHouse panel: “Let agents use this tab”). And you can send pages, screenshots, elements and bug reports from Chrome to a chat. Your other tabs are read only when you ask. Without the extension, agents use PilotHouse's built-in browser.",
-                    )),
+                    .child(div().text_xs().text_color(muted).child(format!(
+                        "Agents can use your own Chrome, with your sign-ins, but only the tabs in its PilotHouse tab group: tabs they open, and tabs you put in the group (in the PilotHouse panel: “Let agents use this tab”). And you can send pages, screenshots, elements and bug reports from Chrome to a chat. Your other tabs are read only when you ask.{}",
+                        if ph_brand::enabled(ph_brand::Feature::Browser) {
+                            concat!(" Without the extension, agents use ", ph_brand::name!(), "'s built-in browser.")
+                        } else {
+                            ""
+                        }
+                    ))),
             )
             .child(
                 v_flex()

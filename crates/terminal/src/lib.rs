@@ -45,6 +45,11 @@ actions!(
         /// A new shell beside the one in front, both shown (⌘\; Ctrl+Shift+5
         /// off macOS, as in VS Code).
         TerminalSplit,
+        /// Select everything, the history too (the right-click menu).
+        TerminalSelectAll,
+        /// Clear the screen and the history (the right-click menu; no key,
+        /// since ⌘K is the command palette everywhere).
+        TerminalClear,
     ]
 );
 
