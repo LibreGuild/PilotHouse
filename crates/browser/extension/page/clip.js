@@ -79,9 +79,10 @@
         case 'a': {
           const inner = inlineOf(child, writer, live).trim();
           const href = child.getAttribute('href');
-          text += href && !href.startsWith('javascript:') && inner
-            ? `[${inner}](${absolute(href)})`
-            : inner;
+          // Only links a reader can follow safely: no javascript:, data: or
+          // other schemes that run or carry content.
+          const url = href ? absolute(href) : '';
+          text += /^(https?|mailto):/i.test(url) && inner ? `[${inner}](${url})` : inner;
           break;
         }
         case 'img': {
@@ -142,7 +143,7 @@
 
   const tableOf = (table, writer) => {
     const rows = [...table.querySelectorAll('tr')].slice(0, 200).map((row) =>
-      [...row.children].map((cell) => inlineOf(cell, writer, false).trim().replace(/\|/g, '\\|')));
+      [...row.children].map((cell) => inlineOf(cell, writer, false).trim().replace(/\\/g, '\\\\').replace(/\|/g, '\\|')));
     if (!rows.length) return '';
     const width = Math.max(...rows.map((row) => row.length));
     const pad = (row) => [...row, ...Array(width - row.length).fill('')];
