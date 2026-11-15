@@ -58,8 +58,10 @@ fn instructions() -> String {
         text.push_str(concat!(
             "\nBuilt-in browser: ",
             ph_brand::name!(),
-            "'s own, shown to the user in the app (logins persist). Use \
-            browser_open, then browser_snapshot to find elements and their selectors, \
+            "'s own, shown to the user in the app (logins persist). It is what the user means \
+            by the built-in, in-app or inbuilt browser, and only this server's browser_ tools \
+            reach it: another server's browser, REPL or Playwright tool drives some other \
+            browser, or fails. Use browser_open, then browser_snapshot to find elements and their selectors, \
             browser_click / browser_type / browser_press to act, and browser_screenshot to check \
             the result visually. browser_logs shows console errors and failed requests."
         ));

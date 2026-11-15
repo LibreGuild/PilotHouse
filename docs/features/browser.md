@@ -10,7 +10,7 @@ Which browser: the one chosen in the pane (setting `browser.chrome_path`), else 
 2. **DevTools over a pipe.** PilotHouse talks to Chrome through `--remote-debugging-pipe` (file descriptors 3 and 4), attaches to the page with a flat session, and enables Page, Runtime, Log and Network. There is no localhost port that other processes could use, and Chrome exits on its own when PilotHouse does, even after a crash.
 3. **Frames.** While the pane is visible, `Page.startScreencast` sends JPEG frames sized to the pane (at the screen's scale). Each frame is decoded off the UI thread and acked after decoding, so only one frame is ever in flight. Hidden panes and other projects stream nothing.
 4. **Input.** Clicks, drags, the wheel and keys go through `Input.dispatch*Event`. ⌘V pastes, and ⌘C/⌘X copy the page selection through the system clipboard.
-5. **Idle stop.** A browser that is not shown and not used by an agent for 10 minutes is stopped to free its memory. The next use starts it again with the same logins.
+5. **Idle stop.** A browser that is not shown and not used by an agent for 10 minutes is stopped to free its memory. The next use starts it again with the same logins. **Stop the browser** in the ⋯ menu stops it at once (also while it is starting); the pane then says it is stopped, with **Start the browser**.
 6. **One page.** Links and `window.open` stay in the pane, and any other page a site opens is closed.
 7. **Dialogs.** `confirm()`, `prompt()` and "leave page" dialogs appear as a card in the pane for you to answer. With the pane hidden they are cancelled (alerts are acknowledged), so an agent never confirms one by itself. Every dialog is logged.
 

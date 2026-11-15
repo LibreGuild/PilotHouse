@@ -46,6 +46,9 @@ impl Progress {
 #[derive(Debug, Clone)]
 pub struct Exported {
     pub path: PathBuf,
+    /// The file asked for, when it could not be replaced (it is open
+    /// somewhere) and the result was saved beside it as `path`.
+    pub beside: Option<PathBuf>,
     pub bytes: u64,
     pub size: (u32, u32),
     pub seconds: f64,
@@ -178,14 +181,17 @@ pub fn export(
         let _ = std::fs::remove_file(&partial);
         return Err(err);
     }
-    std::fs::rename(&partial, out).map_err(|err| {
+    let saved = media::settle(&partial, out).map_err(|err| {
         let _ = std::fs::remove_file(&partial);
         anyhow::anyhow!("could not save {}: {err}", out.display())
     })?;
     progress.set(1.);
     Ok(Exported {
-        path: out.to_path_buf(),
-        bytes: std::fs::metadata(out).map(|meta| meta.len()).unwrap_or(0),
+        bytes: std::fs::metadata(&saved)
+            .map(|meta| meta.len())
+            .unwrap_or(0),
+        beside: (saved != out).then(|| out.to_path_buf()),
+        path: saved,
         size: plan.size,
         seconds: plan.seconds,
     })

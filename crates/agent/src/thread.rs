@@ -2433,7 +2433,7 @@ pub(crate) fn pilothouse_mcp_server(
     agent_id: &str,
     project_id: ProjectId,
 ) -> Option<McpServer> {
-    let exe = std::env::current_exe().ok()?;
+    let exe = ph_store::paths::helper_program("mcp").ok()?;
     let mut env = Vec::new();
     if let Some(dir) = std::env::var_os(ph_store::paths::DATA_DIR_ENV) {
         env.push(EnvVariable::new(

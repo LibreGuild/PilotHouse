@@ -224,7 +224,7 @@ impl StorageView {
                     .accessibility_label("Show the folder")
                     .on_click({
                         let path = item.path.clone();
-                        move |_, _, cx| cx.reveal_path(&path)
+                        move |_, _, cx| ph_ui::platform::reveal(&path, cx)
                     }),
             )
             .children(action.map(|label| {

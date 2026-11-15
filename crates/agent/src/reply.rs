@@ -222,8 +222,11 @@ impl Render for Reply {
                 match part {
                     Part::Markdown { view, .. } => {
                         let on_link = self.on_link.clone();
-                        TextView::new(view)
+                        let text = TextView::new(view)
                             .selectable(true)
+                            // Copied as plain text and as HTML: a table or
+                            // a list pastes elsewhere as one.
+                            .selection_format(gpui_kit::base::text::SelectionFormat::Source)
                             .w_full()
                             .code_block_actions(ph_ui::markdown::code_actions)
                             // An agent wrote it: no files on this computer, and
@@ -232,7 +235,8 @@ impl Render for Reply {
                             .on_link_click(move |url, _, window, cx| match &on_link {
                                 Some(on_link) => on_link(url, window, cx),
                                 None => crate::entry_view::open_link(url, cx),
-                            })
+                            });
+                        ph_ui::rich_copy::on(gpui_kit::div().w_full().child(text))
                             .into_any_element()
                     }
                     Part::Diagram(diagram) => diagram.clone().into_any_element(),

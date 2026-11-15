@@ -43,7 +43,7 @@ Everything at once, so nothing needs switching to be seen (`sidebar.rs`):
 
 ## Agents
 
-`agents_board.rs`: the title bar's **Agents** pop-up (⌘⇧A) lists every chat loaded in this run of PilotHouse, from every workspace and the Chats space, in sections: **Needs you**, **Working**, **Finished** (news not seen, or a failed turn) and **Recent** (the newest eight others). A row shows the state glyph, title and age; the workspace (its colour dot) and the agent; and what the agent is doing, asks, or said last. A row opens its chat in its workspace.
+`agents_board.rs`: the title bar's **Agents** pop-up (⌘⇧A) lists every chat loaded in this run of PilotHouse, from every workspace and the Chats space (the list scrolls within the window's height), in sections: **Needs you**, **Working**, **Finished** (news not seen, or a failed turn) and **Recent** (the newest eight others). A row shows the state glyph, title and age; the workspace (its colour dot) and the agent; and what the agent is doing, asks, or said last. A row opens its chat in its workspace.
 
 ## Notifications
 
@@ -64,7 +64,7 @@ The setup sees `PILOTHOUSE_PORT`, a port of the task's own (4100, 4110, …) for
 
 ## Status bar
 
-Left: the branch (ahead/behind, an operation under way; opens the branch picker), **CI** for the commit checked out (a check when every GitHub check passed, a spinner while some run, red with the count when one failed; the tooltip names them, a click opens the failed or running one), the folder, the network drive, and the **ports** the workspace's processes listen on (opens the Run tool). `signals.rs` reads ports every 10 seconds and CI every minute or when HEAD moves, only for the workspace on screen and not on network drives; the Android bridge and emulator are left out (the Devices tool has them). Right: agent limits, the detected stack and the version.
+Left: the branch (ahead/behind, an operation under way; opens the branch picker), **CI** for the commit checked out (a check when every GitHub check passed, a spinner while some run, red with the count when one failed; the tooltip names them, a click opens the failed or running one), the folder, the network drive, and the **ports** the workspace's processes listen on (opens the Run tool). `signals.rs` reads ports every 10 seconds and CI every minute or when HEAD moves (seen in the Git model, without running Git), only for the workspace on screen and not on network drives; while PilotHouse is behind another program both are read once a minute, and ports not at all on Windows, where the system does not say which folder a listener was started in; the Android bridge and emulator are left out (the Devices tool has them). Right: agent limits, the detected stack and the version.
 
 ## Agent limits
 
@@ -139,7 +139,7 @@ Stored in the `settings` table:
 
 `open.rs`, `file_window.rs`, `shell_integration.rs`.
 
-- **`pilothouse <path>...`**: a folder opens as a workspace (the listed one if it is already there), a file in a workspace's folder opens in its editor, and any other file opens in a **window of its own**: just the file in the editor (or the large-file viewer), like a notepad, with **Open folder** to make its folder a workspace. Opening the same file again focuses its window.
+- **`pilothouse <path>...`**: a folder opens as a workspace (the listed one if it is already there), a file in a workspace's folder opens in its editor, and any other file opens in a **window of its own**: just the file in the editor (or the large-file viewer), like a notepad, with **Open folder** to make its folder a workspace. What the file's kind offers is in a bar under the title: **Edit** for a picture, a video or a PowerPoint deck (Studio, with no workspace needed), the Markdown views, *Format* for JSON, *Open in Default App*. Opening the same file again focuses its window.
 - **One app at a time**: a second launch with paths sends them to the running app over the control socket (`app.open`) and exits, so there is never a second copy of the window or the agents.
 - **File manager**: *Settings → Features → System* adds "Open with PilotHouse" for the current user only. Windows: Explorer verbs under `HKCU\Software\Classes` for folders, folder backgrounds and files (on Windows 11 under *Show more options*). Linux: a `.desktop` entry in `~/.local/share/applications` (folders and text files). macOS: Finder's *Open With* and `open -a PilotHouse <path>` come from the app bundle's document types; the app receives them as file URLs (`on_open_urls`).
 

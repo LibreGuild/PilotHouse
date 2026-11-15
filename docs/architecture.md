@@ -90,7 +90,7 @@ Agents run as child processes speaking the [Agent Client Protocol](https://agent
 
 ## Agents → PilotHouse (MCP)
 
-Every new agent session is given one MCP server: this same binary in `pilothouse mcp` mode. It speaks MCP on stdio and forwards tool calls to the running app over the [control socket](control-socket.md). The app owns all state; the bridge holds none. Tools: board, browser, devices and ports (see each feature page). Screenshots come back as MCP image content.
+Every new agent session is given one MCP server: this same binary in `pilothouse mcp` mode. The helper processes the app starts (this one, and the `agy-acp` bridge) run under a name of their own, `pilothouse-mcp` and `pilothouse-agy-acp`, so Task Manager and Activity Monitor tell them from the app: a hard link to the program in `<data dir>/helpers/<build>/` (`ph_store::paths::helper_program`), made by the app only and tried once (`--version`), or the program itself where a link cannot be made or does not start (another disk, a policy on where programs may run). It speaks MCP on stdio and forwards tool calls to the running app over the [control socket](control-socket.md). The app owns all state; the bridge holds none. Tools: board, browser, devices and ports (see each feature page). Screenshots come back as MCP image content.
 
 Slow tools (a page load, an adb call) use async control handlers, so the UI never waits on them.
 

@@ -672,7 +672,7 @@ impl SlidesEditor {
             cx.spawn_in(window, async move |_, cx| {
                 let result = writing.await;
                 _ = cx.update(|window, cx| match result {
-                    Ok(written) => cx.reveal_path(&written),
+                    Ok(written) => ph_ui::platform::reveal(&written, cx),
                     Err(err) => window.push_notification(
                         Notification::error(format!("Not exported: {err:#}")),
                         cx,

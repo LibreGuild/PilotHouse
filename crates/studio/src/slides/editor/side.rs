@@ -402,7 +402,7 @@ impl SlidesEditor {
             RefKind::Other if ph_ui::platform::opens_safely(&reference.path) => {
                 cx.open_with_system(&reference.path)
             }
-            RefKind::Other => cx.reveal_path(&reference.path),
+            RefKind::Other => ph_ui::platform::reveal(&reference.path, cx),
         }
     }
 
@@ -956,10 +956,9 @@ impl SlidesEditor {
                                             }),
                                         )
                                     })
-                                    .item(
-                                        PopupMenuItem::new(super::reveal_label())
-                                            .on_click(move |_, _, cx| cx.reveal_path(&path)),
-                                    );
+                                    .item(PopupMenuItem::new(super::reveal_label()).on_click(
+                                        move |_, _, cx| ph_ui::platform::reveal(&path, cx),
+                                    ));
                                 menu
                             },
                         ),

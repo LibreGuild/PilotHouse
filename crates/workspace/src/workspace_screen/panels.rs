@@ -75,6 +75,7 @@ impl WorkspaceScreen {
             },
         ));
         self.changes.insert(self.git_folder, changes.clone());
+        self.update_live_panes(cx);
         changes
     }
 

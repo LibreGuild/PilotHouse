@@ -1105,9 +1105,10 @@ impl Encoder for MfEncoder {
         self.feed(f64::INFINITY)?;
         let writer = self.writer.take().context("the video is already written")?;
         let finished = unsafe { writer.Finalize() };
-        if finished.is_err() {
-            close(&writer);
-        }
+        // Shut either way: a finished writer that is only released may
+        // keep the file open a while, and the file is moved to its name
+        // next (which then failed with "access is denied").
+        close(&writer);
         finished.map_err(|err| failed("finishing the video failed", err))
     }
 

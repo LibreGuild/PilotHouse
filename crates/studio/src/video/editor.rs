@@ -258,11 +258,25 @@ impl VideoEditor {
             // An export finished: say how it went, once.
             if let Some(outcome) = doc.update(cx, |doc, _| doc.finished.take()) {
                 let notification = match outcome {
-                    Ok(done) => Notification::success(format!(
-                        "Saved {} ({}).",
-                        done.path.file_name().unwrap_or_default().to_string_lossy(),
-                        crate::control::kilobytes(done.bytes as usize)
-                    )),
+                    Ok(done) => {
+                        let name = |path: &std::path::Path| {
+                            path.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned()
+                        };
+                        let size = crate::control::kilobytes(done.bytes as usize);
+                        match &done.beside {
+                            Some(asked) => Notification::warning(format!(
+                                "{} is open somewhere and could not be replaced: saved as {} ({size}).",
+                                name(asked),
+                                name(&done.path)
+                            )),
+                            None => {
+                                Notification::success(format!("Saved {} ({size}).", name(&done.path)))
+                            }
+                        }
+                    }
                     Err(err) if err == "Stopped." => Notification::info("Export stopped."),
                     Err(err) => Notification::error(format!("Not exported: {err}")),
                 };

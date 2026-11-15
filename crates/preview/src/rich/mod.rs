@@ -38,7 +38,7 @@ use gpui_kit::{
 };
 
 use crate::PreviewEvent;
-use crate::markdown::{READING_WIDTH, markdown_view};
+use crate::markdown::{READING_WIDTH, markdown_text};
 use blocks::{Block, Document, Kind};
 use table::Table;
 
@@ -324,8 +324,10 @@ impl RichEditor {
         let Some(copied) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
+        // As Markdown for where text is pasted, and as HTML for where
+        // formatting is (a wiki, a mail, a document).
         if let Some(markdown) = copy::as_markdown(&self.document.text(), &copied) {
-            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(markdown));
+            ph_ui::rich_copy::write_source(&markdown, cx);
         }
     }
 
@@ -1229,7 +1231,7 @@ impl RichEditor {
                             )
                             .into_any_element(),
                         None if text.is_empty() => div().h(px(20.)).into_any_element(),
-                        None => markdown_view(
+                        None => markdown_text(
                             SharedString::from(format!("rich-cell-text-{id}-{r}-{c}")),
                             text.clone().into(),
                             &self.path,
@@ -1667,7 +1669,7 @@ impl RichEditor {
         dark: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        markdown_view(
+        markdown_text(
             ("rich-text", id),
             ph_ui::markdown::keep_line_breaks(&source).into(),
             &self.path,

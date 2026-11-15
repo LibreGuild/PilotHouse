@@ -195,7 +195,9 @@ impl FilesPanel {
             .item(
                 PopupMenuItem::new(ph_ui::platform::reveal_label())
                     .action(Box::new(crate::RevealEntry))
-                    .on_click(run(|_, target, _, cx| cx.reveal_path(&target.absolute))),
+                    .on_click(run(|_, target, _, cx| {
+                        ph_ui::platform::reveal(&target.absolute, cx)
+                    })),
             )
             .item(
                 PopupMenuItem::new("Open in Terminal")
@@ -797,8 +799,9 @@ impl FilesPanel {
         )
         .separator()
         .item(
-            PopupMenuItem::new(ph_ui::platform::reveal_label())
-                .on_click(run(|_, _, absolute, _, cx| cx.reveal_path(absolute))),
+            PopupMenuItem::new(ph_ui::platform::reveal_label()).on_click(run(
+                |_, _, absolute, _, cx| ph_ui::platform::reveal(absolute, cx),
+            )),
         )
         .item(
             PopupMenuItem::new("Open in Terminal")
@@ -1170,7 +1173,7 @@ impl FilesPanel {
         } else if any.is::<crate::DuplicateEntry>() {
             self.duplicate_entry(&target, window, cx)
         } else if any.is::<crate::RevealEntry>() {
-            cx.reveal_path(&target.absolute)
+            ph_ui::platform::reveal(&target.absolute, cx)
         } else if any.is::<crate::CopyEntryPath>() {
             copy_text(target.absolute.to_string_lossy().into_owned(), cx)
         } else if any.is::<crate::CopyRelativePath>() {

@@ -1085,7 +1085,7 @@ impl ImageEditor {
                         )),
                         cx,
                     );
-                    cx.reveal_path(&folder);
+                    ph_ui::platform::reveal(&folder, cx);
                 }
                 Err(err) => window
                     .push_notification(Notification::error(format!("No icons made: {err:#}")), cx),
