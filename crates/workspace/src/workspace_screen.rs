@@ -152,6 +152,9 @@ pub struct WorkspaceScreen {
     tests: Option<Entity<ph_uitest::TestsPanel>>,
     /// This is the project on screen (live panes stream only then).
     visible: bool,
+    /// Its window is the one in front (the status bar's looks at ports
+    /// and CI slow down when not).
+    window_active: bool,
     /// The window shows its sidebar (with the chat lists); the chat offers
     /// its own history menu only when not.
     sidebar_shown: bool,
@@ -371,6 +374,7 @@ impl WorkspaceScreen {
             pulls: HashMap::new(),
             tests: None,
             visible: true,
+            window_active: window.is_window_active(),
             sidebar_shown: true,
             signals: Default::default(),
             _signals: crate::signals::watch(store.clone(), cx),
@@ -379,6 +383,15 @@ impl WorkspaceScreen {
                 chat_subscription,
                 chats_subscription,
                 dock_subscription,
+                // Back from another program, where files may have changed
+                // without the system saying so (a network drive): Git is
+                // read once for the workspace on screen.
+                cx.observe_window_activation(window, |this, window, cx| {
+                    this.window_active = window.is_window_active();
+                    if this.window_active && this.visible {
+                        this.reread_git(cx);
+                    }
+                }),
                 // A review's round may end in a chat elsewhere: the PRs
                 // tool shows its findings at once.
                 cx.subscribe(
@@ -607,6 +620,11 @@ impl WorkspaceScreen {
         self.visible
     }
 
+    /// Whether the screen's window is the one in front.
+    pub(crate) fn is_window_active(&self) -> bool {
+        self.window_active
+    }
+
     pub(crate) fn signals(&self) -> &crate::signals::Signals {
         &self.signals
     }
@@ -684,6 +702,17 @@ impl WorkspaceScreen {
         self.update_live_panes(cx);
         self.save_layout(cx);
         cx.notify();
+    }
+
+    /// Reads Git's state again for the folder the Git tool shows, as when
+    /// its files change.
+    fn reread_git(&mut self, cx: &mut Context<Self>) {
+        if let Some(repo) = self.repos.get(&self.git_folder) {
+            repo.update(cx, |repo, cx| repo.refresh(cx));
+        }
+        if let Some(changes) = self.changes.get(&self.git_folder) {
+            changes.update(cx, |changes, cx| changes.files_changed(cx));
+        }
     }
 
     /// Saves the layout in a moment: a split made by a drop has its sizes
@@ -807,6 +836,20 @@ impl WorkspaceScreen {
         let runs_shown = shown(ContextTab::Runs);
         if let Some(runs) = &self.runs {
             runs.update(cx, |runs, cx| runs.set_active(runs_shown, cx));
+        }
+        // The Git tool reads the working tree on every change only while
+        // it shows; its count on the icon bar is kept with a look now and
+        // then, and a workspace not on screen waits.
+        let git_shown = shown(ContextTab::Changes);
+        for (folder, changes) in &self.changes {
+            let attention = if !self.visible || *folder != self.git_folder {
+                ph_changes::Attention::Away
+            } else if git_shown {
+                ph_changes::Attention::Shown
+            } else {
+                ph_changes::Attention::Glance
+            };
+            changes.update(cx, |changes, cx| changes.set_attention(attention, cx));
         }
     }
 
@@ -994,6 +1037,7 @@ impl WorkspaceScreen {
         self.git_folder = ix;
         self.repo(window, cx);
         self.ensure_panel(self.context_tab, window, cx);
+        self.update_live_panes(cx);
         cx.notify();
     }
 

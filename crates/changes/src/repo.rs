@@ -36,6 +36,9 @@ pub struct Repo {
     _watch: Subscription,
 }
 
+/// The pause between two reads of Git while files keep changing.
+pub(crate) const SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
+
 impl EventEmitter<RepoEvent> for Repo {}
 
 impl Repo {
@@ -93,28 +96,36 @@ impl Repo {
             return;
         }
         let root = self.root.clone();
-        let read = cx.background_spawn(async move {
-            if !ph_git::is_repository(&root) {
-                return (None, None);
-            }
-            let status = ph_git::status(&root).ok();
-            let operation = ph_git::conflicts::operation(&root);
-            (status, operation)
-        });
         self._refresh = Some(cx.spawn(async move |this, cx| {
-            let (status, operation) = read.await;
-            _ = this.update(cx, |this, cx| {
-                this._refresh = None;
-                this.loaded = true;
-                if this.status != status || this.operation != operation {
-                    this.status = status;
-                    this.operation = operation;
-                    cx.notify();
+            loop {
+                let root = root.clone();
+                let (status, operation) = cx
+                    .background_spawn(async move {
+                        if !ph_git::is_repository(&root) {
+                            return (None, None);
+                        }
+                        let status = ph_git::status(&root).ok();
+                        let operation = ph_git::conflicts::operation(&root);
+                        (status, operation)
+                    })
+                    .await;
+                let again = this.update(cx, |this, cx| {
+                    this.loaded = true;
+                    if this.status != status || this.operation != operation {
+                        this.status = status;
+                        this.operation = operation;
+                        cx.notify();
+                    }
+                    std::mem::take(&mut this.refresh_again)
+                });
+                if !again.unwrap_or(false) {
+                    break;
                 }
-                if std::mem::take(&mut this.refresh_again) {
-                    this.refresh(cx);
-                }
-            });
+                // Files still changing: a breath between reads, so Git
+                // does not run without pause while an agent writes.
+                cx.background_executor().timer(SETTLE).await;
+            }
+            _ = this.update(cx, |this, _| this._refresh = None);
         }));
     }
 

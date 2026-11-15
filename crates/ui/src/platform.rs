@@ -109,19 +109,15 @@ pub fn opens_safely(path: &std::path::Path) -> bool {
     let extension = path
         .extension()
         .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
-    if extension.is_some_and(|extension| RUNNABLE.contains(&extension.as_str())) {
-        return false;
-    }
+    let runs = extension.is_some_and(|extension| RUNNABLE.contains(&extension.as_str()));
+    // A file marked as a program runs whatever its name.
     #[cfg(unix)]
-    {
+    let runs = runs || {
         use std::os::unix::fs::PermissionsExt as _;
-        if std::fs::metadata(path)
+        std::fs::metadata(path)
             .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        {
-            return false;
-        }
-    }
-    true
+    };
+    !runs
 }
 
 /// A `/`-separated path as the path part of a URL: the characters that
@@ -173,6 +169,27 @@ pub fn reveal_label() -> &'static str {
     }
 }
 
+/// `path` spelled the way the system's shell wants it. Paths in a project
+/// are joined from `/`-separated relative ones, so on Windows a file in a
+/// subfolder reads `C:\repo\src/app/main.rs`. File APIs take that, but
+/// Explorer's own parser refuses it, so nothing below the root was shown.
+pub fn native_path(path: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(windows) {
+        std::path::PathBuf::from(backslashes(&path.to_string_lossy()))
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn backslashes(path: &str) -> String {
+    path.replace('/', "\\")
+}
+
+/// Shows `path` in the system's file manager, selected.
+pub fn reveal(path: &std::path::Path, cx: &gpui_kit::App) {
+    cx.reveal_path(&native_path(path));
+}
+
 /// A `file://` URL for an absolute path, valid on every platform
 /// (`file:///C:/work/app.rs` on Windows).
 pub fn file_url(path: &std::path::Path) -> String {
@@ -202,6 +219,15 @@ fn shorten_home(path: &std::path::Path, home: Option<&std::path::Path>) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_paths_use_one_separator() {
+        assert_eq!(
+            backslashes(r"C:\repo\src/app/main.rs"),
+            r"C:\repo\src\app\main.rs"
+        );
+        assert_eq!(backslashes(r"\\server\share/a"), r"\\server\share\a");
+    }
 
     #[test]
     fn runnable_files_do_not_open() {

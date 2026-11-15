@@ -29,6 +29,7 @@ mod search;
 mod symbol_search;
 pub mod symbols;
 mod tree_drag;
+mod tree_list;
 mod tree_menu;
 pub mod unsaved;
 mod watcher;

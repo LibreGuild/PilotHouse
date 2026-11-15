@@ -25,6 +25,11 @@ impl Port {
     }
 }
 
+/// Whether [`Port::cwd`] is known here, so a listener can be told to
+/// belong to a folder. Not on Windows, where `netstat` names only the
+/// process: asking which ports are a folder's is pointless there.
+pub const TELLS_FOLDERS: bool = !cfg!(windows);
+
 /// [`listening`], as seen at most `max_age` ago: several windows and the
 /// Run tool look every few seconds, and one `lsof` serves them all.
 pub fn listening_within(max_age: std::time::Duration) -> Vec<Port> {

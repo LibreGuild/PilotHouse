@@ -320,9 +320,88 @@ pub(crate) fn partial(out: &Path) -> PathBuf {
     ))
 }
 
+/// Moves the finished `partial` to `out` and says where the result is.
+///
+/// On Windows the move can fail for a moment after the last byte is
+/// written (the system's writer, a virus scanner or the indexer still
+/// has the new file open; a network share then says "access is denied"),
+/// so it is tried again for a few seconds. A file that is open somewhere
+/// cannot be replaced there at all: the result is then kept beside it
+/// under a free name, rather than thrown away after a long export.
+pub(crate) fn settle(partial: &Path, out: &Path) -> std::io::Result<PathBuf> {
+    const TRIES: u32 = if cfg!(windows) { 12 } else { 1 };
+    let mut failure = None;
+    for attempt in 0..TRIES {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        match std::fs::rename(partial, out) {
+            Ok(()) => return Ok(out.to_path_buf()),
+            Err(err) if in_use(&err) => failure = Some(err),
+            Err(err) => {
+                failure = Some(err);
+                break;
+            }
+        }
+    }
+    let failure = failure.unwrap_or_else(|| std::io::Error::other("the file was not moved"));
+    if !out.exists() {
+        return Err(failure);
+    }
+    let folder = out.parent().unwrap_or(Path::new(""));
+    let stem = out
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let extension = out
+        .extension()
+        .map(|extension| format!(".{}", extension.to_string_lossy()))
+        .unwrap_or_default();
+    (2..100)
+        .map(|n| folder.join(format!("{stem} ({n}){extension}")))
+        .find(|free| !free.exists())
+        .ok_or(failure)
+        .and_then(|free| std::fs::rename(partial, &free).map(|()| free))
+}
+
+/// Whether a move failed because something has the file open (which may
+/// pass): Windows' "access is denied", sharing and lock violations.
+fn in_use(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::PermissionDenied
+        || (cfg!(windows) && matches!(err.raw_os_error(), Some(5 | 32 | 33)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_result_that_cannot_replace_its_file_is_kept_beside_it() {
+        let dir = std::env::temp_dir().join(format!("ph-settle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("clip.mp4");
+        let write = || {
+            let made = partial(&out);
+            std::fs::write(&made, b"video").unwrap();
+            made
+        };
+        // Nothing in the way: the name asked for.
+        assert_eq!(settle(&write(), &out).unwrap(), out);
+        // A file is replaced.
+        assert_eq!(settle(&write(), &out).unwrap(), out);
+        // What cannot be replaced (here a folder of that name) is left,
+        // and the result takes the first free name beside it.
+        std::fs::remove_file(&out).unwrap();
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join("held"), b"x").unwrap();
+        assert_eq!(settle(&write(), &out).unwrap(), dir.join("clip (2).mp4"));
+        assert_eq!(settle(&write(), &out).unwrap(), dir.join("clip (3).mp4"));
+        // Nowhere to put it: the failure is reported.
+        let missing = dir.join("gone").join("clip.mp4");
+        assert!(settle(&write(), &missing).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn rates_as_fractions() {

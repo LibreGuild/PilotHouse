@@ -15,7 +15,7 @@ use gpui_kit::component::{
     list::ListItem,
     menu::ContextMenuExt as _,
     tab::{Tab, TabBar},
-    tree::{TreeEvent, TreeState, tree},
+    tree::{TreeEntry, TreeEvent, TreeState},
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -176,6 +176,8 @@ pub struct FilesPanel {
     /// File list for the finder; rebuilt lazily after file-system changes.
     index: Option<FileList>,
     index_stale: bool,
+    /// The tree is read again from disk when it is next drawn.
+    refresh_due: bool,
     /// Git's changes, marked in the tree.
     pub(crate) changes: Rc<TreeChanges>,
     /// Tree paths with staged changes.
@@ -218,6 +220,19 @@ impl FilesPanel {
             ),
         ];
 
+        // Not every folder reports its changes (a network drive, a full
+        // watch table): what the tree shows is read again when the user
+        // comes back from another program, where files are added or moved.
+        subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.refresh_due = true;
+                // The file in front, if it is another on disk now.
+                if let Some(file) = this.active.and_then(|ix| this.open_files.get(ix)) {
+                    file.update(cx, |file, cx| file.reload_if_changed(window, cx));
+                }
+                cx.notify();
+            }
+        }));
         for watcher in watchers {
             subscriptions.push(cx.subscribe_in(
                 watcher,
@@ -280,6 +295,7 @@ impl FilesPanel {
             staged: Rc::default(),
             index: None,
             index_stale: true,
+            refresh_due: false,
             changes: Rc::default(),
             _subscriptions: subscriptions,
         };
@@ -1005,6 +1021,10 @@ impl FilesPanel {
                 ),
             )
             .child(
+                button("files-refresh", Icons::RotateCw, "Refresh")
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh_tree(cx))),
+            )
+            .child(
                 button(
                     "files-collapse",
                     Icons::ChevronsDownUp,
@@ -1048,7 +1068,24 @@ impl FilesPanel {
         self.load_dirs(vec![dir], cx);
     }
 
-    /// Lists `dirs` in the background, then rebuilds the tree once.
+    /// Reads the tree again from disk, when asked (the window came back
+    /// to the front) and only once the tree is on show.
+    fn refresh_if_due(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.refresh_due) {
+            self.refresh_tree(cx);
+        }
+    }
+
+    /// Reads the folders on show again from disk, for changes the watcher
+    /// did not report. Closed folders are read when they are next opened.
+    pub fn refresh_tree(&mut self, cx: &mut Context<Self>) {
+        self.tree.forget_hidden();
+        self.load_dirs(self.tree.shown_dirs(), cx);
+    }
+
+    /// Lists `dirs` in the background, then rebuilds the tree once, if
+    /// anything in them changed: most changes reported are to a file's
+    /// text, which leaves every listing as it was.
     pub(crate) fn load_dirs(&mut self, dirs: Vec<String>, cx: &mut Context<Self>) {
         let roots = self.roots.clone();
         let listings = cx.background_spawn(async move {
@@ -1062,10 +1099,18 @@ impl FilesPanel {
         cx.spawn(async move |this, cx| {
             let listings = listings.await;
             _ = this.update(cx, |this, cx| {
+                let mut changed = this.pending_select.is_some();
                 for (dir, entries) in listings {
-                    this.tree.set_listing(&dir, entries);
+                    if !this.tree.listing_is(&dir, &entries) {
+                        this.tree.set_listing(&dir, entries);
+                        changed = true;
+                        // Names came or went: the finder's list is old.
+                        this.index_stale = true;
+                    }
                 }
-                this.rebuild_tree(cx);
+                if changed {
+                    this.rebuild_tree(cx);
+                }
             });
         })
         .detach();
@@ -1275,7 +1320,11 @@ impl FilesPanel {
                 })
                 .unwrap_or_default(),
         );
-        tree(&self.tree_state, move |_, entry, selected, _, cx| {
+        let row = move |_: usize,
+                        entry: &TreeEntry,
+                        selected: bool,
+                        _: &mut Window,
+                        cx: &mut gpui_kit::App| {
             let item = entry.item();
             let path = item.id.to_string();
             let is_file = !entry.is_folder();
@@ -1476,13 +1525,17 @@ impl FilesPanel {
                         }
                     });
                 })
-        })
+        };
         // Every row has the file menu; with several folders, a folder's
         // own row also makes it primary or takes it out of the workspace.
-        .context_menu(move |_, entry, menu, _, cx| {
-            crate::tree_menu::build(&menu_panel, &entry.item().id, entry.is_folder(), menu, cx)
-        })
-        .size_full()
+        crate::tree_list::tree_list(
+            &self.tree_state,
+            row,
+            move |_, entry, menu, _, cx| {
+                crate::tree_menu::build(&menu_panel, &entry.item().id, entry.is_folder(), menu, cx)
+            },
+            cx,
+        )
         .into_any_element()
     }
 
@@ -1959,7 +2012,10 @@ impl FileTree {
 
 impl Render for FileTree {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = self.files.update(cx, |files, cx| files.render_browser(cx));
+        let body = self.files.update(cx, |files, cx| {
+            files.refresh_if_due(cx);
+            files.render_browser(cx)
+        });
         // The tree's keys act on its selected row.
         fn key<A: gpui_kit::Action>(
             cx: &mut Context<FileTree>,
@@ -2064,7 +2120,7 @@ fn tab_menu(
             .tab_path(ix, cx)
             .and_then(|path| panel.roots.absolute(&path))
         {
-            cx.reveal_path(&path);
+            ph_ui::platform::reveal(&path, cx);
         }
     }))
     .item(item("Reveal in Files", |panel, ix, _, cx| {

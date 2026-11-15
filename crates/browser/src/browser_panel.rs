@@ -311,7 +311,12 @@ impl BrowserPanel {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let browser = self.browser.read(cx);
         let loading = browser.is_loading();
-        let running = *browser.status() == BrowserStatus::Running;
+        // Starting counts: the menu then stops the start, rather than
+        // offering to start what is already starting.
+        let running = matches!(
+            browser.status(),
+            BrowserStatus::Running | BrowserStatus::Starting
+        );
         let nav = |id: &'static str, icon: IconName, label: &'static str| {
             Button::new(id)
                 .ghost()
@@ -418,7 +423,7 @@ impl BrowserPanel {
                                 .icon(Icons::Power)
                                 .on_click(move |_, _, cx| {
                                     stop.update(cx, |browser, cx| {
-                                        if *browser.status() == BrowserStatus::Running {
+                                        if running {
                                             browser.stop(cx)
                                         } else {
                                             browser.ensure_started(cx)
@@ -512,12 +517,25 @@ impl BrowserPanel {
                 .icon(Icons::Globe)
                 .description("Type an address above. Logins in this browser are kept for this workspace, and agents can use it too.")
                 .into_any_element(),
-            BrowserStatus::Starting | BrowserStatus::Stopped => h_flex()
+            BrowserStatus::Starting => h_flex()
                 .gap_2()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
                 .child(Spinner::new().small())
                 .child("Starting the browser…")
+                .into_any_element(),
+            // Stopped is not starting: it said so, with a spinner that
+            // never ended, after the user stopped the browser.
+            BrowserStatus::Stopped => EmptyState::new("The browser is stopped")
+                .icon(Icons::Power)
+                .description("Its logins are kept. It starts again when you start it here, or when an agent uses it.")
+                .action(
+                    Button::new("browser-start")
+                        .small()
+                        .primary()
+                        .label("Start the browser")
+                        .on_click(cx.listener(|this, _, _, cx| this.browser.update(cx, |browser, cx| browser.ensure_started(cx)))),
+                )
                 .into_any_element(),
             BrowserStatus::NoBrowser => EmptyState::new("No browser found")
                 .icon(Icons::Globe)

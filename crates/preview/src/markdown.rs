@@ -25,8 +25,24 @@ const DIAGRAM_WIDTH: f32 = READING_WIDTH - 64.;
 /// A Markdown view of `text`, the file at `path`: images resolve beside
 /// it, ```` ```mermaid ```` blocks become diagrams, and links to files call
 /// `open` (web and mail links open in the browser; other schemes do
-/// nothing, since a document may come from anyone).
+/// nothing, since a document may come from anyone). A selection copies as
+/// plain text and as HTML (`ph_ui::rich_copy`), so it pastes elsewhere with
+/// its headings, tables and lists.
 pub fn markdown_view(
+    id: impl Into<gpui_kit::ElementId>,
+    text: SharedString,
+    path: &Path,
+    dark: bool,
+    open: impl Fn(PathBuf, &mut Window, &mut App) + Send + Sync + 'static,
+) -> gpui_kit::Div {
+    let view = markdown_text(id, text, path, dark, open)
+        .selection_format(gpui_kit::base::text::SelectionFormat::Source);
+    ph_ui::rich_copy::on(div().w_full().child(view))
+}
+
+/// [`markdown_view`]'s text alone, copying what it shows: for the formatted
+/// editor, which makes its own copies (`rich/copy.rs`).
+pub(crate) fn markdown_text(
     id: impl Into<gpui_kit::ElementId>,
     text: SharedString,
     path: &Path,

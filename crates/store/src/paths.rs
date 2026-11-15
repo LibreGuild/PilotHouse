@@ -18,6 +18,90 @@ pub fn data_dir() -> PathBuf {
         .join(ph_brand::DATA_FOLDER)
 }
 
+/// This program under a name that says what it runs as, for the helper
+/// processes the app starts (`pilothouse-mcp`, one per agent session):
+/// Task Manager and Activity Monitor name a process after its program
+/// file, never its arguments, so they all read `pilothouse` otherwise.
+///
+/// The name is a hard link to this program in the data folder, in a
+/// folder per build so an update never meets a stale one. Where a link
+/// cannot be made (another disk, an AppImage's mount), it is the program
+/// itself. Not for commands written into files that outlive this build
+/// (shell hooks, the Chrome host's launcher): those keep the program.
+pub fn helper_program(role: &str) -> std::io::Result<PathBuf> {
+    // Found once per role: this is asked each time an agent is looked up.
+    static KNOWN: std::sync::Mutex<Vec<(String, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+    let mut known = KNOWN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // A link someone removed since (the data folder cleared) is made again.
+    known.retain(|(_, program)| program.exists());
+    if let Some((_, program)) = known.iter().find(|(known, _)| known == role) {
+        return Ok(program.clone());
+    }
+    let exe = std::env::current_exe()?;
+    // Only the app itself: a test's program, or a helper asking for
+    // another, makes no links in the data folder.
+    let app = exe
+        .file_stem()
+        .is_some_and(|name| name.eq_ignore_ascii_case("pilothouse"));
+    let program = app
+        .then(|| named_link(&exe, &data_dir().join("helpers"), role, runs))
+        .flatten()
+        .unwrap_or(exe);
+    known.push((role.to_string(), program.clone()));
+    Ok(program)
+}
+
+/// Whether `program` (a link just made) starts: where a policy lets only
+/// programs in certain folders run, the one in the data folder does not,
+/// and the app's own is used.
+fn runs(program: &Path) -> bool {
+    std::process::Command::new(program)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn named_link(
+    exe: &Path,
+    folder: &Path,
+    role: &str,
+    runs: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    // A link to a symlink would run under the symlink's target's name.
+    let exe = dunce::canonicalize(exe).ok()?;
+    let build = std::fs::metadata(&exe).ok()?;
+    let stamp = |meta: &std::fs::Metadata| {
+        let modified = meta.modified().ok()?;
+        let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+        Some((meta.len(), since.as_nanos()))
+    };
+    let (length, modified) = stamp(&build)?;
+    let dir = folder.join(format!("{length:x}-{modified:x}"));
+    let link = dir.join(format!("pilothouse-{role}{}", std::env::consts::EXE_SUFFIX));
+    let linked = |link: &Path| std::fs::metadata(link).ok().and_then(|meta| stamp(&meta));
+    if linked(&link) != Some((length, modified)) {
+        std::fs::create_dir_all(&dir).ok()?;
+        _ = std::fs::remove_file(&link);
+        std::fs::hard_link(&exe, &link).ok()?;
+        if !runs(&link) {
+            _ = std::fs::remove_file(&link);
+            return None;
+        }
+        // Earlier builds' links; one still running stays until next time.
+        for other in std::fs::read_dir(folder).ok()?.flatten() {
+            if other.path() != dir {
+                _ = std::fs::remove_dir_all(other.path());
+            }
+        }
+    }
+    Some(link)
+}
+
 /// Names, in the data folder, the folder chosen for copies (see
 /// [`copies_dir`]).
 const COPIES_FILE: &str = "copies-location";
@@ -273,4 +357,46 @@ pub fn verify_private_parent(path: &Path) -> std::io::Result<()> {
     }
     let _ = path;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helpers_run_under_their_own_name() {
+        let folder = std::env::temp_dir().join(format!("ph-helpers-{}", std::process::id()));
+        _ = std::fs::remove_dir_all(&folder);
+        let exe = std::env::current_exe().unwrap();
+        // The test binary's folder may be on another disk than the system's
+        // temporary one; a link is then not made, and the program is used.
+        let Some(link) = named_link(&exe, &folder, "mcp", |_| true) else {
+            return;
+        };
+        let name = link.file_stem().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name, "pilothouse-mcp");
+        assert_eq!(
+            std::fs::metadata(&link).unwrap().len(),
+            std::fs::metadata(&exe).unwrap().len()
+        );
+        assert_eq!(
+            named_link(&exe, &folder, "mcp", |_| true),
+            Some(link.clone()),
+            "kept"
+        );
+        // Another build's folder goes when a new link is made.
+        let stale = folder.join("stale");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        assert_eq!(
+            named_link(&exe, &folder, "mcp", |_| true),
+            Some(link.clone())
+        );
+        assert!(!stale.exists());
+        // A link that does not start is not kept.
+        std::fs::remove_file(&link).unwrap();
+        assert_eq!(named_link(&exe, &folder, "mcp", |_| false), None);
+        assert!(!link.exists());
+        _ = std::fs::remove_dir_all(&folder);
+    }
 }

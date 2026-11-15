@@ -34,7 +34,7 @@ The first launch of a freshly built binary on macOS is slower (about 1.5 s) beca
 - **Stream only what is seen**: browser and device frames flow only while their pane is visible in the shown project, at most one frame is in flight, and replaced GPU textures are freed right away.
 - **One copy per frame**: frames are converted to BGRA once, on the decoding thread, inside the image GPUI draws; the UI thread only swaps a pointer. Live panes redraw at most ~30 times a second, and the newest frame always wins, so a busy UI never queues frames or shows a stale one.
 - **Bounded memory**: recordings stream to disk; logs, logcat and requests are capped; idle hidden browsers stop after 10 minutes.
-- **Ignore what no one shows**: the file watcher drops `.gitignore`d paths (`target/`, `node_modules/`…), and the Changes panel folds event bursts into one `git` run.
+- **Ignore what no one shows**: the file watcher drops `.gitignore`d paths (`target/`, `node_modules/`…), and the Changes panel folds event bursts into one `git` run, paces its reads while files keep changing, and reads the working tree on every change only while it is on screen (every 5 s for its count, not at all for a workspace that is not in front). The Files tree draws again only when a folder's listing changed. A mirrored phone is never polled: a turned screen is seen in its video.
 - **Off the UI thread**: file reads, directory listings, search, git, fuzzy matching and agent I/O.
 - **Virtualize long lists**: the chat transcript (`MessageScroller`), the file tree and ⌘P results render only what is visible.
 - **Cap pathological inputs**: files over 4 MB open as a notice, diffs are cut at 80–300 lines per block, search stops at 500 hits and the file index at 200k files.

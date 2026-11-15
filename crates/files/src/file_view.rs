@@ -231,6 +231,9 @@ pub struct FileView {
     /// The file is not UTF-8: it is shown read-only, as saving the text
     /// would replace every byte that is not.
     not_utf8: bool,
+    /// Whether the system's default app may open the file, found once: it
+    /// reads the file's permissions, and is asked on every draw.
+    opens_safely: std::cell::OnceCell<bool>,
     /// Why the last save failed; the text stays, to save again.
     save_error: Option<SharedString>,
     /// The file as last read or written here (change time, length): a save
@@ -337,7 +340,9 @@ impl FileView {
         let mut view = Self {
             relative: relative.to_string().into(),
             root: root.to_path_buf(),
-            absolute: root.join(relative),
+            // With the system's separator throughout: the path is copied,
+            // shown and handed to the file manager.
+            absolute: ph_ui::platform::native_path(&root.join(relative)),
             blame: None,
             show_blame: false,
             blame_error: None,
@@ -354,6 +359,7 @@ impl FileView {
             _marks: None,
             restored: false,
             not_utf8: false,
+            opens_safely: std::cell::OnceCell::new(),
             save_error: None,
             disk: None,
             _keep: None,
@@ -949,6 +955,27 @@ impl FileView {
         if !self.dirty {
             self.load(window, cx);
         }
+    }
+
+    /// Reads the file again if it is another on disk than the one read (its
+    /// time or length changed) and has no unsaved edits: for changes the
+    /// watcher may not have reported.
+    pub fn reload_if_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dirty || self.content != Content::Text {
+            return;
+        }
+        let (path, read) = (self.absolute.clone(), self.disk);
+        let stamp = cx.background_spawn(async move { disk_stamp(&path) });
+        cx.spawn_in(window, async move |this, cx| {
+            let now = stamp.await;
+            _ = this.update_in(cx, |this, window, cx| {
+                // Gone or unreadable: what is shown stays.
+                if now.is_some() && now != read && this.disk == read {
+                    this.reload_if_clean(window, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Moves the cursor to `line` (0-based), now or once the file has loaded.
@@ -2012,12 +2039,17 @@ impl Render for FileView {
             .on_action(cx.listener(|this, _: &CopyFileRelativePath, _, cx| {
                 ph_ui::copy_with_toast(this.relative.to_string(), "the relative path", cx);
             }))
-            .on_action(cx.listener(|this, _: &RevealFile, _, cx| cx.reveal_path(&this.absolute)))
+            .on_action(cx.listener(|this, _: &RevealFile, _, cx| {
+                ph_ui::platform::reveal(&this.absolute, cx)
+            }))
             .on_action(
                 cx.listener(|_, _: &RevealInFiles, _, cx| cx.emit(FileViewEvent::RevealInTree)),
             )
             .size_full()
             .when(self.asks, |this| this.child(self.render_toolbar(cx)))
+            .when(!self.asks, |this| {
+                this.children(self.render_lone_toolbar(cx))
+            })
             .child(div().flex_1().min_h_0().child(body))
             .when(is_text, |this| this.child(self.render_footer(cx)))
     }
@@ -2268,6 +2300,33 @@ impl FileView {
             )
     }
 
+    /// The bar of a file shown alone in a window: what its kind offers
+    /// (edit a picture or a video in Studio, the Markdown views, format
+    /// JSON), without the path, asking and blame, which need a workspace.
+    /// No bar when the kind offers nothing.
+    fn render_lone_toolbar(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let mut items = self.render_kind_actions(cx);
+        items.extend(self.render_view_switch(cx));
+        if items.is_empty() {
+            return None;
+        }
+        Some(
+            h_flex()
+                .flex_none()
+                .h_8()
+                .px_3()
+                .gap_1()
+                .justify_end()
+                .overflow_hidden()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .children(items)
+                .into_any_element(),
+        )
+    }
+
     /// Source, preview, both (or rich, for Markdown): a segmented switch.
     fn render_view_switch(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let views = self.kind.views();
@@ -2333,7 +2392,8 @@ impl FileView {
                     .into_any_element(),
             );
         }
-        if text && self.kind == Kind::Html {
+        // The browser is a workspace's: not for a file shown alone.
+        if text && self.kind == Kind::Html && self.asks {
             let path = self.absolute.clone();
             actions.push(
                 Button::new("html-browser")
@@ -2369,8 +2429,25 @@ impl FileView {
                     .into_any_element(),
             );
         }
+        if is_powerpoint(&self.absolute) {
+            let path = self.absolute.clone();
+            actions.push(
+                Button::new("edit-slides")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icons::SlidersHorizontal)
+                    .label("Edit")
+                    .tooltip("Open the deck in Studio Slides, to edit it by hand or with an agent")
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(FileViewEvent::EditMedia(path.clone()))
+                    }))
+                    .into_any_element(),
+            );
+        }
         if matches!(self.content, Content::Media(_))
-            && ph_ui::platform::opens_safely(&self.absolute)
+            && *self
+                .opens_safely
+                .get_or_init(|| ph_ui::platform::opens_safely(&self.absolute))
         {
             let path = self.absolute.clone();
             actions.push(
@@ -2539,6 +2616,14 @@ fn word_at(text: &str, offset: usize) -> String {
         .map(|(i, _)| offset + i)
         .unwrap_or(text.len());
     text[start..end].to_string()
+}
+
+/// Whether `path` is a PowerPoint deck or template, which Studio Slides
+/// edits.
+fn is_powerpoint(path: &std::path::Path) -> bool {
+    path.extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+        .is_some_and(|extension| extension == "pptx" || extension == "potx")
 }
 
 #[cfg(test)]

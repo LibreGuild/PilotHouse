@@ -116,8 +116,19 @@ impl StreamQuality {
 /// How long the stream must pause before the bytes held are taken as a
 /// whole picture: the phone writes each picture at once.
 const PICTURE_GAP: Duration = Duration::from_millis(10);
-/// How often the screen's rotation is checked while video streams.
-const ROTATION_CHECK: Duration = Duration::from_millis(1200);
+/// How long the stream is waited on while nothing of a picture is held:
+/// long enough that a still screen costs next to nothing, short enough to
+/// notice the pane closing.
+const IDLE_WAIT: Duration = Duration::from_millis(250);
+/// How long the picture must look turned (see [`looks_turned`]) before the
+/// phone is asked whether it is, and then asked again while the look
+/// lasts: an answer may come before the phone has finished turning. After
+/// these, a look that lasts is the app's own (dark, with black edges).
+const TURN_ASKS: [Duration; 3] = [
+    Duration::from_millis(400),
+    Duration::from_secs(2),
+    Duration::from_secs(6),
+];
 /// Redraws for a moving screen are capped at about 30 a second: smooth to
 /// the eye, and each one repaints the window.
 const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -649,39 +660,7 @@ impl Phone<'_> {
                     }
                 }
             });
-        // Watches the screen's rotation; a turn ends this run.
-        let done = AtomicBool::new(false);
-        let ended = std::thread::scope(|scope| {
-            scope.spawn(|| {
-                let mut waited = Duration::ZERO;
-                while !done.load(Ordering::Relaxed) {
-                    // Short naps, so the run's end is not held up.
-                    std::thread::sleep(Duration::from_millis(100));
-                    waited += Duration::from_millis(100);
-                    if waited < ROTATION_CHECK || done.load(Ordering::Relaxed) {
-                        continue;
-                    }
-                    waited = Duration::ZERO;
-                    let now = rotation(self.adb, self.serial);
-                    if now.is_some() && now != turned {
-                        if let Some(mut child) =
-                            self.recorder.lock().ok().and_then(|mut slot| slot.take())
-                        {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                        }
-                        break;
-                    }
-                }
-            });
-            let ended = self.decode_video(decoder, &arrived, frames, stop);
-            if let Some(mut child) = self.recorder.lock().ok().and_then(|mut slot| slot.take()) {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            done.store(true, Ordering::Relaxed);
-            ended
-        });
+        let ended = self.decode_video(decoder, turned, &arrived, frames, stop);
         if let Some(mut child) = self.recorder.lock().ok().and_then(|mut slot| slot.take()) {
             let _ = child.kill();
             let _ = child.wait();
@@ -696,11 +675,18 @@ impl Phone<'_> {
         ended
     }
 
-    /// Decodes the run's bytes as they arrive until it ends or the pane
-    /// closes.
+    /// Decodes the run's bytes as they arrive until it ends, the screen
+    /// turns (the run is then ended, to start again in the new shape) or
+    /// the pane closes.
+    ///
+    /// A turn is seen in the picture, not asked of the phone: asking means
+    /// `dumpsys display`, a dump made inside Android's system process, and
+    /// one every second made the phone itself stutter while it was
+    /// mirrored. The phone is asked only once the picture looks turned.
     fn decode_video(
         &self,
         decoder: &mut crate::h264::Decoder,
+        turned: Option<u8>,
         arrived: &std::sync::mpsc::Receiver<Vec<u8>>,
         frames: &Latest,
         stop: &AtomicBool,
@@ -708,11 +694,16 @@ impl Phone<'_> {
         let mut assembler = crate::h264::Assembler::default();
         // Pictures shown, and decoding failures.
         let mut counts = (0usize, 0usize);
-        let mut decode = |pictures: Vec<Vec<Vec<u8>>>, counts: &mut (usize, usize)| -> bool {
+        let mut turn = TurnWatch::default();
+        let mut decode = |pictures: Vec<Vec<Vec<u8>>>,
+                          counts: &mut (usize, usize),
+                          turn: &mut TurnWatch|
+         -> bool {
             for picture in pictures {
                 match decoder.decode(&picture) {
                     Ok(Some(frame)) => {
                         counts.0 += 1;
+                        turn.saw(looks_turned(frame.width, frame.height, frame.bgra()));
                         if !frames.put(Ok(frame)) {
                             return false;
                         }
@@ -734,12 +725,25 @@ impl Phone<'_> {
             if counts.0 == 0 && counts.1 >= 3 {
                 break Recorded::Unsupported;
             }
-            let pictures = match arrived.recv_timeout(PICTURE_GAP) {
+            if turn.ask() {
+                let now = rotation(self.adb, self.serial);
+                if now.is_some() && now != turned {
+                    break Recorded::Ended;
+                }
+            }
+            // With part of a picture held, a short pause ends it; with
+            // nothing held there is nothing to end, and the wait is long.
+            let wait = if assembler.is_empty() {
+                IDLE_WAIT
+            } else {
+                PICTURE_GAP
+            };
+            let pictures = match arrived.recv_timeout(wait) {
                 Ok(bytes) => assembler.push(&bytes),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => assembler.flush(),
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     let pictures = assembler.flush();
-                    decode(pictures, &mut counts);
+                    decode(pictures, &mut counts, &mut turn);
                     break if counts.0 > 0 {
                         Recorded::Ended
                     } else {
@@ -747,7 +751,7 @@ impl Phone<'_> {
                     };
                 }
             };
-            if !decode(pictures, &mut counts) {
+            if !decode(pictures, &mut counts, &mut turn) {
                 break Recorded::Stopped;
             }
         }
@@ -810,6 +814,81 @@ impl Phone<'_> {
         }
         ended
     }
+}
+
+/// Whether the phone should be asked if its screen turned, from how the
+/// pictures look.
+#[derive(Default)]
+struct TurnWatch {
+    /// Since when the pictures have looked turned.
+    since: Option<Instant>,
+    /// How many times the phone was asked about this look.
+    asked: usize,
+}
+
+impl TurnWatch {
+    /// A picture arrived, looking turned or not.
+    fn saw(&mut self, turned: bool) {
+        if !turned {
+            *self = Self::default();
+        } else if self.since.is_none() {
+            self.since = Some(Instant::now());
+        }
+    }
+
+    /// Whether to ask the phone now: the look has lasted to the next of
+    /// [`TURN_ASKS`].
+    fn ask(&mut self) -> bool {
+        let due = TURN_ASKS
+            .get(self.asked)
+            .zip(self.since)
+            .is_some_and(|(after, since)| since.elapsed() >= *after);
+        if due {
+            self.asked += 1;
+        }
+        due
+    }
+}
+
+/// Whether a picture of the stream looks like the screen turned since the
+/// recording began: `screenrecord` keeps the video's shape and fits the
+/// turned screen inside it, so a portrait video then has black bands above
+/// and below a wide picture (a landscape one, left and right of a tall
+/// picture). Bands that are black while the middle is not; a wholly black
+/// screen says nothing.
+fn looks_turned(width: u32, height: u32, bgra: &[u8]) -> bool {
+    let (width, height) = (width as usize, height as usize);
+    if bgra.len() < width * height * 4 || width.min(height) < 64 {
+        return false;
+    }
+    // Along the long side: where the bands end and the picture begins.
+    let (long, short) = (width.max(height), width.min(height));
+    let band = (long - short * short / long) / 2;
+    if band < 16 {
+        return false;
+    }
+    let pixel = |along: usize, across: usize| {
+        let (x, y) = if height > width {
+            (across, along)
+        } else {
+            (along, across)
+        };
+        let at = (y * width + x) * 4;
+        bgra[at].max(bgra[at + 1]).max(bgra[at + 2])
+    };
+    // Nine places across the short side, away from its edges.
+    let across = (1..=9).map(|n| short * n / 10);
+    let bands_black = [band / 4, band / 2, band * 3 / 4]
+        .into_iter()
+        .flat_map(|depth| [depth, long - 1 - depth])
+        .all(|along| across.clone().all(|across| pixel(along, across) <= 24));
+    if !bands_black {
+        return false;
+    }
+    let middle = long - 2 * band;
+    (1..=5)
+        .map(|n| band + middle * n / 6)
+        .any(|along| across.clone().any(|across| pixel(along, across) > 48))
 }
 
 /// The screen's rotation from its natural orientation, in quarter turns.
@@ -1022,6 +1101,60 @@ mod tests {
         assert_eq!(sizes, [(480, 768), (720, 1152), (1072, 1728), (1200, 1920)]);
         assert_eq!(StreamQuality::from_key("high"), StreamQuality::High);
         assert_eq!(StreamQuality::from_key(""), StreamQuality::Medium);
+    }
+
+    /// A `width` x `height` picture, black but for `lit` (x, y) places.
+    fn picture(width: usize, height: usize, lit: impl Fn(usize, usize) -> bool) -> Vec<u8> {
+        let mut bgra = vec![0u8; width * height * 4];
+        for y in 0..height {
+            for x in 0..width {
+                if lit(x, y) {
+                    bgra[(y * width + x) * 4..][..3].fill(200);
+                }
+            }
+        }
+        bgra
+    }
+
+    #[test]
+    fn a_turned_screen_is_seen_in_the_picture() {
+        // Portrait video, the screen now sideways: a wide picture in the
+        // middle (rows 60..100 of 160), black above and below.
+        let turned = picture(80, 160, |_, y| (60..100).contains(&y));
+        assert!(looks_turned(80, 160, &turned));
+        // Landscape video, the screen now upright.
+        let upright = picture(160, 80, |x, _| (60..100).contains(&x));
+        assert!(looks_turned(160, 80, &upright));
+        // The screen as recorded, a black screen, and an app that is dark
+        // only at its top do not look turned.
+        assert!(!looks_turned(80, 160, &picture(80, 160, |_, _| true)));
+        assert!(!looks_turned(80, 160, &picture(80, 160, |_, _| false)));
+        assert!(!looks_turned(80, 160, &picture(80, 160, |_, y| y > 40)));
+        // Too small or cut short to judge.
+        assert!(!looks_turned(
+            40,
+            80,
+            &picture(40, 80, |_, y| (30..50).contains(&y))
+        ));
+        assert!(!looks_turned(80, 160, &turned[..100]));
+    }
+
+    #[test]
+    fn the_phone_is_asked_a_few_times_per_turned_look() {
+        let mut watch = TurnWatch::default();
+        watch.saw(true);
+        assert!(!watch.ask(), "not before the look has lasted");
+        watch.since = Some(Instant::now() - TURN_ASKS[0]);
+        assert!(watch.ask());
+        watch.saw(true);
+        assert!(!watch.ask(), "asked a moment ago");
+        watch.since = Some(Instant::now() - TURN_ASKS[2]);
+        assert!(watch.ask() && watch.ask(), "again while the look lasts");
+        assert!(!watch.ask(), "then no more: the app looks like that");
+        watch.saw(false);
+        watch.saw(true);
+        watch.since = Some(Instant::now() - TURN_ASKS[0]);
+        assert!(watch.ask(), "a new look is asked about");
     }
 
     #[test]

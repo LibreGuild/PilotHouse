@@ -130,8 +130,31 @@ pub struct ChangesPanel {
     branch: Option<Result<Option<git::diff::BranchChanges>, SharedString>>,
     _branch_task: Option<Task<()>>,
     _refresh: Option<Task<()>>,
+    /// How closely the panel is looked at, for how often it reads Git.
+    attention: Attention,
+    /// Files changed since the last read began.
+    stale: bool,
+    /// The next read of a panel only glanced at.
+    _glance: Option<Task<()>>,
     _subscription: Subscription,
 }
+
+/// How closely the panel is looked at. Reading the working tree is three
+/// `git` runs, one of them a whole `git diff`: while an agent works, files
+/// change many times a second, and a panel nobody sees must not read Git
+/// each time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attention {
+    /// On screen: read on every change.
+    Shown,
+    /// Only its count shows (on the tool's icon): read every few seconds.
+    Glance,
+    /// Its workspace is not on screen: read when it is again.
+    Away,
+}
+
+/// How often a panel only glanced at reads Git.
+const GLANCE_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl EventEmitter<ChangesPanelEvent> for ChangesPanel {}
 
@@ -143,7 +166,9 @@ impl ChangesPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let root = watcher.read(cx).root().to_path_buf();
-        let subscription = cx.subscribe(watcher, |this, _, _: &FilesChanged, cx| this.refresh(cx));
+        let subscription = cx.subscribe(watcher, |this, _, _: &FilesChanged, cx| {
+            this.files_changed(cx)
+        });
         // The repository's state (conflicts, staged files) is in the list's
         // first row; it is measured again when that changes.
         cx.observe(&repo, |this, _, cx| {
@@ -179,10 +204,49 @@ impl ChangesPanel {
             branch: None,
             _branch_task: None,
             _refresh: None,
+            attention: Attention::Shown,
+            stale: false,
+            _glance: None,
             _subscription: subscription,
         };
         panel.refresh(cx);
         panel
+    }
+
+    /// Says how closely the panel is looked at now. Coming back to one
+    /// whose files changed meanwhile reads them.
+    pub fn set_attention(&mut self, attention: Attention, cx: &mut Context<Self>) {
+        if self.attention == attention {
+            return;
+        }
+        self.attention = attention;
+        if attention != Attention::Away && self.stale {
+            self._glance = None;
+            self.refresh(cx);
+        }
+    }
+
+    /// Files changed on disk (or may have): read now, soon or later, by
+    /// how closely the panel is looked at.
+    pub fn files_changed(&mut self, cx: &mut Context<Self>) {
+        match self.attention {
+            Attention::Shown => self.refresh(cx),
+            Attention::Away => self.stale = true,
+            Attention::Glance => {
+                self.stale = true;
+                if self._glance.is_none() {
+                    self._glance = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(GLANCE_EVERY).await;
+                        _ = this.update(cx, |this, cx| {
+                            this._glance = None;
+                            if this.stale && this.attention != Attention::Away {
+                                this.refresh(cx);
+                            }
+                        });
+                    }));
+                }
+            }
+        }
     }
 
     /// Number of changed files, for the tab badge.
@@ -202,28 +266,45 @@ impl ChangesPanel {
             self.refresh_again = true;
             return;
         }
+        self.stale = false;
         let root = self.root.clone();
-        let load = cx.background_spawn(async move {
-            if !git::is_repository(&root) {
-                return Ok(None);
-            }
-            git::working_changes(&root).map(Some)
-        });
         self._refresh = Some(cx.spawn(async move |this, cx| {
-            let result = load.await;
-            _ = this.update(cx, |this, cx| {
-                this._refresh = None;
-                if std::mem::take(&mut this.refresh_again) {
-                    this.refresh(cx);
+            loop {
+                let root = root.clone();
+                let result = cx
+                    .background_spawn(async move {
+                        if !git::is_repository(&root) {
+                            return Ok(None);
+                        }
+                        git::working_changes(&root).map(Some)
+                    })
+                    .await;
+                let again = this.update(cx, |this, cx| {
+                    // The same changes as before (a file saved as it was,
+                    // one Git ignores): nothing to measure or draw again.
+                    let same = matches!(
+                        (&this.state, &result),
+                        (State::Loaded(known), Ok(Some(read))) if **known == *read
+                    );
+                    if !same {
+                        this.state = match result {
+                            Ok(Some(changes)) => State::Loaded(std::rc::Rc::new(changes)),
+                            Ok(None) => State::NotRepository,
+                            Err(err) => State::Failed(format!("{err:#}").into()),
+                        };
+                        this.sync_rows();
+                        cx.notify();
+                    }
+                    std::mem::take(&mut this.refresh_again)
+                });
+                if !again.unwrap_or(false) {
+                    break;
                 }
-                this.state = match result {
-                    Ok(Some(changes)) => State::Loaded(std::rc::Rc::new(changes)),
-                    Ok(None) => State::NotRepository,
-                    Err(err) => State::Failed(format!("{err:#}").into()),
-                };
-                this.sync_rows();
-                cx.notify();
-            });
+                // Files still changing: a breath between reads, so Git
+                // does not run without pause while an agent writes.
+                cx.background_executor().timer(crate::repo::SETTLE).await;
+            }
+            _ = this.update(cx, |this, _| this._refresh = None);
         }));
     }
 

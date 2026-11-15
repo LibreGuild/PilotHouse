@@ -10,7 +10,7 @@ The branch item shows the branch (or detached commit), `↑ahead ↓behind`, a m
 - Local and remote branches on two tabs (**Local**, **Remote**, each with its count), newest first, with search. Click to switch; a remote branch gets a local tracking branch. Delete (merged only) on hover.
 - Typing a new name offers **Create branch from here** (names are validated with `git check-ref-format`).
 
-The shared `Repo` model (`repo.rs`) holds status and runs one operation at a time; results show as notifications. It refreshes when the project watcher sees `.git` HEAD, index, refs, `FETCH_HEAD` or `MERGE_HEAD` change.
+The shared `Repo` model (`repo.rs`) holds status and runs one operation at a time; results show as notifications. It refreshes when the project watcher sees `.git` HEAD, index, refs, `FETCH_HEAD` or `MERGE_HEAD` change, or a file of the working tree, and once when the window comes back to the front. While files keep changing (an agent writing), reads follow each other with a pause of 0.3 s, never back to back. The Changes list (`changes_panel.rs`, three `git` runs, one a whole `git diff`) is read on every change only while the Git tool is on screen (`Attention::Shown`); with only its count showing on the icon bar it is read at most every 5 seconds (`Glance`), and not at all while its workspace is not in front (`Away`), then once when it is again. A read that finds the same changes draws nothing.
 
 ## The Git tab
 

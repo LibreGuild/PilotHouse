@@ -652,6 +652,16 @@ impl Panes {
             .layout(DockPlacement::Center)
             .and_then(|tree| tree.find_panel_node(self.id(Pane::Chat)));
         let width = column_width(window, cx);
+        // The dock takes a new pane into the main area's first group, as
+        // its tab in front. Once the pane moves on to where it belongs,
+        // that group would show its last tab (the editor, with the chat
+        // in front before): the tab that was in front is chosen again.
+        let front = self
+            .area
+            .read(cx)
+            .layout(DockPlacement::Center)
+            .and_then(|tree| first_group_front(tree.root()))
+            .flatten();
         self.area.update(cx, |area, cx| {
             // Into the main area's first group, then where it belongs.
             area.add_panel_view(handle, DockPlacement::Center, None, window, cx);
@@ -670,6 +680,9 @@ impl Panes {
             };
             if let Some(target) = target {
                 area.move_panel(id, target, window, cx);
+                if let Some(front) = front {
+                    area.select_panel(front, window, cx);
+                }
             }
         });
         DockPlacement::Center
@@ -821,6 +834,16 @@ impl Panes {
 
 /// The bottom panel's height when it is made: room for a screenful of
 /// output, the editor and chat keeping most of the window.
+/// The pane in front in the first tab group under `node` (`Some(None)`
+/// for a group without panes), found as the dock finds that group.
+fn first_group_front(node: &gpui_kit::base::dock::layout::PaneNode) -> Option<Option<PanelId>> {
+    use gpui_kit::base::dock::layout::PaneRef;
+    match node.kind() {
+        PaneRef::Tabs { panels, active_ix } => Some(panels.get(active_ix).copied()),
+        PaneRef::Split { children, .. } => children.iter().find_map(first_group_front),
+    }
+}
+
 fn bottom_height(window: &Window) -> gpui_kit::Pixels {
     (window.viewport_size().height * 0.34).clamp(gpui_kit::px(180.), gpui_kit::px(420.))
 }

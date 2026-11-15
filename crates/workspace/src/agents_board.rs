@@ -218,7 +218,17 @@ pub(crate) fn counts(workspace: &Workspace, cx: &App) -> (usize, usize) {
 /// The Agents popup under its title bar button: every chat at work,
 /// waiting for the user or with news, most urgent first. A card opens its
 /// chat (and closes the popup); the rest of the window stays as it was.
-pub(crate) fn popup(workspace: &Workspace, entity: WeakEntity<Workspace>, cx: &App) -> AnyElement {
+///
+/// `room` is the window's height: the list scrolls within what is left of
+/// it under the title bar, so its last cards are never cut off.
+pub(crate) fn popup(
+    workspace: &Workspace,
+    entity: WeakEntity<Workspace>,
+    room: gpui_kit::Pixels,
+    cx: &App,
+) -> AnyElement {
+    // The title bar, the popup's own title and padding, a margin below.
+    let list_height = (room - px(140.)).clamp(px(160.), px(500.));
     let cards = cards(workspace, cx);
     let busy = cards
         .iter()
@@ -281,9 +291,13 @@ pub(crate) fn popup(workspace: &Workspace, entity: WeakEntity<Workspace>, cx: &A
                     })),
             )
         });
+        // The height limit is on the list itself: a limit on the popup
+        // alone left the list as tall as its cards, running out of the
+        // popup with nothing to scroll.
         v_flex()
             .id("agents-popup-list")
             .gap_4()
+            .max_h(list_height)
             .overflow_y_scroll()
             .children(sections)
             .into_any_element()
@@ -291,7 +305,6 @@ pub(crate) fn popup(workspace: &Workspace, entity: WeakEntity<Workspace>, cx: &A
     v_flex()
         .id("agents-popup")
         .w(px(400.))
-        .max_h(px(560.))
         .gap_3()
         .child(
             div()
@@ -299,7 +312,7 @@ pub(crate) fn popup(workspace: &Workspace, entity: WeakEntity<Workspace>, cx: &A
                 .font_weight(gpui_kit::FontWeight::MEDIUM)
                 .child("Agents"),
         )
-        .child(div().flex_1().min_h_0().child(body))
+        .child(body)
         .into_any_element()
 }
 

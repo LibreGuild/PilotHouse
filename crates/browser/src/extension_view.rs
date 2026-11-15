@@ -505,7 +505,7 @@ impl Render for ChromeExtensionView {
                                     .ghost()
                                     .icon(Icons::FolderOpen)
                                     .label("Reveal")
-                                    .on_click(move |_, _, cx| cx.reveal_path(&folder)),
+                                    .on_click(move |_, _, cx| ph_ui::platform::reveal(&folder, cx)),
                             ),
                     )
                     .child(step(1, "Open chrome://extensions in Chrome (or edge://extensions, brave://extensions)."))

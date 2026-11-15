@@ -337,7 +337,7 @@ impl AgentSpec {
                     self.name
                 )),
             },
-            Launch::Bridge { subcommand } => match std::env::current_exe() {
+            Launch::Bridge { subcommand } => match ph_store::paths::helper_program(subcommand) {
                 Ok(program) => Availability::Ready {
                     program,
                     args: vec![subcommand.into()],

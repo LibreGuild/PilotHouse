@@ -574,3 +574,56 @@ fn a_pasted_image_becomes_an_attachment(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+/// Rendered Markdown, as the preview and the chat show it.
+struct Document;
+
+impl gpui_kit::Render for Document {
+    fn render(
+        &mut self,
+        _: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        use gpui_kit::base::text::{SelectionFormat, TextView};
+        use gpui_kit::{InteractiveElement as _, ParentElement as _, Styled as _, div};
+        let text = "# Notes\n\nSome **bold** text.\n\n| Name | Count |\n|---|---|\n| a | 1 |\n";
+        ph_ui::rich_copy::on(
+            div().id("document").size_full().child(
+                TextView::markdown("document-text", text)
+                    .selectable(true)
+                    .selection_format(SelectionFormat::Source),
+            ),
+        )
+    }
+}
+
+/// Copying from rendered Markdown puts the text as it reads on the
+/// clipboard, a table's cells apart by tabs (the HTML form goes to the
+/// system's clipboard, which a test leaves alone).
+#[gpui_kit::test]
+fn rendered_markdown_copies_as_the_text_read(cx: &mut TestAppContext) {
+    let (window, _) = cx
+        .update(|cx| {
+            gpui_kit::init(cx);
+            ph_theme::init(cx);
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| cx.new(|_| Document))
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        // The document fills the window: its heading is at the top left.
+        let at = gpui_kit::point(px(12.), px(12.));
+        gpui_kit::test::TestEventExt::pointer_down(window, at, gpui_kit::MouseButton::Left, cx);
+        gpui_kit::test::TestEventExt::pointer_up(window, at, gpui_kit::MouseButton::Left, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    press(window, "secondary-a", cx);
+    press(window, "secondary-c", cx);
+    let copied = cx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .unwrap_or_default();
+    assert_eq!(copied, "Notes\n\nSome bold text.\n\nName\tCount\na\t1");
+}

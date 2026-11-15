@@ -666,7 +666,7 @@ impl Render for AndroidRun {
                                 .icon(Icons::FolderOpen)
                                 .tooltip("Show the APK in its folder")
                                 .accessibility_label("Show the APK")
-                                .on_click(move |_, _, cx| cx.reveal_path(&apk)),
+                                .on_click(move |_, _, cx| ph_ui::platform::reveal(&apk, cx)),
                         )
                         .child(
                             ph_ui::CopyButton::new(

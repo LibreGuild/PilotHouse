@@ -89,11 +89,15 @@ impl Roots {
     /// Where `path` is on disk (see [`Self::split`]).
     pub fn absolute(&self, path: &str) -> Option<PathBuf> {
         let (root, rest) = self.split(path)?;
-        Some(if rest.is_empty() {
-            root.path.clone()
-        } else {
-            root.path.join(rest)
-        })
+        // Pushed a part at a time, so Windows gets its own separator
+        // throughout: a copied path, or one handed to Explorer, must not
+        // read `C:\repo\src/app`.
+        let mut absolute = root.path.clone();
+        absolute.extend(
+            rest.split('/')
+                .filter(|part| !part.is_empty() && *part != "."),
+        );
+        Some(absolute)
     }
 
     /// The path of `absolute`, if it is in one of the folders (the deepest

@@ -41,6 +41,39 @@ impl DirTree {
         self.listings.contains_key(dir)
     }
 
+    /// Whether `dir` is listed as exactly `entries`.
+    pub fn listing_is(&self, dir: &str, entries: &[DirEntry]) -> bool {
+        self.listings.get(dir).is_some_and(|known| known == entries)
+    }
+
+    /// The listed folders on show: the top one, and each open folder whose
+    /// parents are all open.
+    pub fn shown_dirs(&self) -> Vec<String> {
+        let shown = |dir: &str| {
+            dir.is_empty()
+                || dir
+                    .match_indices('/')
+                    .map(|(end, _)| &dir[..end])
+                    .chain([dir])
+                    .all(|folder| self.expanded.contains(folder))
+        };
+        let mut dirs: Vec<String> = self
+            .listings
+            .keys()
+            .filter(|dir| shown(dir))
+            .cloned()
+            .collect();
+        dirs.sort();
+        dirs
+    }
+
+    /// Forgets the listings of folders not on show, so each is read again
+    /// when it is next opened.
+    pub fn forget_hidden(&mut self) {
+        let shown: HashSet<String> = self.shown_dirs().into_iter().collect();
+        self.listings.retain(|dir, _| shown.contains(dir));
+    }
+
     pub fn set_listing(&mut self, dir: &str, entries: Vec<DirEntry>) {
         // Everything in an ignored folder is ignored, whatever the listing
         // of that folder alone says.
@@ -179,6 +212,24 @@ mod tests {
             is_dir,
             ignored: false,
         }
+    }
+
+    #[test]
+    fn only_folders_on_show_are_kept_when_refreshing() {
+        let mut tree = DirTree::default();
+        tree.set_listing("", vec![entry("src", true), entry("docs", true)]);
+        tree.set_listing("src", vec![entry("app", true)]);
+        tree.set_listing("src/app", vec![entry("main.rs", false)]);
+        tree.set_listing("docs", vec![entry("a.md", false)]);
+        tree.set_expanded("src/app", true);
+        // `src` is closed, so `src/app` is not on show though it is open.
+        assert_eq!(tree.shown_dirs(), [""]);
+        tree.set_expanded("src", true);
+        assert_eq!(tree.shown_dirs(), ["", "src", "src/app"]);
+        tree.forget_hidden();
+        assert!(!tree.is_listed("docs") && tree.is_listed("src/app"));
+        assert!(tree.listing_is("src", &[entry("app", true)]));
+        assert!(!tree.listing_is("src", &[]) && !tree.listing_is("docs", &[]));
     }
 
     #[test]

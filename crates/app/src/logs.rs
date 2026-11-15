@@ -21,21 +21,49 @@ fn logs_dir() -> PathBuf {
     ph_store::paths::data_dir().join("logs")
 }
 
-/// Sets up logging; `to_file` for the app (not the `ctl`, `mcp` and
-/// `agy-acp` helpers, which run beside it). `RUST_LOG` overrides the level,
-/// e.g. `RUST_LOG=ph_store=debug pilothouse`.
-pub fn init(to_file: bool) {
+/// The app's log file, once [`write_to_file`] has opened it.
+static FILE: std::sync::OnceLock<Mutex<Log>> = std::sync::OnceLock::new();
+
+/// Writes to the app's log file when there is one, and nowhere before.
+struct FileWriter;
+
+impl std::io::Write for FileWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match FILE.get().map(Mutex::lock) {
+            Some(Ok(mut log)) => log.write(bytes),
+            _ => Ok(bytes.len()),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match FILE.get().map(Mutex::lock) {
+            Some(Ok(mut log)) => log.flush(),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Sets up logging to stderr. `RUST_LOG` overrides the level, e.g.
+/// `RUST_LOG=ph_store=debug pilothouse`. The log file is the app's alone
+/// ([`write_to_file`]).
+pub fn init() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("warn,pilothouse=info,ph_=info"));
-    let file = to_file
-        .then(open_log)
-        .flatten()
-        .map(|file| fmt::layer().with_ansi(false).with_writer(Mutex::new(file)));
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_writer(std::io::stderr))
-        .with(file)
+        .with(fmt::layer().with_ansi(false).with_writer(|| FileWriter))
         .try_init();
+}
+
+/// Starts the app's log file. Only once the app itself starts: a run that
+/// hands its paths to the running app, shows its quick chat or prints the
+/// version used to start a new file too, moving the running app's log
+/// along each time until what it had written was gone.
+pub fn write_to_file() {
+    if let Some(log) = open_log() {
+        let _ = FILE.set(Mutex::new(log));
+    }
 }
 
 /// A log grows to this, then starts afresh (the full one moved along), so

@@ -483,7 +483,7 @@ pub(crate) fn open_dialog(window: &mut Window, cx: &mut App) {
                             .on_click(|_, _, cx| {
                                 let root = space::root();
                                 let _ = std::fs::create_dir_all(&root);
-                                cx.reveal_path(&root);
+                                ph_ui::platform::reveal(&root, cx);
                             }),
                     )
                     .child(div().flex_1())

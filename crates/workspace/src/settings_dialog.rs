@@ -911,7 +911,7 @@ fn about_page() -> SettingPage {
                                 .outline()
                                 .icon(Icons::FolderOpen)
                                 .label("Open")
-                                .on_click(move |_, _, cx| cx.reveal_path(&data)),
+                                .on_click(move |_, _, cx| ph_ui::platform::reveal(&data, cx)),
                         )
                 }))
                 .item(SettingItem::render(|_, _, cx| {

@@ -10,7 +10,7 @@ pub const TOOLS: &[Tool] = &[
         description: concat!(
             "Open a URL in ",
             ph_brand::name!(),
-            "'s built-in browser (a pane the user sees in the app) and wait for it to load. When chrome_ tools are offered (the user's own Chrome), use them first; use this one when they answer that the extension is not connected, or when the user asks for this browser. Logins made here persist for this project. Local addresses like localhost:3000 work."
+            "'s built-in browser (a pane the user sees in the app) and wait for it to load. This is the browser the user means by \"the built-in browser\", \"the in-app browser\" or \"the browser tab\": drive it only with these browser_ tools, never with another server's browser, REPL or Playwright tool, which cannot reach it. When chrome_ tools are offered (the user's own Chrome), use them first; use this one when they answer that the extension is not connected, or when the user asks for this browser. Logins made here persist for this project. Local addresses like localhost:3000 work."
         ),
         schema: || json!({ "type": "object", "required": ["url"], "properties": { "url": { "type": "string" } } }),
         build: |arguments, project_id, _| Ok(("browser.open", with_project(arguments, project_id))),

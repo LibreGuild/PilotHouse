@@ -18,6 +18,7 @@ pub mod markdown;
 mod menu;
 mod pane_header;
 pub mod platform;
+pub mod rich_copy;
 mod surface;
 pub mod time;
 mod truncated;

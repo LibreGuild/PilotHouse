@@ -952,7 +952,7 @@ impl SlidesEditor {
                         )),
                         cx,
                     );
-                    cx.reveal_path(&written);
+                    ph_ui::platform::reveal(&written, cx);
                 }
                 Err(err) => window
                     .push_notification(Notification::error(format!("Not exported: {err:#}")), cx),
@@ -1187,7 +1187,7 @@ impl SlidesEditor {
                         PopupMenuItem::new(reveal_label()).on_click(move |_, _, cx| {
                             if let Some(editor) = reveal.upgrade() {
                                 let folder = editor.read(cx).doc.read(cx).folder().to_path_buf();
-                                cx.reveal_path(&folder.join(super::space::DECK));
+                                ph_ui::platform::reveal(&folder.join(super::space::DECK), cx);
                             }
                         }),
                     )

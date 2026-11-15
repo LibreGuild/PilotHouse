@@ -82,23 +82,40 @@ pub(crate) fn watch(store: Store, cx: &mut Context<WorkspaceScreen>) -> Task<()>
     cx.spawn(async move |this: WeakEntity<WorkspaceScreen>, cx| {
         let mut round = 0u32;
         let mut head = String::new();
+        // The commit the Git model named when HEAD was last asked for.
+        let mut seen: Option<Option<String>> = None;
         loop {
-            let Ok(Some((folders, git_root, task))) = this.update(cx, |space, _| {
-                (space.is_visible() && space.server().is_none()).then(|| {
+            let due = round.is_multiple_of(CI_EVERY);
+            let Ok(Some((folders, git_root, task, named))) = this.update(cx, |space, cx| {
+                // Behind another program nobody reads the status bar: a
+                // look a minute keeps it roughly right for coming back.
+                let looked_at = space.is_visible() && (space.is_window_active() || due);
+                (looked_at && space.server().is_none()).then(|| {
                     let folders: Vec<PathBuf> = space.project().folders();
                     let git_root = folders.get(space.git_folder()).cloned();
                     let task = crate::tasks::of(&store, space.project().id);
-                    (folders, git_root, task)
+                    // The commit checked out, as the Git model (which the
+                    // watcher keeps current) names it: `None` before it
+                    // has read the folder.
+                    let named = space
+                        .repo_model()
+                        .map(|repo| repo.read(cx))
+                        .filter(|repo| repo.is_loaded())
+                        .map(|repo| repo.status().and_then(|status| status.head.clone()));
+                    (folders, git_root, task, named)
                 })
             }) else {
                 if this.upgrade().is_none() {
                     return;
                 }
+                round = round.wrapping_add(1);
                 cx.background_executor().timer(PORTS_EVERY).await;
                 continue;
             };
-            let ports = cx
-                .background_spawn(async move {
+            // Where the system does not say which folder a listener was
+            // started in, none can be the workspace's: nothing is asked.
+            let ports = if ph_runs::ports::TELLS_FOLDERS {
+                cx.background_spawn(async move {
                     let mut ports: Vec<u16> = ph_runs::ports::listening_within(PORTS_EVERY / 2)
                         .into_iter()
                         .filter(|port| folders.iter().any(|folder| port.belongs_to(folder)))
@@ -108,13 +125,24 @@ pub(crate) fn watch(store: Store, cx: &mut Context<WorkspaceScreen>) -> Task<()>
                     ports.dedup();
                     ports
                 })
-                .await;
-            // CI when HEAD moved, else once a minute.
+                .await
+            } else {
+                Vec::new()
+            };
+            // CI when HEAD moved, else once a minute. Whether it moved is
+            // read off the Git model where it knows, without running Git.
+            let moved = named.is_none() || named != seen;
+            seen = named.clone();
+            let ask = moved || due || head.is_empty();
             let ci = match git_root {
+                // No commit (not a repository, or an empty one): no CI.
+                Some(_) if named == Some(None) => (String::new(), Some(None)),
+                // The commit it was, and CI read within the minute: both
+                // stay as they are.
+                Some(_) if !ask => (head.clone(), None),
                 Some(root) => {
                     let store = store.clone();
                     let last = head.clone();
-                    let due = round.is_multiple_of(CI_EVERY);
                     cx.background_spawn(async move {
                         let now = ph_git::git(&root, &["rev-parse", "HEAD"])
                             .map(|sha| sha.trim().to_string())

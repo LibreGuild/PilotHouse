@@ -832,7 +832,11 @@ impl Render for StudioWindow {
                             )
                         })
                         .child(div().flex_1().min_w_2())
-                        .child(actions)
+                        // Windows treats the bar as the window's drag area:
+                        // a button in it takes clicks only from an area
+                        // that blocks the bar (Export did nothing there,
+                        // while its shortcut worked).
+                        .child(div().flex_none().occlude().child(actions))
                         .children(chat_button),
                 ),
             )

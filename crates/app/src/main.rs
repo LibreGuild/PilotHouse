@@ -33,13 +33,10 @@ fn main() {
     if args.first().is_some_and(|command| command == "ctl") {
         attach_console();
     }
-    // The helpers run beside the app and keep to stderr (`chrome-host`'s
-    // stdout is Chrome's channel to the extension).
-    let helper = matches!(
-        args.first().map(String::as_str),
-        Some("ctl" | "mcp" | "agy-acp" | "agent-hook" | "chrome-host")
-    );
-    logs::init(!helper);
+    // To stderr until the app itself starts (`chrome-host`'s stdout is
+    // Chrome's channel to the extension): the helpers, and a run that only
+    // hands paths to the running app, leave its log file alone.
+    logs::init();
     logs::install_crash_handler();
 
     let (open, quick_chat) = match cli::run(&args) {
@@ -55,6 +52,7 @@ fn main() {
 }
 
 fn run_app(open: Vec<std::path::PathBuf>, quick_chat: bool) -> Result<()> {
+    logs::write_to_file();
     // Agents and terminals need the login shell's PATH; read it while the UI starts.
     ph_env::warm_up();
     let store = Store::open(&paths::database_path())?;
@@ -68,6 +66,7 @@ fn run_app(open: Vec<std::path::PathBuf>, quick_chat: bool) -> Result<()> {
     });
     app.run(move |cx| {
         gpui_kit::init(cx);
+        ph_ui::rich_copy::use_system_clipboard();
         ph_theme::init(cx);
         ph_browser::init(store.clone(), cx);
         ph_devices::init(cx);

@@ -318,11 +318,12 @@ fn agents_button(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl Int
             }
         })
         .trigger(trigger)
-        .content(move |_, _, cx| {
+        .content(move |_, window, cx| {
             let Some(workspace) = this.upgrade() else {
                 return div().into_any_element();
             };
-            crate::agents_board::popup(workspace.read(cx), this.clone(), cx)
+            let room = window.viewport_size().height;
+            crate::agents_board::popup(workspace.read(cx), this.clone(), room, cx)
         })
 }
 

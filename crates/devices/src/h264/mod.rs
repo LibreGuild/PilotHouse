@@ -70,6 +70,11 @@ impl Assembler {
         done
     }
 
+    /// Whether nothing of a picture is held: a pause then ends nothing.
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.unit.is_empty()
+    }
+
     /// The stream paused: what is held ends a picture (the phone writes
     /// each one whole), so it and any before it are complete.
     pub fn flush(&mut self) -> Vec<Vec<Vec<u8>>> {
