@@ -61,6 +61,9 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
         .map(|folder| ph_ui::platform::display_path(folder))
         .collect::<Vec<_>>()
         .join("\n");
+    let stacks: Vec<&'static str> = space
+        .map(|space| space.stacks().iter().map(|stack| stack.label()).collect())
+        .unwrap_or_default();
     let drive = space.and_then(|space| drive_item(space, cx));
     let ci = space.and_then(|space| ci_item(space.signals().ci.as_ref(), cx));
     let ports = space.and_then(|space| ports_item(&space.signals().ports, cx));
@@ -109,7 +112,8 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                 .gap_3()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .children(limits(cx)),
+                .children(limits(cx))
+                .when(!stacks.is_empty(), |this| this.child(stacks.join(" · "))),
         )
 }
 

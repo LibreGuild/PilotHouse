@@ -321,7 +321,11 @@ impl Workspace {
         match target {
             Target::Chat(session) if github => self.show_session(*session, window, cx),
             Target::Chat(session) => self.open_chat(project, *session, window, cx),
-            Target::Terminal(pane) => self.open_terminal_agent(project, pane, false, window, cx),
+            // The terminal takes the keyboard itself: what is typed next
+            // is the answer the agent waits for.
+            Target::Terminal(pane) => {
+                return self.open_terminal_agent(project, pane, false, window, cx);
+            }
             // Its chat is beside the pull request.
             Target::Preparing(_) => self.set_view(View::GitHub, window, cx),
         }
@@ -698,30 +702,31 @@ impl Workspace {
         id: ph_store::sessions::SessionId,
         cx: &mut Context<Self>,
     ) {
-        if !self.settled.remove(&id) {
-            self.settled.insert(id);
-            if let Some(chats) = ph_agent::ChatHub::existing(project, cx) {
-                chats.update(cx, |chats, cx| chats.mark_read(id, cx));
-            }
+        if self.settled.remove(&id) {
+            self.save_settled(cx);
+            cx.notify();
+        } else {
+            self.settle_all(&[(project, id)], cx);
         }
-        self.save_settled(cx);
-        cx.notify();
     }
 
-    /// Marks every one of `chats` (each with its workspace) done at once.
+    /// Marks every one of `chats` (each with its workspace) done, whatever
+    /// it was: its news counts as seen. (A chat marked done before that
+    /// finished another turn since is put away again, not taken back out.)
     pub(crate) fn settle_all(
         &mut self,
         chats: &[(ProjectId, ph_store::sessions::SessionId)],
         cx: &mut Context<Self>,
     ) {
         for (project, id) in chats {
-            if self.settled.insert(*id)
-                && let Some(chats) = ph_agent::ChatHub::existing(*project, cx)
-            {
-                chats.update(cx, |chats, cx| chats.mark_read(*id, cx));
+            self.settled.insert(*id);
+            if let Some(chats) = ph_agent::ChatHub::existing(*project, cx) {
+                chats.update(cx, |chats, cx| chats.settle(*id, cx));
             }
         }
         self.save_settled(cx);
+        // The dots and counts follow at once, not at the next look.
+        self.refresh_statuses(cx);
         cx.notify();
     }
 
@@ -894,9 +899,12 @@ impl Workspace {
         }
         // The screen that is drawn: one hidden behind "no workspace yet"
         // cannot take the keyboard (no shortcut would reach the window).
-        match self.screen_in_front().cloned() {
-            Some(space) => space.update(cx, |space, cx| space.focus_chat(window, cx)),
-            None => self.focus_handle.focus(window, cx),
+        let taken = self
+            .screen_in_front()
+            .cloned()
+            .is_some_and(|space| space.update(cx, |space, cx| space.focus_chat(window, cx)));
+        if !taken {
+            self.focus_handle.focus(window, cx);
         }
     }
 
@@ -1309,6 +1317,7 @@ impl Workspace {
         let Some(id) = self.active_project.filter(|id| !self.is_chats(*id)) else {
             return window.dispatch_action(Box::new(AddProject), cx);
         };
+        self.bring_forward(window, cx);
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -1403,6 +1412,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.bring_forward(window, cx);
         let Some(project) = self
             .active_space()
             .map(|space| space.read(cx).project().clone())
@@ -1464,7 +1474,17 @@ impl Workspace {
         if self.active_project == Some(id) {
             self.active_project = None;
             // Back to the Bridge, where the others are: no other workspace
-            // is the obvious one to show instead.
+            // is the obvious one to show instead. One is ready behind it
+            // all the same (the one shown before, else the Chats space), so
+            // a new chat and the other commands have somewhere to go.
+            let behind = self
+                .previous_project
+                .filter(|previous| *previous != id && self.has_place(*previous))
+                .or(self.chats_space.as_ref().map(|chats| chats.id))
+                .or_else(|| self.projects.first().map(|project| project.id));
+            if let Some(behind) = behind {
+                self.open_project(behind, window, cx);
+            }
             self.set_view(View::Bridge, window, cx);
         }
         cx.notify();
@@ -1482,10 +1502,17 @@ impl Workspace {
         let Some(space) = self.active_space().cloned() else {
             return;
         };
-        if self.view != View::Workspaces {
+        self.bring_forward(window, cx);
+        space.update(cx, |space, cx| update(space, window, cx));
+    }
+
+    /// Shows the workspace last in front where the Bridge or Reviews is: a
+    /// command that acts on "this workspace" is not carried out on one
+    /// nobody is looking at.
+    fn bring_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.view != View::Workspaces && self.active_project.is_some() {
             self.set_view(View::Workspaces, window, cx);
         }
-        space.update(cx, |space, cx| update(space, window, cx));
     }
 
     // ---- Action handlers -------------------------------------------------
@@ -1550,6 +1577,7 @@ impl Workspace {
         let Some(space) = self.active_space().cloned() else {
             return;
         };
+        self.bring_forward(window, cx);
         let (root, parent_name) = {
             let space = space.read(cx);
             let folders = space.project().folders();
@@ -1805,6 +1833,7 @@ impl Workspace {
         let Some(project) = self.active_project else {
             return;
         };
+        self.bring_forward(window, cx);
         let store = AppState::store(cx).clone();
         let Some(task) = crate::tasks::of(&store, project) else {
             return;
@@ -1905,6 +1934,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // From the Bridge or Reviews, the one shown before is the one
+        // still behind them.
+        if self.view != View::Workspaces && self.active_project.is_some() {
+            return self.bring_forward(window, cx);
+        }
         let previous = self
             .previous_project
             .filter(|id| self.projects.iter().any(|project| project.id == *id));
@@ -1930,7 +1964,9 @@ impl Workspace {
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
         match self.view {
             View::Workspaces => {
-                self.with_active_space(window, cx, |space, _, cx| space.toggle_chat(cx))
+                self.with_active_space(window, cx, |space, _, cx| space.toggle_chat(cx));
+                // The composer is gone with the chat, or back with it.
+                self.focus_front(window, cx);
             }
             View::GitHub => self.set_sidebar_collapsed(!self.sidebar_collapsed, cx),
             View::Bridge | View::Custom(_) => {}
@@ -1961,6 +1997,7 @@ impl Workspace {
         self.with_active_space(window, cx, |space, window, cx| {
             space.toggle_zoom(window, cx)
         });
+        self.focus_front(window, cx);
     }
 
     fn reset_layout(&mut self, _: &ResetLayout, window: &mut Window, cx: &mut Context<Self>) {
@@ -2271,6 +2308,7 @@ impl Render for Workspace {
                 this.show_tab(ContextTab::Tests, window, cx)
             }))
             .on_action(cx.listener(|this, _: &CaptureToChat, window, cx| {
+                this.bring_forward(window, cx);
                 if let Some(space) = this.active_space() {
                     space.update(cx, |space, cx| space.capture_to_chat(window, cx));
                 }
@@ -2311,12 +2349,14 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &ShowArchitecture, window, cx| {
+                this.bring_forward(window, cx);
                 if let Some(space) = this.active_space() {
                     let root = space.read(cx).project().path.clone();
                     crate::arch_map::open(space.downgrade(), root, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &ShowParallelRuns, window, cx| {
+                this.bring_forward(window, cx);
                 if let Some(space) = this.active_space() {
                     let (project, root) = {
                         let project = space.read(cx).project();
@@ -2326,6 +2366,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &ShowInstructions, window, cx| {
+                this.bring_forward(window, cx);
                 if let Some(space) = this.active_space() {
                     let root = space.read(cx).project().path.clone();
                     crate::instructions_view::open(root, window, cx);
@@ -2345,6 +2386,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_workspace))
             .on_action(cx.listener(Self::remove_workspace))
             .on_action(cx.listener(|this, _: &OpenInNewWindow, window, cx| {
+                this.bring_forward(window, cx);
                 if let Some(id) = this.active_project {
                     this.open_in_new_window(id, window, cx);
                 }

@@ -87,6 +87,9 @@ pub(crate) struct Card {
     settled: bool,
     /// Its workspace has folders, so there can be changes to review.
     has_folders: bool,
+    /// PilotHouse started it, not the user: a schedule's chat, a UI
+    /// test's recording or repair, a review.
+    automated: bool,
 }
 
 /// The Bridge's columns, most urgent first.
@@ -107,11 +110,20 @@ impl Column {
     ];
 
     fn of(card: &Card, now: i64) -> Self {
+        let quiet = now - card.updated_at > QUIET_AFTER;
         match card.summary.state {
-            ChatState::NeedsYou | ChatState::Failed => Column::NeedsYou,
+            ChatState::NeedsYou => Column::NeedsYou,
             ChatState::Working => Column::Working,
+            // A turn that failed asks for a look until it is put away (a
+            // chat that ends on an error counts as failed whenever it is
+            // loaded, however old).
+            ChatState::Failed if card.settled || quiet => Column::Done,
+            ChatState::Failed => Column::NeedsYou,
             ChatState::Done => Column::Review,
-            ChatState::Idle if card.settled || now - card.updated_at > QUIET_AFTER => Column::Done,
+            // Runs PilotHouse started (a schedule's, a test's) wait for a
+            // look only while their news is fresh: they would bury the
+            // user's own tasks otherwise. The inbox lists what they did.
+            ChatState::Idle if card.settled || quiet || card.automated => Column::Done,
             ChatState::Idle => Column::Review,
         }
     }
@@ -165,7 +177,7 @@ pub(crate) fn live_cards(workspace: &Workspace, cx: &App) -> Vec<Card> {
 /// marked done; else every stored chat too.
 fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
     let dark = cx.theme().is_dark();
-    let store = crate::app_state::AppState::store(cx);
+    let now = jiff::Timestamp::now().as_millisecond();
     let mut places: Vec<(ProjectId, String, Option<Hsla>, bool)> = workspace
         .projects()
         .iter()
@@ -190,6 +202,12 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                 continue;
             };
             let place = format!("Reviews · {name}");
+            // The agent a review runs with, as Reviews last read it (the
+            // store is not read while drawing).
+            let reviewer = github
+                .read(cx)
+                .review_agent()
+                .unwrap_or(&ph_agent::agents::AGENTS[0]);
             // A review whose repository is still being cloned is at work
             // already, to whoever asked for it.
             if let Some(preparing) = chats.read(cx).preparing() {
@@ -204,7 +222,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                     summary: ChatSummary {
                         state: ChatState::Working,
                         title: preparing.title.clone(),
-                        agent: ph_agent::chats::default_agent(store),
+                        agent: reviewer,
                         line: Some(format!(
                             "{} {}s",
                             preparing.label,
@@ -215,6 +233,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                     pinned: false,
                     settled: false,
                     has_folders: false,
+                    automated: false,
                 });
             }
             // Those started from the queue, several at once, each have
@@ -231,7 +250,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                     summary: ChatSummary {
                         state: ChatState::Working,
                         title: starting.title.clone(),
-                        agent: ph_agent::chats::default_agent(store),
+                        agent: reviewer,
                         line: Some(format!(
                             "{} {}s",
                             starting.label,
@@ -242,6 +261,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                     pinned: false,
                     settled: false,
                     has_folders: false,
+                    automated: false,
                 });
             }
             for (session, summary) in chats.read(cx).live(cx) {
@@ -250,22 +270,21 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                 if !busy && (!live || workspace.is_settled(session)) {
                     continue;
                 }
-                let Some(stored) = store.session(session).ok().flatten() else {
-                    continue;
-                };
                 cards.push(Card {
                     project: *project,
                     github: true,
                     target: Target::Chat(session),
-                    title: stored.title.clone(),
+                    title: summary.title.to_string(),
                     place: place.clone(),
                     color: None,
-                    updated_at: stored.updated_at,
+                    // Loaded in this run and busy, or just finished: now.
+                    updated_at: now,
                     summary,
                     session: None,
                     pinned: false,
                     settled: false,
                     has_folders: false,
+                    automated: false,
                 });
             }
         }
@@ -299,7 +318,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                     state: ChatState::Idle,
                     title: stored.title.clone().into(),
                     agent: ph_agent::agents::find(&stored.agent_id)
-                        .unwrap_or_else(|| ph_agent::chats::default_agent(store)),
+                        .unwrap_or(&ph_agent::agents::AGENTS[0]),
                     line: stored.last_line.clone(),
                 },
             };
@@ -316,6 +335,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                 pinned: workspace.is_pinned(stored.id),
                 settled,
                 has_folders,
+                automated: is_automated(stored),
             });
         }
     }
@@ -350,6 +370,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
             pinned: false,
             settled: false,
             has_folders: false,
+            automated: false,
         });
     }
     cards.sort_by_key(|card| std::cmp::Reverse(card.updated_at));
@@ -871,7 +892,7 @@ fn card_view(
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
                                 _ = done.update(cx, |workspace, cx| {
-                                    workspace.toggle_settled(project, session, cx)
+                                    workspace.settle_all(&[(project, session)], cx)
                                 });
                             }),
                     )
@@ -1088,8 +1109,18 @@ pub(crate) fn workspace_menu_items(
         PopupMenuItem::new(label)
             .icon(Icon::new(icon))
             .on_click(move |_, window, cx| {
-                _ = workspace.update(cx, |workspace, cx| workspace.open_project(id, window, cx));
-                window.dispatch_action(action(), cx);
+                let here = workspace
+                    .update(cx, |workspace, cx| {
+                        workspace.open_project(id, window, cx);
+                        workspace.view() == View::Workspaces
+                            && workspace.active_project_id() == Some(id)
+                    })
+                    .unwrap_or(false);
+                // Shown in another window: that window came forward, and
+                // the action is not run here, on whatever this one shows.
+                if here {
+                    window.dispatch_action(action(), cx);
+                }
             })
     };
     let colours = {
@@ -1210,3 +1241,93 @@ fn chat_menu(
 
 /// Opens tool `tab` beside a task's chat (the review of its changes).
 pub(crate) const REVIEW_TOOL: ContextTab = ContextTab::Changes;
+
+/// A chat PilotHouse started rather than the user: a schedule's, a UI
+/// test's recording or repair, a review of the user's own changes.
+fn is_automated(session: &Session) -> bool {
+    session.kind == "review"
+        || session.title.ends_with("(scheduled)")
+        || session.title.starts_with("Record test:")
+        || session.title.starts_with("Repair test:")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HOUR: i64 = 60 * 60 * 1000;
+
+    fn card(state: ChatState, settled: bool, automated: bool, age: i64) -> Card {
+        let agent = &ph_agent::agents::AGENTS[0];
+        Card {
+            project: 1,
+            github: false,
+            target: Target::Chat(1),
+            title: "Task".into(),
+            place: "demo".into(),
+            color: None,
+            updated_at: 100 * 24 * HOUR - age,
+            summary: ChatSummary {
+                state,
+                title: "Task".into(),
+                agent,
+                line: None,
+            },
+            session: None,
+            pinned: false,
+            settled,
+            has_folders: true,
+            automated,
+        }
+    }
+
+    fn column(state: ChatState, settled: bool, automated: bool, age: i64) -> Column {
+        Column::of(&card(state, settled, automated, age), 100 * 24 * HOUR)
+    }
+
+    #[test]
+    fn a_task_stands_under_what_it_needs() {
+        assert_eq!(
+            column(ChatState::NeedsYou, false, false, HOUR),
+            Column::NeedsYou
+        );
+        assert_eq!(
+            column(ChatState::Working, true, false, HOUR),
+            Column::Working
+        );
+        assert_eq!(column(ChatState::Done, false, false, HOUR), Column::Review);
+        assert_eq!(column(ChatState::Idle, false, false, HOUR), Column::Review);
+        // Marked done, or not touched for more than a week.
+        assert_eq!(column(ChatState::Idle, true, false, HOUR), Column::Done);
+        assert_eq!(
+            column(ChatState::Idle, false, false, 8 * 24 * HOUR),
+            Column::Done
+        );
+    }
+
+    #[test]
+    fn a_failed_task_can_be_put_away() {
+        assert_eq!(
+            column(ChatState::Failed, false, false, HOUR),
+            Column::NeedsYou
+        );
+        assert_eq!(column(ChatState::Failed, true, false, HOUR), Column::Done);
+        // An old chat that ends on an error, merely opened again.
+        assert_eq!(
+            column(ChatState::Failed, false, false, 30 * 24 * HOUR),
+            Column::Done
+        );
+    }
+
+    #[test]
+    fn runs_do_not_bury_the_tasks() {
+        // A schedule's chat waits for a look while its news is fresh, and
+        // asks like any other; read, it is done.
+        assert_eq!(column(ChatState::Done, false, true, HOUR), Column::Review);
+        assert_eq!(
+            column(ChatState::NeedsYou, false, true, HOUR),
+            Column::NeedsYou
+        );
+        assert_eq!(column(ChatState::Idle, false, true, HOUR), Column::Done);
+    }
+}

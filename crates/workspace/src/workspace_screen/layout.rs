@@ -103,6 +103,9 @@ pub(super) struct Layout {
     /// The chat's share of the window's width (0 to 1) once the line
     /// between the panes was dragged; before that it starts at two fifths.
     pub chat_share: Option<f32>,
+    /// A file's changes, picked in the Changes list, show beside the list
+    /// (the editor has them in front).
+    pub diff_beside: bool,
 }
 
 impl Layout {
@@ -119,6 +122,7 @@ impl Layout {
             tree_open: true,
             before_terminal: None,
             chat_share: None,
+            diff_beside: false,
         }
     }
 
@@ -143,6 +147,9 @@ impl Layout {
                 }
                 tool => {
                     panes.insert(Pane::Tool(tool));
+                    if tool == ContextTab::Changes && self.diff_beside {
+                        panes.insert(Pane::Editor);
+                    }
                 }
             }
         }
@@ -193,7 +200,7 @@ impl Layout {
     }
 
     /// ⌘J and ⌃`: the terminal; with it in front already, what was there
-    /// before it.
+    /// before it (the chat alone, when the result pane was shut).
     pub fn toggle_terminal(&mut self) {
         if self.result_open && self.tool == ContextTab::Terminal {
             match self.before_terminal.take() {
@@ -201,7 +208,11 @@ impl Layout {
                 None => self.toggle_result(),
             }
         } else {
+            let was_open = self.result_open;
             self.show_tool(ContextTab::Terminal);
+            if !was_open {
+                self.before_terminal = None;
+            }
         }
     }
 }
@@ -236,6 +247,22 @@ mod tests {
     }
 
     #[test]
+    fn changes_show_beside_their_list() {
+        let mut layout = Layout::new(ContextTab::Changes, true);
+        layout.diff_beside = true;
+        assert_eq!(
+            layout.panes(),
+            HashSet::from([Pane::Chat, Pane::Tool(ContextTab::Changes), Pane::Editor])
+        );
+        // Only there: another tool has the pane to itself.
+        layout.show_tool(ContextTab::Board);
+        assert_eq!(
+            layout.panes(),
+            HashSet::from([Pane::Chat, Pane::Tool(ContextTab::Board)])
+        );
+    }
+
+    #[test]
     fn preview_remembers_browser_or_phone() {
         let mut layout = Layout::new(ContextTab::Changes, true);
         layout.show_tab(ResultTab::Preview);
@@ -254,6 +281,12 @@ mod tests {
         assert_eq!(layout.tool, ContextTab::Terminal);
         layout.toggle_terminal();
         assert_eq!(layout.tool, ContextTab::Changes);
+        // From the chat alone, the key goes back to the chat alone.
+        let mut layout = Layout::new(ContextTab::Changes, false);
+        layout.toggle_terminal();
+        assert!(layout.result_open && layout.tool == ContextTab::Terminal);
+        layout.toggle_terminal();
+        assert!(!layout.result_open);
         // Opened on the terminal: there is nothing to go back to but the
         // chat alone.
         let mut layout = Layout::new(ContextTab::Terminal, true);

@@ -25,6 +25,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     notification::Notification,
+    resizable::ResizableState,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -117,6 +118,12 @@ pub struct WorkspaceScreen {
     shown: HashSet<Pane>,
     /// Writes the panes' sizes once a drag of the line between them rests.
     _save_split: Option<gpui_kit::Task<()>>,
+    /// Where the lines inside the result pane were dragged to (the tree
+    /// beside the editor; the Changes list beside or over a file's
+    /// changes): kept while another tool is in front.
+    pub(super) tree_split: Entity<ResizableState>,
+    pub(super) changes_split: Entity<ResizableState>,
+    pub(super) changes_stack: Entity<ResizableState>,
     away: Option<Away>,
     /// What the workspace's folders hold, once looked at.
     traits: Option<Traits>,
@@ -345,6 +352,9 @@ impl WorkspaceScreen {
             layout,
             shown: HashSet::new(),
             _save_split: None,
+            tree_split: cx.new(|_| ResizableState::default()),
+            changes_split: cx.new(|_| ResizableState::default()),
+            changes_stack: cx.new(|_| ResizableState::default()),
             away: None,
             traits: None,
             git_folder: 0,
@@ -653,6 +663,21 @@ impl WorkspaceScreen {
 
     /// A name over the result pane was pressed.
     fn show_result_tab(&mut self, tab: ResultTab, window: &mut Window, cx: &mut Context<Self>) {
+        // Preview is the browser or a phone: whichever was shown last, as
+        // long as it is switched on.
+        if tab == ResultTab::Preview {
+            let enabled = AppState::enabled_tabs(cx);
+            if !enabled.contains(&self.layout.preview) {
+                let other = match self.layout.preview {
+                    ContextTab::Browser => ContextTab::Devices,
+                    _ => ContextTab::Browser,
+                };
+                if !enabled.contains(&other) {
+                    return;
+                }
+                self.layout.preview = other;
+            }
+        }
         self.layout.show_tab(tab);
         self.ensure_panel(self.layout.tool, window, cx);
         self.layout_changed(cx);
@@ -711,6 +736,13 @@ impl WorkspaceScreen {
     }
 
     /// A file is open in the editor.
+    /// The editor has a file's changes (a diff) in front.
+    pub(crate) fn showing_diff(&self, cx: &App) -> bool {
+        self.files
+            .as_ref()
+            .is_some_and(|files| files.read(cx).showing_diff())
+    }
+
     pub(crate) fn has_open_files(&self, cx: &App) -> bool {
         self.files
             .as_ref()
@@ -751,16 +783,23 @@ impl WorkspaceScreen {
     /// Gives the keyboard to what is in front: the chat's composer, or the
     /// open file when the editor is on screen and the chat is folded away.
     /// The layout stays as it is.
-    pub fn focus_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.shown.contains(&Pane::Chat)
-            && self.shown.contains(&Pane::Editor)
+    ///
+    /// Says whether something took it. With the chat folded away and no
+    /// text in front there is nothing here to hold the keyboard, and the
+    /// window must: a composer that is not drawn would keep every shortcut
+    /// from reaching it.
+    pub fn focus_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.layout.chat_folded {
+            self.chat
+                .update(cx, |chat, cx| chat.focus_composer(window, cx));
+            return true;
+        }
+        if self.shown.contains(&Pane::Editor)
             && let Some(files) = self.files.clone()
         {
-            files.update(cx, |files, cx| files.focus_active(window, cx));
-            return;
+            return files.update(cx, |files, cx| files.focus_active(window, cx));
         }
-        self.chat
-            .update(cx, |chat, cx| chat.focus_composer(window, cx));
+        false
     }
 
     /// Brings the chat forward and puts the keyboard in its composer.
@@ -898,17 +937,41 @@ impl WorkspaceScreen {
                 FilesPanelEvent::OpenFilesChanged => {
                     // The last file closed where there is no folder tree to
                     // fall back on (the Chats space): the pane would be
-                    // blank under the name Files.
+                    // blank under the name Files. It shuts, on a tool that
+                    // needs no folder for when it is opened again (not
+                    // shown now: the browser would start for nothing).
                     if this.layout.tool == ContextTab::Files
                         && !this.project.is_workspace()
                         && !this.has_open_files(cx)
                         && let Some(tool) = first_tool(&this.project, cx)
                     {
-                        return this.show_tool(tool, window, cx);
+                        this.layout.tool = tool;
+                        this.layout.result_open = false;
+                        return this.layout_changed(cx);
+                    }
+                    // The changes beside their list were closed, or a file
+                    // took their place in the editor.
+                    if this.layout.diff_beside && !this.showing_diff(cx) {
+                        this.layout.diff_beside = false;
+                        return this.layout_changed(cx);
                     }
                     this.save_layout(cx)
                 }
-                FilesPanelEvent::Opened => this.show_tool(ContextTab::Files, window, cx),
+                FilesPanelEvent::Opened => {
+                    // A file's changes picked in the Changes list open
+                    // beside the list, which stays to pick the next from; a
+                    // file opens in Files.
+                    if this.showing_diff(cx)
+                        && this.layout.result_open
+                        && this.layout.tool == ContextTab::Changes
+                    {
+                        this.layout.diff_beside = true;
+                        this.layout_changed(cx);
+                    } else {
+                        this.layout.diff_beside = false;
+                        this.show_tool(ContextTab::Files, window, cx)
+                    }
+                }
                 FilesPanelEvent::Ask(ask) => this.ask_about_code(ask.clone(), window, cx),
                 FilesPanelEvent::MakePrimary(path) => {
                     cx.emit(WorkspaceScreenEvent::MakePrimary(path.clone()))
@@ -1137,6 +1200,10 @@ impl WorkspaceScreen {
     }
 
     pub fn select_session(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        // A chat asked for is shown, also where the chat was folded away.
+        if self.layout.chat_folded {
+            self.reveal_chat(cx);
+        }
         if self.active_session == Some(id) {
             return;
         }
@@ -1156,6 +1223,9 @@ impl WorkspaceScreen {
     /// Clears the chat so the next message starts a new session (with the
     /// agent picked in the composer). Nothing is stored until it is sent.
     pub fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.layout.chat_folded {
+            self.reveal_chat(cx);
+        }
         self.active_session = None;
         self.chat.update(cx, |chat, cx| {
             chat.set_session(None, cx);

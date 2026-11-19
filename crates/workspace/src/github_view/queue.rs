@@ -62,7 +62,7 @@ pub(crate) struct Starting {
 /// Who would run a review started from the queue, and by which template.
 #[derive(Default)]
 pub(crate) struct Reviewer {
-    pub agent: SharedString,
+    pub agent: Option<&'static ph_agent::agents::AgentSpec>,
     pub template: SharedString,
 }
 
@@ -191,7 +191,7 @@ impl GithubView {
         let store = self.store.clone();
         let load = cx.background_spawn(async move {
             let reviewer = Reviewer {
-                agent: ph_agent::chats::default_agent(&store).name.into(),
+                agent: Some(ph_agent::chats::default_agent(&store)),
                 template: ph_review::templates::default_review(&store).name.into(),
             };
             (read(&store, keys), reviewer)
@@ -231,6 +231,21 @@ impl GithubView {
         })
     }
 
+    /// A review of pull request `key` is being readied or runs.
+    pub(super) fn is_under_review(&self, key: &PullKey, cx: &App) -> bool {
+        self.starting.contains_key(key) || self.at_work(key, cx).is_some()
+    }
+
+    /// The chat of the review of `key` started in this run, when its last
+    /// turn failed: the row says so instead of looking untouched.
+    fn stopped(&self, key: &PullKey, cx: &App) -> Option<SessionId> {
+        let (space, session) = self.running.get(key).copied()?;
+        let summary = ph_agent::ChatHub::existing(space, cx)?
+            .read(cx)
+            .summary(session, cx)?;
+        (summary.state == ChatState::Failed).then_some(session)
+    }
+
     /// The reviews of `space`'s pull requests started from the queue and
     /// still being readied: each one's number.
     pub(crate) fn starting_behind(
@@ -241,6 +256,12 @@ impl GithubView {
             .iter()
             .filter(move |(_, starting)| starting.behind == Some(space))
             .map(|(key, starting)| (key.3, starting))
+    }
+
+    /// The agent a review started here runs with, as last read (`None`
+    /// until the lists were read once).
+    pub(crate) fn review_agent(&self) -> Option<&'static ph_agent::agents::AgentSpec> {
+        self.reviewer.agent
     }
 
     /// How many reviews started from the queue are still being readied.
@@ -262,6 +283,8 @@ impl GithubView {
         match starting {
             Some(starting) => {
                 self.starting.insert(key.clone(), starting);
+                // Under way however it was started: no longer ticked.
+                self.selected.remove(key);
                 self.count_seconds(cx);
             }
             None => {
@@ -326,7 +349,11 @@ impl GithubView {
     fn review_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = std::mem::take(&mut self.selected);
         for key in picked {
-            self.review_behind(key, window, cx);
+            // Only what nobody reviewed: a tick may outlive that (the pull
+            // request was reviewed from its own page meanwhile).
+            if !self.reviews.contains_key(&key) {
+                self.review_behind(key, window, cx);
+            }
         }
     }
 
@@ -334,7 +361,7 @@ impl GithubView {
     /// queue: its chat runs behind the one in view, and its row says how
     /// far it is.
     fn review_behind(&mut self, key: PullKey, window: &mut Window, cx: &mut Context<Self>) {
-        if self.starting.contains_key(&key) || self.at_work(&key, cx).is_some() {
+        if self.is_under_review(&key, cx) {
             return;
         }
         let id = repo_of(&key);
@@ -497,8 +524,7 @@ impl GithubView {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
-        let batch = (!not_started.is_empty() || !self.selected.is_empty())
-            .then(|| self.batch_bar(not_started, cx));
+        let batch = (!not_started.is_empty()).then(|| self.batch_bar(not_started, cx));
         v_flex()
             .size_full()
             .child(
@@ -578,16 +604,19 @@ impl GithubView {
     /// Reviews of several at once: how many are ticked, the button that
     /// starts them, and what starting them does.
     fn batch_bar(&self, not_started: Vec<PullKey>, cx: &mut Context<Self>) -> AnyElement {
-        let picked = self.selected.len();
+        // Ticks on what is still listed as not started.
+        let picked = not_started
+            .iter()
+            .filter(|key| self.selected.contains(*key))
+            .count();
         let all = not_started.len();
         let every_one = picked > 0 && not_started.iter().all(|key| self.selected.contains(key));
-        let by = if self.reviewer.agent.is_empty() {
-            String::new()
-        } else {
-            format!(
+        let by = match self.reviewer.agent {
+            Some(agent) => format!(
                 "{}, by the template “{}”. ",
-                self.reviewer.agent, self.reviewer.template
-            )
+                agent.name, self.reviewer.template
+            ),
+            None => String::new(),
         };
         h_flex()
             .id("queue-batch")
@@ -733,7 +762,17 @@ impl GithubView {
             )
             .test_support();
         let pushed_since = triage.as_ref().is_some_and(|triage| triage.behind);
-        let state = self.queue_state(&id, key, group, at_work, reviewed, pushed_since, cx);
+        let stopped = key.as_ref().and_then(|key| self.stopped(key, cx));
+        let state = self.queue_state(
+            &id,
+            key,
+            group,
+            at_work,
+            reviewed,
+            pushed_since,
+            stopped,
+            cx,
+        );
         h_flex()
             .id(SharedString::from(format!("github-found-{id}")))
             .aria_label(SharedString::from(format!(
@@ -767,6 +806,7 @@ impl GithubView {
         at_work: Option<AtWork>,
         reviewed: Option<Reviewed>,
         pushed_since: bool,
+        stopped: Option<SessionId>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -854,6 +894,20 @@ impl GithubView {
                     .into_any_element()
             }
             _ => cell
+                // A review started here ended on an error: said, with the
+                // chat that has the reason, instead of looking untouched.
+                .when_some(stopped, |this, session| {
+                    this.child(note("The review stopped".into(), cx.theme().danger))
+                        .child(
+                            Button::new(SharedString::from(format!("queue-why-{id}")))
+                                .xsmall()
+                                .ghost()
+                                .label("See why")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.show_session_id(session, window, cx)
+                                })),
+                        )
+                })
                 .when_some(key, |this, key| {
                     this.child(
                         Button::new(SharedString::from(format!("queue-review-{id}")))

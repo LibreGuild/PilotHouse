@@ -107,7 +107,7 @@ One SQLite file (`~/Library/Application Support/PilotHouse/pilothouse.db` on mac
 Nothing is on by default except what the project needs:
 
 1. Features cost nothing until opened (lazy panels).
-2. **Detection**: `workspace/src/detect.rs` reads root markers (`Cargo.toml`, `build.gradle`, `*.xcodeproj`, …) and shows the stack in the status bar. `runs/src/detect.rs` finds run configurations.
+2. **Detection**: `workspace/src/detect.rs` reads root markers (`Cargo.toml`, `build.gradle`, `*.xcodeproj`, …) and shows the stack in the status bar (with a workspace in front). `runs/src/detect.rs` finds run configurations.
 3. **Heavy helpers start on use**: Chrome when the Browser tab or a browser tool is first used, the device screen and logcat only while the Devices tab is visible, and an emulator only when asked.
 4. **Settings → Features** hides tools the user does not want.
 

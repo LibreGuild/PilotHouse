@@ -709,14 +709,25 @@ impl FilesPanel {
     /// Gives the keyboard to the open file in front when its text is on
     /// screen (not a preview or a viewer, whose hidden text must not take
     /// keys).
-    pub fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(file) = self.active.and_then(|ix| self.open_files.get(ix)) else {
-            return;
-        };
-        if file.read(cx).takes_keys() {
-            let focus = gpui_kit::Focusable::focus_handle(file.read(cx), cx);
-            focus.focus(window, cx);
+    pub fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // The changes are in front: the file behind them is not drawn.
+        if self.showing_diff() {
+            return false;
         }
+        let Some(file) = self.active.and_then(|ix| self.open_files.get(ix)) else {
+            return false;
+        };
+        if !file.read(cx).takes_keys() {
+            return false;
+        }
+        let focus = gpui_kit::Focusable::focus_handle(file.read(cx), cx);
+        focus.focus(window, cx);
+        true
+    }
+
+    /// The tab in front is the changes (a diff), not a file.
+    pub fn showing_diff(&self) -> bool {
+        self.diff_active && self.diff.is_some()
     }
 
     /// Brings tab `ix` forward; a video or sound in the tab going back stops.

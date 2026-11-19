@@ -450,6 +450,17 @@ impl WorkspaceChats {
     /// counts as seeing what finished: the chats whose turn ended while it
     /// was away are returned (and forgotten).
     /// Counts chat `session`'s news as seen.
+    /// Chat `session` was put away (marked done): its news is neither
+    /// unread nor waiting to be told about.
+    pub fn settle(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        let unread = self.unread.remove(&session);
+        let before = self.unseen.len();
+        self.unseen.retain(|unseen| *unseen != session);
+        if unread || self.unseen.len() != before {
+            cx.notify();
+        }
+    }
+
     pub fn mark_read(&mut self, session: SessionId, cx: &mut Context<Self>) {
         if self.unread.remove(&session) {
             cx.notify();

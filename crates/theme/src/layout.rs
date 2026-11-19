@@ -26,6 +26,11 @@ pub const CONTEXT_PANEL_MAX: Pixels = px(1200.);
 /// The chat's narrowest width.
 pub const CHAT_MIN: Pixels = px(380.);
 
+/// A list beside what it opens, inside the result pane (the folder tree
+/// beside the editor, the Changes list beside a file's changes).
+pub const SIDE_LIST_MIN: Pixels = px(160.);
+pub const SIDE_LIST_MAX: Pixels = px(520.);
+
 /// The editor column's narrowest width (beside the chat, while a file is
 /// open).
 pub const EDITOR_MIN: Pixels = px(360.);

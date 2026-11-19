@@ -102,6 +102,19 @@ impl GithubView {
         };
         let id = RepoId::of(&hosting);
         let number = pull.number;
+        // One round at a time on a pull request: they share its checkout,
+        // and the second would be read as the first one's findings.
+        let key = (id.host.clone(), id.owner.clone(), id.name.clone(), number);
+        if self.is_under_review(&key, cx) {
+            window.push_notification(
+                Notification::info(format!(
+                    "A review of #{number} is under way already. Its row in the queue says how far it is."
+                ))
+                .title("Reviews"),
+                cx,
+            );
+            return;
+        }
         self.show_pull(id.clone(), number, window, cx);
         let project = match self.space(&id) {
             Ok(project) => project,
@@ -133,7 +146,6 @@ impl GithubView {
             )
         });
         // The queue shows it among the agents at work.
-        let key = (id.host.clone(), id.owner.clone(), id.name.clone(), number);
         self.set_starting(
             &key,
             Some(super::queue::Starting {

@@ -62,11 +62,12 @@ What agents are asked to do with a pull request (`ph_review::templates`). Shippe
 |---|---|
 | **Findings to read** | the newest finished round left findings open: how many, and the worst (*3 findings, 1 major*). **Read** opens the pull request on its Findings tab, as a click on the row does. |
 | **Agents at work** | a review is being readied (*Cloning owner/repo 12s*) or runs (what the agent is doing). **Watch** opens its chat; **Answer** when it asks something. |
-| **Not started** | nobody reviewed it. A tick box, and **Review** for one. |
+| **Not started** | nobody reviewed it. A tick box, and **Review** for one. A review started in this run that ended on an error says so (*The review stopped*, **See why** opens its chat). |
 | **Reviewed, nothing found** | the newest round has no open finding. |
 
 - **Reviews of several at once.** Tick pull requests under *Not started* (*Tick the N not started* takes them all) and press **Review N with an agent**. Each gets a full review by the default agent and review template (the bar names both), in the view's own copy of the repository, reading only; nothing is posted until you post it from the pull request's page. The repository is cloned once and each pull request checked out in turn (one Git operation at a time); the agents then run side by side.
 - **A review from the queue runs behind the chat in view** (`ChatPanel::start_review_behind`): a chat of its own in the repository's space, which does not take the panel beside whatever pull request is open. Its row follows it, and so does its card on the Bridge.
+- **One round at a time on a pull request.** Its rounds share one checkout: while a review of it is readied or runs, *Review with agent* on its page says so instead of starting another, and its tick is dropped.
 - **Check the fixes** shows on a reviewed row when the author pushed since: a round on the new commits that says which findings still stand.
 - What agents found is read from the store when the lists are read and whenever a round ends (`GithubView::read_reviews`), off the UI thread.
 

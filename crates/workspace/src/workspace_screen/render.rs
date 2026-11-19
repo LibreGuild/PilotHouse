@@ -131,9 +131,10 @@ impl WorkspaceScreen {
         let on = |tab: ContextTab| enabled.contains(&tab);
         let front = self.layout.result_open.then(|| self.layout.tab());
         let mut names = Vec::new();
-        if on(ContextTab::Changes)
-            && (self.is_relevant(ContextTab::Changes) || front == Some(ResultTab::Changes))
-        {
+        let git = on(ContextTab::Changes);
+        let changes =
+            git && (self.is_relevant(ContextTab::Changes) || front == Some(ResultTab::Changes));
+        if changes {
             names.push(ResultTab::Changes);
         }
         if on(ContextTab::Browser) || on(ContextTab::Devices) {
@@ -157,6 +158,12 @@ impl WorkspaceScreen {
                 ResultTab::Other(_) => more.push(tab),
                 _ => {}
             }
+        }
+        // Git without a repository (as far as was seen when the folders
+        // were looked at) has no name, but is not out of reach: a folder
+        // may have become one since.
+        if git && !changes && self.project.is_workspace() {
+            more.push(ContextTab::Changes);
         }
         // Those the workspace has a use for lead the menu.
         more.sort_by_key(|tab| !self.is_relevant(*tab));
@@ -283,7 +290,8 @@ impl WorkspaceScreen {
 
     /// What the result pane shows under its names.
     fn render_result(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        use gpui_kit::component::resizable::{h_resizable, resizable_panel};
+        use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
+        use ph_theme::layout::{SIDE_LIST_MAX, SIDE_LIST_MIN};
         match self.layout.tool {
             // The folders' tree and, beside it, the files open from it.
             ContextTab::Files => {
@@ -293,13 +301,57 @@ impl WorkspaceScreen {
                 }
                 let tree = self.render_pane(Pane::Tool(ContextTab::Files), window, cx);
                 h_resizable("files-split")
+                    .with_state(&self.tree_split)
                     .child(
                         resizable_panel()
                             .size(ph_ui::scaled_px(240., window))
-                            .size_range(gpui_kit::px(160.)..gpui_kit::px(520.))
+                            .size_range(SIDE_LIST_MIN..SIDE_LIST_MAX)
                             .child(tree),
                     )
                     .child(resizable_panel().child(editor))
+                    .into_any_element()
+            }
+            // The list of what changed and, once a file is picked in it,
+            // that file's changes: beside the list where there is room,
+            // under it in a narrow pane. The list stays to pick the next.
+            ContextTab::Changes if self.layout.diff_beside && self.showing_diff(cx) => {
+                let list = self.render_pane(Pane::Tool(ContextTab::Changes), window, cx);
+                let diff = self.render_pane(Pane::Editor, window, cx);
+                // Which way to divide the pane is decided once its width is
+                // known (a frame later): a split first made too narrow would
+                // keep those shares when given the room.
+                let (width, probe) = ph_ui::measure::width_of("changes-room", window, cx);
+                let room = width.map(|width| ph_ui::measure::design_px(width, window));
+                let split = match room {
+                    None => list,
+                    Some(room) if room < 720. => v_resizable("changes-stack")
+                        .with_state(&self.changes_stack)
+                        .child(
+                            resizable_panel()
+                                .size(ph_ui::scaled_px(320., window))
+                                .size_range(ph_ui::scaled_px(140., window)..gpui_kit::Pixels::MAX)
+                                .child(list),
+                        )
+                        .child(resizable_panel().child(diff))
+                        .into_any_element(),
+                    Some(_) => h_resizable("changes-split")
+                        .with_state(&self.changes_split)
+                        .child(
+                            resizable_panel()
+                                .size(ph_ui::scaled_px(340., window))
+                                .size_range(
+                                    ph_ui::scaled_px(260., window)..ph_ui::scaled_px(440., window),
+                                )
+                                .child(list),
+                        )
+                        .child(resizable_panel().child(diff))
+                        .into_any_element(),
+                };
+                div()
+                    .relative()
+                    .size_full()
+                    .child(probe)
+                    .child(split)
                     .into_any_element()
             }
             tool => self.render_pane(Pane::Tool(tool), window, cx),
@@ -342,7 +394,9 @@ impl WorkspaceScreen {
                                 .icon(Icons::MessagesSquare)
                                 .tooltip(label.clone())
                                 .accessibility_label(label)
-                                .on_click(cx.listener(|this, _, _, cx| this.toggle_chat(cx))),
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.show_chat(window, cx)),
+                                ),
                         )
                         .children(state.map(|color| {
                             div().size(ph_ui::rems_from_px(8.)).rounded_full().bg(color)

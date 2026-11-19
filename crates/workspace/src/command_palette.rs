@@ -467,7 +467,11 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
     let projects: Vec<Entry> = workspace
         .projects()
         .iter()
-        .filter(|project| Some(project.id) != workspace.active_project_id())
+        // Not the one on screen; the one behind the Bridge is offered.
+        .filter(|project| {
+            workspace.view() != crate::workspace::View::Workspaces
+                || Some(project.id) != workspace.active_project_id()
+        })
         .map(|project| Entry {
             label: format!("Open {}", project.name).into(),
             icon: IconName::Folder.into(),

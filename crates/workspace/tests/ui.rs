@@ -591,6 +591,84 @@ fn badges_open_workspaces_and_cards_open_their_chats(cx: &mut TestAppContext) {
     });
 }
 
+/// With the chat folded away its composer is not drawn; the keyboard must
+/// not stay there, or no shortcut would reach the window (⌘B could not
+/// bring the chat back). A chat asked for unfolds it.
+#[gpui_kit::test]
+fn keys_work_with_the_chat_folded(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let folder = temp_project("folded");
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.add_project_path(&folder, window, cx)
+        });
+        // A tool with no text to take the keyboard, and the chat typed in.
+        window.dispatch_action(Box::new(ph_workspace::ShowBoard), cx);
+        let space = workspace.read(cx).active_space().unwrap().clone();
+        space.update(cx, |space, cx| space.focus_chat(window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let folded = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            workspace
+                .read(cx)
+                .active_space()
+                .unwrap()
+                .read(cx)
+                .is_chat_folded()
+        })
+    };
+    press(window, "secondary-b", cx);
+    cx.update_window(window, |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(folded(cx));
+    press(window, "secondary-b", cx);
+    assert!(
+        !folded(cx),
+        "⌘B reached the window and brought the chat back"
+    );
+
+    // Folded again, then a new chat is asked for: it shows.
+    press(window, "secondary-b", cx);
+    cx.update_window(window, |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    cx.run_until_parked();
+    assert!(folded(cx));
+    press(window, "secondary-n", cx);
+    assert!(!folded(cx), "a new chat is not started out of sight");
+}
+
+/// Removing the workspace in front lands on the Bridge with another place
+/// ready behind it, so a new chat and the other commands have somewhere to
+/// go.
+#[gpui_kit::test]
+fn removing_the_workspace_in_front_leaves_one_behind(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let (alpha, beta) = two_workspaces("removed", window, &workspace, cx);
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_project(alpha, window, cx);
+            workspace.open_project(beta, window, cx);
+            workspace.remove_project(beta, window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.view(), ph_workspace::View::Bridge);
+        assert_eq!(workspace.active_project_id(), Some(alpha));
+    });
+    press(window, "secondary-n", cx);
+    cx.update(|cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.view(), ph_workspace::View::Workspaces);
+        assert_eq!(workspace.active_project_id(), Some(alpha));
+    });
+}
+
 /// Someone who comes from a version without the Bridge finds their last
 /// week of chats waiting for a look: the column's menu puts them away at
 /// once.
