@@ -25,7 +25,8 @@ pub struct Preferences {
     /// to keep an old "Dark" choice looking the same.
     pub dark_theme: DarkTheme,
     pub chat_width: ChatWidth,
-    /// Names under the tool icons on the right, not only in tooltips.
+    /// Names under the icons of the column at the left edge, not only in
+    /// tooltips. (Named for the tool icons it first labelled.)
     pub tool_labels: bool,
     /// One color for focus, links, selection and highlights, over the
     /// theme's own.
