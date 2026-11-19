@@ -464,12 +464,6 @@ impl WorkspaceChats {
         }
     }
 
-    pub fn mark_read(&mut self, session: SessionId, cx: &mut Context<Self>) {
-        if self.unread.remove(&session) {
-            cx.notify();
-        }
-    }
-
     pub fn set_on_screen(&mut self, on_screen: bool, cx: &mut Context<Self>) -> Vec<SessionId> {
         self.on_screen = on_screen;
         if on_screen

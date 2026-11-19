@@ -723,32 +723,6 @@ impl ChatPanel {
         cx.notify();
     }
 
-    /// Opens a new review chat working in `cwd` (the PR's worktree) and
-    /// starts it: `display` is what the chat shows for the long `prompt`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn start_review(
-        &mut self,
-        review_id: i64,
-        cwd: std::path::PathBuf,
-        title: String,
-        display: String,
-        prompt: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.start_review_turn(
-            Some(review_id),
-            Some(crate::thread::ReviewTurn::Round),
-            None,
-            cwd,
-            title,
-            display,
-            prompt,
-            window,
-            cx,
-        )
-    }
-
     /// Starts a chat that asks `prompt` about a pull request, working in
     /// its checkout `cwd` and only reading.
     pub fn start_question(

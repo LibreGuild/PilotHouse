@@ -3,9 +3,6 @@
 //! Preview, Terminal, Files and the workspace's other tools; see
 //! [`layout`]). The Bridge lists its chats with every other workspace's.
 //!
-//! The Chats space (chats outside any workspace) has a screen too: the chat
-//! and the tools that need no folder.
-//!
 //! A `WorkspaceScreen` is the screen of a workspace. Its running work (chats,
 //! shells, test runs) belongs to the workspace and outlives the screen (see
 //! [`ph_agent::chats`], [`ph_terminal::TerminalHub`],
@@ -346,10 +343,7 @@ impl WorkspaceScreen {
             .as_deref()
             .and_then(ContextTab::from_key)
             .filter(|tab| tab.in_build())
-            // The Chats space has no folder for Files to show (0.6.4 kept
-            // Files as its tool all the same, in a column that was shut).
-            .filter(|tab| *tab != ContextTab::Files || project.is_workspace())
-            .or_else(|| first_tool(&project, cx))
+            .or_else(|| AppState::enabled_tabs(cx).into_iter().next())
             .unwrap_or_default();
         let mut layout = Layout::new(tool, saved.context_panel_open.unwrap_or(!project.empty));
         layout.chat_folded = saved.chat_folded.unwrap_or(false) && layout.result_open;
@@ -482,9 +476,9 @@ impl WorkspaceScreen {
     /// tests or an app to test. Until the folders are looked at, every tool
     /// shows; the tool in view always does.
     fn is_relevant(&self, tab: ContextTab) -> bool {
-        // In the Chats space there is no folder to show or add.
+        // Files is where a folder is added, too.
         if tab == ContextTab::Files {
-            return self.project.is_workspace();
+            return true;
         }
         let Some(traits) = &self.traits else {
             return true;
@@ -662,11 +656,6 @@ impl WorkspaceScreen {
     /// Shows `tab` in the result pane.
     pub fn show_tab(&mut self, tab: ContextTab, window: &mut Window, cx: &mut Context<Self>) {
         if !AppState::enabled_tabs(cx).contains(&tab) {
-            return;
-        }
-        // The Chats space has no folder: Files has nothing to show there
-        // but a file opened from a chat.
-        if tab == ContextTab::Files && !self.project.is_workspace() && !self.has_open_files(cx) {
             return;
         }
         self.show_tool(tab, window, cx);
@@ -885,7 +874,7 @@ impl WorkspaceScreen {
             // A tool the brand leaves out gives way to the first one
             // switched on.
             if !self.layout.tool.in_build() {
-                let Some(tool) = first_tool(&self.project, cx) else {
+                let Some(tool) = AppState::enabled_tabs(cx).into_iter().next() else {
                     self.layout.result_open = false;
                     return;
                 };
@@ -896,14 +885,8 @@ impl WorkspaceScreen {
         self.layout_changed(cx);
     }
 
-    /// ⌘J: the terminal in the result pane; pressed again, what was there
-    /// before it. (The terminal had a panel of its own at the bottom once;
-    /// the key stayed.)
-    pub fn toggle_bottom_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_terminal(window, cx);
-    }
-
-    /// ⌃`: as ⌘J.
+    /// ⌘J and ⌃`: the terminal; with it in front already, what was there
+    /// before it.
     pub fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !AppState::enabled_tabs(cx).contains(&ContextTab::Terminal) {
             return;
@@ -946,23 +929,7 @@ impl WorkspaceScreen {
             &files,
             window,
             |this, _, event: &FilesPanelEvent, window, cx| match event {
-                FilesPanelEvent::OpenFilesChanged => {
-                    // The last file closed where there is no folder tree to
-                    // fall back on (the Chats space): the pane would be
-                    // blank under the name Files. It shuts, on a tool that
-                    // needs no folder for when it is opened again (not
-                    // shown now: the browser would start for nothing).
-                    if this.layout.tool == ContextTab::Files
-                        && !this.project.is_workspace()
-                        && !this.has_open_files(cx)
-                        && let Some(tool) = first_tool(&this.project, cx)
-                    {
-                        this.layout.tool = tool;
-                        this.layout.result_open = false;
-                        return this.layout_changed(cx);
-                    }
-                    this.save_layout(cx)
-                }
+                FilesPanelEvent::OpenFilesChanged => this.save_layout(cx),
                 FilesPanelEvent::Opened => this.show_tool(ContextTab::Files, window, cx),
                 FilesPanelEvent::Ask(ask) => this.ask_about_code(ask.clone(), window, cx),
                 FilesPanelEvent::MakePrimary(path) => {
@@ -994,10 +961,6 @@ impl WorkspaceScreen {
     /// The Files tool's tree (none for a workspace without folders).
     pub fn file_tree(&self) -> Option<&Entity<FileTree>> {
         self.file_tree.as_ref()
-    }
-
-    pub fn files_panel(&self) -> Option<&Entity<FilesPanel>> {
-        self.files.as_ref()
     }
 
     /// One watcher per folder, in the order of the workspace's roots. Their
@@ -1121,7 +1084,7 @@ impl WorkspaceScreen {
 
     /// ⌘T from anywhere: Go to Symbol over the workspace's folders.
     pub fn go_to_symbol(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.project.is_workspace() || self.project.folders().is_empty() {
+        if self.project.folders().is_empty() {
             return;
         }
         let files = self.files(window, cx);
@@ -1130,9 +1093,6 @@ impl WorkspaceScreen {
 
     /// ⌘⇧F from anywhere: the Files tool's tree turns into workspace search.
     pub fn find_in_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.project.is_workspace() {
-            return;
-        }
         self.show_tab(ContextTab::Files, window, cx);
         let files = self.files(window, cx);
         files.update(cx, |files, cx| files.find_in_project(window, cx));
@@ -1369,25 +1329,6 @@ impl WorkspaceScreen {
             );
         }
     }
-}
-
-/// The first tool this build and the user's settings show for `project`:
-/// what the result pane falls back to. In the Chats space, which has no
-/// folder, that is the first of the tools that need none.
-fn first_tool(project: &Project, cx: &App) -> Option<ContextTab> {
-    let enabled = AppState::enabled_tabs(cx);
-    if project.is_workspace() {
-        return enabled.into_iter().next();
-    }
-    [
-        ContextTab::Browser,
-        ContextTab::Terminal,
-        ContextTab::Board,
-        ContextTab::Devices,
-        ContextTab::Tests,
-    ]
-    .into_iter()
-    .find(|tab| enabled.contains(tab))
 }
 
 /// `@tabs`: the text of the Chrome tabs the user shared with PilotHouse,

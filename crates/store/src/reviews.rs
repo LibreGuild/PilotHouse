@@ -339,19 +339,6 @@ impl Store {
         Ok(reviews)
     }
 
-    /// The repositories with reviews, as (host, owner, repo).
-    pub fn reviewed_repos(&self) -> Result<Vec<(String, String, String)>> {
-        let conn = self.conn();
-        let mut statement = conn.prepare(
-            "SELECT DISTINCT host, owner, repo FROM pr_reviews WHERE finished = 1 AND host != 'local'
-             ORDER BY owner, repo",
-        )?;
-        let repos = statement
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(repos)
-    }
-
     /// Saves what the agent found and marks the run finished.
     pub fn finish_pr_review(
         &self,
@@ -520,14 +507,6 @@ impl Store {
         self.conn().execute(
             "UPDATE pr_findings SET comment_id = ?2, comment_kind = ?3 WHERE id = ?1",
             params![id, comment_id as i64, kind],
-        )?;
-        Ok(())
-    }
-
-    pub fn set_finding_notified(&self, id: i64) -> Result<()> {
-        self.conn().execute(
-            "UPDATE pr_findings SET fixed_notified = 1 WHERE id = ?1",
-            params![id],
         )?;
         Ok(())
     }

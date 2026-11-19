@@ -1,5 +1,5 @@
-//! Searching every chat's messages (⌘⇧K, the palette, the sidebar, or the
-//! chat history menu). Results come from the store's full-text index as you
+//! Searching every chat's messages (⌘⇧K, the palette, or the chat history
+//! menu). Results come from the store's full-text index as you
 //! type; picking one opens that chat at the message.
 
 use std::time::Duration;

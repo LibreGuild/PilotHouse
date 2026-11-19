@@ -6160,7 +6160,6 @@ dependencies = [
  "ph-uitest",
  "serde",
  "serde_json",
- "tracing",
 ]
 
 [[package]]
@@ -6200,7 +6199,6 @@ version = "0.6.4"
 dependencies = [
  "anyhow",
  "gpui-kit",
- "ph-env",
  "ph-files",
  "ph-git",
  "ph-preview",
@@ -6309,7 +6307,6 @@ dependencies = [
  "security-framework",
  "serde",
  "serde_json",
- "tracing",
  "ureq",
  "windows-sys 0.61.2",
 ]
@@ -6323,7 +6320,6 @@ dependencies = [
  "gpui-kit",
  "lsp-types",
  "ph-env",
- "serde",
  "serde_json",
  "smol",
  "tracing",
@@ -6336,7 +6332,6 @@ dependencies = [
  "anyhow",
  "ph-brand",
  "ph-control",
- "serde",
  "serde_json",
 ]
 
@@ -6362,7 +6357,6 @@ dependencies = [
  "calamine",
  "csv",
  "flate2",
- "futures",
  "gpui-kit",
  "hayro",
  "image",
@@ -6408,7 +6402,6 @@ dependencies = [
  "ph-store",
  "ph-theme",
  "ph-ui",
- "serde_json",
  "tracing",
 ]
 
@@ -6534,7 +6527,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
- "tracing",
 ]
 
 [[package]]
@@ -6562,7 +6554,6 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "ph-brand",
- "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -6580,8 +6571,6 @@ dependencies = [
  "ph-ui",
  "serde",
  "serde_json",
- "smol",
- "tracing",
 ]
 
 [[package]]
@@ -6651,7 +6640,6 @@ dependencies = [
  "ph-utils",
  "raw-window-handle",
  "ring",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.1",

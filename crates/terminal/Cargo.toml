@@ -21,4 +21,3 @@ serde_json.workspace = true
 ph-theme.workspace = true
 ph-ui.workspace = true
 smol.workspace = true
-tracing.workspace = true

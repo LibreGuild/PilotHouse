@@ -9,7 +9,6 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 gpui-kit.workspace = true
-ph-env.workspace = true
 ph-files.workspace = true
 ph-preview.workspace = true
 ph-git.workspace = true

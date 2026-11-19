@@ -874,11 +874,6 @@ impl FilesPanel {
         cx.notify();
     }
 
-    /// The tree shows search results rather than folders.
-    pub fn is_searching(&self) -> bool {
-        self.browse == Browse::Search
-    }
-
     /// How many open files have unsaved changes.
     pub fn unsaved_count(&self, cx: &gpui_kit::App) -> usize {
         self.open_files

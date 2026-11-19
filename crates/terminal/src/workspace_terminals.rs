@@ -497,12 +497,6 @@ impl WorkspaceTerminals {
         }
         self.splits.retain(|split| split.len() > 1);
     }
-
-    pub fn close_index(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if let Some(terminal) = self.terminals.get(ix).cloned() {
-            self.close(&terminal, cx);
-        }
-    }
 }
 
 /// The most terminals side by side: each needs room for its lines.

@@ -54,11 +54,12 @@ actions!(
         ShowParallelRuns,
         /// The project's parts and how they depend on each other.
         ShowArchitecture,
-        /// Show or hide the project sidebar.
+        /// Fold the chat away or bring it back (⌘B); in Reviews, its list.
+        /// (Named for the list of workspaces and chats it showed and hid.)
         ToggleSidebar,
-        /// Show or hide the column of tools beside the chat.
+        /// Show or hide the result pane beside the chat (⌥⌘B).
         ToggleContextPanel,
-        /// Let the context panel fill the window (and back).
+        /// Let the result pane have the window, and back (⌘⇧J).
         ToggleZoom,
         /// Put the panes back where a new workspace has them.
         ResetLayout,
@@ -71,11 +72,10 @@ actions!(
         ShowRuns,
         ShowPulls,
         ShowTests,
-        /// The chosen device's log (a tool of its own, at the bottom).
+        /// The chosen device's log (a tool of its own, under More).
         ShowLogcat,
-        /// Open or close the bottom panel (the terminal, Logcat).
-        ToggleBottomPanel,
-        /// Show the terminal, or hide the bottom panel when it is in front.
+        /// The terminal (⌘J, ⌃`); with it in front already, what was
+        /// there before it.
         ToggleTerminal,
         /// Send a screenshot of the visible browser or device (with its marks) to chat.
         CaptureToChat,
@@ -97,7 +97,8 @@ actions!(
         FinishTask,
         /// Back to the workspace shown before this one (Ctrl+Tab).
         PreviousWorkspace,
-        /// The Workspaces list, and the workspace last used in front (⌘⇧E).
+        /// The Bridge: every task of every workspace (⌘⇧E, ⌘⇧A). (Named
+        /// for the list of workspaces that was in its place.)
         ShowWorkspacesView,
         /// The workspace for chats that need no folder ("Scratch"), made
         /// when there is none (⌘⇧D). Named for what it showed before that
@@ -105,8 +106,6 @@ actions!(
         ShowChatsView,
         /// The GitHub view: pull requests across repositories, reviews (⌘⇧G).
         ShowGitHubView,
-        /// The Agents pop-up: chats at work or waiting, across workspaces (⌘⇧A).
-        ShowAgentsView,
         /// Move the workspace in front to a window of its own.
         OpenInNewWindow,
         Quit,
@@ -119,7 +118,7 @@ actions!(
     ]
 );
 
-/// Show the workspace at `index` in the sidebar (⌃1…⌃9 on macOS, Alt+1…9
+/// Show the workspace at `index` in the column of icons (⌃1…⌃9 on macOS, Alt+1…9
 /// elsewhere).
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = workspace, no_json)]
@@ -142,10 +141,10 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new(ph_ui::keys("secondary-;"), SideChat, context),
         KeyBinding::new(ph_ui::keys("secondary-shift-k"), SearchChats, context),
         KeyBinding::new(ph_ui::keys("secondary-b"), ToggleSidebar, context),
-        // As in VS Code: ⌘J the bottom panel, ⌃` the terminal, ⌥⌘B the
-        // column of tools beside the chat.
-        KeyBinding::new(ph_ui::keys("secondary-j"), ToggleBottomPanel, context),
+        // As in VS Code: ⌃` and ⌘J the terminal (⌘J last: it is the one
+        // menus and hints show), ⌥⌘B the pane beside the chat.
         KeyBinding::new(ph_ui::keys("ctrl-`"), ToggleTerminal, context),
+        KeyBinding::new(ph_ui::keys("secondary-j"), ToggleTerminal, context),
         KeyBinding::new(ph_ui::keys("secondary-alt-b"), ToggleContextPanel, context),
         KeyBinding::new(ph_ui::keys("secondary-shift-j"), ToggleZoom, context),
         KeyBinding::new(ph_ui::keys("secondary-1"), ShowFiles, context),
@@ -169,6 +168,12 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new(ph_ui::keys("secondary--"), ZoomOut, None),
         KeyBinding::new(ph_ui::keys("secondary-0"), ResetZoom, None),
         KeyBinding::new(ph_ui::keys("ctrl-tab"), PreviousWorkspace, context),
+        // ⌘⇧A was the Agents pop-up's key; ⌘⇧E last, the one hints show.
+        KeyBinding::new(
+            ph_ui::keys("secondary-shift-a"),
+            ShowWorkspacesView,
+            context,
+        ),
         KeyBinding::new(
             ph_ui::keys("secondary-shift-e"),
             ShowWorkspacesView,
@@ -176,7 +181,6 @@ pub(crate) fn bind_keys(cx: &mut App) {
         ),
         KeyBinding::new(ph_ui::keys("secondary-shift-d"), ShowChatsView, context),
         KeyBinding::new(ph_ui::keys("secondary-shift-g"), ShowGitHubView, context),
-        KeyBinding::new(ph_ui::keys("secondary-shift-a"), ShowAgentsView, context),
     ]);
     // ⌘/Ctrl+digits show tools, so workspaces take the other modifier.
     const KEYS: [&str; 9] = if cfg!(target_os = "macos") {

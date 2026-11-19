@@ -39,7 +39,7 @@ crates/
   agy/        `pilothouse agy-acp`: Google Antigravity (`agy`) as an ACP agent
   control/    local control socket (+ dev UI automation)
   store/      SQLite persistence (workspaces, chats, board, schedules, to-dos, usage…)
-  theme/      light, dark and warm-dark themes, user preferences, layout + motion tokens
+  theme/      light, dark and warm-dark themes, user preferences, layout tokens
   ui/         icon assets, small shared components
   brand/      the app's name, ids, icons, features on or off and update sources, read from
               brand/brand.toml at build time (see customizing.md)

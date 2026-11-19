@@ -485,19 +485,6 @@ pub enum MarkType {
 }
 
 impl MarkType {
-    /// Whether the mark is an area drawn by dragging its corners.
-    pub fn is_area(self) -> bool {
-        matches!(
-            self,
-            MarkType::Rect
-                | MarkType::Ellipse
-                | MarkType::Highlight
-                | MarkType::Blur
-                | MarkType::Pixelate
-                | MarkType::Spotlight
-        )
-    }
-
     /// A new mark of this type over `area` (from `from` to `to` for lines),
     /// in `color` where it has one.
     pub fn mark(self, from: [f32; 2], to: [f32; 2], color: Color) -> MarkKind {

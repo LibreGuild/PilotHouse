@@ -2,10 +2,12 @@
 //!
 //! [`Workspace`] is the root view of a window. It owns the list of
 //! workspaces and one [`WorkspaceScreen`] per opened one, and lays out the
-//! title bar (with the Workspaces and GitHub views), the sidebar of
-//! workspaces and chats, the screen in front and the status bar. The
-//! [`GithubView`] shows pull requests across repositories and their reviews. Feature crates (files, board, terminal, agents...) plug
-//! their views into a `WorkspaceScreen`; the shell itself holds no feature logic.
+//! title bar, the column of icons (the Bridge, Reviews, a badge per
+//! workspace), what is in front (the Bridge with every task, a workspace's
+//! screen, or Reviews) and the status bar. The [`GithubView`] shows pull
+//! requests across repositories and their reviews. Feature crates (files,
+//! board, terminal, agents...) plug their views into a `WorkspaceScreen`;
+//! the shell itself holds no feature logic.
 //!
 //! See `docs/architecture.md` for how the pieces fit together.
 

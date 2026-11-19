@@ -103,10 +103,6 @@ impl LiveTools {
         self.source = source.into();
     }
 
-    pub fn is_recording(&self) -> bool {
-        self.recorder.is_some()
-    }
-
     /// Feeds the recorder; call for every frame the pane shows.
     pub fn push_frame(&mut self, frame: &Frame) {
         if let Some(recorder) = &mut self.recorder {

@@ -2323,11 +2323,6 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::finish_task))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_context_panel))
-            .on_action(cx.listener(|this, _: &ToggleBottomPanel, window, cx| {
-                this.with_active_space(window, cx, |space, window, cx| {
-                    space.toggle_bottom_panel(window, cx)
-                })
-            }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 this.with_active_space(window, cx, |space, window, cx| {
                     space.toggle_terminal(window, cx)
@@ -2360,9 +2355,6 @@ impl Render for Workspace {
                 {
                     this.set_view(View::Custom(custom.id), window, cx)
                 }
-            }))
-            .on_action(cx.listener(|this, _: &ShowAgentsView, window, cx| {
-                this.set_view(View::Bridge, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowChanges, window, cx| {
                 this.show_tab(ContextTab::Changes, window, cx)

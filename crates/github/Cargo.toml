@@ -13,7 +13,6 @@ anyhow.workspace = true
 ph-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tracing.workspace = true
 ureq = { version = "3.5", default-features = false, features = ["native-tls-no-default", "gzip", "json"] }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]

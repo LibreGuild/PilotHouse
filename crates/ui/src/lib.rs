@@ -18,7 +18,6 @@ mod loader;
 pub mod markdown;
 pub mod measure;
 mod menu;
-mod pane_header;
 mod pill_tabs;
 pub mod platform;
 pub mod rich_copy;
@@ -28,7 +27,7 @@ pub mod time;
 mod truncated;
 mod workspace_colors;
 
-pub use agent_logos::{agent_logo, app_icon, logo_mark};
+pub use agent_logos::{agent_logo, logo_mark};
 pub use assets::{PilotHouseAssets, custom_icon};
 pub use copy_button::{CopyButton, copy_with_toast};
 pub use diagram::DiagramCard;
@@ -40,7 +39,6 @@ pub use file_icons::{
 pub use keys::keys;
 pub use loader::Loader;
 pub use menu::{MenuButton, POPUP_GAP, SpacedMenu};
-pub use pane_header::PaneHeader;
 pub use pill_tabs::{PillTab, PillTabs};
 pub use scale::{rems_from_px, scaled_px};
 pub use surface::Surface;

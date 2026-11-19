@@ -1,6 +1,6 @@
 [package]
 name = "ph-workspace"
-description = "The PilotHouse window shell: projects, sidebar, chat/context layout, command palette and settings."
+description = "The PilotHouse window shell: the Bridge, workspaces with their chat and result pane, Reviews, command palette and settings."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -43,7 +43,6 @@ global-hotkey = "0.9"
 smol.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-rusqlite.workspace = true
 ureq = { version = "3.5", default-features = false, features = ["native-tls-no-default", "gzip"] }
 sha2 = "0.11"
 # The updater checks the release key's signature on `latest.json`.

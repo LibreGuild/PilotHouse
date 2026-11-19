@@ -163,7 +163,7 @@ impl WorkspaceScreen {
         // Git without a repository (as far as was seen when the folders
         // were looked at) has no name, but is not out of reach: a folder
         // may have become one since.
-        if git && !changes && self.project.is_workspace() {
+        if git && !changes {
             more.push(ContextTab::Changes);
         }
         // Those the workspace has a use for lead the menu.
@@ -287,7 +287,7 @@ impl WorkspaceScreen {
     /// The Files tool is in this build and the workspace has folders to
     /// list.
     fn has_tree(&self, cx: &App) -> bool {
-        self.project.is_workspace() && AppState::enabled_tabs(cx).contains(&ContextTab::Files)
+        AppState::enabled_tabs(cx).contains(&ContextTab::Files)
     }
 
     /// What the result pane shows under its names.

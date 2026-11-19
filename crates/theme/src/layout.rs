@@ -13,30 +13,22 @@ pub const TITLE_BAR_HEIGHT: Pixels = px(40.);
 /// Where macOS draws the window buttons, centred in [`TITLE_BAR_HEIGHT`].
 pub const TRAFFIC_LIGHTS: (Pixels, Pixels) = (px(14.), px(13.));
 
-/// Left rail: projects and sessions (dragging its edge sets the width).
+/// The list beside Reviews (its inbox and repositories); dragging its edge
+/// sets the width.
 pub const SIDEBAR_WIDTH: Pixels = px(248.);
 pub const SIDEBAR_MIN: Pixels = px(180.);
 pub const SIDEBAR_MAX: Pixels = px(520.);
 
-/// Right context panel (files, changes, board, terminal).
-pub const CONTEXT_PANEL_DEFAULT: Pixels = px(560.);
+/// The result pane's narrowest width, beside the chat.
 pub const CONTEXT_PANEL_MIN: Pixels = px(320.);
-pub const CONTEXT_PANEL_MAX: Pixels = px(1200.);
 
 /// The chat's narrowest width.
 pub const CHAT_MIN: Pixels = px(380.);
 
 /// A list beside what it opens, inside the result pane (the folder tree
-/// beside the editor, the Changes list beside a file's changes).
+/// beside the editor).
 pub const SIDE_LIST_MIN: Pixels = px(160.);
 pub const SIDE_LIST_MAX: Pixels = px(520.);
-
-/// The editor column's narrowest width (beside the chat, while a file is
-/// open).
-pub const EDITOR_MIN: Pixels = px(360.);
-
-/// Chat messages are capped at a comfortable reading width.
-pub const CHAT_MAX_CONTENT: Pixels = px(860.);
 
 /// Default window size on first launch.
 pub const WINDOW_DEFAULT_WIDTH: Pixels = px(1440.);

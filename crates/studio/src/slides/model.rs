@@ -662,14 +662,6 @@ impl TextBody {
             .collect::<Vec<_>>()
             .join("\n")
     }
-
-    /// A body of one plain paragraph per line of `text`.
-    pub fn from_plain(text: &str) -> TextBody {
-        TextBody {
-            paragraphs: text.split('\n').map(Paragraph::plain_text).collect(),
-            ..TextBody::default()
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

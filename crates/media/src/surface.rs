@@ -143,10 +143,6 @@ impl SurfaceView {
         self.bounds.get().size
     }
 
-    pub fn frames_per_second(&self) -> usize {
-        self.frame_times.len()
-    }
-
     pub fn mode(&self) -> SurfaceMode {
         self.mode
     }

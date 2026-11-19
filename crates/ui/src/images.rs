@@ -34,19 +34,6 @@ pub fn release_render_image(image: Arc<RenderImage>, cx: &mut App) {
     });
 }
 
-/// Drops `images`' textures from every window, once they are free.
-pub fn release_render_images(images: Vec<Arc<RenderImage>>, cx: &mut App) {
-    if images.is_empty() {
-        return;
-    }
-    cx.defer(move |cx| {
-        for image in images {
-            cx.drop_image(image, None);
-        }
-        trim_soon(cx);
-    });
-}
-
 /// Lets go of an encoded picture shown with `img(image)`: its decoded
 /// pixels (GPUI's asset cache) and its textures.
 pub fn release_image(image: Arc<Image>, cx: &mut App) {

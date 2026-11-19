@@ -73,7 +73,7 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
                 ),
                 (
                     "Show or hide the terminal",
-                    action(Box::new(ToggleBottomPanel)),
+                    action(Box::new(ToggleTerminal)),
                 ),
                 (
                     "Split the terminal",

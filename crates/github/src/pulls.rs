@@ -195,18 +195,6 @@ pub fn edit_comment(
     )
 }
 
-pub fn edit_line_comment(
-    client: &Client,
-    repo: &Repo,
-    comment_id: u64,
-    body: &str,
-) -> Result<ReviewComment> {
-    client.patch(
-        &repo.path(&format!("pulls/comments/{comment_id}")),
-        &json!({ "body": body }),
-    )
-}
-
 /// Submits a review with line comments, on `commit` (the head it was made
 /// against, so comments land on the right lines).
 pub fn submit_review(

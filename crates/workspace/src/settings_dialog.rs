@@ -350,7 +350,7 @@ fn appearance_page(
                 .title("Layout")
                 .item(
                     SettingItem::new("Density", choice(&Density::ALL, Density::label, |p| p.density, |p, v| p.density = v))
-                        .description("How much room rows and spacing take in the sidebar, the file tree, the Git lists and the chat.")
+                        .description("How much room rows and spacing take in lists, the file tree, the Git lists and the chat.")
                         .keywords(["density", "compact", "spacing", "padding", "rows"]),
                 )
                 .item(

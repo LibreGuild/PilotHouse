@@ -109,13 +109,6 @@ impl ContextTab {
         }
     }
 
-    pub fn index(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|tab| *tab == self)
-            .unwrap_or_default()
-    }
-
     /// The brand's feature that is this tool (`[features]` in
     /// `brand/brand.toml`).
     pub fn feature(self) -> ph_brand::Feature {

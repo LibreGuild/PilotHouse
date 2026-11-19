@@ -29,8 +29,8 @@ fn view_items() -> Vec<MenuItem> {
     let mut items = vec![
         MenuItem::action("Command Palette", ToggleCommandPalette),
         MenuItem::separator(),
-        MenuItem::action("Toggle Sidebar", ToggleSidebar),
-        MenuItem::action("Toggle Panel", ToggleContextPanel),
+        MenuItem::action("Show or Hide the Chat", ToggleSidebar),
+        MenuItem::action("Show or Hide the Result Pane", ToggleContextPanel),
         MenuItem::separator(),
     ];
     if enabled(Feature::Files) {

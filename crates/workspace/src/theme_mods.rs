@@ -15,12 +15,12 @@ use crate::AppState;
 /// Where PilotHouse takes its colors from, for the agent.
 const GUIDE: &str = "\
 Where PilotHouse takes its colors from (`colors`):
-- sidebar.background: the window's frame: the left sidebar, the strip of tools on the right and around the panels. title_bar.background, status_bar.background and tab_bar.background are part of it: change them together.
+- sidebar.background: the window's frame: the column of icons on the left, the title and status bars, and around the panels. title_bar.background, status_bar.background and tab_bar.background are part of it: change them together.
 - background: the panels on the frame (chat, editor, files, the settings page) and dialogs; border: their outlines and the lines between things.
 - foreground: text; muted.foreground: secondary text (descriptions, times, placeholders).
 - muted.background: the user's messages in a chat, segmented switches, code in text.
 - popover.background / popover.foreground: menus, pop-ups and dropdowns.
-- list.hover.background / list.active.background: a row under the pointer / the selected row (sidebar, lists, menus).
+- list.hover.background / list.active.background: a row under the pointer / the selected row (lists, menus).
 - primary.background / primary.foreground (and .hover / .active): filled main buttons (Send, Add).
 - secondary.background (and .hover / .active): plain buttons; input.border: text fields' outline.
 - ring: the focus outline; info.background: highlights; link: links; selection.background: selected text.
