@@ -137,7 +137,7 @@ pub fn views() -> Vec<CustomView> {
 
 `build` returns any GPUI view (`cx.new(|cx| ReportsView::new(...)).into()`). The view then shows:
 
-- as an icon in the column at the window's left edge, under Workspaces, Chats and GitHub. The view fills a rounded panel (an island of the window's frame) between the title bar and the status bar: draw it edge to edge, without a border or rounded corners of its own;
+- as an icon in the column at the window's left edge, after the Bridge and Reviews. The view fills a rounded panel (an island of the window's frame) between the title bar and the status bar: draw it edge to edge, without a border or rounded corners of its own;
 - in the command palette as *Show the Reports view*.
 
 From your own code, `window.dispatch_action(Box::new(ph_custom::ShowView { id: "reports".into() }), cx)` opens it.

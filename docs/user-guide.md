@@ -4,7 +4,7 @@ A short tour of PilotHouse for people using it. For how it is built, see the [do
 
 ## First steps
 
-1. **Chat right away**, or **open a folder** (⌘O, or **+** in the column of icons). PilotHouse starts in a chat that needs no folder (*Chats*, in the column of icons). A folder you open becomes a **workspace**; it can hold more folders (*Add a folder* in its Files tool or the menu on its badge), or none.
+1. **Chat right away**, or **open a folder** (⌘O, or **+** in the column of icons). PilotHouse starts in a chat that needs no folder (in a workspace named *Scratch*, made for it). A folder you open becomes a **workspace**; it can hold more folders (*Add a folder* in its Files tool or the menu on its badge), or none.
 2. **Pick an agent.** The model button in the chat composer opens the picker: the agents on the left, their models on the right. An agent that is not installed or signed in says what is missing; the empty chat shows a setup card with the steps.
 3. **Ask.** Type in the composer and press Enter. Mention things with `@`: a file (`@src/main.rs`), a line (`@src/main.rs:42`), a function by name, `@screenshot` (the browser or device on screen), `@log`, `@pr:12`, `@test-run`, `@tabs` (the Chrome tabs you shared, with PilotHouse's Chrome extension), or a board card with `#12`.
 4. **Approve.** When the agent wants to run a command or edit files, it asks in the chat (and in the title bar's inbox). The **Mode** button next to the model sets how much it may do without asking.
@@ -13,16 +13,16 @@ A short tour of PilotHouse for people using it. For how it is built, see the [do
 
 - **The frame:** the title bar, the column of icons at the left edge and the status bar. With a workspace in front the frame takes that workspace's colour, faintly, so you can tell at a glance where you are.
 - **Title bar:** the name of what is in front, search and commands (⌘K) in the middle, then the inbox and, with a workspace in front, the two switches of its screen: the chat and the result pane.
-- **The column of icons:** what the window shows. The **Bridge** (⌘⇧E), **Reviews** (⌘⇧G), a badge for each workspace (its letter on its colour, with a dot when something there wants you; right-click for its menu: add folders, rename, recolour, open in a new window, remove), *Chats* (⌘⇧D) for chats that need no folder, **+** for a new workspace, and Settings at the foot.
-- **The Bridge** is where the window starts: every task of every workspace in four columns, *Needs you*, *Working*, *Ready for review* and *Done*. A card opens its chat; *Review changes* opens it with what the agent changed beside it; *Done* puts it away. *New task* starts a chat in the workspace you pick. The status bar counts the same from anywhere (*2 need you · 1 working*).
-- **A workspace's screen** is two panes: the **chat**, and one **result pane** under the names *Changes* (what changed, to review and commit), *Preview* (the browser, or a phone), *Terminal* and *Files* (the folder tree and the editor); the board, run configurations, tests, pull requests and the phone's log are under ⋯. Picking a file shows it in Files. Markdown opens formatted and editable like a document; images, audio, video, PDF, tables, notebooks, databases and more open with a viewer. See [previews](features/previews.md).
+- **The column of icons:** what the window shows. The **Bridge** (⌘⇧E), **Reviews** (⌘⇧G), a badge for each workspace (its letter on its colour, with a dot when something there wants you; right-click for its menu: add folders, rename, recolour, open in a new window, remove), **+** for a new workspace, and Settings at the foot. Chats that need no folder are in the workspace named *Scratch* (⌘⇧D).
+- **The Bridge** is where the window starts: every task of every workspace in four columns, *Needs you*, *Working*, *Ready for review* and *Done*. A card says its branch, what the chat changed and how it checked that, and its pull request; it opens its chat, *Review changes* opens it with what the agent changed beside it, *Done* puts it away, and a permission an agent asks for is answered on the card. *New task* starts a chat in the workspace you pick, or on a branch of its own. The status bar counts the same from anywhere (*2 need you · 1 working*).
+- **A workspace's screen** is two panes: the **chat**, and one **result pane** under the names *Git* (what changed, to review file by file, tick as viewed, keep or undo, and commit), *Preview* (the browser, once you start it, or a phone), *Terminal* and *Files* (the folder tree and the editor); the board, run configurations, tests, pull requests and the phone's log are under ⋯. Several chats in one workspace are tabs over the chat, each with a mark for what it is doing. Picking a file shows it in Files. Markdown opens formatted and editable like a document; images, audio, video, PDF, tables, notebooks, databases and more open with a viewer. See [previews](features/previews.md).
 - **Give either pane the window:** ⌘B folds the chat to a strip at the edge (click it, or send something, to bring it back), ⌥⌘B hides the result pane, and the gap between them drags. The chat's header lists the workspace's other chats.
 - **Right-click** a file or folder in Files for new, rename, move to the trash, copy and paste, reveal, Git, compare and chat (the empty space under the files for new file, new folder and paste); an editor tab to close others; selected code to add it to the chat or copy it with where it is from. Ctrl+click (⌘ on a Mac) picks more files, Shift+click a range; the menu and keys then act on all of them.
 - **Chat menu** (the arrow at the top right of a chat): *Compact chat* frees the agent's context (Claude Code's own `/compact`, otherwise a fresh chat that starts from a recap), or continue the chat with another agent. Code blocks in replies have a copy button.
 
 A workspace keeps its chats, shells and test runs going while you look at another one. The Bridge and the dot on its badge show what each is doing, and coming back shows what finished while you were away.
 
-**Quick chat:** ⌥Space (Alt+Shift+Space on Windows and Linux) opens a small chat window over every app, from anywhere, while PilotHouse runs; press it again to hide it. Its chats are under *Chats*. Set the shortcut in Settings → Chat, or give `pilothouse quick-chat` a shortcut in your system's keyboard settings ([quick-chat.md](features/quick-chat.md)).
+**Quick chat:** ⌥Space (Alt+Shift+Space on Windows and Linux) opens a small chat window over every app, from anywhere, while PilotHouse runs; press it again to hide it. Its chats are in the *Scratch* workspace. Set the shortcut in Settings → Chat, or give `pilothouse quick-chat` a shortcut in your system's keyboard settings ([quick-chat.md](features/quick-chat.md)).
 
 **Agents in a terminal:** start one from the terminal's **+** (or resume one of its sessions there). Once you ask it something it is listed with the chats; after its terminal closes it stays, with its last answer, and opens read only, to go on in a terminal or in a new chat.
 
@@ -47,7 +47,7 @@ If your code lives on a server and you reach it as a mapped drive (`Z:\`) or a m
 | ⌘P / ⌘⇧F | Go to a file / search the workspace |
 | ⌘B / ⌥⌘B | Fold the chat away / hide the result pane |
 | ⌘J / ⌘⇧J | The terminal / the result pane fills the window |
-| ⌘⇧E / ⌘⇧D / ⌘⇧G | The Bridge / Chats / Reviews |
+| ⌘⇧E / ⌘⇧D / ⌘⇧G | The Bridge / Scratch (chats that need no folder) / Reviews |
 | ⌘1…⌘9 | Files, Git, Board, Terminal, Browser, Devices, Run, PRs, Tests |
 | ⌃1…⌃9 (Alt+1…9 on Windows and Linux) | Workspace 1…9 in the column of icons |
 | Ctrl+Tab | The workspace shown before |

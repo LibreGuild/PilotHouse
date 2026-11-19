@@ -2,7 +2,7 @@
 
 Crate: `ph-workspace` (`quick_chat.rs`), behind the `quick_chat` feature (`brand/brand.toml`).
 
-A small chat window over every other app, to ask an agent something without going to PilotHouse. Its chats are in the **Chats** space (no folder): they are in *Chats* (the column of icons) and on the Bridge, and go on there like any other.
+A small chat window over every other app, to ask an agent something without going to PilotHouse. Its chats are in the **Scratch** workspace (no folder; made when there is none): they are under its badge in the column of icons and on the Bridge, and go on there like any other.
 
 ## Opening it
 
@@ -24,6 +24,6 @@ It can be moved by its title bar and resized (at least 320 × 240). It opens whe
 
 - **Esc** hides it (the chat goes on: a reply still comes, and the Bridge shows it).
 - **⌘N / Ctrl+N** or the pen button: a new chat.
-- The arrow button opens the chat in the main window, under *Chats*, and hides the quick window.
+- The arrow button opens the chat in the main window, in the Scratch workspace, and hides the quick window.
 
-The chat is a full one: any agent and model, attachments, permissions, and the agent's work folder is the Chats space's own.
+The chat is a full one: any agent and model, attachments, permissions, and the agent's work folder is the Scratch workspace's own.

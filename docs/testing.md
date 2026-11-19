@@ -54,3 +54,15 @@ In the app, add the same mapping in Settings → Network drives and open a folde
 ## Visual regression
 
 Keep reference screenshots of key screens (welcome, chat, each tab, light and dark). Compare new captures after UI changes. Automating the comparison is planned; for now, review the images.
+
+## Coverage
+
+Which lines and functions the tests run, with [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) (once: `cargo install cargo-llvm-cov --locked` and `rustup component add llvm-tools-preview`):
+
+```sh
+cargo coverage-summary -p ph-store   # a table: per file, regions, functions and lines covered
+cargo coverage -p ph-store           # the same as pages, in target/llvm-cov/html
+cargo coverage --workspace           # everything: builds it all again, instrumented (tens of GB)
+```
+
+A run builds what it covers a second time, instrumented, in `target/llvm-cov-target`, so one crate at a time is the usual way to look. A function no test runs is not thereby unused: the compiler (with `-D warnings`) says what nothing in a crate calls, and for `pub` items another crate might call, count their uses across `crates/`.
