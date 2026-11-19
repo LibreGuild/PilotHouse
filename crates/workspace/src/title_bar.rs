@@ -491,10 +491,13 @@ fn front_name(workspace: &Workspace, cx: &App) -> Option<AnyElement> {
             .into(),
         View::Workspaces => {
             let id = workspace.active_project_id()?;
-            match workspace.projects().iter().find(|project| project.id == id) {
-                Some(project) => project.name.clone().into(),
-                None => "Chats".into(),
-            }
+            workspace
+                .projects()
+                .iter()
+                .find(|project| project.id == id)?
+                .name
+                .clone()
+                .into()
         }
     };
     Some(

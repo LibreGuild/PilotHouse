@@ -59,7 +59,10 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
             "Workspaces and layout",
             vec![
                 ("The Bridge", action(Box::new(ShowWorkspacesView))),
-                ("Chats that need no folder", action(Box::new(ShowChatsView))),
+                (
+                    "Scratch: chats that need no folder",
+                    action(Box::new(ShowChatsView)),
+                ),
                 ("Reviews", action(Box::new(ShowGitHubView))),
                 ("Workspace 1 to 9", Keys::Text(workspace_keys.into())),
                 ("Previous workspace", action(Box::new(PreviousWorkspace))),

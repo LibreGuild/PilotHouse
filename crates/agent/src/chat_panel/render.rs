@@ -22,8 +22,8 @@ impl ChatPanel {
                 (
                     Some(Icons::MessagesSquare),
                     None,
-                    "Chats".into(),
-                    "No workspace: the agent works in a folder of its own".into(),
+                    project.name.clone(),
+                    "No folder yet: the agent works in a folder of this workspace's own".into(),
                 )
             } else {
                 let sub = (folder != project.path)

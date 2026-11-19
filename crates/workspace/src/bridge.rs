@@ -196,7 +196,7 @@ pub(crate) fn live_cards(workspace: &Workspace, cx: &App) -> Vec<Card> {
 fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
     let dark = cx.theme().is_dark();
     let now = jiff::Timestamp::now().as_millisecond();
-    let mut places: Vec<(ProjectId, String, Option<Hsla>, Option<std::path::PathBuf>)> = workspace
+    let places: Vec<(ProjectId, String, Option<Hsla>, Option<std::path::PathBuf>)> = workspace
         .projects()
         .iter()
         .map(|project| {
@@ -209,9 +209,6 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
             )
         })
         .collect();
-    if let Some(chats) = workspace.chats_space() {
-        places.push((chats.id, "Chats".into(), None, None));
-    }
     let mut cards = Vec::new();
     // Reviews: those an agent works on, or is being readied for.
     if let Some(github) = workspace.github_view() {
@@ -486,7 +483,6 @@ pub(crate) fn counts(workspace: &Workspace, cx: &App) -> (usize, usize) {
         .projects()
         .iter()
         .map(|project| project.id)
-        .chain(workspace.chats_space().map(|chats| chats.id))
         .chain(github)
     {
         if let Some(chats) = ph_agent::ChatHub::existing(project, cx) {
@@ -515,7 +511,6 @@ pub(crate) fn unseen(workspace: &Workspace) -> usize {
         .projects()
         .iter()
         .map(|project| project.id)
-        .chain(workspace.chats_space().map(|chats| chats.id))
         .map(|id| workspace.status(id).unseen)
         .sum()
 }
@@ -531,14 +526,11 @@ pub(crate) fn render(
     let state = workspace.bridge();
     let now = jiff::Timestamp::now().as_millisecond();
     let all = cards(workspace, false, cx);
-    let filter = state
-        .filter
-        .filter(|id| workspace.has_place(*id))
-        .map(|id| (id, workspace.is_chats(id)));
+    let filter = state.filter.filter(|id| workspace.has_project(*id));
     let shown: Vec<&Card> = all
         .iter()
         .filter(|card| match filter {
-            Some((id, _)) => card.project == id && !card.github,
+            Some(id) => card.project == id && !card.github,
             None => true,
         })
         .collect();
@@ -605,7 +597,7 @@ pub(crate) fn render(
         .pb(crate::frame::gap())
         .gap_3()
         .child(probe)
-        .child(header(workspace, filter.map(|(id, _)| id), &entity, cx))
+        .child(header(workspace, filter, &entity, cx))
         .child(body)
         .test_support()
         .into_any_element()
@@ -677,15 +669,6 @@ fn header(
             Some(project.id),
         ));
     }
-    if let Some(chats) = workspace.chats_space() {
-        chips.push(chip(
-            "bridge-filter-chats".into(),
-            "Chats".into(),
-            None,
-            filter == Some(chats.id),
-            Some(chats.id),
-        ));
-    }
     h_flex()
         .flex_none()
         .flex_wrap()
@@ -726,7 +709,6 @@ fn new_task_button(workspace: &Workspace, entity: WeakEntity<Workspace>) -> impl
         })
         .map(|project| (project.id, project.name.clone()))
         .collect();
-    let chats = workspace.chats_space().map(|chats| chats.id);
     Button::new("bridge-new-task")
         .primary()
         .small()
@@ -744,20 +726,21 @@ fn new_task_button(workspace: &Workspace, entity: WeakEntity<Workspace>) -> impl
                         }),
                 )
             });
-            let menu = match chats {
-                Some(chats) => {
-                    let entity = entity.clone();
-                    menu.item(
-                        PopupMenuItem::new("Without a folder")
-                            .icon(Icon::new(Icons::MessagesSquare))
-                            .on_click(move |_, window, cx| {
-                                _ = entity.update(cx, |workspace, cx| {
-                                    workspace.new_chat_in(chats, window, cx)
-                                });
-                            }),
-                    )
-                }
-                None => menu,
+            // For a chat that needs no folder: the Scratch workspace, made
+            // when there is none (it was removed, or given folders).
+            let menu = {
+                let entity = entity.clone();
+                menu.item(
+                    PopupMenuItem::new("Without a folder")
+                        .icon(Icon::new(Icons::MessagesSquare))
+                        .on_click(move |_, window, cx| {
+                            _ = entity.update(cx, |workspace, cx| {
+                                if let Some(scratch) = workspace.scratch(cx) {
+                                    workspace.new_chat_in(scratch, window, cx)
+                                }
+                            });
+                        }),
+                )
             };
             // A task apart from the workspace's own checkout: its branch
             // in a worktree, so several agents do not write over each

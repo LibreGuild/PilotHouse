@@ -56,8 +56,6 @@ pub struct Workspace {
     handle: gpui_kit::AnyWindowHandle,
     /// The workspaces, newest first (the sidebar's order, and ⌃1–⌃9's).
     projects: Vec<Project>,
-    /// The space for chats outside any workspace.
-    chats_space: Option<Project>,
     view: View,
     /// What the Bridge shows.
     bridge: crate::bridge::BridgeState,
@@ -121,11 +119,17 @@ impl Workspace {
         if let Err(err) = store.heal_scratch_folders(&ph_store::paths::scratch_root()) {
             tracing::warn!("checking scratch folders failed: {err:#}");
         }
-        let projects = workspaces(store);
-        let chats_space = store
-            .chats_space(&ph_store::paths::scratch_root())
-            .inspect_err(|err| tracing::error!("opening the Chats space failed: {err:#}"))
-            .ok();
+        let mut projects = workspaces(store);
+        // A first start (or one after every workspace was removed) opens
+        // straight into a chat: in the workspace for chats that need no
+        // folder, made now.
+        let first_start = projects.is_empty();
+        if first_start {
+            match store.scratch_workspace(&ph_store::paths::scratch_root()) {
+                Ok(_) => projects = workspaces(store),
+                Err(err) => tracing::error!("making the Scratch workspace failed: {err:#}"),
+            }
+        }
         let last_project: Option<ProjectId> = store.setting(keys::LAST_PROJECT);
         let sidebar_collapsed: bool = store.setting(keys::SIDEBAR_COLLAPSED);
         let front: String = store.setting(keys::FRONT_VIEW);
@@ -158,7 +162,6 @@ impl Workspace {
             focus_handle,
             handle: window.window_handle(),
             projects,
-            chats_space,
             view: View::Bridge,
             bridge: Default::default(),
             github: None,
@@ -232,11 +235,10 @@ impl Workspace {
         })
         .detach();
         // The workspace shown last is ready behind whatever is in front,
-        // else the Chats space, so a first start opens straight into a chat.
+        // else the newest one.
         let initial = project
             .or(last_project)
-            .filter(|id| workspace.has_project(*id) || workspace.is_chats(*id))
-            .or(workspace.chats_space.as_ref().map(|chats| chats.id))
+            .filter(|id| workspace.has_project(*id))
             .or_else(|| workspace.projects.first().map(|project| project.id));
         if let Some(id) = initial {
             workspace.open_project(id, window, cx);
@@ -248,7 +250,9 @@ impl Workspace {
         let bridge = match front.as_str() {
             "workspace" => false,
             "bridge" => true,
-            _ => !workspace.projects.is_empty(),
+            // The chat, on a first start: its only workspace is the one
+            // for chats, and the Bridge would have nothing to show.
+            _ => !first_start && !workspace.projects.is_empty(),
         };
         if project.is_none() && bridge {
             workspace.view = View::Bridge;
@@ -295,18 +299,6 @@ impl Workspace {
         &self.projects
     }
 
-    /// The space for chats outside any workspace.
-    pub fn chats_space(&self) -> Option<&Project> {
-        self.chats_space.as_ref()
-    }
-
-    /// Whether `id` is the Chats space.
-    pub fn is_chats(&self, id: ProjectId) -> bool {
-        self.chats_space
-            .as_ref()
-            .is_some_and(|chats| chats.id == id)
-    }
-
     pub fn view(&self) -> View {
         self.view
     }
@@ -330,23 +322,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Whether `id` is a workspace here, or the Chats space.
-    pub(crate) fn has_place(&self, id: ProjectId) -> bool {
-        self.has_project(id) || self.is_chats(id)
-    }
-
-    /// An entry of the left column was pressed.
-    pub(crate) fn show(
-        &mut self,
-        target: crate::rail::Target,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use crate::rail::Target;
-        match target {
-            Target::View(view) => self.set_view(view, window, cx),
-            Target::Workspace(id) => self.open_project(id, window, cx),
-        }
+    /// A view's entry in the left column was pressed (the Bridge,
+    /// Reviews, one of the organisation's own).
+    pub(crate) fn show(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_view(view, window, cx);
         self.focus_front(window, cx);
     }
 
@@ -390,10 +369,26 @@ impl Workspace {
         }
     }
 
-    /// The Chats space's screen, for chats that need no folder.
-    pub fn show_chats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(chats) = self.chats_space.as_ref().map(|chats| chats.id) {
-            self.open_project(chats, window, cx);
+    /// The workspace for chats that need no folder ("Scratch"), made when
+    /// there is none (it was removed, or given folders).
+    pub(crate) fn scratch(&mut self, cx: &mut Context<Self>) -> Option<ProjectId> {
+        let store = AppState::store(cx).clone();
+        let project = store
+            .scratch_workspace(&ph_store::paths::scratch_root())
+            .inspect_err(|err| tracing::error!("making the Scratch workspace failed: {err:#}"))
+            .ok()?;
+        if !self.has_project(project.id) {
+            self.projects = workspaces(&store);
+            self.projects_changed(cx);
+            cx.notify();
+        }
+        Some(project.id)
+    }
+
+    /// Brings the workspace for chats that need no folder forward.
+    pub fn show_scratch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(scratch) = self.scratch(cx) {
+            self.open_project(scratch, window, cx);
             self.focus_front(window, cx);
         }
     }
@@ -573,7 +568,7 @@ impl Workspace {
         }
         let project = self
             .active_project
-            .or_else(|| self.chats_space().map(|chats| chats.id))
+            .or_else(|| self.scratch(cx))
             .ok_or_else(|| anyhow::anyhow!("Open a workspace in {} first.", ph_brand::NAME))?;
         self.open_project(project, window, cx);
         let space = self
@@ -581,11 +576,7 @@ impl Workspace {
             .get(&project)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("The workspace could not be opened."))?;
-        let name = if self.is_chats(project) {
-            "Chats".to_string()
-        } else {
-            space.read(cx).project().name.clone()
-        };
+        let name = space.read(cx).project().name.clone();
         // A read-only chat on screen (a closed terminal's): a new one.
         let new_chat = new_chat || !space.read(cx).chat_takes_messages(cx);
         space.update(cx, |space, cx| {
@@ -617,7 +608,7 @@ impl Workspace {
         }
         let project = self
             .active_project
-            .or_else(|| self.chats_space().map(|chats| chats.id))
+            .or_else(|| self.scratch(cx))
             .ok_or_else(|| anyhow::anyhow!("Open a workspace in {} first.", ph_brand::NAME))?;
         self.open_project(project, window, cx);
         let space = self
@@ -625,11 +616,7 @@ impl Workspace {
             .get(&project)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("The workspace could not be opened."))?;
-        let name = if self.is_chats(project) {
-            "Chats".to_string()
-        } else {
-            space.read(cx).project().name.clone()
-        };
+        let name = space.read(cx).project().name.clone();
         let new_chat = new_chat || !space.read(cx).chat_takes_messages(cx);
         space.update(cx, |space, cx| {
             if new_chat {
@@ -691,14 +678,12 @@ impl Workspace {
         }
     }
 
-    /// The workspaces without a screen, and the Chats space when it has
-    /// none: their chats are read from the store (a screen lists its own).
+    /// The workspaces without a screen: their chats are read from the
+    /// store (a screen lists its own).
     fn sessions_wanted(&self) -> Vec<ProjectId> {
-        let chats = self.chats_space.as_ref().map(|chats| chats.id);
         self.projects
             .iter()
             .map(|project| project.id)
-            .chain(chats)
             .filter(|id| !self.spaces.contains_key(id))
             .collect()
     }
@@ -859,7 +844,6 @@ impl Workspace {
         let project = self
             .projects
             .iter()
-            .chain(self.chats_space.as_ref())
             .find(|candidate| candidate.id == project)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("the workspace is gone"))?;
@@ -1018,10 +1002,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The Chats space stays in the main window.
-        if self.is_chats(id) {
-            return;
-        }
         if let Some(space) = self.spaces.get(&id) {
             let unsaved = space.read(cx).unsaved_files(cx);
             if unsaved > 0 {
@@ -1044,7 +1024,6 @@ impl Workspace {
             let next = self
                 .previous_project
                 .filter(|previous| *previous != id && self.has_project(*previous))
-                .or(self.chats_space.as_ref().map(|chats| chats.id))
                 .or_else(|| {
                     self.projects
                         .iter()
@@ -1063,7 +1042,7 @@ impl Workspace {
         });
     }
 
-    fn has_project(&self, id: ProjectId) -> bool {
+    pub(crate) fn has_project(&self, id: ProjectId) -> bool {
         self.projects.iter().any(|project| project.id == id)
     }
 
@@ -1075,9 +1054,7 @@ impl Workspace {
     pub(crate) fn reload_projects(&mut self, cx: &mut Context<Self>) {
         crate::attention::forget_names(cx);
         let projects = workspaces(AppState::store(cx));
-        let chats = self.chats_space.as_ref().map(|chats| chats.id);
-        let kept =
-            |id: &ProjectId| Some(*id) == chats || projects.iter().any(|project| project.id == *id);
+        let kept = |id: &ProjectId| projects.iter().any(|project| project.id == *id);
         self.spaces.retain(|id, _| kept(id));
         self.hidden_since.retain(|id, _| kept(id));
         self.projects = projects;
@@ -1146,7 +1123,6 @@ impl Workspace {
         let statuses: HashMap<ProjectId, WorkspaceStatus> = self
             .projects
             .iter()
-            .chain(self.chats_space.as_ref())
             .map(|project| (project.id, WorkspaceStatus::of(project.id, cx)))
             .collect();
         // The store, for chats of spaces without a screen (changed by
@@ -1216,7 +1192,6 @@ impl Workspace {
         let project = self
             .projects
             .iter()
-            .chain(self.chats_space.as_ref())
             .find(|project| project.id == id)
             .cloned()?;
         let shell = cx.weak_entity();
@@ -1378,7 +1353,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_project(pick.project_id) && !self.is_chats(pick.project_id) {
+        if !self.has_project(pick.project_id) {
             // A GitHub repository's chat.
             return self.show_session(pick.session_id, window, cx);
         }
@@ -1414,7 +1389,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(id) = self.active_project.filter(|id| !self.is_chats(*id)) else {
+        let Some(id) = self.active_project else {
             return window.dispatch_action(Box::new(AddProject), cx);
         };
         self.bring_forward(window, cx);
@@ -1579,9 +1554,13 @@ impl Workspace {
             // a new chat and the other commands have somewhere to go.
             let behind = self
                 .previous_project
-                .filter(|previous| *previous != id && self.has_place(*previous))
-                .or(self.chats_space.as_ref().map(|chats| chats.id))
-                .or_else(|| self.projects.first().map(|project| project.id));
+                .filter(|previous| *previous != id && self.has_project(*previous))
+                .or_else(|| {
+                    self.projects
+                        .iter()
+                        .map(|project| project.id)
+                        .find(|other| *other != id)
+                });
             if let Some(behind) = behind {
                 self.open_project(behind, window, cx);
             }
@@ -1662,7 +1641,7 @@ impl Workspace {
         // From the Bridge: in the workspace it is narrowed to, else the
         // one last in front (its *New task* asks which).
         if self.view == View::Bridge
-            && let Some(id) = self.bridge.filter.filter(|id| self.has_place(*id))
+            && let Some(id) = self.bridge.filter.filter(|id| self.has_project(*id))
         {
             return self.new_chat_in(id, window, cx);
         }
@@ -2369,7 +2348,7 @@ impl Render for Workspace {
                 this.set_view(View::Bridge, window, cx)
             }))
             .on_action(
-                cx.listener(|this, _: &ShowChatsView, window, cx| this.show_chats(window, cx)),
+                cx.listener(|this, _: &ShowChatsView, window, cx| this.show_scratch(window, cx)),
             )
             .on_action(cx.listener(|this, _: &ShowGitHubView, window, cx| {
                 this.set_view(View::GitHub, window, cx)
@@ -2480,8 +2459,7 @@ impl Render for Workspace {
                 // space it is of every chat.
                 let workspace = (this.view == View::Workspaces)
                     .then(|| this.active_project_id())
-                    .flatten()
-                    .filter(|id| !this.is_chats(*id));
+                    .flatten();
                 crate::chat_search::open(workspace, window, cx)
             }))
             .on_action(cx.listener(Self::switch_to))

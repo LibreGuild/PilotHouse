@@ -581,7 +581,7 @@ fn bounds(store: &Store, cx: &App) -> Bounds<Pixels> {
 
 fn open(cx: &mut App) -> anyhow::Result<()> {
     let store = AppState::store(cx).clone();
-    let project = store.chats_space(&ph_store::paths::scratch_root())?;
+    let project = store.scratch_workspace(&ph_store::paths::scratch_root())?;
     let mut options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds(&store, cx))),
         window_min_size: Some(Size::new(px(MIN_SIZE.0), px(MIN_SIZE.1))),

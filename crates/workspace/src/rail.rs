@@ -176,7 +176,7 @@ pub(crate) fn render_places(
     let view = workspace.view();
     let mac = cfg!(target_os = "macos");
     let hint = |mac_keys: &str, other: &str| Some(if mac { mac_keys } else { other }.to_string());
-    let show = |target: Target| {
+    let show = |target: View| {
         let this = this.clone();
         move |window: &mut Window, cx: &mut App| {
             _ = this.update(cx, |workspace, cx| workspace.show(target, window, cx));
@@ -198,7 +198,7 @@ pub(crate) fn render_places(
             badge: (needs_you > 0 && view != View::Bridge)
                 .then(|| count_badge(needs_you, Some(cx.theme().warning), cx)),
         }
-        .render(labels, show(Target::View(View::Bridge)), cx),
+        .render(labels, show(View::Bridge), cx),
     ];
     if ph_brand::enabled(ph_brand::Feature::GitHub) {
         places.push(
@@ -210,7 +210,7 @@ pub(crate) fn render_places(
                 selected: view == View::GitHub,
                 badge: (waiting > 0).then(|| count_badge(waiting, Some(cx.theme().warning), cx)),
             }
-            .render(labels, show(Target::View(View::GitHub)), cx),
+            .render(labels, show(View::GitHub), cx),
         );
     }
     for custom in ph_custom::views() {
@@ -223,7 +223,7 @@ pub(crate) fn render_places(
                 selected: view == View::Custom(custom.id),
                 badge: None,
             }
-            .render(labels, show(Target::View(View::Custom(custom.id))), cx),
+            .render(labels, show(View::Custom(custom.id)), cx),
         );
     }
 
@@ -232,26 +232,12 @@ pub(crate) fn render_places(
     let in_front = (view == View::Workspaces)
         .then(|| workspace.active_project_id())
         .flatten();
-    let mut badges: Vec<AnyElement> = workspace
+    let badges: Vec<AnyElement> = workspace
         .projects()
         .iter()
         .enumerate()
         .map(|(ix, project)| workspace_badge(workspace, project, ix, in_front, labels, cx))
         .collect();
-    if let Some(chats) = workspace.chats_space() {
-        let status = workspace.status(chats.id);
-        badges.push(
-            Item {
-                id: "view-chats".into(),
-                label: "Chats".into(),
-                icon: Icon::new(Icons::MessagesSquare),
-                hint: hint("⌘⇧D", "Ctrl+Shift+D"),
-                selected: in_front == Some(chats.id),
-                badge: status_dot(&status, cx),
-            }
-            .render(labels, show(Target::Workspace(chats.id)), cx),
-        );
-    }
 
     column("view-rail", labels, places)
         .child(
@@ -437,13 +423,4 @@ fn status_dot(status: &crate::status::WorkspaceStatus, cx: &App) -> Option<AnyEl
         return None;
     };
     Some(dot_badge(color))
-}
-
-/// What an entry of the column shows.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Target {
-    /// The Bridge, Reviews, or one of the organisation's own.
-    View(View),
-    /// A workspace's screen (the Chats space's too).
-    Workspace(ProjectId),
 }

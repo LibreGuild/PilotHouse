@@ -60,60 +60,53 @@ fn temp_project(name: &str) -> std::path::PathBuf {
     dir
 }
 
-/// A first start opens straight into a chat (the Chats space, no folder
-/// needed); the Bridge says how to begin; a folder added becomes a workspace
-/// with a badge in the column of icons, and Files as its first tool.
+/// A first start opens straight into a chat, in the workspace for chats
+/// that need no folder ("Scratch", made for it: a workspace like any
+/// other); the Bridge lists it; a folder added becomes a workspace with a
+/// badge in the column of icons, and Files as its first tool.
 #[gpui_kit::test]
 fn a_first_start_opens_into_a_chat(cx: &mut TestAppContext) {
     let (window, workspace) = open_workspace(cx);
-    cx.update_window(window, |_, window, cx| {
-        window.render_frame(cx);
-        let workspace = workspace.read(cx);
-        let chats = workspace.chats_space().expect("the Chats space").id;
-        assert_eq!(workspace.active_project_id(), Some(chats));
-        assert!(workspace.projects().is_empty(), "it is not a workspace");
-        assert_eq!(workspace.view(), ph_workspace::View::Workspaces);
-        assert!(window.try_find("bridge").is_none(), "the chat is in front");
-        // Nothing to show of files there.
-        assert!(window.try_find("context-tab-files").is_none());
-    })
-    .unwrap();
-    // Also with the result pane open (on the board: the browser, which it
-    // would start on, cannot run in a test): Files has no name there, and
-    // its key does nothing.
-    cx.update_window(window, |_, window, cx| {
-        let space = workspace.read(cx).active_space().unwrap().read(cx);
-        assert_ne!(space.context_tab(), ContextTab::Files);
-        window.dispatch_action(Box::new(ph_workspace::ShowBoard), cx);
-    })
-    .unwrap();
-    cx.run_until_parked();
-    press(window, "secondary-1", cx);
-    cx.update_window(window, |_, window, cx| {
-        window.render_frame(cx);
-        let space = workspace.read(cx).active_space().unwrap().read(cx);
-        assert!(space.is_context_open());
-        assert_eq!(space.context_tab(), ContextTab::Board);
-        assert!(window.try_find("context-tab-files").is_none());
-        assert!(window.try_find("context-tab-terminal").is_some());
-    })
-    .unwrap();
-    press(window, "secondary-alt-b", cx);
+    let scratch = cx
+        .update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let workspace = workspace.read(cx);
+            let [scratch] = workspace.projects() else {
+                panic!("one workspace, made for the first chat");
+            };
+            assert_eq!(scratch.name, "Scratch");
+            assert!(scratch.folders().is_empty());
+            assert_eq!(workspace.active_project_id(), Some(scratch.id));
+            assert_eq!(workspace.view(), ph_workspace::View::Workspaces);
+            assert!(window.try_find("bridge").is_none(), "the chat is in front");
+            assert!(
+                window
+                    .try_find(gpui_kit::ElementId::from((
+                        "rail-workspace",
+                        scratch.id as u64
+                    )))
+                    .is_some(),
+                "it has a badge, as every workspace"
+            );
+            scratch.id
+        })
+        .unwrap();
 
-    // The Bridge: nothing is under way yet, so it says how to begin.
+    // The Bridge, and back to the chat by the key for chats that need no
+    // folder.
     click(window, "view-bridge", cx);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(workspace.read(cx).view(), ph_workspace::View::Bridge);
         assert!(window.try_find("bridge").is_some());
-        assert!(window.try_find("bridge-open-folder").is_some());
     })
     .unwrap();
-    // And back to the chat.
-    click(window, "view-chats", cx);
+    press(window, "secondary-shift-d", cx);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        assert_eq!(workspace.read(cx).view(), ph_workspace::View::Workspaces);
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.view(), ph_workspace::View::Workspaces);
+        assert_eq!(workspace.active_project_id(), Some(scratch));
         assert!(window.try_find("bridge").is_none());
     })
     .unwrap();
@@ -124,7 +117,9 @@ fn a_first_start_opens_into_a_chat(cx: &mut TestAppContext) {
             workspace.add_project_path(&folder, window, cx)
         });
         window.render_frame(cx);
+        // Newest first: the folder's workspace, before Scratch.
         let id = workspace.read(cx).projects()[0].id;
+        assert_ne!(id, scratch);
         assert!(
             window
                 .try_find(gpui_kit::ElementId::from(("rail-workspace", id as u64)))
@@ -140,7 +135,7 @@ fn a_first_start_opens_into_a_chat(cx: &mut TestAppContext) {
     .unwrap();
     cx.update(|cx| {
         let workspace = workspace.read(cx);
-        assert_eq!(workspace.projects().len(), 1);
+        assert_eq!(workspace.projects().len(), 2);
         let space = workspace.active_space().unwrap().read(cx);
         assert_eq!(space.context_tab(), ContextTab::Files);
     });
@@ -527,7 +522,8 @@ fn badges_open_workspaces_and_cards_open_their_chats(cx: &mut TestAppContext) {
         let workspace = workspace.read(cx);
         assert_eq!(workspace.active_project_id(), Some(beta));
         let order: Vec<_> = workspace.projects().iter().map(|p| p.id).collect();
-        assert_eq!(order, vec![beta, alpha], "newest first, and it stays so");
+        // (After them, the workspace the first start made for chats.)
+        assert_eq!(order[..2], [beta, alpha], "newest first, and it stays so");
     });
 
     // ⌃1 (Alt+1 off macOS) is the first badge: beta.
@@ -917,10 +913,13 @@ fn reviews_ask_for_an_account(cx: &mut TestAppContext) {
         window.render_frame(cx);
         let workspace = workspace.read(cx);
         assert_eq!(workspace.view(), ph_workspace::View::Workspaces);
-        assert_eq!(
-            workspace.active_project_id(),
-            workspace.chats_space().map(|chats| chats.id)
-        );
+        let scratch = workspace
+            .projects()
+            .iter()
+            .find(|project| project.name == "Scratch")
+            .map(|project| project.id);
+        assert!(scratch.is_some());
+        assert_eq!(workspace.active_project_id(), scratch);
     })
     .unwrap();
 }

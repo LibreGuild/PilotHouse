@@ -262,16 +262,12 @@ fn site_action(action: SiteAction, cx: &mut App) -> Result<String> {
                     if !ph_brand::enabled(ph_brand::Feature::Board) {
                         anyhow::bail!("This build of {} has no board.", ph_brand::NAME);
                     }
-                    let project = workspace
-                        .read(cx)
-                        .active_project_id()
-                        .filter(|id| !workspace.read(cx).is_chats(*id))
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Open a workspace in {} first: the card goes on its board.",
-                                ph_brand::NAME
-                            )
-                        })?;
+                    let project = workspace.read(cx).active_project_id().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Open a workspace in {} first: the card goes on its board.",
+                            ph_brand::NAME
+                        )
+                    })?;
                     let store = crate::AppState::store(cx).clone();
                     let name = store
                         .project(project)

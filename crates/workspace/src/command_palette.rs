@@ -101,11 +101,6 @@ fn chats(workspace: &Workspace, cx: &App) -> Vec<Entry> {
         .projects()
         .iter()
         .map(|project| (project.id, project.name.clone()))
-        .chain(
-            workspace
-                .chats_space()
-                .map(|chats| (chats.id, "Chats".to_string())),
-        )
         .flat_map(|(id, place)| {
             workspace
                 .sessions_of(id, cx)
@@ -403,10 +398,10 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
                 ],
             ),
             Entry::action(
-                "Show Chats",
+                "Show Scratch (chats that need no folder)",
                 ph_ui::Icons::MessagesSquare,
                 ShowChatsView,
-                &["view", "chat", "no folder", "loose", "scratch"],
+                &["view", "chat", "chats", "no folder", "loose", "scratch"],
             ),
             Entry::action(
                 "Let agents use your Chrome",

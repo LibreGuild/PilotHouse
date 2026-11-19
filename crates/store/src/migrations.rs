@@ -309,6 +309,16 @@ const MIGRATIONS: &[&str] = &[
     // commands, screenshots), as JSON: written when a turn ends so its
     // card can say so without reading the transcript.
     "ALTER TABLE sessions ADD COLUMN facts TEXT;",
+    // 17: the space for chats outside any workspace ("Chats", a kind of
+    // its own) becomes an ordinary workspace without folders, "Scratch",
+    // noted as the place for chats that need no folder. Its chats stay.
+    r#"
+    INSERT INTO settings (key, value)
+        SELECT 'workspace.scratch', CAST(id AS TEXT) FROM projects
+        WHERE kind = 'chats' ORDER BY id LIMIT 1
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+    UPDATE projects SET kind = 'empty', name = 'Scratch' WHERE kind = 'chats';
+    "#,
 ];
 
 /// Backups kept of a database file, newest first; older ones are deleted.
@@ -631,5 +641,49 @@ mod tests {
         // 1 January 2026, 00:00 UTC: that day or the one before, by time zone.
         assert!(day == "2026-01-01" || day == "2025-12-31", "{day}");
         assert_eq!((input, cost), (900, 0.5));
+    }
+    #[test]
+    fn the_chats_space_becomes_the_scratch_workspace() {
+        let connection = Connection::open_in_memory().unwrap();
+        // A database just before migration 17, with the Chats space and a
+        // chat in it.
+        let before = 16;
+        for sql in &MIGRATIONS[..before] {
+            connection.execute_batch(sql).unwrap();
+        }
+        connection
+            .execute_batch(&format!(
+                "PRAGMA user_version = {before};
+                 INSERT INTO projects (id, name, path, created_at, last_opened_at, kind)
+                    VALUES (1, 'Chats', '/tmp/ws/1', 0, 0, 'chats');
+                 INSERT INTO projects (id, name, path, created_at, last_opened_at, kind)
+                    VALUES (2, 'shop', '/tmp/shop', 0, 0, 'folder');
+                 INSERT INTO sessions (id, project_id, title, agent_id, created_at, updated_at)
+                    VALUES (7, 1, 'One', 'codex', 0, 0);"
+            ))
+            .unwrap();
+        apply(&connection).unwrap();
+        let (name, kind): (String, String) = connection
+            .query_row("SELECT name, kind FROM projects WHERE id = 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((name.as_str(), kind.as_str()), ("Scratch", "empty"));
+        let noted: String = connection
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'workspace.scratch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(noted, "1");
+        let chats: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sessions WHERE project_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(chats, 1, "its chats stay");
     }
 }

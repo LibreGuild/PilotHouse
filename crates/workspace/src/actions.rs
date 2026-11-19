@@ -99,8 +99,9 @@ actions!(
         PreviousWorkspace,
         /// The Workspaces list, and the workspace last used in front (⌘⇧E).
         ShowWorkspacesView,
-        /// The Chats list (chats outside any workspace), and its chat in
-        /// front (⌘⇧D).
+        /// The workspace for chats that need no folder ("Scratch"), made
+        /// when there is none (⌘⇧D). Named for what it showed before that
+        /// was a workspace: keymaps and menus refer to it by this name.
         ShowChatsView,
         /// The GitHub view: pull requests across repositories, reviews (⌘⇧G).
         ShowGitHubView,
