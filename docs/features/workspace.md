@@ -40,7 +40,7 @@ Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 - **+**: open a folder as a workspace, or make one without folders.
 - **Settings**, at the foot.
 
-Names show in tooltips, or under the icons with *Settings → Appearance → Names under tool icons*.
+Names show in tooltips, or under the icons with *Settings → Appearance → Names under the icons*.
 
 ## The Bridge
 

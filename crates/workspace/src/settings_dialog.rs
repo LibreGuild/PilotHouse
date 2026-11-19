@@ -355,13 +355,13 @@ fn appearance_page(
                 )
                 .item(
                     SettingItem::new(
-                        "Names under tool icons",
+                        "Names under the icons",
                         switch(|p| p.tool_labels, |p, v| p.tool_labels = v),
                     )
                     .description(
-                        "Show each tool's name under its icon on the right, not only when pointing at it.",
+                        "Show each name under its icon in the column at the window's left edge, not only when pointing at it.",
                     )
-                    .keywords(["layout", "labels", "tools", "icons", "activity bar"]),
+                    .keywords(["layout", "labels", "tools", "tool icons", "icons", "activity bar"]),
                 ),
         )
         .group(
