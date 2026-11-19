@@ -538,7 +538,7 @@ impl GithubView {
                     .child(
                         Icon::new(super::render::inbox_icon(kind))
                             .small()
-                            .text_color(cx.theme().info),
+                            .text_color(cx.theme().link),
                     )
                     .child(
                         div()

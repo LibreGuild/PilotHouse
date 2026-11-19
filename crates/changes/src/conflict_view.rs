@@ -180,7 +180,7 @@ impl ConflictView {
                 .rounded(cx.theme().radius)
                 .border_1()
                 .border_color(if picked {
-                    cx.theme().info
+                    cx.theme().ring
                 } else {
                     cx.theme().border
                 })

@@ -40,7 +40,7 @@ Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 - **+**: open a folder as a workspace, or make one without folders.
 - **Settings**, at the foot.
 
-Names show in tooltips, or under the icons with *Settings → Appearance → Names under the icons*.
+Names show under the icons; *Settings → Appearance → Names under the icons* switches them off, and they show in tooltips then. (They were off unless switched on before 0.7. The setting is kept under a new key, `rail_names`, so everyone starts with the names after updating; the old `tool_labels` is no longer read.)
 
 ## The Bridge
 
@@ -163,7 +163,7 @@ Removing a folder leaves it on disk; removing the primary folder makes the next 
 ## Settings
 
 Stored in the `settings` table:
-- **Appearance**: the theme (`appearance`: the system's light or dark one, or a theme by name), accent, density, the window's background (solid, translucent, a gradient or an image); see [Themes](themes.md), with designing your own and importing; names under tool icons.
+- **Appearance**: the theme (`appearance`: the system's light or dark one, or a theme by name), accent, density; see [Themes](themes.md), with designing your own and importing; names under tool icons.
 - **Features**: turn tools off (`features.disabled`); *System* holds the file manager menu switch.
 - **Zoom**: ⌘= and ⌘- (Ctrl+= and Ctrl+- elsewhere) make the interface, code and terminal text half a point larger or smaller together, kept within each size's bounds; ⌘0 (Ctrl+0) goes back to the default sizes (`Preferences::zoom`). Saved with the other appearance preferences. Back in the editor keeps ⌃- on a Mac and Alt+← elsewhere, so the keys do not meet.
 

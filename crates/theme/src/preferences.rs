@@ -26,8 +26,13 @@ pub struct Preferences {
     pub dark_theme: DarkTheme,
     pub chat_width: ChatWidth,
     /// Names under the icons of the column at the left edge, not only in
-    /// tooltips. (Named for the tool icons it first labelled.)
-    pub tool_labels: bool,
+    /// tooltips. On unless switched off.
+    ///
+    /// It was `tool_labels`, off unless switched on. That key is no longer
+    /// read (it stays in [`Preferences::other`]), so that everyone starts
+    /// with the names after updating, also who never touched the setting
+    /// and has a saved `false` like who chose it.
+    pub rail_names: bool,
     /// One color for focus, links, selection and highlights, over the
     /// theme's own.
     pub accent: Accent,
@@ -82,7 +87,7 @@ impl Default for Preferences {
             editor: EditorPreferences::default(),
             dark_theme: DarkTheme::default(),
             chat_width: ChatWidth::Comfortable,
-            tool_labels: false,
+            rail_names: true,
             accent: Accent::Theme,
             density: Density::Comfortable,
             sizes_version: SIZES_VERSION,
@@ -490,56 +495,124 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
     }
 }
 
-/// Lays the user's accent over the theme: focus, links, selection,
-/// highlights, progress; and the main buttons when the theme draws them in
-/// its accent (Modern Dark's blue Send), not when they are its own color
-/// (Modern Light's black).
+/// Lays the user's accent over the theme, wherever the theme shows *its*
+/// accent: focus, links, selection, the text cursor, progress, the controls
+/// that show a choice (switches, checkboxes, radio buttons, a tab's line),
+/// and the main buttons when the theme draws them in a color (Modern Dark's
+/// blue Send), not when they are ink (Modern Light's black).
+///
+/// The colors that say a state (`info`, `success`, `warning`, `danger`) stay
+/// the theme's own: a green accent must not make *Working* look like *Ready
+/// for review*, nor a red one make a note look like an error. What a view
+/// tints only to draw the eye uses `link` (text, icons) or `ring` (borders),
+/// which do follow.
 fn apply_accent(colors: &mut gpui_kit::component::ThemeColor, accent: Hsla, dark: bool) {
-    let on_accent = if accent.l > 0.62 {
-        gpui_kit::hsla(0., 0., 0.08, 1.)
-    } else {
-        gpui_kit::hsla(0., 0., 1., 1.)
-    };
+    // What carries text (a button, a checked box) is the accent in a shade
+    // its text reads on; what is only a line or a glow is the accent itself.
+    let fill = fill(accent);
+    let on_accent = text_on(fill);
     let shade = |by: f32| Hsla {
-        l: (accent.l + by).clamp(0., 1.),
-        ..accent
+        l: (fill.l + by).clamp(0., 1.),
+        ..fill
     };
-    // Links: lighter on a dark theme, darker on a light one, so they read.
-    let link = if dark {
-        Hsla {
-            l: accent.l.max(0.68),
-            ..accent
-        }
-    } else {
-        Hsla {
-            l: accent.l.min(0.45),
-            ..accent
-        }
-    };
-    let primary_follows = colors.primary == colors.ring;
+    // Links, and the icons and words tinted like them: lighter on a dark
+    // theme, darker on a light one, until they read on its background.
+    let link = readable(accent, dark);
+    // By how much color the theme's main button has, not by whether it is
+    // the very color of its focus ring: One Dark, One Light and Studio Dark
+    // draw the two in blues a shade apart, and kept their blue buttons and
+    // switches under every accent.
+    let buttons_follow = is_colored(colors.button_primary);
     colors.ring = accent;
-    colors.info = accent;
-    colors.info_foreground = on_accent;
+    colors.caret = link;
     colors.drag_border = accent;
     colors.drop_target = accent.opacity(0.12);
     colors.slider_bar = accent;
     colors.progress_bar = accent;
+    colors.table_active_border = accent;
     colors.selection = accent.opacity(if dark { 0.35 } else { 0.22 });
     colors.link = link;
     colors.link_hover = link.opacity(0.85);
     colors.link_active = link;
-    colors.button_info = accent;
-    colors.button_info_hover = shade(0.05);
-    colors.button_info_active = shade(-0.05);
-    colors.button_info_foreground = on_accent;
-    if primary_follows {
-        colors.primary = accent;
-        colors.primary_hover = shade(0.05);
-        colors.primary_active = shade(-0.05);
-        colors.primary_foreground = on_accent;
-        colors.sidebar_primary = accent;
-        colors.sidebar_primary_foreground = on_accent;
+    // What shows a choice is drawn in `primary`, in every theme.
+    colors.primary = fill;
+    colors.primary_hover = shade(0.05);
+    colors.primary_active = shade(-0.05);
+    colors.primary_foreground = on_accent;
+    colors.sidebar_primary = fill;
+    colors.sidebar_primary_foreground = on_accent;
+    // The main buttons have colors of their own (they fall back to
+    // `primary` only as a theme is read), so they are set here too.
+    if buttons_follow {
+        colors.button_primary = fill;
+        colors.button_primary_hover = shade(0.05);
+        colors.button_primary_active = shade(-0.05);
+        colors.button_primary_foreground = on_accent;
     }
+}
+
+/// How bright `color` looks (its relative luminance, 0 to 1): the eye takes
+/// green for far brighter than blue. HSL lightness does not say it: the
+/// green and the blue accents are both "half light" there.
+fn luminance(color: Hsla) -> f32 {
+    let rgb = gpui_kit::Rgba::from(color);
+    let linear = |channel: f32| {
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(rgb.r) + 0.7152 * linear(rgb.g) + 0.0722 * linear(rgb.b)
+}
+
+/// How far apart two luminances are, as WCAG counts contrast (1 to 21).
+fn contrast(a: f32, b: f32) -> f32 {
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Above this luminance white text is faint on a color (under 3 to 1), and
+/// ink is clear (over 6 to 1): the bright green, teal, amber and orange.
+const BRIGHT: f32 = 0.30;
+
+/// The text color that reads on `color`: white, or ink on a bright one.
+fn text_on(color: Hsla) -> Hsla {
+    if luminance(color) > BRIGHT {
+        gpui_kit::hsla(0., 0., 0.08, 1.)
+    } else {
+        gpui_kit::hsla(0., 0., 1., 1.)
+    }
+}
+
+/// `color` as a fill its text ([`text_on`]) reads on at 4.5 to 1. A bright
+/// color has ink on it and does from the start; one that has white on it is
+/// darkened until it does (the blue, the pink and the red by a shade).
+fn fill(color: Hsla) -> Hsla {
+    let mut color = color;
+    while luminance(color) <= BRIGHT && contrast(1., luminance(color)) < 4.5 && color.l > 0.05 {
+        color.l -= 0.01;
+    }
+    color
+}
+
+/// `color` as a color for text and icons on a theme's background: lightened
+/// on a dark theme, darkened on a light one, until it stands 4.5 to 1 from a
+/// typical background of that kind (an amber that reads as a button is too
+/// pale for a word on paper).
+fn readable(color: Hsla, dark: bool) -> Hsla {
+    // Typical backgrounds: #1f1f1f and white.
+    let (background, step) = if dark { (0.014, 0.02) } else { (1., -0.02) };
+    let mut color = color;
+    while contrast(luminance(color), background) < 4.5 && color.l > 0.05 && color.l < 0.95 {
+        color.l += step;
+    }
+    color
+}
+
+/// Whether `color` is a color and not ink, paper or a tint of them: by its
+/// chroma, which is low for a near-black, a cream and a gray alike.
+fn is_colored(color: Hsla) -> bool {
+    (1. - (2. * color.l - 1.).abs()) * color.s > 0.2
 }
 
 #[cfg(test)]
@@ -597,6 +670,86 @@ mod tests {
             "a size the user chose stays"
         );
         assert!(!saved.migrate_sizes(), "once");
+    }
+
+    fn rgb(hex: u32) -> Hsla {
+        gpui_kit::rgb(hex).into()
+    }
+
+    /// An accent reaches the controls in every theme, the main buttons
+    /// where the theme draws them in a color, and never the colors that
+    /// say a state.
+    #[test]
+    fn an_accent_reaches_buttons_and_controls_and_leaves_states_alone() {
+        let green = Accent::Green.color(true).unwrap();
+        // Studio Dark: a blue button a shade from its blue focus ring.
+        let mut colors = gpui_kit::component::ThemeColor::default();
+        (colors.primary, colors.button_primary, colors.ring) =
+            (rgb(0x2b6ef0), rgb(0x2b6ef0), rgb(0x3574f0));
+        let info = rgb(0x2b6ef0);
+        colors.info = info;
+        apply_accent(&mut colors, green, true);
+        assert_eq!(colors.primary, fill(green), "switches and checkboxes");
+        assert_eq!(colors.button_primary, fill(green), "the main buttons");
+        assert_eq!(colors.ring, green);
+        assert_eq!(colors.info, info, "a state keeps its color");
+
+        // Modern Light and Warm Dark: buttons in ink and in cream.
+        for ink in [0x14171c, 0xece6dc, 0x2b2622] {
+            let mut colors = gpui_kit::component::ThemeColor::default();
+            (colors.primary, colors.button_primary) = (rgb(ink), rgb(ink));
+            apply_accent(&mut colors, green, false);
+            assert_eq!(colors.button_primary, rgb(ink), "{ink:x} stays");
+            assert_eq!(colors.primary, fill(green), "its switches take the accent");
+        }
+        for color in [0x0078d4, 0xbd93f9, 0x4572ca, 0x4867ff] {
+            assert!(is_colored(rgb(color)), "{color:x}");
+        }
+    }
+
+    /// Text on an accent, and an accent as text, read: white was put on the
+    /// bright green (2.3 to 1) because HSL calls it half light.
+    #[test]
+    fn text_reads_on_every_accent_and_every_accent_reads_as_text() {
+        for dark in [true, false] {
+            for accent in Accent::ALL {
+                let Some(color) = accent.color(dark) else {
+                    continue;
+                };
+                let fill = fill(color);
+                let on = contrast(luminance(text_on(fill)), luminance(fill));
+                assert!(
+                    on >= 4.5,
+                    "{} text on it, dark {dark}: {on}",
+                    accent.label()
+                );
+                let background = if dark { 0.014 } else { 1. };
+                let text = contrast(luminance(readable(color, dark)), background);
+                assert!(
+                    text >= 4.5,
+                    "{} as text, dark {dark}: {text}",
+                    accent.label()
+                );
+            }
+        }
+        let green = Accent::Green.color(true).unwrap();
+        assert!(text_on(green).l < 0.5, "ink on the bright green");
+        let blue = Accent::Blue.color(true).unwrap();
+        assert!(text_on(blue).l > 0.5, "white on blue");
+    }
+
+    /// The names under the icons show after an update, whatever the old
+    /// setting was saved as, and can be switched off from then on.
+    #[test]
+    fn names_under_the_icons_are_on_after_an_update() {
+        let old: Preferences = serde_json::from_str(r#"{"tool_labels":false}"#).unwrap();
+        assert!(old.rail_names);
+        assert!(old.other.contains_key("tool_labels"), "the old key is kept");
+        let mut chosen = old;
+        chosen.rail_names = false;
+        let saved = serde_json::to_string(&chosen).unwrap();
+        let again: Preferences = serde_json::from_str(&saved).unwrap();
+        assert!(!again.rail_names, "switched off, it stays off");
     }
 
     #[test]

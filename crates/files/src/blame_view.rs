@@ -27,7 +27,7 @@ pub fn render(blamed: Rc<Blamed>, cx: &App) -> AnyElement {
         .map(|line| line.time)
         .min()
         .unwrap_or(newest);
-    let accent = cx.theme().info;
+    let accent = cx.theme().link;
     uniform_list("blame-lines", count, move |range, _, cx| {
         let blamed = blamed.clone();
         range

@@ -215,7 +215,7 @@ fn run_line(
         None => (
             Icon::new(Icons::Layers)
                 .xsmall()
-                .text_color(cx.theme().info)
+                .text_color(cx.theme().link)
                 .into_any_element(),
             summary.into(),
         ),

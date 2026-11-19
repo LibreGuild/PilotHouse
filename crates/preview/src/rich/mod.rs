@@ -1485,11 +1485,11 @@ impl RichEditor {
                         .rounded(px(4.))
                         .border_1()
                         .border_color(if checked {
-                            theme.info
+                            theme.primary
                         } else {
                             theme.muted_foreground
                         })
-                        .when(checked, |this| this.bg(theme.info))
+                        .when(checked, |this| this.bg(theme.primary))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -1498,7 +1498,7 @@ impl RichEditor {
                             this.child(
                                 Icon::new(IconName::Check)
                                     .xsmall()
-                                    .text_color(theme.button_info_foreground),
+                                    .text_color(theme.primary_foreground),
                             )
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {

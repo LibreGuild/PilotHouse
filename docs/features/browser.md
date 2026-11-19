@@ -52,7 +52,9 @@ The pane is for the project's own pages. For real websites (web apps, dashboards
 2. **Load the extension**: open `chrome://extensions`, turn on **Developer mode**, **Load unpacked**, and choose `<data dir>/chrome-extension` (Settings shows the path, with Copy and Reveal). The app writes the extension there at each start from the files built into it (`crates/browser/extension/`), so every package carries it. Its manifest has a fixed public `key`, so its id is the same wherever it is loaded from. After PilotHouse updates, reload it in `chrome://extensions`.
 3. **Pin** it: its toolbar button opens the **PilotHouse panel** (Chrome's side panel, below), where **Let agents use this tab** shares the tab in front (it joins the PilotHouse group) or stops sharing it.
 
-Settings shows *Connected to Chrome 131* once the extension reached the app. One browser at a time: a second browser's extension is told to wait.
+The page is a guide in steps, each a sentence beside a drawing of where in Chrome it happens: the extensions page with *Developer mode*, *Load unpacked* and the folder to choose, the puzzle-piece menu with the pin; then, under *In Chrome*, the tab group, the right-click menu and a message box with what was sent waiting in it. The drawings are wireframes drawn by the app from the theme (`extension_guide.rs`), not pictures: they follow light and dark, the accent (which rings the thing to click) and the interface size, and write out only the names to look for. A step's number turns into a tick once it is done.
+
+Settings shows *Connected to Chrome 131* once the extension reached the app, and folds the setup steps away (*Show the setup steps* brings them back). One browser at a time: a second browser's extension is told to wait.
 
 ### How it works
 

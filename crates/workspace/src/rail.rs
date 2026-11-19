@@ -29,10 +29,10 @@ pub(crate) fn width_px(labels: bool) -> f32 {
     if labels { 64. } else { 42. }
 }
 
-/// Whether the user wants names under the icons.
+/// Whether names show under the icons (they do unless switched off).
 pub(crate) fn labels(cx: &App) -> bool {
     cx.try_global::<ph_theme::Preferences>()
-        .is_some_and(|preferences| preferences.tool_labels)
+        .is_none_or(|preferences| preferences.rail_names)
 }
 
 /// One entry of a column.

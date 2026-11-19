@@ -128,7 +128,7 @@ impl Render for InstructionsView {
                     .py_2()
                     .rounded(cx.theme().radius)
                     .bg(cx.theme().secondary)
-                    .child(Icon::new(Icons::FileText).small().text_color(if exists { cx.theme().info } else { muted }))
+                    .child(Icon::new(Icons::FileText).small().text_color(if exists { cx.theme().link } else { muted }))
                     .child(
                         v_flex()
                             .flex_1()

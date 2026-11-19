@@ -355,9 +355,9 @@ fn appearance_page(
                 .item(
                     SettingItem::new(
                         "Names under the icons",
-                        switch(|p| p.tool_labels, |p, v| p.tool_labels = v),
+                        switch(|p| p.rail_names, |p, v| p.rail_names = v),
                     )
-                    .description("In the column at the window's left edge, not only when pointing at an icon.")
+                    .description("In the column at the window's left edge. Off, a name shows when you point at its icon.")
                     .keywords(["layout", "labels", "tools", "tool icons", "icons", "activity bar"]),
                 ),
         )

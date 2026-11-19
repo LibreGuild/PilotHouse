@@ -415,7 +415,7 @@ impl Render for HistoryView {
 /// `HEAD -> main`, `origin/main`, `tag: v1` as small badges.
 fn ref_badge(name: &str, cx: &App) -> AnyElement {
     let (text, color) = if let Some(branch) = name.strip_prefix("HEAD -> ") {
-        (branch.to_string(), cx.theme().info)
+        (branch.to_string(), cx.theme().link)
     } else if let Some(tag) = name.strip_prefix("tag: ") {
         (tag.to_string(), cx.theme().warning)
     } else {

@@ -1018,6 +1018,44 @@ fn removing_a_workspace_with_chats_asks_first(cx: &mut TestAppContext) {
     });
 }
 
+/// Settings opens at the page it is asked for (the pages are found by
+/// their place in the list, which changes when one is moved), and the
+/// Chrome extension's page is its guide: the steps with what each needs,
+/// drawn without a hitch.
+#[gpui_kit::test]
+fn settings_open_at_the_page_asked_for(cx: &mut TestAppContext) {
+    let (window, _workspace) = open_workspace(cx);
+    let shows = |id: &'static str, cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find(id).is_some()
+        })
+        .unwrap()
+    };
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_action(Box::new(ph_browser::OpenChromeExtensionSettings), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(shows("chrome-extension-set-up", cx), "the first step");
+    assert!(shows("chrome-extension-copy-address", cx), "the second");
+    assert!(shows("chrome-extension-copy", cx), "the third");
+    assert!(
+        !shows("chrome-extension-steps", cx),
+        "no Chrome, so no fold"
+    );
+
+    cx.update_window(window, |_, window, cx| {
+        use gpui_kit::component::WindowExt as _;
+        window.close_dialog(cx);
+        window.dispatch_action(Box::new(ph_workspace::OpenGitHubSettings), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(!shows("chrome-extension-set-up", cx));
+    assert!(shows("add-account", cx), "GitHub's page");
+}
+
 /// Reviews is one click away; without an account it asks for one. The
 /// Bridge and the chats that need no folder each have their key.
 #[gpui_kit::test]

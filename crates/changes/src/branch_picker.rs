@@ -235,7 +235,7 @@ impl BranchPicker {
                     .child(
                         Icon::new(Icons::GitBranch)
                             .small()
-                            .text_color(cx.theme().info),
+                            .text_color(cx.theme().link),
                     )
                     .child(
                         div()
@@ -329,7 +329,7 @@ impl BranchPicker {
                 this.child(
                     Icon::new(IconName::Check)
                         .small()
-                        .text_color(cx.theme().info),
+                        .text_color(cx.theme().link),
                 )
             })
             .when(deletable, |this| {
@@ -485,7 +485,7 @@ impl Render for BranchPicker {
                         .child(
                             Icon::new(IconName::Plus)
                                 .small()
-                                .text_color(cx.theme().info),
+                                .text_color(cx.theme().link),
                         )
                         .child(div().flex_1().min_w_0().child(label))
                         .child(

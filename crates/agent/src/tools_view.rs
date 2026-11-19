@@ -211,7 +211,7 @@ impl Render for ToolsView {
                 )
             };
             Self::row(cx)
-                .child(Icon::new(Icons::Plug).small().text_color(cx.theme().info))
+                .child(Icon::new(Icons::Plug).small().text_color(cx.theme().link))
                 .child(
                     v_flex()
                         .flex_1()
@@ -304,7 +304,7 @@ impl Render for ToolsView {
                 .child(
                     Icon::new(Icons::Sparkles)
                         .small()
-                        .text_color(cx.theme().info),
+                        .text_color(cx.theme().link),
                 )
                 .child(
                     v_flex()

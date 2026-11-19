@@ -27,6 +27,7 @@ pub mod cdp;
 pub mod chrome;
 mod control;
 pub mod extension;
+mod extension_guide;
 mod extension_view;
 mod hub;
 mod input;

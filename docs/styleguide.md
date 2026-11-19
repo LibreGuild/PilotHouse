@@ -19,8 +19,8 @@ The look is a calm graphite, cool rather than warm: near-black with a faint blue
 | Hairlines | `border` | every divider and outline | emphasis |
 | Text | `foreground`, `muted_foreground` | text; secondary text, captions, paths | |
 | The one action | `primary` | the single affirmative button of a surface (Send, Commit, Save): near-white on dark, near-black on light | decoration, secondary actions |
-| Accent | `ring`, `selection`, `info`, filled info buttons: a plain blue as in VS Code (`#0078d4` dark, `#005fb8` light); `link` is `#4daafc` on dark; not a setting. The logo's violet is the logo's only, never the UI's (focus and links stay the accent blue) | focus, text selection, links, "working" spinners, progress | backgrounds, icons for decoration, selected tabs |
-| State | `success`, `warning`, `danger` | done / needs you / failed, git added / modified / deleted, errors | anything that is not state |
+| Accent | `ring` (focus, a border that marks), `link` (links, and an icon or a word tinted to draw the eye), `selection`, `progress_bar`, and `primary` on what shows a choice (a switch, a checked box, a tab's line): the theme's own, a plain blue as in VS Code (`#0078d4` dark, `#005fb8` light), or the accent chosen in Settings → Appearance, which is laid over all of these. The logo's violet is the logo's only, never the UI's | focus, text selection, links, progress, the thing to click in a drawing | backgrounds, selected tabs, a state |
+| State | `success`, `warning`, `danger`, `info` | done / needs you / failed / working, git added / modified / deleted / renamed, errors and notes. They are the theme's and never follow the accent: a green accent must not make *working* look like *done* | anything that is not state, a tint that should follow the accent (that is `link`) |
 
 - A workspace's colour is a small mark beside its name, never a wash over chrome.
 - Agents' brand marks identify the agent, at 14–18 px, and nowhere else.

@@ -192,7 +192,7 @@ impl Render for AccountsView {
                             .rounded(cx.theme().radius)
                             .border_1()
                             .border_color(cx.theme().border)
-                            .child(Icon::new(Icons::GitPullRequest).small().text_color(cx.theme().info))
+                            .child(Icon::new(Icons::GitPullRequest).small().text_color(cx.theme().link))
                             .child(
                                 v_flex()
                                     .flex_1()

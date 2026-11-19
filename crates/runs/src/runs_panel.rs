@@ -420,8 +420,8 @@ impl RunsPanel {
                             div()
                                 .px_1p5()
                                 .rounded_full()
-                                .bg(cx.theme().info.opacity(0.14))
-                                .text_color(cx.theme().info)
+                                .bg(cx.theme().link.opacity(0.14))
+                                .text_color(cx.theme().link)
                                 .child("this project"),
                         )
                     }),
