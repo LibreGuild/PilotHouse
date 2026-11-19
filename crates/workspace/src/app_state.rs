@@ -8,18 +8,17 @@ use crate::context_panel::ContextTab;
 pub(crate) mod keys {
     pub const APPEARANCE: &str = "appearance";
     pub const LAST_PROJECT: &str = "workspace.last_project";
+    /// What the window showed last: `bridge` or `workspace` (the one in
+    /// `LAST_PROJECT`).
+    pub const FRONT_VIEW: &str = "workspace.front_view";
     pub const SIDEBAR_COLLAPSED: &str = "workspace.sidebar_collapsed";
     /// The sidebar's width as dragged, in pixels (0 for the default).
     pub const SIDEBAR_WIDTH: &str = "workspace.sidebar_width";
-    /// The workspaces unfolded in the sidebar (their chats listed).
-    pub const SIDEBAR_EXPANDED: &str = "workspace.sidebar_expanded";
-    /// Chats pinned to the top of the sidebar, in pin order.
+    /// Tasks pinned to the top of their column on the Bridge, in pin order
+    /// (the key's name is from the sidebar they were pinned in before).
     pub const SIDEBAR_PINNED: &str = "workspace.sidebar_pinned";
-    /// Chats marked done: listed apart, under *Done*.
+    /// Tasks marked done: the Bridge's *Done* column.
     pub const SIDEBAR_SETTLED: &str = "workspace.sidebar_settled";
-    /// Sidebar panes collapsed and sections folded away (`chats`,
-    /// `workspaces`, `pinned`).
-    pub const SIDEBAR_FOLDED: &str = "workspace.sidebar_folded";
     pub const DISABLED_FEATURES: &str = "features.disabled";
     pub const PREFERENCES: &str = "appearance.preferences";
 }

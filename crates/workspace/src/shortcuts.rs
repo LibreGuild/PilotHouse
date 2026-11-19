@@ -58,24 +58,19 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
         (
             "Workspaces and layout",
             vec![
-                ("Workspaces", action(Box::new(ShowWorkspacesView))),
-                ("Chats", action(Box::new(ShowChatsView))),
-                ("Agents", action(Box::new(ShowAgentsView))),
-                ("GitHub view", action(Box::new(ShowGitHubView))),
+                ("The Bridge", action(Box::new(ShowWorkspacesView))),
+                ("Chats that need no folder", action(Box::new(ShowChatsView))),
+                ("Reviews", action(Box::new(ShowGitHubView))),
                 ("Workspace 1 to 9", Keys::Text(workspace_keys.into())),
                 ("Previous workspace", action(Box::new(PreviousWorkspace))),
-                ("Show or hide the sidebar", action(Box::new(ToggleSidebar))),
+                ("Show or hide the chat", action(Box::new(ToggleSidebar))),
                 (
-                    "Show or hide the tools beside the chat",
+                    "Show or hide the result pane",
                     action(Box::new(ToggleContextPanel)),
                 ),
                 (
-                    "Show or hide the bottom panel",
-                    action(Box::new(ToggleBottomPanel)),
-                ),
-                (
                     "Show or hide the terminal",
-                    action(Box::new(ToggleTerminal)),
+                    action(Box::new(ToggleBottomPanel)),
                 ),
                 (
                     "Split the terminal",
@@ -85,7 +80,10 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
                         &["ctrl-shift-5"]
                     }),
                 ),
-                ("Tool full size", action(Box::new(ToggleZoom))),
+                (
+                    "The result pane fills the window",
+                    action(Box::new(ToggleZoom)),
+                ),
                 (
                     "Screen capture to the chat",
                     action(Box::new(CaptureToChat)),

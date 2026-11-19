@@ -142,6 +142,7 @@ fn app_state(cx: &mut App) -> Result<Value> {
         "active_project": workspace.active_project_id(),
         "chats_space": workspace.chats_space().map(|chats| chats.id),
         "view": match workspace.view() {
+            ph_workspace::View::Bridge => "bridge",
             ph_workspace::View::Workspaces => "workspaces",
             ph_workspace::View::GitHub => "github",
             ph_workspace::View::Custom(id) => id,

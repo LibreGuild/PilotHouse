@@ -73,12 +73,12 @@ fn chats(workspace: &Workspace, cx: &App) -> Vec<Entry> {
         ChatState::Done | ChatState::Failed => 2,
         ChatState::Idle => 3,
     };
-    let mut live = crate::agents_board::cards(workspace, cx);
+    let mut live = crate::bridge::live_cards(workspace, cx);
     live.sort_by_key(|card| rank(card.summary.state));
     let mut seen = std::collections::HashSet::new();
     let mut entries = Vec::new();
     for (card, session) in live.iter().filter_map(|card| match card.target {
-        crate::agents_board::Target::Chat(session) if card.summary.state != ChatState::Idle => {
+        crate::bridge::Target::Chat(session) if card.summary.state != ChatState::Idle => {
             Some((card, session))
         }
         _ => None,
@@ -301,17 +301,26 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         &["floating", "popup", "overlay", "ask", "spotlight", "hotkey"],
     ));
     general.push(Entry::action(
-        "Show or hide the sidebar",
+        "Show or hide the chat",
         IconName::PanelLeft,
         ToggleSidebar,
-        &["toggle sidebar", "toggle", "hide", "show", "list"],
+        &[
+            "toggle sidebar",
+            "hide the sidebar",
+            "toggle",
+            "hide",
+            "show",
+            "fold",
+            "list",
+        ],
     ));
     general.push(Entry::action(
-        "Show or hide the tools",
+        "Show or hide the result pane",
         IconName::PanelRight,
         ToggleContextPanel,
         &[
             "toggle tools",
+            "hide the tools",
             "toggle",
             "hide",
             "show",
@@ -321,43 +330,29 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         ],
     ));
     general.push(Entry::action(
-        "Show or hide the bottom panel",
-        IconName::PanelBottom,
-        ToggleBottomPanel,
-        &[
-            "toggle bottom panel",
-            "toggle",
-            "hide",
-            "show",
-            "terminal",
-            "logcat",
-            "panel",
-        ],
-    ));
-    general.push(Entry::action(
         "Show or hide the terminal",
         IconName::SquareTerminal,
         ToggleTerminal,
-        &["toggle terminal", "toggle", "shell", "console"],
+        &[
+            "toggle terminal",
+            "toggle bottom panel",
+            "bottom panel",
+            "toggle",
+            "shell",
+            "console",
+        ],
     ));
     general.push(Entry::action(
-        "Maximize the panel in front",
+        "Let the result pane fill the window",
         IconName::Maximize,
         ToggleZoom,
-        &["maximize panel", "zoom", "full"],
+        &["maximize panel", "maximize", "zoom", "full", "editor"],
     ));
     general.push(Entry::action(
         "Reset the layout",
         Icons::LayoutGrid,
         ResetLayout,
-        &[
-            "reset layout",
-            "panes",
-            "dock",
-            "default",
-            "restore",
-            "arrange",
-        ],
+        &["reset layout", "panes", "default", "restore", "arrange"],
     ));
     groups.push(("General", general));
 
@@ -394,16 +389,24 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         "Views",
         vec![
             Entry::action(
-                "Show Workspaces",
-                ph_ui::Icons::LayoutGrid,
+                "Show the Bridge",
+                ph_ui::Icons::ShipWheel,
                 ShowWorkspacesView,
-                &["workspaces view", "view", "sidebar", "list", "folders"],
+                &[
+                    "workspaces view",
+                    "show workspaces",
+                    "agents",
+                    "tasks",
+                    "home",
+                    "view",
+                    "board",
+                ],
             ),
             Entry::action(
                 "Show Chats",
                 ph_ui::Icons::MessagesSquare,
                 ShowChatsView,
-                &["view", "sidebar", "list", "loose", "pinned"],
+                &["view", "chat", "no folder", "loose", "scratch"],
             ),
             Entry::action(
                 "Let agents use your Chrome",
@@ -420,16 +423,18 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
                 ],
             ),
             Entry::action(
-                "Show the agents at work",
-                ph_ui::Icons::Bot,
-                ShowAgentsView,
-                &["agents", "board", "working", "needs", "waiting"],
-            ),
-            Entry::action(
-                "Show GitHub",
-                ph_ui::Icons::Github,
+                "Show Reviews",
+                ph_ui::Icons::GitPullRequest,
                 ShowGitHubView,
-                &["github view", "view", "pull", "review", "pr"],
+                &[
+                    "github view",
+                    "show github",
+                    "github",
+                    "view",
+                    "pull",
+                    "review",
+                    "pr",
+                ],
             ),
         ]
         .into_iter()

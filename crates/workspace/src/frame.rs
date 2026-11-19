@@ -7,8 +7,8 @@
 //! bottom, in the theme's own colour. With a workspace in front the light
 //! has that workspace's colour, strongest in the title bar and fading down
 //! the two columns, so a glance at the window's edge says where a new chat
-//! would go. The Chats list and GitHub belong to no workspace and stay
-//! plain.
+//! would go. The Bridge, Reviews and the Chats space belong to no workspace
+//! and stay plain.
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
@@ -17,7 +17,7 @@ use gpui_kit::{
 };
 
 use crate::sidebar;
-use crate::workspace::{Section, View, Workspace};
+use crate::workspace::{View, Workspace};
 
 /// The room between two islands, and under them.
 pub(crate) fn gap() -> Rems {
@@ -128,7 +128,7 @@ pub(crate) fn layers(workspace: &Workspace, cx: &mut App) -> Vec<AnyElement> {
 
 /// The colour of the workspace in front, when one is.
 pub(crate) fn tint(workspace: &Workspace, cx: &App) -> Option<Hsla> {
-    if workspace.view() != View::Workspaces || workspace.section() != Section::Workspaces {
+    if workspace.view() != View::Workspaces {
         return None;
     }
     let id = workspace.active_project_id()?;

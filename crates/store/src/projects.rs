@@ -87,6 +87,12 @@ pub struct ProjectUiState {
     pub open_files: Vec<String>,
     /// The file that was focused in the viewer.
     pub active_file: Option<String>,
+    /// The chat was folded away for the result pane to have the screen.
+    pub chat_folded: Option<bool>,
+    /// The folders' tree showed beside the editor.
+    pub tree_open: Option<bool>,
+    /// What Preview showed last: `browser` or `devices`.
+    pub preview: Option<String>,
 }
 
 impl Project {

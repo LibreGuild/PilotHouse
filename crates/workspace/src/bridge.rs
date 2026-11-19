@@ -1,0 +1,1148 @@
+//! The Bridge: every task of every workspace, by where it stands. It is the
+//! window's home, and answers "what needs me?" before any one workspace is
+//! looked at.
+//!
+//! A task is a chat with an agent (or an agent's CLI in a terminal, or a
+//! review being readied). The columns are what the user does about it:
+//!
+//! - **Needs you**: the agent asks something, or stopped with an error.
+//! - **Working**: the agent is at it.
+//! - **Ready for review**: a turn finished and nobody marked the task done.
+//!   News not looked at yet comes first.
+//! - **Done**: marked done, or left alone for a week.
+//!
+//! It took the place of the lists beside the workspace (which showed one
+//! workspace's chats at a time) and of the Agents pop-up (which showed only
+//! what was loaded): the same cards, for everything, always in the same
+//! place. Reviews of other people's pull requests have their own view; the
+//! Bridge shows that some wait, and those an agent is working on.
+
+use std::collections::HashSet;
+
+use gpui_kit::TestSupportExt as _;
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    menu::{PopupMenu, PopupMenuItem},
+    v_flex,
+};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
+    AnyElement, App, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div,
+};
+use ph_agent::{ChatState, ChatSummary};
+use ph_store::projects::ProjectId;
+use ph_store::sessions::{Session, SessionId};
+use ph_ui::{Icons, MenuButton as _};
+
+use crate::actions::{
+    AddFolderToWorkspace, AddProject, FinishTask, NewTask, NewWorkspace, OpenInNewWindow,
+    RemoveWorkspace, RenameWorkspace,
+};
+use crate::context_panel::ContextTab;
+use crate::workspace::{View, Workspace};
+
+/// A task nobody touched for this long counts as done.
+const QUIET_AFTER: i64 = 7 * 24 * 60 * 60 * 1000;
+/// Cards a column lists before *Show all*.
+const SHOWN: usize = 12;
+
+/// What the Bridge shows, kept while the window lives.
+#[derive(Default)]
+pub(crate) struct BridgeState {
+    /// Only this workspace's tasks.
+    pub filter: Option<ProjectId>,
+    /// The columns listing every card of theirs.
+    pub all: HashSet<&'static str>,
+}
+
+/// What a card opens.
+#[derive(Clone, PartialEq)]
+pub(crate) enum Target {
+    Chat(SessionId),
+    /// An agent CLI in a terminal (its pane id).
+    Terminal(String),
+    /// A chat about to start, while what it needs is readied (a clone).
+    Preparing,
+}
+
+/// One task on the Bridge.
+pub(crate) struct Card {
+    pub project: ProjectId,
+    /// A chat of the Reviews view (a review), shown there.
+    pub github: bool,
+    pub target: Target,
+    pub title: String,
+    pub place: String,
+    pub color: Option<Hsla>,
+    pub updated_at: i64,
+    pub summary: ChatSummary,
+    /// The stored chat, for its menu.
+    session: Option<Session>,
+    pinned: bool,
+    settled: bool,
+    /// Its workspace has folders, so there can be changes to review.
+    has_folders: bool,
+}
+
+/// The Bridge's columns, most urgent first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Column {
+    NeedsYou,
+    Working,
+    Review,
+    Done,
+}
+
+impl Column {
+    const ALL: [Column; 4] = [
+        Column::NeedsYou,
+        Column::Working,
+        Column::Review,
+        Column::Done,
+    ];
+
+    fn of(card: &Card, now: i64) -> Self {
+        match card.summary.state {
+            ChatState::NeedsYou | ChatState::Failed => Column::NeedsYou,
+            ChatState::Working => Column::Working,
+            ChatState::Done => Column::Review,
+            ChatState::Idle if card.settled || now - card.updated_at > QUIET_AFTER => Column::Done,
+            ChatState::Idle => Column::Review,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Column::NeedsYou => "Needs you",
+            Column::Working => "Working",
+            Column::Review => "Ready for review",
+            Column::Done => "Done",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Column::NeedsYou => "needs-you",
+            Column::Working => "working",
+            Column::Review => "review",
+            Column::Done => "done",
+        }
+    }
+
+    fn empty(self) -> &'static str {
+        match self {
+            Column::NeedsYou => "No agent waits for you.",
+            Column::Working => "No agent is at work.",
+            Column::Review => "Nothing to look at.",
+            Column::Done => "Tasks you mark done show here.",
+        }
+    }
+
+    fn color(self, cx: &App) -> Hsla {
+        let theme = cx.theme();
+        match self {
+            Column::NeedsYou => theme.warning,
+            Column::Working => theme.info,
+            Column::Review => theme.success,
+            Column::Done => theme.muted_foreground,
+        }
+    }
+}
+
+/// Every loaded chat of every workspace (and the Chats space) that is live
+/// in this run, and the agents in terminals, newest first: for the command
+/// palette.
+pub(crate) fn live_cards(workspace: &Workspace, cx: &App) -> Vec<Card> {
+    cards(workspace, true, cx)
+}
+
+/// The tasks: with `live`, only the chats loaded in this run that are not
+/// marked done; else every stored chat too.
+fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
+    let dark = cx.theme().is_dark();
+    let store = crate::app_state::AppState::store(cx);
+    let mut places: Vec<(ProjectId, String, Option<Hsla>, bool)> = workspace
+        .projects()
+        .iter()
+        .map(|project| {
+            let color = ph_ui::workspace_color(project.shade(ph_ui::WORKSPACE_COLORS.len()), dark);
+            (
+                project.id,
+                project.name.clone(),
+                Some(color),
+                !project.folders().is_empty(),
+            )
+        })
+        .collect();
+    if let Some(chats) = workspace.chats_space() {
+        places.push((chats.id, "Chats".into(), None, false));
+    }
+    let mut cards = Vec::new();
+    // Reviews: those an agent works on, or is being readied for.
+    if let Some(github) = workspace.github_view() {
+        for (project, name) in github.read(cx).spaces() {
+            let Some(chats) = ph_agent::ChatHub::existing(*project, cx) else {
+                continue;
+            };
+            let place = format!("Reviews · {name}");
+            // A review whose repository is still being cloned is at work
+            // already, to whoever asked for it.
+            if let Some(preparing) = chats.read(cx).preparing() {
+                cards.push(Card {
+                    project: *project,
+                    github: true,
+                    target: Target::Preparing,
+                    title: preparing.title.to_string(),
+                    place: place.clone(),
+                    color: None,
+                    updated_at: i64::MAX,
+                    summary: ChatSummary {
+                        state: ChatState::Working,
+                        title: preparing.title.clone(),
+                        agent: ph_agent::chats::default_agent(store),
+                        line: Some(format!(
+                            "{} {}s",
+                            preparing.label,
+                            preparing.since.elapsed().as_secs()
+                        )),
+                    },
+                    session: None,
+                    pinned: false,
+                    settled: false,
+                    has_folders: false,
+                });
+            }
+            for (session, summary) in chats.read(cx).live(cx) {
+                let busy = matches!(summary.state, ChatState::Working | ChatState::NeedsYou);
+                // Finished reviews are read in Reviews, not here.
+                if !busy && (!live || workspace.is_settled(session)) {
+                    continue;
+                }
+                let Some(stored) = store.session(session).ok().flatten() else {
+                    continue;
+                };
+                cards.push(Card {
+                    project: *project,
+                    github: true,
+                    target: Target::Chat(session),
+                    title: stored.title.clone(),
+                    place: place.clone(),
+                    color: None,
+                    updated_at: stored.updated_at,
+                    summary,
+                    session: None,
+                    pinned: false,
+                    settled: false,
+                    has_folders: false,
+                });
+            }
+        }
+    }
+    for (project, place, color, has_folders) in places.iter().cloned() {
+        let chats = ph_agent::ChatHub::existing(project, cx);
+        for stored in workspace.sessions_of(project, cx).iter() {
+            // An agent CLI's chat whose terminal is open is that terminal's
+            // card.
+            if stored.kind == "terminal"
+                && crate::terminal_agents::TerminalAgents::of_session(stored.id, cx).is_some()
+            {
+                continue;
+            }
+            let loaded = chats
+                .as_ref()
+                .and_then(|chats| chats.read(cx).summary(stored.id, cx));
+            let settled = workspace.is_settled(stored.id);
+            let summary = match loaded {
+                Some(summary) => {
+                    let busy = matches!(summary.state, ChatState::Working | ChatState::NeedsYou);
+                    // Chats marked done leave the live list until they work
+                    // again.
+                    if live && settled && !busy {
+                        continue;
+                    }
+                    summary
+                }
+                None if live => continue,
+                None => ChatSummary {
+                    state: ChatState::Idle,
+                    title: stored.title.clone().into(),
+                    agent: ph_agent::agents::find(&stored.agent_id)
+                        .unwrap_or_else(|| ph_agent::chats::default_agent(store)),
+                    line: stored.last_line.clone(),
+                },
+            };
+            cards.push(Card {
+                project,
+                github: false,
+                target: Target::Chat(stored.id),
+                title: stored.title.clone(),
+                place: place.clone(),
+                color,
+                updated_at: stored.updated_at,
+                summary,
+                session: Some(stored.clone()),
+                pinned: workspace.is_pinned(stored.id),
+                settled,
+                has_folders,
+            });
+        }
+    }
+    // Agents in terminals, of the same places.
+    for agent in crate::terminal_agents::TerminalAgents::all(cx) {
+        let Some((_, place, color, _)) = places.iter().find(|(id, ..)| *id == agent.project) else {
+            continue;
+        };
+        let label = agent
+            .terminal
+            .upgrade()
+            .and_then(|terminal| terminal.read(cx).label().cloned())
+            .unwrap_or_else(|| agent.agent.name.into());
+        cards.push(Card {
+            project: agent.project,
+            github: false,
+            target: Target::Terminal(agent.pane.clone()),
+            title: agent
+                .title
+                .clone()
+                .unwrap_or_else(|| format!("{label} (terminal)")),
+            place: format!("{place} · terminal"),
+            color: *color,
+            updated_at: agent.updated_at,
+            summary: ChatSummary {
+                state: agent.state,
+                title: label,
+                agent: agent.agent,
+                line: agent.line.clone(),
+            },
+            session: None,
+            pinned: false,
+            settled: false,
+            has_folders: false,
+        });
+    }
+    cards.sort_by_key(|card| std::cmp::Reverse(card.updated_at));
+    cards
+}
+
+/// How many tasks need the user and how many are being worked on, across
+/// the window's workspaces and reviews.
+pub(crate) fn counts(workspace: &Workspace, cx: &App) -> (usize, usize) {
+    let mut counts = (0, 0);
+    let github: Vec<ProjectId> = workspace
+        .github_view()
+        .map(|github| github.read(cx).spaces().iter().map(|(id, _)| *id).collect())
+        .unwrap_or_default();
+    for project in workspace
+        .projects()
+        .iter()
+        .map(|project| project.id)
+        .chain(workspace.chats_space().map(|chats| chats.id))
+        .chain(github)
+    {
+        if let Some(chats) = ph_agent::ChatHub::existing(project, cx) {
+            let activity = chats.read(cx).activity(cx);
+            counts.0 += activity.waiting;
+            counts.1 += activity.working;
+        }
+    }
+    for agent in crate::terminal_agents::TerminalAgents::all(cx) {
+        match agent.state {
+            ChatState::NeedsYou => counts.0 += 1,
+            ChatState::Working => counts.1 += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
+/// How many finished tasks nobody looked at yet, for the status bar.
+pub(crate) fn unseen(workspace: &Workspace) -> usize {
+    workspace
+        .projects()
+        .iter()
+        .map(|project| project.id)
+        .chain(workspace.chats_space().map(|chats| chats.id))
+        .map(|id| workspace.status(id).unseen)
+        .sum()
+}
+
+/// The Bridge, filling the window between the column of icons and its
+/// right edge.
+pub(crate) fn render(
+    workspace: &Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let entity = cx.entity().downgrade();
+    let state = workspace.bridge();
+    let now = jiff::Timestamp::now().as_millisecond();
+    let all = cards(workspace, false, cx);
+    let filter = state
+        .filter
+        .filter(|id| workspace.has_place(*id))
+        .map(|id| (id, workspace.is_chats(id)));
+    let shown: Vec<&Card> = all
+        .iter()
+        .filter(|card| match filter {
+            Some((id, _)) => card.project == id && !card.github,
+            None => true,
+        })
+        .collect();
+    // Two columns in a narrow window, one in a very narrow one: four cards
+    // side by side need the room.
+    let (width, probe) = ph_ui::measure::width_of("bridge-width", window, cx);
+    let rem = f32::from(window.rem_size());
+    let columns = match width.map(|width| f32::from(width) / rem) {
+        Some(rems) if rems < 34. => 1,
+        Some(rems) if rems < 62. => 2,
+        _ => 4,
+    };
+
+    let nothing = workspace.projects().is_empty() && all.is_empty();
+    let body = if nothing {
+        welcome(window, cx).into_any_element()
+    } else {
+        div()
+            .id("bridge-columns")
+            .flex_1()
+            .min_h_0()
+            .grid()
+            .grid_cols(columns)
+            .gap_3()
+            // Side by side each column scrolls alone; stacked, they scroll
+            // as one.
+            .when(columns < 4, |this| this.overflow_y_scroll())
+            .children(Column::ALL.into_iter().map(|column| {
+                let mut cards: Vec<&Card> = shown
+                    .iter()
+                    .copied()
+                    .filter(|card| Column::of(card, now) == column)
+                    .collect();
+                // What was not looked at yet leads the review column;
+                // pinned tasks lead theirs.
+                cards.sort_by_key(|card| {
+                    (
+                        !card.pinned,
+                        card.summary.state != ChatState::Done,
+                        std::cmp::Reverse(card.updated_at),
+                    )
+                });
+                let reviews = (column == Column::Review && filter.is_none())
+                    .then(|| reviews_card(workspace, &entity, cx))
+                    .flatten();
+                column_view(
+                    column,
+                    cards,
+                    reviews,
+                    state.all.contains(column.key()),
+                    columns == 4,
+                    &entity,
+                    cx,
+                )
+            }))
+            .into_any_element()
+    };
+
+    v_flex()
+        .id("bridge")
+        .relative()
+        .size_full()
+        .pr_3()
+        .pb(crate::frame::gap())
+        .gap_3()
+        .child(probe)
+        .child(header(workspace, filter.map(|(id, _)| id), &entity, cx))
+        .child(body)
+        .test_support()
+        .into_any_element()
+}
+
+/// The Bridge's title, the workspaces to narrow it to, and a new task.
+fn header(
+    workspace: &Workspace,
+    filter: Option<ProjectId>,
+    entity: &WeakEntity<Workspace>,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let theme = cx.theme();
+    let dark = theme.is_dark();
+    let chip = |id: SharedString,
+                label: SharedString,
+                color: Option<Hsla>,
+                selected: bool,
+                to: Option<ProjectId>| {
+        let entity = entity.clone();
+        h_flex()
+            .id(id)
+            .flex_none()
+            .h(ph_ui::rems_from_px(26.))
+            .px_2p5()
+            .gap_1p5()
+            .rounded_full()
+            .border_1()
+            .border_color(if selected { theme.input } else { theme.border })
+            .when(selected, |this| this.bg(theme.secondary_hover))
+            .text_xs()
+            .text_color(if selected {
+                theme.foreground
+            } else {
+                theme.muted_foreground
+            })
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme.foreground))
+            .children(color.map(|color| {
+                div()
+                    .flex_none()
+                    .size(ph_ui::rems_from_px(7.))
+                    .rounded_full()
+                    .bg(color)
+            }))
+            .child(label.clone())
+            .aria_label(label)
+            .on_click(move |_, _, cx| {
+                _ = entity.update(cx, |workspace, cx| workspace.set_bridge_filter(to, cx));
+            })
+            .test_support()
+    };
+    let mut chips = vec![chip(
+        "bridge-all".into(),
+        "All workspaces".into(),
+        None,
+        filter.is_none(),
+        None,
+    )];
+    for project in workspace.projects() {
+        chips.push(chip(
+            SharedString::from(format!("bridge-filter-{}", project.id)),
+            project.name.clone().into(),
+            Some(ph_ui::workspace_color(
+                project.shade(ph_ui::WORKSPACE_COLORS.len()),
+                dark,
+            )),
+            filter == Some(project.id),
+            Some(project.id),
+        ));
+    }
+    if let Some(chats) = workspace.chats_space() {
+        chips.push(chip(
+            "bridge-filter-chats".into(),
+            "Chats".into(),
+            None,
+            filter == Some(chats.id),
+            Some(chats.id),
+        ));
+    }
+    h_flex()
+        .flex_none()
+        .flex_wrap()
+        .gap_2()
+        .pl_1()
+        .child(
+            div()
+                .mr_1()
+                .text_lg()
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .child("Bridge"),
+        )
+        // With one place there is nothing to narrow to.
+        .when(chips.len() > 2, |this| this.children(chips))
+        .child(div().flex_1())
+        .child(new_task_button(workspace, entity.clone()))
+        .into_any_element()
+}
+
+/// *New task*: a chat in a workspace of the user's choosing. The Bridge is
+/// of no one workspace, so it asks which.
+fn new_task_button(workspace: &Workspace, entity: WeakEntity<Workspace>) -> impl IntoElement {
+    let places: Vec<(ProjectId, String)> = workspace
+        .projects()
+        .iter()
+        .map(|project| (project.id, project.name.clone()))
+        .collect();
+    let chats = workspace.chats_space().map(|chats| chats.id);
+    Button::new("bridge-new-task")
+        .primary()
+        .small()
+        .icon(IconName::Plus)
+        .label("New task")
+        .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+            let menu = places.iter().fold(menu, |menu, (id, name)| {
+                let (entity, id) = (entity.clone(), *id);
+                menu.item(
+                    PopupMenuItem::new(format!("In {name}"))
+                        .icon(Icon::new(Icons::SquarePen))
+                        .on_click(move |_, window, cx| {
+                            _ = entity
+                                .update(cx, |workspace, cx| workspace.new_chat_in(id, window, cx));
+                        }),
+                )
+            });
+            let menu = match chats {
+                Some(chats) => {
+                    let entity = entity.clone();
+                    menu.item(
+                        PopupMenuItem::new("Without a folder")
+                            .icon(Icon::new(Icons::MessagesSquare))
+                            .on_click(move |_, window, cx| {
+                                _ = entity.update(cx, |workspace, cx| {
+                                    workspace.new_chat_in(chats, window, cx)
+                                });
+                            }),
+                    )
+                }
+                None => menu,
+            };
+            menu.separator()
+                .item(
+                    PopupMenuItem::new("Open a folder as a workspace")
+                        .icon(Icon::new(Icons::FolderOpen))
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(AddProject), cx)),
+                )
+                .item(
+                    PopupMenuItem::new("New workspace without folders")
+                        .icon(Icon::new(Icons::FolderPlus))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(NewWorkspace), cx)
+                        }),
+                )
+        })
+}
+
+/// A column: its name and count, then its cards, scrolling on its own
+/// while the columns stand side by side.
+fn column_view(
+    column: Column,
+    cards: Vec<&Card>,
+    extra: Option<AnyElement>,
+    all: bool,
+    scrolls: bool,
+    entity: &WeakEntity<Workspace>,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let count = cards.len();
+    let hidden = if all { 0 } else { count.saturating_sub(SHOWN) };
+    let key = column.key();
+    let more = (count > SHOWN).then(|| {
+        let entity = entity.clone();
+        Button::new(SharedString::from(format!("bridge-more-{key}")))
+            .ghost()
+            .xsmall()
+            .label(if all {
+                "Show fewer".to_string()
+            } else {
+                format!("Show {hidden} more")
+            })
+            .on_click(move |_, _, cx| {
+                _ = entity.update(cx, |workspace, cx| workspace.toggle_bridge_all(key, cx));
+            })
+    });
+    let empty = (count == 0 && extra.is_none()).then(|| {
+        div()
+            .px_1()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(column.empty())
+    });
+    let rows: Vec<AnyElement> = cards
+        .into_iter()
+        .take(if all { usize::MAX } else { SHOWN })
+        .map(|card| card_view(card, column, entity, cx))
+        .collect();
+    v_flex()
+        .id(SharedString::from(format!("bridge-column-{key}")))
+        .min_w_0()
+        .min_h_0()
+        .gap_2()
+        .child(
+            h_flex()
+                .flex_none()
+                .h(ph_ui::rems_from_px(24.))
+                .px_1()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .size(ph_ui::rems_from_px(8.))
+                        .rounded_full()
+                        .bg(column.color(cx)),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child(column.title()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(count.to_string()),
+                ),
+        )
+        .child(
+            v_flex()
+                .id(SharedString::from(format!("bridge-list-{key}")))
+                .gap_2()
+                .when(scrolls, |this| this.flex_1().min_h_0().overflow_y_scroll())
+                .children(extra)
+                .children(rows)
+                .children(empty)
+                .children(more),
+        )
+        .aria_label(column.title())
+        .test_support()
+        .into_any_element()
+}
+
+/// A task's card: where it lives, its agent and age; its title; what it
+/// asks, does or said last; and what to do about it.
+fn card_view(
+    card: &Card,
+    column: Column,
+    entity: &WeakEntity<Workspace>,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let theme = cx.theme();
+    let state = card.summary.state;
+    let key = match &card.target {
+        Target::Chat(session) => format!("{session}"),
+        Target::Terminal(pane) => pane.clone(),
+        Target::Preparing => format!("preparing-{}", card.project),
+    };
+    let group = SharedString::from(format!("bridge-card-{key}"));
+    let edge = match state {
+        ChatState::NeedsYou => theme.warning.opacity(0.45),
+        ChatState::Failed => theme.danger.opacity(0.45),
+        _ => theme.border,
+    };
+    let line_color = match state {
+        ChatState::NeedsYou => theme.warning,
+        ChatState::Failed => theme.danger,
+        _ => theme.muted_foreground,
+    };
+    let line = match state {
+        ChatState::Failed => Some(
+            card.summary
+                .line
+                .clone()
+                .filter(|line| !line.is_empty())
+                .unwrap_or_else(|| "Stopped with an error.".into()),
+        ),
+        _ => card.summary.line.clone().filter(|line| !line.is_empty()),
+    };
+    let open = {
+        let (entity, project, target, github) = (
+            entity.clone(),
+            card.project,
+            card.target.clone(),
+            card.github,
+        );
+        move |window: &mut Window, cx: &mut App| {
+            _ = entity.update(cx, |workspace, cx| {
+                workspace.open_task_card(project, &target, github, window, cx)
+            });
+        }
+    };
+    let busy = matches!(state, ChatState::Working | ChatState::NeedsYou);
+    let menu = card.session.clone().map(|session| {
+        chat_menu(
+            entity.clone(),
+            card.project,
+            session,
+            (card.pinned, card.settled),
+            busy,
+        )
+    });
+    // What the column is for, one press away.
+    let actions: Option<AnyElement> = match (column, &card.target) {
+        (Column::NeedsYou, _) => {
+            let open = open.clone();
+            Some(
+                Button::new(SharedString::from(format!("bridge-answer-{key}")))
+                    .primary()
+                    .small()
+                    .label(if state == ChatState::Failed {
+                        "See what happened"
+                    } else {
+                        "Answer"
+                    })
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        open(window, cx)
+                    })
+                    .into_any_element(),
+            )
+        }
+        (Column::Review, Target::Chat(session)) if card.session.is_some() => {
+            let (project, session) = (card.project, *session);
+            let (review, done) = (entity.clone(), entity.clone());
+            Some(
+                h_flex()
+                    .flex_wrap()
+                    .gap_1p5()
+                    .when(card.has_folders, |this| {
+                        this.child(
+                            Button::new(SharedString::from(format!("bridge-review-{key}")))
+                                .outline()
+                                .small()
+                                .label("Review changes")
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    _ = review.update(cx, |workspace, cx| {
+                                        workspace.review_task(project, session, window, cx)
+                                    });
+                                }),
+                        )
+                    })
+                    .child(
+                        Button::new(SharedString::from(format!("bridge-done-{key}")))
+                            .ghost()
+                            .small()
+                            .icon(Icons::Check)
+                            .label("Done")
+                            .tooltip("Mark this task as done")
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                _ = done.update(cx, |workspace, cx| {
+                                    workspace.toggle_settled(project, session, cx)
+                                });
+                            }),
+                    )
+                    .into_any_element(),
+            )
+        }
+        _ => None,
+    };
+    v_flex()
+        .id(SharedString::from(format!("bridge-card-{key}")))
+        .group(group.clone())
+        .relative()
+        .flex_none()
+        .p_3()
+        .gap_2()
+        .rounded(theme.radius_lg)
+        .border_1()
+        .border_color(edge)
+        .bg(if column == Column::Done {
+            theme.background.opacity(0.6)
+        } else {
+            theme.background
+        })
+        .cursor_pointer()
+        .hover(|style| style.border_color(theme.muted_foreground.opacity(0.5)))
+        .on_click(move |_, window, cx| open(window, cx))
+        .child(
+            h_flex()
+                .gap_1p5()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .children(card.color.map(|color| {
+                    div()
+                        .flex_none()
+                        .size(ph_ui::rems_from_px(7.))
+                        .rounded_full()
+                        .bg(color)
+                }))
+                .child(div().min_w_0().truncate().child(card.place.clone()))
+                .child("·")
+                .child(card.summary.agent.mark(ph_ui::rems_from_px(12.)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(card.summary.agent.name),
+                )
+                .when(card.pinned, |this| {
+                    this.child(Icon::new(Icons::Pin).xsmall())
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .group_hover(group.clone(), |style| style.invisible())
+                        .child(crate::sidebar::age(card.updated_at)),
+                ),
+        )
+        .child(
+            h_flex()
+                .items_start()
+                .gap_2()
+                .when(state == ChatState::Working, |this| {
+                    this.child(
+                        div()
+                            .flex_none()
+                            .pt_0p5()
+                            .child(ph_ui::Loader::new().xsmall().color(theme.info)),
+                    )
+                })
+                .when(state == ChatState::Done, |this| {
+                    this.child(
+                        div()
+                            .flex_none()
+                            .mt_1p5()
+                            .size(ph_ui::rems_from_px(8.))
+                            .rounded_full()
+                            .bg(theme.success),
+                    )
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                        .line_clamp(2)
+                        .child(card.title.clone()),
+                ),
+        )
+        .when_some(line, |this, line| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(line_color)
+                    .line_clamp(3)
+                    .child(line),
+            )
+        })
+        .children(actions)
+        // The task's menu, over its age, while the pointer is on the card.
+        .children(menu.map(|menu| {
+            div()
+                .absolute()
+                .top_2()
+                .right_2()
+                .invisible()
+                .group_hover(group, |style| style.visible())
+                .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation()
+                })
+                .child(menu)
+        }))
+        .test_support()
+        .into_any_element()
+}
+
+/// In the review column: pull requests other people asked the user to
+/// review are read in Reviews. Said here so they are not missed.
+fn reviews_card(
+    workspace: &Workspace,
+    entity: &WeakEntity<Workspace>,
+    cx: &App,
+) -> Option<AnyElement> {
+    let waiting = workspace
+        .github_view()
+        .map_or(0, |github| github.read(cx).waiting_for_review());
+    if waiting == 0 {
+        return None;
+    }
+    let theme = cx.theme();
+    let entity = entity.clone();
+    Some(
+        h_flex()
+            .id("bridge-reviews")
+            .flex_none()
+            .p_3()
+            .gap_2()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .cursor_pointer()
+            .hover(|style| style.border_color(theme.muted_foreground.opacity(0.5)))
+            .child(
+                Icon::new(Icons::GitPullRequest)
+                    .small()
+                    .text_color(theme.muted_foreground),
+            )
+            .child(div().flex_1().min_w_0().text_sm().child(if waiting == 1 {
+                "1 pull request waits for your review".to_string()
+            } else {
+                format!("{waiting} pull requests wait for your review")
+            }))
+            .child(Icon::new(IconName::ChevronRight).small())
+            .on_click(move |_, window, cx| {
+                _ = entity.update(cx, |workspace, cx| {
+                    workspace.set_view(View::GitHub, window, cx)
+                });
+            })
+            .test_support()
+            .into_any_element(),
+    )
+}
+
+/// The Bridge before there is anything on it: how to begin.
+fn welcome(window: &Window, cx: &App) -> impl IntoElement {
+    div().flex_1().min_h_0().child(
+        crate::frame::island(window, cx).child(
+            ph_ui::EmptyState::new("Nothing under way yet")
+                .icon(Icons::ShipWheel)
+                .description(
+                    "Open a folder to work on it with agents, or start a chat that needs none. Every task shows here, with what it needs from you.",
+                )
+                .action(
+                    h_flex()
+                        .flex_wrap()
+                        .justify_center()
+                        .gap_2()
+                        .child(
+                            Button::new("bridge-open-folder")
+                                .primary()
+                                .icon(Icons::FolderOpen)
+                                .label("Open a folder")
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(AddProject), cx)
+                                }),
+                        )
+                        .child(
+                            Button::new("bridge-new-chat")
+                                .outline()
+                                .label("New chat")
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(crate::actions::NewSession), cx)
+                                }),
+                        ),
+                ),
+        ),
+    )
+}
+
+/// What can be done to workspace `id`, as menu items (the right click on
+/// its badge, and its name in the title bar). Each opens it first, then
+/// runs the action on the workspace in front.
+pub(crate) fn workspace_menu_items(
+    menu: PopupMenu,
+    workspace: WeakEntity<Workspace>,
+    id: ProjectId,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let item = |label: &'static str, icon: Icons, action: fn() -> Box<dyn gpui_kit::Action>| {
+        let workspace = workspace.clone();
+        PopupMenuItem::new(label)
+            .icon(Icon::new(icon))
+            .on_click(move |_, window, cx| {
+                _ = workspace.update(cx, |workspace, cx| workspace.open_project(id, window, cx));
+                window.dispatch_action(action(), cx);
+            })
+    };
+    let colours = {
+        let workspace = workspace.clone();
+        PopupMenu::build(window, cx, move |menu, _, _| {
+            ph_ui::WORKSPACE_COLORS
+                .iter()
+                .enumerate()
+                .fold(menu, |menu, (ix, (name, _))| {
+                    let workspace = workspace.clone();
+                    menu.item(PopupMenuItem::new(*name).on_click(move |_, _, cx| {
+                        _ = workspace.update(cx, |workspace, cx| {
+                            workspace.set_color(id, Some(ix as u8), cx)
+                        });
+                    }))
+                })
+        })
+    };
+    let task = crate::tasks::of(crate::AppState::store(cx), id);
+    let new_chat = workspace.clone();
+    let menu = menu
+        .item(
+            PopupMenuItem::new("New chat")
+                .icon(Icon::new(Icons::SquarePen))
+                .on_click(move |_, window, cx| {
+                    _ = new_chat.update(cx, |workspace, cx| workspace.new_chat_in(id, window, cx));
+                }),
+        )
+        .item(item("New task in a worktree", Icons::GitBranch, || {
+            Box::new(NewTask)
+        }))
+        .when(task.is_some(), |menu| {
+            menu.item(item("Finish this task", Icons::Check, || {
+                Box::new(FinishTask)
+            }))
+        })
+        .separator()
+        .item(item("Add a folder", Icons::FolderPlus, || {
+            Box::new(AddFolderToWorkspace)
+        }));
+    menu.item(item("Rename", Icons::Pencil, || Box::new(RenameWorkspace)))
+        .item(item("Open in a new window", Icons::ExternalLink, || {
+            Box::new(OpenInNewWindow)
+        }))
+        .item(PopupMenuItem::submenu("Colour", colours))
+        .separator()
+        .item(item(
+            concat!("Remove from ", ph_brand::name!()),
+            Icons::Trash,
+            || Box::new(RemoveWorkspace),
+        ))
+}
+
+/// A task's menu: pin it, mark it done, rename or delete it.
+fn chat_menu(
+    workspace: WeakEntity<Workspace>,
+    project: ProjectId,
+    session: Session,
+    (pinned, settled): (bool, bool),
+    busy: bool,
+) -> impl IntoElement {
+    let id = session.id;
+    Button::new(SharedString::from(format!("chat-menu-{id}")))
+        .ghost()
+        .xsmall()
+        .icon(IconName::Ellipsis)
+        .accessibility_label("Task menu")
+        .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+            let (pin, settle, rename, delete) = (
+                workspace.clone(),
+                workspace.clone(),
+                workspace.clone(),
+                workspace.clone(),
+            );
+            let (rename_session, delete_session) = (session.clone(), session.clone());
+            menu.item(
+                PopupMenuItem::new(if pinned { "Unpin" } else { "Pin to the top" })
+                    .icon(Icon::new(if pinned { Icons::PinOff } else { Icons::Pin }))
+                    .on_click(move |_, _, cx| {
+                        _ = pin.update(cx, |workspace, cx| workspace.toggle_pin(id, cx));
+                    }),
+            )
+            .item(
+                PopupMenuItem::new(if settled { "Not done" } else { "Mark as done" })
+                    .icon(Icon::new(if settled { Icons::Undo2 } else { Icons::Check }))
+                    .on_click(move |_, _, cx| {
+                        _ = settle.update(cx, |workspace, cx| {
+                            workspace.toggle_settled(project, id, cx)
+                        });
+                    }),
+            )
+            .item(
+                PopupMenuItem::new("Rename")
+                    .icon(Icon::new(Icons::Pencil))
+                    .on_click(move |_, window, cx| {
+                        _ = rename.update(cx, |workspace, cx| {
+                            workspace.rename_chat(project, &rename_session, window, cx)
+                        });
+                    }),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new(if busy {
+                    "Delete (still working)"
+                } else {
+                    "Delete"
+                })
+                .icon(Icon::new(Icons::Trash))
+                .disabled(busy)
+                .on_click(move |_, window, cx| {
+                    _ = delete.update(cx, |workspace, cx| {
+                        workspace.delete_chat(project, &delete_session, window, cx)
+                    });
+                }),
+            )
+        })
+}
+
+/// Opens tool `tab` beside a task's chat (the review of its changes).
+pub(crate) const REVIEW_TOOL: ContextTab = ContextTab::Changes;

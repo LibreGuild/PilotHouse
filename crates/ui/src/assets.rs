@@ -9,6 +9,7 @@ icon_assets!(
     ExtraIcons,
     [
         MousePointer2,
+        ShipWheel,
         BellRing,
         MessagesSquare,
         MessageCircleQuestionMark,

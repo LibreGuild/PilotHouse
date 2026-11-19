@@ -10,10 +10,10 @@
 //! See `docs/architecture.md` for how the pieces fit together.
 
 mod actions;
-mod agents_board;
 mod app_state;
 mod arch_map;
 mod attention;
+mod bridge;
 mod browser_inbox;
 mod chat_search;
 mod command_palette;
@@ -82,7 +82,7 @@ pub fn open_in_studio(path: std::path::PathBuf, cx: &mut gpui_kit::App) -> anyho
     studio_window::open(path, None, cx)
 }
 pub use windows::{open_window, window_options};
-pub use workspace::{Section, View, Workspace};
+pub use workspace::{View, Workspace};
 pub use workspace_screen::WorkspaceScreen;
 
 use gpui_kit::App;

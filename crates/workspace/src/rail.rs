@@ -1,18 +1,27 @@
-//! The icon columns at the window's two edges: on the left what the window
-//! shows (workspaces, chats, GitHub, an organisation's own views), on the
-//! right the tools of the workspace in front. Both are drawn here, so they
-//! look and behave the same: an icon with its name in a tooltip, or under
-//! it when the user asked for names (Settings → Appearance).
+//! The column of icons at the window's left edge: where the window can go.
+//! First the places that are of no one workspace (the Bridge, Reviews, an
+//! organisation's own views), then every workspace as a badge in its
+//! colour, the Chats space among them, then a way to add one, and Settings
+//! at the foot. An entry shows its name in a tooltip, or under it when the
+//! user asked for names (Settings → Appearance).
 
 use gpui_kit::TestSupportExt as _;
-use gpui_kit::component::{ActiveTheme as _, Icon, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    menu::{ContextMenuExt as _, PopupMenuItem},
+    v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div,
 };
+use ph_store::projects::{Project, ProjectId};
+use ph_ui::{Icons, MenuButton as _};
 
-use crate::workspace::{Section, View, Workspace};
+use crate::actions::{AddProject, NewWorkspace, OpenSettings};
+use crate::workspace::{View, Workspace};
 
 /// A column's width in pixels at the default interface size: icons alone,
 /// or wider with their names.
@@ -157,86 +166,46 @@ pub(crate) fn column(
         .children(items)
 }
 
-/// The left column: what the window shows. Pressing the entry already in
-/// front hides or shows its list, as in VS Code.
-pub(crate) fn render_views(
+/// The left column: where the window can go.
+pub(crate) fn render_places(
     workspace: &Workspace,
     cx: &mut gpui_kit::Context<Workspace>,
 ) -> impl IntoElement {
     let labels = labels(cx);
     let this = cx.entity().downgrade();
-    let (view, section) = (workspace.view(), workspace.section());
+    let view = workspace.view();
     let mac = cfg!(target_os = "macos");
     let hint = |mac_keys: &str, other: &str| Some(if mac { mac_keys } else { other }.to_string());
-
-    // What waits in the lists that are not in front: amber when an agent
-    // waits for an answer, green when there is only news.
-    let news = |ids: Vec<ph_store::projects::ProjectId>, cx: &App| {
-        let statuses: Vec<_> = ids.into_iter().map(|id| workspace.status(id)).collect();
-        if statuses.iter().any(|status| status.waiting > 0) {
-            Some(dot_badge(cx.theme().warning))
-        } else if statuses.iter().any(|status| status.unseen > 0) {
-            Some(dot_badge(cx.theme().success))
-        } else {
-            None
-        }
-    };
-    let in_front = (view == View::Workspaces)
-        .then(|| workspace.active_project_id())
-        .flatten();
-    let workspace_ids = workspace
-        .projects()
-        .iter()
-        .map(|project| project.id)
-        .filter(|id| Some(*id) != in_front)
-        .collect();
-    let chat_ids = workspace
-        .chats_space()
-        .map(|chats| chats.id)
-        .filter(|id| Some(*id) != in_front)
-        .into_iter()
-        .collect();
-    let waiting = workspace
-        .github_view()
-        .map_or(0, |github| github.read(cx).waiting_for_review());
-
-    let mut items = Vec::new();
     let show = |target: Target| {
         let this = this.clone();
         move |window: &mut Window, cx: &mut App| {
             _ = this.update(cx, |workspace, cx| workspace.show(target, window, cx));
         }
     };
-    items.push(
+
+    let (needs_you, _) = crate::bridge::counts(workspace, cx);
+    let waiting = workspace
+        .github_view()
+        .map_or(0, |github| github.read(cx).waiting_for_review());
+
+    let mut places = vec![
         Item {
-            id: "view-workspaces".into(),
-            label: "Workspaces".into(),
-            icon: Icon::new(ph_ui::Icons::LayoutGrid),
+            id: "view-bridge".into(),
+            label: "Bridge".into(),
+            icon: Icon::new(Icons::ShipWheel),
             hint: hint("⌘⇧E", "Ctrl+Shift+E"),
-            selected: view == View::Workspaces && section == Section::Workspaces,
-            badge: news(workspace_ids, cx),
+            selected: view == View::Bridge,
+            badge: (needs_you > 0 && view != View::Bridge)
+                .then(|| count_badge(needs_you, Some(cx.theme().warning), cx)),
         }
-        .render(labels, show(Target::Section(Section::Workspaces)), cx),
-    );
-    if workspace.chats_space().is_some() {
-        items.push(
-            Item {
-                id: "view-chats".into(),
-                label: "Chats".into(),
-                icon: Icon::new(ph_ui::Icons::MessagesSquare),
-                hint: hint("⌘⇧D", "Ctrl+Shift+D"),
-                selected: view == View::Workspaces && section == Section::Chats,
-                badge: news(chat_ids, cx),
-            }
-            .render(labels, show(Target::Section(Section::Chats)), cx),
-        );
-    }
+        .render(labels, show(Target::View(View::Bridge)), cx),
+    ];
     if ph_brand::enabled(ph_brand::Feature::GitHub) {
-        items.push(
+        places.push(
             Item {
                 id: "view-github".into(),
-                label: "GitHub".into(),
-                icon: Icon::new(ph_ui::Icons::Github),
+                label: "Reviews".into(),
+                icon: Icon::new(Icons::GitPullRequest),
                 hint: hint("⌘⇧G", "Ctrl+Shift+G"),
                 selected: view == View::GitHub,
                 badge: (waiting > 0).then(|| count_badge(waiting, Some(cx.theme().warning), cx)),
@@ -245,7 +214,7 @@ pub(crate) fn render_views(
         );
     }
     for custom in ph_custom::views() {
-        items.push(
+        places.push(
             Item {
                 id: custom.id.into(),
                 label: custom.label.into(),
@@ -257,14 +226,224 @@ pub(crate) fn render_views(
             .render(labels, show(Target::View(View::Custom(custom.id))), cx),
         );
     }
-    column("view-rail", labels, items)
+
+    // The workspaces, each a badge; the Chats space last, as an icon (it
+    // has no folder to take a letter from).
+    let in_front = (view == View::Workspaces)
+        .then(|| workspace.active_project_id())
+        .flatten();
+    let mut badges: Vec<AnyElement> = workspace
+        .projects()
+        .iter()
+        .enumerate()
+        .map(|(ix, project)| workspace_badge(workspace, project, ix, in_front, labels, cx))
+        .collect();
+    if let Some(chats) = workspace.chats_space() {
+        let status = workspace.status(chats.id);
+        badges.push(
+            Item {
+                id: "view-chats".into(),
+                label: "Chats".into(),
+                icon: Icon::new(Icons::MessagesSquare),
+                hint: hint("⌘⇧D", "Ctrl+Shift+D"),
+                selected: in_front == Some(chats.id),
+                badge: status_dot(&status, cx),
+            }
+            .render(labels, show(Target::Workspace(chats.id)), cx),
+        );
+    }
+
+    column("view-rail", labels, places)
+        .child(
+            div()
+                .flex_none()
+                .w(ph_ui::rems_from_px(20.))
+                .h_px()
+                .my_1()
+                .bg(cx.theme().border),
+        )
+        .child(
+            v_flex()
+                .id("rail-workspaces")
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .items_center()
+                .gap_1()
+                .overflow_y_scroll()
+                .children(badges)
+                .child(
+                    Button::new("rail-add-workspace")
+                        .ghost()
+                        .small()
+                        .icon(IconName::Plus)
+                        .tooltip("Open a folder as a workspace, or make one without folders")
+                        .accessibility_label("Add a workspace")
+                        .menu(gpui_kit::Anchor::TopLeft, |menu, _, _| {
+                            menu.item(
+                                PopupMenuItem::new("Open a folder as a workspace")
+                                    .icon(Icon::new(Icons::FolderOpen))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(AddProject), cx)
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new("New workspace without folders")
+                                    .icon(Icon::new(Icons::SquarePen))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(NewWorkspace), cx)
+                                    }),
+                            )
+                        }),
+                ),
+        )
+        .child(
+            Item {
+                id: "open-settings".into(),
+                label: "Settings".into(),
+                icon: Icon::new(IconName::Settings),
+                hint: hint("⌘,", "Ctrl+,"),
+                selected: false,
+                badge: None,
+            }
+            .render(
+                labels,
+                |window, cx| window.dispatch_action(Box::new(OpenSettings), cx),
+                cx,
+            ),
+        )
 }
 
-/// What an entry of the left column shows.
+/// A workspace in the column: its first letter on its colour, a dot for
+/// what it is doing, a ring while it is in front. A right click has what
+/// can be done to it.
+fn workspace_badge(
+    workspace: &Workspace,
+    project: &Project,
+    ix: usize,
+    in_front: Option<ProjectId>,
+    labels: bool,
+    cx: &mut gpui_kit::Context<Workspace>,
+) -> AnyElement {
+    let theme = cx.theme();
+    let id = project.id;
+    let selected = in_front == Some(id);
+    let color = ph_ui::workspace_color(
+        project.shade(ph_ui::WORKSPACE_COLORS.len()),
+        theme.is_dark(),
+    );
+    let status = workspace.status(id);
+    let summary = status.summary(cx).map(|(text, _)| text);
+    let keys = (ix < 9).then(|| {
+        if cfg!(target_os = "macos") {
+            format!("⌃{}", ix + 1)
+        } else {
+            format!("Alt+{}", ix + 1)
+        }
+    });
+    let tip = match (summary, keys) {
+        (Some(text), Some(keys)) => format!("{} · {text} ({keys})", project.name),
+        (Some(text), None) => format!("{} · {text}", project.name),
+        (None, Some(keys)) => format!("{} ({keys})", project.name),
+        (None, None) => project.name.clone(),
+    };
+    let letter: SharedString = project
+        .name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_else(|| "·".into())
+        .into();
+    let entity = cx.entity().downgrade();
+    let (open, menu_owner) = (entity.clone(), entity);
+    let name: SharedString = project.name.clone().into();
+    v_flex()
+        .id(("rail-workspace", id as u64))
+        .role(gpui_kit::accesskit::Role::Tab)
+        .aria_label(name.clone())
+        .relative()
+        .flex_none()
+        .w(ph_ui::rems_from_px(width_px(labels) - 6.))
+        .when(labels, |this| this.py_1().gap_0p5())
+        .items_center()
+        .cursor_pointer()
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+        })
+        .on_click(move |_, window, cx| {
+            _ = open.update(cx, |workspace, cx| workspace.open_project(id, window, cx));
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(ph_ui::rems_from_px(30.))
+                .rounded(theme.radius)
+                .bg(color.opacity(if selected { 0.36 } else { 0.2 }))
+                .text_color(if theme.is_dark() {
+                    theme.foreground
+                } else {
+                    color
+                })
+                .text_sm()
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                // The one in front wears its colour as a ring.
+                .border_2()
+                .border_color(if selected {
+                    color
+                } else {
+                    gpui_kit::transparent_black()
+                })
+                .hover(|style| style.bg(color.opacity(0.36)))
+                .child(letter),
+        )
+        .when(labels, |this| {
+            this.child(
+                div()
+                    .max_w_full()
+                    .truncate()
+                    .text_size(ph_ui::rems_from_px(10.))
+                    .text_color(if selected {
+                        theme.foreground
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(name),
+            )
+        })
+        .children(status_dot(&status, cx))
+        // Findable by name in UI tests and automation.
+        .test_support()
+        .context_menu(move |menu, window, cx| {
+            crate::bridge::workspace_menu_items(menu, menu_owner.clone(), id, window, cx)
+        })
+        .into_any_element()
+}
+
+/// The dot at a place's corner for what happens there: amber when an agent
+/// waits for an answer, red for failing tests, green for news not seen.
+fn status_dot(status: &crate::status::WorkspaceStatus, cx: &App) -> Option<AnyElement> {
+    let theme = cx.theme();
+    let color = if status.waiting > 0 {
+        theme.warning
+    } else if status.failed {
+        theme.danger
+    } else if status.unseen > 0 {
+        theme.success
+    } else if status.working > 0 {
+        theme.info
+    } else {
+        return None;
+    };
+    Some(dot_badge(color))
+}
+
+/// What an entry of the column shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Target {
-    /// Workspaces or Chats: a list beside the screen in front.
-    Section(Section),
-    /// GitHub, or one of the organisation's own.
+    /// The Bridge, Reviews, or one of the organisation's own.
     View(View),
+    /// A workspace's screen (the Chats space's too).
+    Workspace(ProjectId),
 }

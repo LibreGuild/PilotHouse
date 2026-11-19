@@ -25,7 +25,7 @@ use ph_ui::Icons;
 use ph_ui::MenuButton as _;
 
 use crate::actions::*;
-use crate::workspace::{Section, View, Workspace};
+use crate::workspace::{View, Workspace};
 
 pub(crate) fn render(
     workspace: &Workspace,
@@ -106,75 +106,7 @@ pub(crate) fn render(
                         .occlude()
                         .child(crate::inbox::button(&workspace.inbox, cx)),
                 )
-                .child(
-                    div()
-                        .id("agents-button")
-                        .occlude()
-                        .child(agents_button(workspace, cx)),
-                )
-                // The two side panels' switches side by side, as in VS Code,
-                // then Settings, last.
-                .child(
-                    Button::new("toggle-sidebar")
-                        .occlude()
-                        .ghost()
-                        .small()
-                        .icon(if workspace.is_sidebar_collapsed() {
-                            IconName::PanelLeftOpen
-                        } else {
-                            IconName::PanelLeftClose
-                        })
-                        .tooltip(format!(
-                            "Show or hide the list ({})",
-                            ph_ui::platform::shortcut("secondary-b")
-                        ))
-                        .accessibility_label("Show or hide the list")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(ToggleSidebar), cx)
-                        }),
-                )
-                .child(
-                    Button::new("toggle-bottom-panel")
-                        .occlude()
-                        .ghost()
-                        .small()
-                        .icon(IconName::PanelBottom)
-                        .tooltip(format!(
-                            "Show or hide the bottom panel ({})",
-                            ph_ui::platform::shortcut("secondary-j")
-                        ))
-                        .accessibility_label("Show or hide the bottom panel")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(ToggleBottomPanel), cx)
-                        }),
-                )
-                .child(
-                    Button::new("toggle-context-panel")
-                        .occlude()
-                        .ghost()
-                        .small()
-                        .icon(IconName::PanelRight)
-                        .tooltip(format!(
-                            "Show or hide the tools ({})",
-                            ph_ui::platform::shortcut("secondary-alt-b")
-                        ))
-                        .accessibility_label("Show or hide the tools")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(ToggleContextPanel), cx)
-                        }),
-                )
-                .child(
-                    Button::new("open-settings")
-                        .occlude()
-                        .ghost()
-                        .small()
-                        .icon(Icons::Settings)
-                        .tooltip("Settings")
-                        .accessibility_label("Settings")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(OpenSettings), cx)
-                        }),
-                ),
+                .children(panel_switches(workspace, cx)),
         )
 }
 
@@ -277,61 +209,65 @@ fn chrome_bias(window: &Window) -> (gpui_kit::Pixels, gpui_kit::Pixels) {
     }
 }
 
-/// The Agents button: how many chats need the user (amber) or are at work,
-/// and the popup listing them all.
-fn agents_button(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    use gpui_kit::component::popover::Popover;
-    let (needs_you, working) = crate::agents_board::counts(workspace, cx);
-    let hint = if cfg!(target_os = "macos") {
-        "⌘⇧A"
-    } else {
-        "Ctrl+Shift+A"
+/// The switches for what the view in front can show or hide: a
+/// workspace's chat and its result pane, Reviews' list. The Bridge has
+/// none.
+fn panel_switches(workspace: &Workspace, cx: &App) -> Vec<AnyElement> {
+    let switch = |id: &'static str,
+                  icon: IconName,
+                  what: &'static str,
+                  keys: &'static str,
+                  action: fn() -> Box<dyn gpui_kit::Action>| {
+        let label = format!("Show or hide {what}");
+        Button::new(id)
+            .occlude()
+            .ghost()
+            .small()
+            .icon(icon)
+            .tooltip(format!("{label} ({})", ph_ui::platform::shortcut(keys)))
+            .accessibility_label(label)
+            .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
+            .into_any_element()
     };
-    let trigger = Button::new("agents")
-        .ghost()
-        .small()
-        .icon(Icons::Bot)
-        .tooltip(format!("Agents ({hint})"))
-        .accessibility_label("Agents")
-        .when(needs_you > 0, |this| {
-            this.child(
-                div()
-                    .px_1p5()
-                    .rounded_full()
-                    .bg(cx.theme().warning.opacity(0.2))
-                    .text_color(cx.theme().warning)
-                    .text_xs()
-                    .child(needs_you.to_string()),
-            )
-        })
-        .when(needs_you == 0 && working > 0, |this| {
-            this.child(ph_ui::Loader::new().xsmall().color(cx.theme().info))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(working.to_string()),
-                )
-        });
-    let this = cx.entity().downgrade();
-    Popover::new("agents-popover")
-        .offset(ph_ui::POPUP_GAP)
-        .anchor(gpui_kit::Anchor::TopRight)
-        .open(workspace.agents_open)
-        .on_open_change({
-            let this = this.clone();
-            move |open, _, cx| {
-                _ = this.update(cx, |workspace, cx| workspace.set_agents_open(*open, cx));
-            }
-        })
-        .trigger(trigger)
-        .content(move |_, window, cx| {
-            let Some(workspace) = this.upgrade() else {
-                return div().into_any_element();
-            };
-            let room = window.viewport_size().height;
-            crate::agents_board::popup(workspace.read(cx), this.clone(), room, cx)
-        })
+    match workspace.view() {
+        View::Workspaces => {
+            let folded = workspace
+                .active_space()
+                .is_some_and(|space| space.read(cx).is_chat_folded());
+            vec![
+                switch(
+                    "toggle-chat",
+                    if folded {
+                        IconName::PanelLeftOpen
+                    } else {
+                        IconName::PanelLeftClose
+                    },
+                    "the chat",
+                    "secondary-b",
+                    || Box::new(ToggleSidebar),
+                ),
+                switch(
+                    "toggle-context-panel",
+                    IconName::PanelRight,
+                    "the result pane",
+                    "secondary-alt-b",
+                    || Box::new(ToggleContextPanel),
+                ),
+            ]
+        }
+        View::GitHub => vec![switch(
+            "toggle-sidebar",
+            if workspace.is_sidebar_collapsed() {
+                IconName::PanelLeftOpen
+            } else {
+                IconName::PanelLeftClose
+            },
+            "the list",
+            "secondary-b",
+            || Box::new(ToggleSidebar),
+        )],
+        View::Bridge | View::Custom(_) => Vec::new(),
+    }
 }
 
 /// An update, only once there is one: ready to install, waiting to be
@@ -396,30 +332,26 @@ fn app_icon(_: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// What is in front, said beside the app's mark: the workspace's name (or
-/// *Chats*, *GitHub*, an organisation's view). The left column of icons
-/// switches between them; this only names where the user is.
+/// What is in front, said beside the app's mark: *Bridge*, *Reviews*, an
+/// organisation's view, or the workspace's name with its colour (*Chats*
+/// for the space without folders). The left column of icons switches
+/// between them; this names where the user is.
 fn front_name(workspace: &Workspace, cx: &App) -> Option<AnyElement> {
     let name: gpui_kit::SharedString = match workspace.view() {
-        View::GitHub => "GitHub".into(),
+        View::Bridge => "Bridge".into(),
+        View::GitHub => "Reviews".into(),
         View::Custom(id) => ph_custom::views()
             .into_iter()
             .find(|custom| custom.id == id)?
             .label
             .into(),
-        View::Workspaces => match workspace.section() {
-            Section::Chats => "Chats".into(),
-            Section::Workspaces => {
-                let id = workspace.active_project_id()?;
-                workspace
-                    .projects()
-                    .iter()
-                    .find(|project| project.id == id)?
-                    .name
-                    .clone()
-                    .into()
+        View::Workspaces => {
+            let id = workspace.active_project_id()?;
+            match workspace.projects().iter().find(|project| project.id == id) {
+                Some(project) => project.name.clone().into(),
+                None => "Chats".into(),
             }
-        },
+        }
     };
     Some(
         h_flex()

@@ -1,9 +1,11 @@
-//! The bar at the bottom of the window: the git branch (click for the
-//! branch picker), the project folder, where its work runs when it is on a
-//! network drive, how CI went for the commit checked out, the ports the
-//! workspace's processes listen on, the Android device in use (its menu
-//! switches, connects and opens Logcat), the detected stack, and how close
-//! each agent subscription is to its limits.
+//! The bar at the bottom of the window. First what waits across every
+//! workspace (tasks that need the user, are worked on, or finished unseen),
+//! whatever is in front. Then, for the workspace in front: the git branch
+//! (click for the branch picker), its folder, where its work runs when it
+//! is on a network drive, how CI went for the commit checked out, the ports
+//! its processes listen on, the Android device in use (its menu switches,
+//! connects and opens Logcat). At the right, how close each agent
+//! subscription is to its limits.
 
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _,
@@ -59,9 +61,6 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
         .map(|folder| ph_ui::platform::display_path(folder))
         .collect::<Vec<_>>()
         .join("\n");
-    let stacks: Vec<&'static str> = space
-        .map(|space| space.stacks().iter().map(|stack| stack.label()).collect())
-        .unwrap_or_default();
     let drive = space.and_then(|space| drive_item(space, cx));
     let ci = space.and_then(|space| ci_item(space.signals().ci.as_ref(), cx));
     let ports = space.and_then(|space| ports_item(&space.signals().ports, cx));
@@ -81,6 +80,7 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                 .min_w_0()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
+                .children(tasks_item(workspace, cx))
                 .children(branch)
                 .children(merged)
                 .children(ci)
@@ -109,10 +109,47 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                 .gap_3()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .children(limits(cx))
-                .when(!stacks.is_empty(), |this| this.child(stacks.join(" · ")))
-                .child(format!("{} {}", ph_brand::NAME, ph_ui::version())),
+                .children(limits(cx)),
         )
+}
+
+/// What waits across every workspace, in a few words, whatever is in
+/// front: how many tasks need the user (amber), are being worked on, or
+/// finished and were not looked at. A click shows the Bridge. Nothing when
+/// nothing is under way.
+fn tasks_item(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let (needs_you, working) = crate::bridge::counts(workspace, cx);
+    let unseen = crate::bridge::unseen(workspace);
+    if needs_you + working + unseen == 0 {
+        return None;
+    }
+    let theme = cx.theme();
+    let part = |count: usize, one: &str, many: &str, color: gpui_kit::Hsla| {
+        (count > 0).then(|| {
+            div()
+                .flex_none()
+                .text_color(color)
+                .child(format!("{count} {}", if count == 1 { one } else { many }))
+        })
+    };
+    Some(
+        h_flex()
+            .id("status-tasks")
+            .flex_none()
+            .gap_2()
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme.foreground))
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new("Show the Bridge").build(window, cx)
+            })
+            .children(part(needs_you, "needs you", "need you", theme.warning))
+            .children(part(working, "working", "working", theme.muted_foreground))
+            .children(part(unseen, "to look at", "to look at", theme.success))
+            .on_click(cx.listener(|workspace, _, window, cx| {
+                workspace.set_view(crate::workspace::View::Bridge, window, cx)
+            }))
+            .into_any_element(),
+    )
 }
 
 /// Each agent's limit windows as small meters ("Claude 5h ▰▰▱ 62%"), amber

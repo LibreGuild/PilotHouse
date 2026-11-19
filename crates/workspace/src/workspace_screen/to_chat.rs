@@ -196,7 +196,7 @@ impl WorkspaceScreen {
 
     /// ⌘⇧S: send the visible browser or device (with its marks) to chat.
     pub fn capture_to_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tools = match self.context_tab {
+        let tools = match self.context_tab() {
             tab if !self.shown.contains(&Pane::Tool(tab)) => None,
             ContextTab::Browser => self
                 .browser
@@ -223,7 +223,7 @@ impl WorkspaceScreen {
     pub(super) fn live_screenshot(&self, cx: &gpui_kit::App) -> Option<Attachment> {
         let browser = || Some(("browser", self.browser.as_ref()?.read(cx).composite(cx)?));
         let device = || Some(("device", self.devices.as_ref()?.read(cx).composite(cx)?));
-        let (source, frame) = if self.context_tab == ContextTab::Devices {
+        let (source, frame) = if self.context_tab() == ContextTab::Devices {
             device().or_else(browser)
         } else {
             browser().or_else(device)
