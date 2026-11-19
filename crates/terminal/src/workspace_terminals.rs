@@ -23,6 +23,8 @@ pub struct TerminalHub {
 const KEPT_LINES: usize = 2000;
 /// Most terminals of a workspace brought back.
 const KEPT_TERMINALS: usize = 8;
+/// The breath between two terminals restored (see [`TerminalHub::restore`]).
+const RESTORE_PAUSE: std::time::Duration = std::time::Duration::from_millis(40);
 
 /// A terminal as it was when PilotHouse quit.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -107,9 +109,9 @@ impl TerminalHub {
     /// each a new shell with the old text above it. False when there were
     /// none (or none were kept).
     fn restore(id: i64, cx: &mut App) -> bool {
-        let Some(terminals) = Self::existing(id, cx) else {
+        if Self::existing(id, cx).is_none() {
             return false;
-        };
+        }
         let Some(dir) = cx
             .try_global::<Self>()
             .and_then(|hub| hub.state_dir.clone())
@@ -124,21 +126,55 @@ impl TerminalHub {
         let Ok(kept) = serde_json::from_slice::<Vec<Kept>>(&json) else {
             return false;
         };
-        let mut restored = false;
-        for kept in kept.iter().take(KEPT_TERMINALS) {
-            let terminal = terminals.update(cx, |terminals, cx| terminals.new_terminal(cx));
-            if let Some(terminal) = terminal {
-                terminal.read(cx).show_restored(
-                    &kept.text,
-                    concat!("from the last run of ", ph_brand::name!()),
-                );
-                restored = true;
-            }
-        }
-        if restored {
-            terminals.update(cx, |terminals, cx| terminals.select(0, cx));
+        let mut kept = kept.into_iter().take(KEPT_TERMINALS);
+        let Some(first) = kept.next() else {
+            return false;
+        };
+        let restored = Self::reopen(id, &first, cx);
+        // The others after it, one at a time with the window drawn in
+        // between. Starting a shell takes a moment (a pseudo console and a
+        // process; longer on Windows), and eight in one go held the window
+        // up as it opened.
+        let rest: Vec<Kept> = kept.collect();
+        if !rest.is_empty() {
+            cx.spawn(async move |cx| {
+                for kept in rest {
+                    cx.background_executor().timer(RESTORE_PAUSE).await;
+                    if !cx.update(|cx| Self::reopen(id, &kept, cx)) {
+                        break;
+                    }
+                }
+            })
+            .detach();
         }
         restored
+    }
+
+    /// Opens one terminal workspace `id` had, a new shell with the old text
+    /// above it, behind the terminal in front. False when the workspace's
+    /// terminals are gone or no shell would start.
+    fn reopen(id: i64, kept: &Kept, cx: &mut App) -> bool {
+        let Some(terminals) = Self::existing(id, cx) else {
+            return false;
+        };
+        let (front, had) = {
+            let terminals = terminals.read(cx);
+            (terminals.active_index(), terminals.terminals().len())
+        };
+        let Some(terminal) = terminals.update(cx, |terminals, cx| terminals.new_terminal(cx))
+        else {
+            return false;
+        };
+        terminal.read(cx).show_restored(
+            &kept.text,
+            concat!("from the last run of ", ph_brand::name!()),
+        );
+        // The first one restored is the one in front, as it was; one opened
+        // by hand meanwhile stays there.
+        terminals.update(cx, |terminals, cx| {
+            terminals.select(if had == 0 { 0 } else { front }, cx)
+        });
+        true
     }
 
     /// Closes a removed workspace's terminals (their shells stop) and

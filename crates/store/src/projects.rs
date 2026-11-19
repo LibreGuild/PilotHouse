@@ -664,6 +664,8 @@ impl Store {
         )?;
         tx.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
         tx.commit()?;
+        drop(conn);
+        self.forget_setting(LAST_REMOVED);
         Ok(())
     }
 

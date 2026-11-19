@@ -91,6 +91,8 @@ pub struct Workspace {
     /// When each loaded but hidden workspace was last shown.
     hidden_since: HashMap<ProjectId, std::time::Instant>,
     _status_poll: gpui_kit::Task<()>,
+    /// The every-few-seconds read of the stored chats, while it runs.
+    _sessions_poll: Option<gpui_kit::Task<()>>,
     _subscriptions: Vec<Subscription>,
     /// The status bar follows the devices once something uses them.
     _devices: Option<Subscription>,
@@ -180,6 +182,7 @@ impl Workspace {
             hidden_since: HashMap::new(),
             // Status comes from chats and test runs outside this window; a
             // cheap look each second catches every change.
+            _sessions_poll: None,
             _status_poll: cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor()
@@ -649,19 +652,26 @@ impl Workspace {
         }
     }
 
-    /// Reads the chats of the workspaces without a screen, and of the
-    /// Chats space: the Bridge lists every task, loaded or not.
-    fn read_sessions(&mut self, cx: &mut Context<Self>) -> bool {
-        let store = AppState::store(cx).clone();
-        let mut changed = self.read_pinned(cx);
+    /// The workspaces without a screen, and the Chats space when it has
+    /// none: their chats are read from the store (a screen lists its own).
+    fn sessions_wanted(&self) -> Vec<ProjectId> {
         let chats = self.chats_space.as_ref().map(|chats| chats.id);
-        let wanted: Vec<ProjectId> = self
-            .projects
+        self.projects
             .iter()
             .map(|project| project.id)
             .chain(chats)
             .filter(|id| !self.spaces.contains_key(id))
-            .collect();
+            .collect()
+    }
+
+    /// Reads the chats of the workspaces without a screen, and of the
+    /// Chats space: the Bridge lists every task, loaded or not. At once,
+    /// for what the user just did; the look every few seconds is
+    /// [`Self::poll_sessions`].
+    fn read_sessions(&mut self, cx: &mut Context<Self>) -> bool {
+        let store = AppState::store(cx).clone();
+        let mut changed = self.read_pinned(cx);
+        let wanted = self.sessions_wanted();
         self.sessions.retain(|id, _| wanted.contains(id));
         for id in wanted {
             let sessions = store.sessions(id).unwrap_or_default();
@@ -671,6 +681,53 @@ impl Workspace {
             }
         }
         changed
+    }
+
+    /// Reads what [`Self::read_sessions`] reads off the UI thread and takes
+    /// it when it is there. Nobody waits for the look every few seconds
+    /// (for chats a schedule or another window changed), and a query that
+    /// waits behind a writer must not hold the window up.
+    fn poll_sessions(&mut self, cx: &mut Context<Self>) {
+        if self._sessions_poll.is_some() {
+            return;
+        }
+        let store = AppState::store(cx).clone();
+        let wanted = self.sessions_wanted();
+        let read = cx.background_spawn(async move {
+            let pinned: Vec<ph_store::sessions::SessionId> = store.setting(keys::SIDEBAR_PINNED);
+            let pinned: Vec<_> = pinned
+                .iter()
+                .filter_map(|id| store.session(*id).ok().flatten())
+                .collect();
+            let sessions: Vec<_> = wanted
+                .into_iter()
+                .map(|id| (id, store.sessions(id).unwrap_or_default()))
+                .collect();
+            (pinned, sessions)
+        });
+        self._sessions_poll = Some(cx.spawn(async move |this, cx| {
+            let (pinned, sessions) = read.await;
+            _ = this.update(cx, |this, cx| {
+                this._sessions_poll = None;
+                let mut changed = pinned != this.pinned;
+                this.pinned = pinned;
+                let wanted = this.sessions_wanted();
+                this.sessions.retain(|id, _| wanted.contains(id));
+                for (id, sessions) in sessions {
+                    // A screen opened meanwhile lists its own.
+                    if !wanted.contains(&id) {
+                        continue;
+                    }
+                    if this.sessions.get(&id).map(|known| &known[..]) != Some(&sessions[..]) {
+                        this.sessions.insert(id, sessions.into());
+                        changed = true;
+                    }
+                }
+                if changed {
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     /// Re-reads the pinned chats (dropping ids whose chat is gone).
@@ -1056,7 +1113,9 @@ impl Workspace {
         // The store, for chats of spaces without a screen (changed by
         // schedules or another window): every few seconds, not each one.
         self.status_ticks = self.status_ticks.wrapping_add(1);
-        let sessions_changed = self.status_ticks.is_multiple_of(5) && self.read_sessions(cx);
+        if self.status_ticks.is_multiple_of(5) {
+            self.poll_sessions(cx);
+        }
         // The sidebar lists agent CLIs in terminals: redrawn when they change.
         let agents = {
             use std::hash::{Hash as _, Hasher as _};
@@ -1081,7 +1140,7 @@ impl Workspace {
             space.update(cx, |space, cx| space.reload_sessions(cx));
         }
         let any = saved.is_none_or(|projects| !projects.is_empty());
-        let sessions_changed = sessions_changed || (any && self.read_sessions(cx));
+        let sessions_changed = any && self.read_sessions(cx);
         if statuses != self.statuses || sessions_changed || agents_changed {
             self.statuses = statuses;
             cx.notify();

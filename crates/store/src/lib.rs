@@ -39,6 +39,8 @@ pub use time::now_millis;
 #[derive(Clone)]
 pub struct Store {
     connection: Arc<Mutex<Connection>>,
+    /// Settings read a moment ago (see [`settings`]).
+    settings: Arc<Mutex<settings::Recent>>,
 }
 
 impl Store {
@@ -82,6 +84,7 @@ impl Store {
         migrations::apply(&connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            settings: Default::default(),
         })
     }
 

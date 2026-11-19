@@ -60,18 +60,53 @@ pub fn var(name: &str) -> Option<&'static str> {
     None
 }
 
+/// How long a search of `PATH` is remembered. Views ask "is this agent
+/// installed?" while they draw, and one search looks at a file in every
+/// `PATH` folder (times every `PATHEXT` ending on Windows, where each look
+/// is slow): asked on every frame, that held the window up. A program
+/// installed meanwhile is found once this has passed, or at once after
+/// [`forget_lookups`].
+const LOOKUP_KEPT: std::time::Duration = std::time::Duration::from_secs(5);
+
+type Lookups = HashMap<String, (std::time::Instant, Option<PathBuf>)>;
+
+static LOOKUPS: std::sync::Mutex<Option<Lookups>> = std::sync::Mutex::new(None);
+
+/// Forgets what [`which`] remembers: the next search looks again. For when
+/// the user says something was just installed (*Check again*).
+pub fn forget_lookups() {
+    if let Ok(mut lookups) = LOOKUPS.lock() {
+        *lookups = None;
+    }
+}
+
 /// Finds `program` on the environment's `PATH`. On Windows `PATHEXT`
-/// extensions are tried too, so `which("npx")` finds `npx.cmd`.
+/// extensions are tried too, so `which("npx")` finds `npx.cmd`. A search of
+/// `PATH` is remembered for a few seconds (see [`LOOKUP_KEPT`]).
 pub fn which(program: &str) -> Option<PathBuf> {
+    // A path is looked at where it says: one or a few files, never kept.
     if program.contains('/') || program.contains(std::path::MAIN_SEPARATOR) {
         return candidates(PathBuf::from(program))
             .into_iter()
             .find(|path| is_executable(path));
     }
+    let now = std::time::Instant::now();
+    if let Ok(lookups) = LOOKUPS.lock()
+        && let Some((at, found)) = lookups.as_ref().and_then(|known| known.get(program))
+        && now.duration_since(*at) < LOOKUP_KEPT
+    {
+        return found.clone();
+    }
     let path = var("PATH")?;
-    std::env::split_paths(path)
+    let found = std::env::split_paths(path)
         .flat_map(|dir| candidates(dir.join(program)))
-        .find(|candidate| is_executable(candidate))
+        .find(|candidate| is_executable(candidate));
+    if let Ok(mut lookups) = LOOKUPS.lock() {
+        lookups
+            .get_or_insert_with(HashMap::new)
+            .insert(program.to_string(), (now, found.clone()));
+    }
+    found
 }
 
 /// `path` itself or, on Windows unless it already ends in a runnable

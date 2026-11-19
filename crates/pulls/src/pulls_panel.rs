@@ -98,6 +98,8 @@ struct CreateForm {
     draft: bool,
     busy: Option<&'static str>,
     _task: Option<Task<()>>,
+    /// Finds the branch to merge into (Git is asked off the UI thread).
+    _base: Task<()>,
 }
 
 impl EventEmitter<PullsPanelEvent> for PullsPanel {}
@@ -293,10 +295,8 @@ impl PullsPanel {
         let Some((local, root)) = self.local() else {
             return;
         };
-        let (branch, base_branch) = (
-            local.read(cx).branch().unwrap_or_default().to_string(),
-            default_base(root),
-        );
+        let branch = local.read(cx).branch().unwrap_or_default().to_string();
+        let root = root.clone();
         let title = cx.new(|cx| {
             let mut input = InputState::new(window, cx).placeholder("Title");
             input.set_value(branch.replace(['-', '_', '/'], " "), window, cx);
@@ -307,10 +307,21 @@ impl PullsPanel {
                 .placeholder("Description (Markdown)")
                 .rows(6)
         });
-        let base = cx.new(|cx| {
-            let mut input = InputState::new(window, cx).placeholder("Base branch");
-            input.set_value(base_branch, window, cx);
-            input
+        let base = cx.new(|cx| InputState::new(window, cx).placeholder("Base branch"));
+        // The repository's default branch takes a few runs of Git to find
+        // (slow on Windows): the form opens at once and the branch is
+        // filled in when it is known, unless one was typed meanwhile.
+        let found = cx.background_spawn(async move { default_base(&root) });
+        let fill = cx.spawn_in(window, async move |this, cx| {
+            let found = found.await;
+            _ = this.update_in(cx, |this, window, cx| {
+                if let Some(form) = &this.create
+                    && form.base.read(cx).value().is_empty()
+                {
+                    form.base
+                        .update(cx, |input, cx| input.set_value(found, window, cx));
+                }
+            });
         });
         self.create = Some(CreateForm {
             title,
@@ -319,6 +330,7 @@ impl PullsPanel {
             draft: false,
             busy: None,
             _task: None,
+            _base: fill,
         });
         cx.notify();
     }
@@ -332,6 +344,14 @@ impl PullsPanel {
             return;
         };
         let base = form.base.read(cx).value().trim().to_string();
+        // Not found yet (it is being looked up), or cleared.
+        if base.is_empty() {
+            window.push_notification(
+                Notification::warning("Say which branch it goes into first."),
+                cx,
+            );
+            return;
+        }
         form.busy = Some("Writing…");
         cx.notify();
         let collect = cx.background_spawn({
@@ -423,6 +443,13 @@ impl PullsPanel {
         let title = form.title.read(cx).value().trim().to_string();
         let body = form.body.read(cx).value().to_string();
         let base = form.base.read(cx).value().trim().to_string();
+        if base.is_empty() {
+            window.push_notification(
+                Notification::warning("Say which branch it goes into first."),
+                cx,
+            );
+            return;
+        }
         let draft = form.draft;
         let status = local.read(cx).status().cloned().unwrap_or_default();
         let Some(head) = status.branch.clone() else {
