@@ -128,12 +128,9 @@ pub struct WorkspaceScreen {
     shown: HashSet<Pane>,
     /// Writes the panes' sizes once a drag of the line between them rests.
     _save_split: Option<gpui_kit::Task<()>>,
-    /// Where the lines inside the result pane were dragged to (the tree
-    /// beside the editor; the Changes list beside or over a file's
-    /// changes): kept while another tool is in front.
+    /// Where the line between the folders' tree and the editor was dragged
+    /// to: kept while another tool is in front.
     pub(super) tree_split: Entity<ResizableState>,
-    pub(super) changes_split: Entity<ResizableState>,
-    pub(super) changes_stack: Entity<ResizableState>,
     away: Option<Away>,
     /// What the workspace's folders hold, once looked at.
     traits: Option<Traits>,
@@ -208,6 +205,7 @@ impl WorkspaceScreen {
                 ChatPanelEvent::SelectSession(Some(id)) => this.select_session(*id, cx),
                 ChatPanelEvent::SelectSession(None) => this.new_session(window, cx),
                 ChatPanelEvent::TurnEnded => {
+                    this.refresh_evidence(cx);
                     // A UI test being recorded ends with the agent's turn.
                     if ph_uitest::record::current(cx).is_some()
                         && let Some(tests) = this.tests.clone()
@@ -368,8 +366,6 @@ impl WorkspaceScreen {
             shown: HashSet::new(),
             _save_split: None,
             tree_split: cx.new(|_| ResizableState::default()),
-            changes_split: cx.new(|_| ResizableState::default()),
-            changes_stack: cx.new(|_| ResizableState::default()),
             away: None,
             traits: None,
             git_folder: 0,
@@ -753,14 +749,6 @@ impl WorkspaceScreen {
         }
     }
 
-    /// A file is open in the editor.
-    /// The editor has a file's changes (a diff) in front.
-    pub(crate) fn showing_diff(&self, cx: &App) -> bool {
-        self.files
-            .as_ref()
-            .is_some_and(|files| files.read(cx).showing_diff())
-    }
-
     pub(crate) fn has_open_files(&self, cx: &App) -> bool {
         self.files
             .as_ref()
@@ -967,29 +955,9 @@ impl WorkspaceScreen {
                         this.layout.result_open = false;
                         return this.layout_changed(cx);
                     }
-                    // The changes beside their list were closed, or a file
-                    // took their place in the editor.
-                    if this.layout.diff_beside && !this.showing_diff(cx) {
-                        this.layout.diff_beside = false;
-                        return this.layout_changed(cx);
-                    }
                     this.save_layout(cx)
                 }
-                FilesPanelEvent::Opened => {
-                    // A file's changes picked in the Changes list open
-                    // beside the list, which stays to pick the next from; a
-                    // file opens in Files.
-                    if this.showing_diff(cx)
-                        && this.layout.result_open
-                        && this.layout.tool == ContextTab::Changes
-                    {
-                        this.layout.diff_beside = true;
-                        this.layout_changed(cx);
-                    } else {
-                        this.layout.diff_beside = false;
-                        this.show_tool(ContextTab::Files, window, cx)
-                    }
-                }
+                FilesPanelEvent::Opened => this.show_tool(ContextTab::Files, window, cx),
                 FilesPanelEvent::Ask(ask) => this.ask_about_code(ask.clone(), window, cx),
                 FilesPanelEvent::MakePrimary(path) => {
                     cx.emit(WorkspaceScreenEvent::MakePrimary(path.clone()))
@@ -1164,36 +1132,26 @@ impl WorkspaceScreen {
         files.update(cx, |files, cx| files.find_in_project(window, cx));
     }
 
-    /// Opens `relative` in the editor beside the chat, optionally at a
-    /// 0-based line.
-    /// Shows the changes in `root` (one file's, else every file's, against
-    /// the index) in the editor's Changes tab.
-    pub(crate) fn open_diff(
+    /// Shows `path`'s changes since the last commit (kept or not) in the
+    /// editor's Changes tab.
+    pub(crate) fn open_changes_since_commit(
         &mut self,
         root: std::path::PathBuf,
-        path: Option<String>,
-        against_head: bool,
+        path: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let title = match &path {
-            Some(path) => {
-                let name = path.rsplit('/').next().unwrap_or(path);
-                if against_head {
-                    format!("{name} since the last commit")
-                } else {
-                    format!("{name} (changes)")
-                }
-            }
-            None => "All changes".to_string(),
-        };
+        let name = path.rsplit('/').next().unwrap_or(&path);
+        let title = format!("{name} since the last commit");
         let load: ph_files::diff_tab::LoadDiff =
-            std::sync::Arc::new(move || ph_git::files::patch(&root, path.as_deref(), against_head));
+            std::sync::Arc::new(move || ph_git::files::patch(&root, Some(&path), true));
         let files = self.files(window, cx);
         // The panel says it opened something, and the editor comes into view.
         files.update(cx, |files, cx| files.show_diff(title, load, cx));
     }
 
+    /// Opens `relative` in the editor beside the chat, optionally at a
+    /// 0-based line.
     pub fn open_file(
         &mut self,
         relative: &str,
@@ -1233,6 +1191,7 @@ impl WorkspaceScreen {
         self.active_session = Some(id);
         self.chat
             .update(cx, |chat, cx| chat.set_session(session, cx));
+        self.refresh_evidence(cx);
         self.save_layout(cx);
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
@@ -1249,6 +1208,7 @@ impl WorkspaceScreen {
             chat.set_session(None, cx);
             chat.focus_composer(window, cx);
         });
+        self.refresh_evidence(cx);
         self.save_layout(cx);
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
@@ -1327,6 +1287,7 @@ impl WorkspaceScreen {
                     }
                 ),
                 from_review: true,
+                removed: false,
             })
             .collect();
         let changes = self.changes(window, cx);

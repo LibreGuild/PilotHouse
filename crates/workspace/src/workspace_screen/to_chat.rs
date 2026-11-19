@@ -71,7 +71,7 @@ impl WorkspaceScreen {
                     .update(cx, |chat, cx| chat.new_chat_in(folder.clone(), window, cx));
             }
             FilesPanelEvent::CompareWithHead(root, path) => {
-                self.open_diff(root.clone(), Some(path.clone()), true, window, cx)
+                self.open_changes_since_commit(root.clone(), path.clone(), window, cx)
             }
             FilesPanelEvent::CompareFiles(first, second) => {
                 let (first, second) = (first.clone(), second.clone());

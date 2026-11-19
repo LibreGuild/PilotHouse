@@ -41,16 +41,6 @@ impl WorkspaceScreen {
                         .unwrap_or_else(|| path.clone());
                     this.open_file(&path, Some(*line), window, cx);
                 }
-                ChangesPanelEvent::OpenDiff(path) => {
-                    let root = this
-                        .roots()
-                        .list()
-                        .get(this.git_folder)
-                        .map(|root| root.path.clone());
-                    if let Some(root) = root {
-                        this.open_diff(root, path.clone(), false, window, cx);
-                    }
-                }
                 ChangesPanelEvent::ReviewChanges => this.review_changes(window, cx),
                 ChangesPanelEvent::SendNotes(text) => {
                     this.reveal_chat(cx);
@@ -76,7 +66,21 @@ impl WorkspaceScreen {
         ));
         self.changes.insert(self.git_folder, changes.clone());
         self.update_live_panes(cx);
+        self.refresh_evidence(cx);
         changes
+    }
+
+    /// Says over the changes what the chat in front did to check its work
+    /// (tests, commands, screenshots): after its turn, and when another
+    /// chat comes in front.
+    pub(super) fn refresh_evidence(&mut self, cx: &mut Context<Self>) {
+        if self.changes.is_empty() {
+            return;
+        }
+        let evidence = evidence_chips(&self.chat.read(cx).evidence(cx));
+        for changes in self.changes.values() {
+            changes.update(cx, |changes, cx| changes.set_evidence(evidence.clone(), cx));
+        }
     }
 
     /// The board panel, created on first use.
@@ -861,6 +865,62 @@ pub(crate) fn briefs(pulls: &[ph_github::models::PullRequest]) -> Vec<ph_agent::
             body: pull.body.clone().unwrap_or_default(),
         })
         .collect()
+}
+
+/// What a chat did to check its work, as the Git tool says it over the
+/// changes.
+fn evidence_chips(evidence: &ph_agent::evidence::Evidence) -> Vec<ph_changes::Evidence> {
+    use ph_changes::{Evidence, EvidenceKind};
+    let plural = |count: usize, one: &str| {
+        if count == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{count} {one}s")
+        }
+    };
+    let mut chips = Vec::new();
+    for run in &evidence.tests {
+        let label = match (run.ok, run.passed, run.failed) {
+            (true, Some(passed), _) => format!("{} passed", plural(passed, "test")),
+            (true, None, _) => "Tests passed".to_string(),
+            (false, _, Some(failed)) if failed > 0 => {
+                format!("{} failed", plural(failed, "test"))
+            }
+            (false, ..) => "Tests failed".to_string(),
+        };
+        chips.push(Evidence {
+            kind: EvidenceKind::Tests,
+            label: label.into(),
+            detail: Some(run.command.clone().into()),
+            ok: Some(run.ok),
+        });
+    }
+    if evidence.commands > 0 {
+        let failed = evidence.failed_commands;
+        chips.push(Evidence {
+            kind: EvidenceKind::Commands,
+            label: if failed > 0 {
+                format!(
+                    "{} run, {failed} failed",
+                    plural(evidence.commands, "command")
+                )
+                .into()
+            } else {
+                format!("{} run", plural(evidence.commands, "command")).into()
+            },
+            detail: Some("Commands the agent ran in this chat, besides tests".into()),
+            ok: (failed > 0).then_some(false),
+        });
+    }
+    if evidence.screenshots > 0 {
+        chips.push(Evidence {
+            kind: EvidenceKind::Screenshots,
+            label: plural(evidence.screenshots, "screenshot").into(),
+            detail: Some("Screenshots the agent took to look at its work".into()),
+            ok: None,
+        });
+    }
+    chips
 }
 
 #[cfg(test)]

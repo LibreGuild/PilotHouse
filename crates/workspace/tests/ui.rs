@@ -811,6 +811,78 @@ fn open_chats_are_tabs_over_the_chat(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+/// The Git tool lists the changed files and shows their changes in one
+/// diff beside (or under) the list: a row has a tick for "looked at" where
+/// the arrow that unfolded the file in the list was.
+#[gpui_kit::test]
+fn changes_are_reviewed_beside_their_list(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let folder = temp_project("review");
+    let git = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&folder)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(done.status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&[
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "Start",
+    ]);
+    std::fs::write(
+        folder.join("src/main.rs"),
+        "fn main() {\n    println!(\"hi\");\n}\n",
+    )
+    .unwrap();
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.add_project_path(&folder, window, cx)
+        });
+        window.dispatch_action(Box::new(ph_workspace::ShowChanges), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("change-file-src/main.rs").is_some());
+        assert!(
+            window.try_find("fold-file-src/main.rs").is_none(),
+            "no arrow unfolds the file in the list"
+        );
+    })
+    .unwrap();
+    // The diff is drawn once the pane's width is known and the patch read.
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("git-review").is_some(), "the changes show");
+        assert!(window.try_find("review-keep-src/main.rs").is_some());
+    })
+    .unwrap();
+    click(window, "viewed-src/main.rs", cx);
+    cx.update_window(window, |_, window, cx| {
+        let space = workspace.read(cx).active_space().unwrap().clone();
+        let changes = space.update(cx, |space, cx| space.changes(window, cx));
+        assert_eq!(
+            changes.read(cx).viewed_count(),
+            (1, 1),
+            "the tick is counted"
+        );
+    })
+    .unwrap();
+}
+
 /// Reviews is one click away; without an account it asks for one. The
 /// Bridge and the chats that need no folder each have their key.
 #[gpui_kit::test]

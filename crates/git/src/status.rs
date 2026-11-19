@@ -17,6 +17,9 @@ pub struct WorkingChanges {
     pub untracked: Vec<String>,
     /// Number of files with changes already staged (kept).
     pub staged_files: usize,
+    /// `files` as Git printed them, for a viewer that draws the patch
+    /// itself: read once, not a second time for it.
+    pub patch: String,
 }
 
 /// Whether `root` is in a Git working tree: it or a folder above it holds
@@ -63,6 +66,7 @@ pub fn working_changes(root: &Path) -> Result<WorkingChanges> {
         files: parse_diff(&diff),
         untracked,
         staged_files,
+        patch: diff,
     })
 }
 

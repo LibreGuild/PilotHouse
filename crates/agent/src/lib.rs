@@ -26,6 +26,7 @@ pub mod cli_transcript;
 pub mod cline;
 mod connection;
 mod entry_view;
+pub mod evidence;
 pub mod form;
 pub mod installed;
 pub mod instructions;

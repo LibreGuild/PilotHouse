@@ -726,7 +726,7 @@ impl FilesPanel {
     }
 
     /// The tab in front is the changes (a diff), not a file.
-    pub fn showing_diff(&self) -> bool {
+    fn showing_diff(&self) -> bool {
         self.diff_active && self.diff.is_some()
     }
 

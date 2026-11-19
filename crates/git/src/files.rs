@@ -112,7 +112,7 @@ const NEW_FILES_SHOWN: usize = 100;
 
 /// A new file's patch: all its lines added. None for a binary or very
 /// large file.
-fn new_file_patch(root: &Path, file: &str) -> Option<String> {
+pub fn new_file_patch(root: &Path, file: &str) -> Option<String> {
     const LARGEST: u64 = 512 * 1024;
     let full = root.join(file);
     if std::fs::metadata(&full).ok()?.len() > LARGEST {

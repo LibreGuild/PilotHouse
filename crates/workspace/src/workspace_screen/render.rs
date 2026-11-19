@@ -292,7 +292,7 @@ impl WorkspaceScreen {
 
     /// What the result pane shows under its names.
     fn render_result(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
+        use gpui_kit::component::resizable::{h_resizable, resizable_panel};
         use ph_theme::layout::{SIDE_LIST_MAX, SIDE_LIST_MIN};
         match self.layout.tool {
             // The folders' tree and, beside it, the files open from it.
@@ -311,49 +311,6 @@ impl WorkspaceScreen {
                             .child(tree),
                     )
                     .child(resizable_panel().child(editor))
-                    .into_any_element()
-            }
-            // The list of what changed and, once a file is picked in it,
-            // that file's changes: beside the list where there is room,
-            // under it in a narrow pane. The list stays to pick the next.
-            ContextTab::Changes if self.layout.diff_beside && self.showing_diff(cx) => {
-                let list = self.render_pane(Pane::Tool(ContextTab::Changes), window, cx);
-                let diff = self.render_pane(Pane::Editor, window, cx);
-                // Which way to divide the pane is decided once its width is
-                // known (a frame later): a split first made too narrow would
-                // keep those shares when given the room.
-                let (width, probe) = ph_ui::measure::width_of("changes-room", window, cx);
-                let room = width.map(|width| ph_ui::measure::design_px(width, window));
-                let split = match room {
-                    None => list,
-                    Some(room) if room < 720. => v_resizable("changes-stack")
-                        .with_state(&self.changes_stack)
-                        .child(
-                            resizable_panel()
-                                .size(ph_ui::scaled_px(320., window))
-                                .size_range(ph_ui::scaled_px(140., window)..gpui_kit::Pixels::MAX)
-                                .child(list),
-                        )
-                        .child(resizable_panel().child(diff))
-                        .into_any_element(),
-                    Some(_) => h_resizable("changes-split")
-                        .with_state(&self.changes_split)
-                        .child(
-                            resizable_panel()
-                                .size(ph_ui::scaled_px(340., window))
-                                .size_range(
-                                    ph_ui::scaled_px(260., window)..ph_ui::scaled_px(440., window),
-                                )
-                                .child(list),
-                        )
-                        .child(resizable_panel().child(diff))
-                        .into_any_element(),
-                };
-                div()
-                    .relative()
-                    .size_full()
-                    .child(probe)
-                    .child(split)
                     .into_any_element()
             }
             tool => self.render_pane(Pane::Tool(tool), window, cx),

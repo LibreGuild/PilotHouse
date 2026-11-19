@@ -661,6 +661,12 @@ impl ChatPanel {
         self.terminal_session.is_none()
     }
 
+    /// What the chat in view did to check its work (tests, commands,
+    /// screenshots), read off its tool calls.
+    pub fn evidence(&self, cx: &App) -> crate::evidence::Evidence {
+        crate::evidence::of(self.active.read(cx).entries())
+    }
+
     pub fn active_session_id(&self, cx: &App) -> Option<SessionId> {
         if let Some(shown) = &self.terminal_session {
             return Some(shown.session.id);
