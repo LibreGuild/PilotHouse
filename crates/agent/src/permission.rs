@@ -148,6 +148,12 @@ impl PermissionRequest {
         self.responder.is_some()
     }
 
+    /// It is answered by picking one of [`Self::options`], with nothing to
+    /// fill in or read first: a card can offer the options as they are.
+    pub fn is_choice(&self) -> bool {
+        self.form.is_none() && self.plan.is_none() && !self.options.is_empty()
+    }
+
     /// The chosen option's label once answered, e.g. "Allow once".
     pub fn outcome(&self) -> Option<&SharedString> {
         self.outcome.as_ref()

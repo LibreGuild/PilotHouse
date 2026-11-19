@@ -149,7 +149,7 @@ impl BrowserPanel {
         if self.active != active {
             self.active = active;
             self.browser
-                .update(cx, |browser, cx| browser.set_screencast(active, cx));
+                .update(cx, |browser, _| browser.set_screencast(active));
         }
     }
 
@@ -523,11 +523,11 @@ impl BrowserPanel {
                 .child(ph_ui::Loader::new().small())
                 .child("Starting the browser…")
                 .into_any_element(),
-            // Stopped is not starting: it said so, with a spinner that
-            // never ended, after the user stopped the browser.
-            BrowserStatus::Stopped => EmptyState::new("The browser is stopped")
+            // Not running: it starts when asked to here (or when an agent
+            // uses it), never by the pane coming into view.
+            BrowserStatus::Stopped => EmptyState::new("The browser is not running")
                 .icon(Icons::Power)
-                .description("Its logins are kept. It starts again when you start it here, or when an agent uses it.")
+                .description("Start it to open pages here. Its logins are kept for this workspace, and it also starts when an agent uses it.")
                 .action(
                     Button::new("browser-start")
                         .small()

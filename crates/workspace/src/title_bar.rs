@@ -1,7 +1,8 @@
 //! Contents of the window title bar: the app's mark and the name of what is
-//! in front (a workspace with its colour, *Chats*, *GitHub*), the command
-//! palette trigger in the middle, and window-level buttons (inbox, agents,
-//! appearance, settings, the side panels). The bar is part of the window's
+//! in front (a workspace with its colour and, after it, the task in its
+//! chat with where that stands and its branch; *Chats*; *Reviews*), the
+//! command palette trigger in the middle, the task's next step, and
+//! window-level buttons (inbox, the side panels). The bar is part of the window's
 //! frame (`frame`): it has no fill of its own. What the window shows is
 //! picked in the column of icons at its left edge (`rail`).
 //!
@@ -9,6 +10,7 @@
 //! click on it moves the window and a double click maximises it. Every
 //! control here is `occlude`d so its clicks reach the app instead.
 
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -49,8 +51,10 @@ pub(crate) fn render(
                 .flex_1()
                 .flex_basis(left_bias)
                 .gap_1()
+                .min_w_0()
                 .child(app_icon(cx))
-                .children(front_name(workspace, cx)),
+                .children(front_name(workspace, cx))
+                .children(front_task(workspace, cx)),
         )
         .child(
             h_flex()
@@ -99,6 +103,7 @@ pub(crate) fn render(
                 .flex_basis(right_bias)
                 .justify_end()
                 .gap_1()
+                .children(next_step(workspace, cx))
                 .children(update_item(cx))
                 .child(
                     div()
@@ -108,6 +113,145 @@ pub(crate) fn render(
                 )
                 .children(panel_switches(workspace, cx)),
         )
+}
+
+/// The task in the chat of the workspace in front, as the Bridge has it.
+fn task_in_front(workspace: &Workspace, cx: &App) -> Option<crate::bridge::OpenChat> {
+    if workspace.view() != View::Workspaces {
+        return None;
+    }
+    let space = workspace.active_space()?.read(cx);
+    let front = space.active_session()?;
+    crate::bridge::open_chats(
+        workspace,
+        space.project().id,
+        space.sessions(),
+        Some(front),
+        cx,
+    )
+    .into_iter()
+    .find(|chat| chat.session.id == front)
+}
+
+/// Where the task in front works: its own folder, else its workspace's
+/// first.
+fn task_folder(
+    workspace: &Workspace,
+    task: &crate::bridge::OpenChat,
+    cx: &App,
+) -> Option<std::path::PathBuf> {
+    task.session
+        .cwd
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            workspace
+                .active_space()?
+                .read(cx)
+                .project()
+                .folders()
+                .into_iter()
+                .next()
+        })
+}
+
+/// After the workspace's name: the task in its chat (the title) and where
+/// it stands (as its column on the Bridge). With several chats a
+/// workspace's name alone does not say which is in front. (Its branch is
+/// in the status bar.)
+fn front_task(workspace: &Workspace, cx: &App) -> Option<AnyElement> {
+    let task = task_in_front(workspace, cx)?;
+    let theme = cx.theme();
+    let color = task.column.color(cx);
+    Some(
+        h_flex()
+            .id("front-task")
+            .min_w_0()
+            .gap_1p5()
+            .text_sm()
+            .text_color(theme.muted_foreground)
+            .child(div().flex_none().child("/"))
+            .child(
+                div()
+                    .min_w_0()
+                    .max_w(ph_ui::rems_from_px(280.))
+                    .truncate()
+                    .text_color(theme.foreground)
+                    .child(task.summary.title.clone()),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .h_5()
+                    .px_1p5()
+                    .rounded(theme.radius)
+                    .bg(color.opacity(0.14))
+                    .text_xs()
+                    .text_color(color)
+                    .child(task.column.title()),
+            )
+            .test_support()
+            .into_any_element(),
+    )
+}
+
+/// What the task in front waits for next, one press away: its changes to
+/// review (while another tool is in front), or its pull request.
+fn next_step(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let task = task_in_front(workspace, cx)?;
+    let (project, on_git) = {
+        let space = workspace.active_space()?.read(cx);
+        (
+            space.project().id,
+            space.is_context_open() && space.context_tab() == crate::bridge::REVIEW_TOOL,
+        )
+    };
+    let session = task.session.id;
+    let changed = task
+        .session
+        .facts
+        .as_ref()
+        .is_some_and(|facts| facts.files > 0);
+    let waits = matches!(
+        task.column,
+        crate::bridge::Column::Review | crate::bridge::Column::NeedsYou
+    );
+    if changed && waits && !on_git {
+        return Some(
+            div()
+                .id("next-step")
+                .occlude()
+                .child(
+                    Button::new("task-review")
+                        .primary()
+                        .small()
+                        .label("Review changes")
+                        .tooltip("Read what this task changed, in the Git tool")
+                        .on_click(cx.listener(move |workspace, _, window, cx| {
+                            workspace.review_task(project, session, window, cx)
+                        })),
+                )
+                .into_any_element(),
+        );
+    }
+    let pull = task_folder(workspace, &task, cx)
+        .and_then(|folder| crate::task_facts::of(&folder, cx)?.pull.clone())?;
+    let url = pull.url.clone();
+    Some(
+        div()
+            .id("next-step")
+            .occlude()
+            .child(
+                Button::new("task-pull")
+                    .outline()
+                    .small()
+                    .icon(Icons::GitPullRequest)
+                    .label(format!("#{}", pull.number))
+                    .tooltip("Open the pull request of this branch in the browser")
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+            )
+            .into_any_element(),
+    )
 }
 
 /// More (⋯), right of the search: making things (presentations, with the
@@ -355,13 +499,16 @@ fn front_name(workspace: &Workspace, cx: &App) -> Option<AnyElement> {
     };
     Some(
         h_flex()
-            .min_w_0()
+            // It keeps its room (up to a point): the task's title after
+            // it is what gives way in a narrow window.
+            .flex_none()
+            .max_w(ph_ui::rems_from_px(180.))
             .gap_1p5()
             .text_sm()
             .font_weight(gpui_kit::FontWeight::MEDIUM)
             .text_color(cx.theme().muted_foreground)
-            // A workspace's colour, as on its row in the list and in the
-            // frame's light: the three say the same thing.
+            // A workspace's colour, as on its badge and in the frame's
+            // light: the three say the same thing.
             .children(crate::frame::tint(workspace, cx).map(|color| {
                 div()
                     .flex_none()

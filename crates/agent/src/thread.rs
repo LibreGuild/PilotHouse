@@ -151,7 +151,7 @@ pub enum ThreadEvent {
     /// The agent finished a turn (or it stopped or failed).
     TurnEnded,
     /// The first send created the stored session.
-    SessionCreated(Session),
+    SessionCreated(Box<Session>),
     /// A review card asks to open a file, or for a new review run.
     Review(ReviewCardEvent),
 }
@@ -202,6 +202,8 @@ pub struct ChatThread {
     views: VecDeque<usize>,
     /// `entries[..saved]` are in the store.
     saved: usize,
+    /// What the chat did, in numbers, as the store has it.
+    facts_saved: Option<ph_store::sessions::SessionFacts>,
     status: ThreadStatus,
     scroller: Entity<TranscriptScroll>,
     /// The PR review this chat runs, if it is a review chat.
@@ -295,6 +297,7 @@ impl ChatThread {
             pending: Vec::new(),
             views: VecDeque::new(),
             saved: 0,
+            facts_saved: None,
             status: ThreadStatus::Idle,
             scroller,
             review_id: None,
@@ -599,6 +602,7 @@ impl ChatThread {
             thread.watch_card(entry, cx);
         }
         thread.saved = entries.len();
+        thread.facts_saved = session.facts.clone();
         thread.usage = thread.store.session_usage(session.id).ok().flatten();
         thread.scroller = cx.new(|cx| TranscriptScroll::new(entries.len(), cx));
         thread.entries = entries;
@@ -694,6 +698,15 @@ impl ChatThread {
             let request = request.read(cx);
             request.is_pending().then(|| request.title.to_string())
         })
+    }
+
+    /// The newest question still waiting for the user.
+    pub fn pending_request(&self, cx: &App) -> Option<Entity<PermissionRequest>> {
+        self.pending
+            .iter()
+            .rev()
+            .find(|request| request.read(cx).is_pending())
+            .cloned()
     }
 
     /// The last turn ended in an error (the agent failed or exited).
@@ -1104,7 +1117,7 @@ impl ChatThread {
                         let _ = self.store.set_session_place(session.id, "chat", Some(&cwd));
                         session.cwd = Some(cwd);
                     }
-                    cx.emit(ThreadEvent::SessionCreated(session.clone()));
+                    cx.emit(ThreadEvent::SessionCreated(Box::new(session.clone())));
                     self.session = Some(session);
                 }
                 Err(err) => {
@@ -2136,6 +2149,47 @@ impl ChatThread {
                 self.saved = self.entries.len();
             }
             Err(err) => tracing::warn!("saving chat messages failed: {err:#}"),
+        }
+        self.save_facts();
+    }
+
+    /// What the chat did, in numbers: the files and lines its edits
+    /// changed, and what it ran to check them.
+    fn facts(&self) -> ph_store::sessions::SessionFacts {
+        let (files, added, removed) = crate::transcript::turn_change_counts(&self.entries);
+        let evidence = crate::evidence::of(&self.entries);
+        let total = |count: fn(&crate::evidence::TestRun) -> Option<usize>| {
+            evidence
+                .tests
+                .iter()
+                .filter_map(count)
+                .reduce(|sum, count| sum + count)
+        };
+        ph_store::sessions::SessionFacts {
+            files,
+            added,
+            removed,
+            tests_ok: (!evidence.tests.is_empty()).then(|| evidence.tests.iter().all(|run| run.ok)),
+            tests_passed: total(|run| run.passed),
+            tests_failed: total(|run| run.failed),
+            commands: evidence.commands,
+            screenshots: evidence.screenshots,
+        }
+    }
+
+    /// Keeps the chat's facts with it when they changed, for its card on
+    /// the Bridge (which does not read transcripts).
+    fn save_facts(&mut self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let facts = self.facts();
+        if self.facts_saved.as_ref() == Some(&facts) {
+            return;
+        }
+        match self.store.set_session_facts(session.id, &facts) {
+            Ok(()) => self.facts_saved = Some(facts),
+            Err(err) => tracing::warn!("saving what the chat did failed: {err:#}"),
         }
     }
 

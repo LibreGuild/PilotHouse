@@ -90,6 +90,13 @@ pub(crate) struct Card {
     /// PilotHouse started it, not the user: a schedule's chat, a UI
     /// test's recording or repair, a review.
     automated: bool,
+    /// Where it works (its own folder, else its workspace's first), for
+    /// the branch and pull request found there.
+    folder: Option<std::path::PathBuf>,
+    /// What it did, in numbers, as of its last turn.
+    facts: Option<ph_store::sessions::SessionFacts>,
+    /// What its agent asks, while it waits for the answer.
+    request: Option<gpui_kit::Entity<ph_agent::PermissionRequest>>,
 }
 
 /// The Bridge's columns, most urgent first.
@@ -139,7 +146,7 @@ impl Column {
         }
     }
 
-    fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Column::NeedsYou => "Needs you",
             Column::Working => "Working",
@@ -166,7 +173,7 @@ impl Column {
         }
     }
 
-    fn color(self, cx: &App) -> Hsla {
+    pub(crate) fn color(self, cx: &App) -> Hsla {
         let theme = cx.theme();
         match self {
             Column::NeedsYou => theme.warning,
@@ -189,7 +196,7 @@ pub(crate) fn live_cards(workspace: &Workspace, cx: &App) -> Vec<Card> {
 fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
     let dark = cx.theme().is_dark();
     let now = jiff::Timestamp::now().as_millisecond();
-    let mut places: Vec<(ProjectId, String, Option<Hsla>, bool)> = workspace
+    let mut places: Vec<(ProjectId, String, Option<Hsla>, Option<std::path::PathBuf>)> = workspace
         .projects()
         .iter()
         .map(|project| {
@@ -198,12 +205,12 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                 project.id,
                 project.name.clone(),
                 Some(color),
-                !project.folders().is_empty(),
+                project.folders().into_iter().next(),
             )
         })
         .collect();
     if let Some(chats) = workspace.chats_space() {
-        places.push((chats.id, "Chats".into(), None, false));
+        places.push((chats.id, "Chats".into(), None, None));
     }
     let mut cards = Vec::new();
     // Reviews: those an agent works on, or is being readied for.
@@ -245,6 +252,9 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                     settled: false,
                     has_folders: false,
                     automated: false,
+                    folder: None,
+                    facts: None,
+                    request: None,
                 });
             }
             // Those started from the queue, several at once, each have
@@ -273,6 +283,9 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                     settled: false,
                     has_folders: false,
                     automated: false,
+                    folder: None,
+                    facts: None,
+                    request: None,
                 });
             }
             for (session, summary) in chats.read(cx).live(cx) {
@@ -296,11 +309,15 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                     settled: false,
                     has_folders: false,
                     automated: false,
+                    folder: None,
+                    facts: None,
+                    request: chats.read(cx).pending_request(session, cx),
                 });
             }
         }
     }
-    for (project, place, color, has_folders) in places.iter().cloned() {
+    for (project, place, color, folder) in places.iter().cloned() {
+        let has_folders = folder.is_some();
         let chats = ph_agent::ChatHub::existing(project, cx);
         for stored in workspace.sessions_of(project, cx).iter() {
             if in_terminal(stored, cx) {
@@ -337,6 +354,15 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                 settled,
                 has_folders,
                 automated: is_automated(stored),
+                folder: stored
+                    .cwd
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| folder.clone()),
+                facts: stored.facts.clone().filter(|facts| !facts.is_empty()),
+                request: chats
+                    .as_ref()
+                    .and_then(|chats| chats.read(cx).pending_request(stored.id, cx)),
             });
         }
     }
@@ -372,6 +398,9 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
             settled: false,
             has_folders: false,
             automated: false,
+            folder: None,
+            facts: None,
+            request: None,
         });
     }
     cards.sort_by_key(|card| std::cmp::Reverse(card.updated_at));
@@ -400,6 +429,8 @@ pub(crate) struct OpenChat {
     pub summary: ChatSummary,
     pub pinned: bool,
     pub settled: bool,
+    /// Where it stands on the Bridge.
+    pub column: Column,
 }
 
 /// Of a workspace's chats `sessions`, those still open (one needs the user,
@@ -435,6 +466,7 @@ pub(crate) fn open_chats(
                 summary,
                 pinned: workspace.is_pinned(stored.id),
                 settled,
+                column,
             })
         })
         .collect();
@@ -681,6 +713,19 @@ fn new_task_button(workspace: &Workspace, entity: WeakEntity<Workspace>) -> impl
         .iter()
         .map(|project| (project.id, project.name.clone()))
         .collect();
+    // Those whose task can have a branch and worktree of its own. (A file
+    // is looked for, no `git` run: this is asked while the Bridge draws.)
+    let repositories: Vec<(ProjectId, String)> = workspace
+        .projects()
+        .iter()
+        .filter(|project| {
+            project
+                .folders()
+                .iter()
+                .any(|folder| ph_git::is_repository(folder))
+        })
+        .map(|project| (project.id, project.name.clone()))
+        .collect();
     let chats = workspace.chats_space().map(|chats| chats.id);
     Button::new("bridge-new-task")
         .primary()
@@ -713,6 +758,28 @@ fn new_task_button(workspace: &Workspace, entity: WeakEntity<Workspace>) -> impl
                     )
                 }
                 None => menu,
+            };
+            // A task apart from the workspace's own checkout: its branch
+            // in a worktree, so several agents do not write over each
+            // other and each ends as one pull request.
+            let menu = if repositories.is_empty() {
+                menu
+            } else {
+                repositories.iter().fold(
+                    menu.separator().label("On a branch of its own"),
+                    |menu, (id, name)| {
+                        let (entity, id) = (entity.clone(), *id);
+                        menu.item(
+                            PopupMenuItem::new(format!("From {name}…"))
+                                .icon(Icon::new(Icons::GitBranch))
+                                .on_click(move |_, window, cx| {
+                                    _ = entity.update(cx, |workspace, cx| {
+                                        workspace.new_task_in(id, window, cx)
+                                    });
+                                }),
+                        )
+                    },
+                )
             };
             menu.separator()
                 .item(
@@ -909,9 +976,51 @@ fn card_view(
     // What the column is for, one press away.
     let actions: Option<AnyElement> = match (column, &card.target) {
         (Column::NeedsYou, _) => {
+            // A question answered by picking an option is answered here:
+            // the options as the agent gave them, and the chat one press
+            // away for whoever wants to read around it first.
+            let choices = card
+                .request
+                .as_ref()
+                .filter(|request| request.read(cx).is_choice())
+                .map(|request| (request.clone(), request.read(cx).options.clone()));
             let open = open.clone();
-            Some(
-                Button::new(SharedString::from(format!("bridge-answer-{key}")))
+            Some(match choices {
+                Some((request, options)) => h_flex()
+                    .flex_wrap()
+                    .gap_1p5()
+                    .children(options.into_iter().enumerate().map(|(ix, option)| {
+                        let request = request.clone();
+                        let id = option.id.clone();
+                        let button =
+                            Button::new(SharedString::from(format!("bridge-choose-{key}-{ix}")))
+                                .small()
+                                .label(option.label.clone())
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    request.update(cx, |request, cx| request.choose(&id, cx));
+                                });
+                        // What lets the agent go on stands out; the first
+                        // such option most.
+                        match (option.allows, ix) {
+                            (true, 0) => button.primary(),
+                            (true, _) => button.outline(),
+                            (false, _) => button.ghost(),
+                        }
+                    }))
+                    .child(
+                        Button::new(SharedString::from(format!("bridge-answer-{key}")))
+                            .ghost()
+                            .small()
+                            .label("Open")
+                            .tooltip("Read the chat before answering")
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                open(window, cx)
+                            }),
+                    )
+                    .into_any_element(),
+                None => Button::new(SharedString::from(format!("bridge-answer-{key}")))
                     .primary()
                     .small()
                     .label(if state == ChatState::Failed {
@@ -924,7 +1033,7 @@ fn card_view(
                         open(window, cx)
                     })
                     .into_any_element(),
-            )
+            })
         }
         (Column::Review, Target::Chat(session)) if card.session.is_some() => {
             let (project, session) = (card.project, *session);
@@ -1057,6 +1166,7 @@ fn card_view(
                     .child(line),
             )
         })
+        .children(facts_row(card, &key, cx))
         .children(actions)
         // The task's menu, over its age, while the pointer is on the card.
         .children(menu.map(|menu| {
@@ -1073,6 +1183,140 @@ fn card_view(
         }))
         .test_support()
         .into_any_element()
+}
+
+/// What a task is besides its chat, in a row of its card: the branch it
+/// works on, what it changed and how it checked that, and its pull request
+/// with where the checks stand. Nothing of it known: no row.
+fn facts_row(card: &Card, key: &str, cx: &App) -> Option<AnyElement> {
+    use crate::task_facts::Checks;
+    let theme = cx.theme();
+    let place = card
+        .folder
+        .as_deref()
+        .and_then(|folder| crate::task_facts::of(folder, cx));
+    let branch = place.and_then(|place| place.branch.clone());
+    let pull = place.and_then(|place| place.pull.clone());
+    let facts = card.facts.as_ref();
+    if branch.is_none() && pull.is_none() && facts.is_none() {
+        return None;
+    }
+    let plural = |count: usize, one: &str| {
+        if count == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{count} {one}s")
+        }
+    };
+    let mut row = h_flex()
+        .flex_wrap()
+        .gap_x_2p5()
+        .gap_y_0p5()
+        .text_xs()
+        .text_color(theme.muted_foreground);
+    if let Some(branch) = branch {
+        row = row.child(
+            h_flex()
+                .min_w_0()
+                .max_w(ph_ui::rems_from_px(190.))
+                .gap_1()
+                .child(Icon::new(Icons::GitBranch).xsmall())
+                .child(div().min_w_0().truncate().child(branch)),
+        );
+    }
+    if let Some(facts) = facts {
+        if facts.files > 0 {
+            row = row.child(
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_color(theme.success)
+                            .child(format!("+{}", facts.added)),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.danger)
+                            .child(format!("−{}", facts.removed)),
+                    )
+                    .child(plural(facts.files, "file")),
+            );
+        }
+        if let Some(ok) = facts.tests_ok {
+            let label = match (ok, facts.tests_passed, facts.tests_failed) {
+                (true, Some(passed), _) => format!("{} passed", plural(passed, "test")),
+                (true, None, _) => "Tests passed".to_string(),
+                (false, _, Some(failed)) if failed > 0 => {
+                    format!("{} failed", plural(failed, "test"))
+                }
+                (false, ..) => "Tests failed".to_string(),
+            };
+            let color = if ok { theme.success } else { theme.danger };
+            row = row.child(
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .child(Icon::new(Icons::FlaskConical).xsmall().text_color(color))
+                    .child(label),
+            );
+        }
+        if facts.screenshots > 0 {
+            row = row.child(
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .child(Icon::new(Icons::Camera).xsmall())
+                    .child(plural(facts.screenshots, "screenshot")),
+            );
+        }
+    }
+    if let Some(pull) = pull {
+        let (mark, about) = match pull.checks {
+            Some(Checks::Passed) => (Some(theme.success), "checks passed".to_string()),
+            Some(Checks::Failed(failed)) => (
+                Some(theme.danger),
+                format!("{} failed", plural(failed, "check")),
+            ),
+            Some(Checks::Running) => (Some(theme.warning), "checks running".to_string()),
+            None => (None, "no checks".to_string()),
+        };
+        let tip = SharedString::from(format!(
+            "{} #{}, {about}. Opens it in the browser.",
+            if pull.draft {
+                "Draft pull request"
+            } else {
+                "Pull request"
+            },
+            pull.number
+        ));
+        let url = pull.url.clone();
+        row = row.child(
+            h_flex()
+                .id(SharedString::from(format!("bridge-pull-{key}")))
+                .flex_none()
+                .gap_1()
+                .cursor_pointer()
+                .hover(|style| style.text_color(theme.foreground))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    cx.open_url(&url);
+                })
+                .child(Icon::new(Icons::GitPullRequest).xsmall())
+                .child(format!("#{}", pull.number))
+                .children(mark.map(|color| {
+                    div()
+                        .flex_none()
+                        .size(ph_ui::rems_from_px(7.))
+                        .rounded_full()
+                        .bg(color)
+                })),
+        );
+    }
+    Some(row.into_any_element())
 }
 
 /// In the review column: pull requests other people asked the user to
@@ -1357,6 +1601,9 @@ mod tests {
             settled,
             has_folders: true,
             automated,
+            folder: None,
+            facts: None,
+            request: None,
         }
     }
 

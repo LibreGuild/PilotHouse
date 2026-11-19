@@ -46,6 +46,7 @@ mod status;
 mod status_bar;
 mod storage;
 mod studio_window;
+mod task_facts;
 mod tasks;
 mod terminal_agents;
 pub mod theme_mods;

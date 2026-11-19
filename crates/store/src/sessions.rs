@@ -31,6 +31,36 @@ pub struct Session {
     /// What it said last, for a chat whose messages are kept elsewhere (a
     /// terminal's).
     pub last_line: Option<String>,
+    /// What it did, in numbers, as of its last turn.
+    pub facts: Option<SessionFacts>,
+}
+
+/// What a chat did, in numbers. It is kept with the chat when a turn ends,
+/// so its card on the Bridge can say so without reading the transcript.
+/// Fields a build does not know are dropped, ones it lacks read as none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SessionFacts {
+    /// Files its edits touched, and the lines they added and removed.
+    pub files: usize,
+    pub added: usize,
+    pub removed: usize,
+    /// The last run of each of its test commands, together: whether all
+    /// ended well (`None`: it ran no tests), and how many tests passed and
+    /// failed where the output says.
+    pub tests_ok: Option<bool>,
+    pub tests_passed: Option<usize>,
+    pub tests_failed: Option<usize>,
+    /// Other commands it ran, and screenshots it took.
+    pub commands: usize,
+    pub screenshots: usize,
+}
+
+impl SessionFacts {
+    /// Nothing to say: it changed nothing and checked nothing.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +83,11 @@ impl Session {
             cwd: row.get("cwd")?,
             kind: row.get("kind")?,
             last_line: row.get("last_line")?,
+            // Facts that no longer parse are none: the next turn writes
+            // them again.
+            facts: row
+                .get::<_, Option<String>>("facts")?
+                .and_then(|raw| serde_json::from_str(&raw).ok()),
         })
     }
 }
@@ -82,6 +117,7 @@ impl Store {
             cwd: None,
             kind: "chat".into(),
             last_line: None,
+            facts: None,
         })
     }
 
@@ -177,6 +213,16 @@ impl Store {
         self.conn().execute(
             "UPDATE sessions SET last_line = ?2 WHERE id = ?1",
             params![id, line],
+        )?;
+        Ok(())
+    }
+
+    /// Keeps what a chat did, in numbers (see [`SessionFacts`]).
+    pub fn set_session_facts(&self, id: SessionId, facts: &SessionFacts) -> Result<()> {
+        let raw = serde_json::to_string(facts)?;
+        self.conn().execute(
+            "UPDATE sessions SET facts = ?2 WHERE id = ?1",
+            params![id, raw],
         )?;
         Ok(())
     }
@@ -280,6 +326,27 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ph-sessions-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         store.add_project(&dir).unwrap().id
+    }
+
+    #[test]
+    fn what_a_chat_did_is_kept_with_it() {
+        let store = Store::open_in_memory().unwrap();
+        let session = store
+            .create_session(project(&store), "Task", "claude")
+            .unwrap();
+        assert_eq!(session.facts, None);
+        let facts = SessionFacts {
+            files: 6,
+            added: 87,
+            removed: 12,
+            tests_ok: Some(true),
+            tests_passed: Some(14),
+            ..Default::default()
+        };
+        store.set_session_facts(session.id, &facts).unwrap();
+        let read = store.session(session.id).unwrap().unwrap();
+        assert_eq!(read.facts, Some(facts));
+        assert!(SessionFacts::default().is_empty());
     }
 
     #[test]

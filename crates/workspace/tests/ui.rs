@@ -769,6 +769,14 @@ fn open_chats_are_tabs_over_the_chat(cx: &mut TestAppContext) {
     })
     .unwrap();
     assert_eq!(front(cx), Some(first));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("front-task").is_some(),
+            "the title bar names the task in front"
+        );
+    })
+    .unwrap();
     click_id(window, ("chat-tab", second as u64), cx);
     assert_eq!(front(cx), Some(second), "a tab shows its chat");
 

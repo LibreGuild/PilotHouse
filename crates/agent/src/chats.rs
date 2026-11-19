@@ -118,7 +118,7 @@ impl ChatHub {
 
 #[derive(Debug, Clone)]
 pub enum WorkspaceChatsEvent {
-    /// A chat was made (here or by its first message).
+    /// A chat was made (here or by its first message), or one's turn ended.
     SessionsChanged,
     /// A chat started with [`WorkspaceChats::start_background`] finished its
     /// turn; `reply` is the start of the agent's last message.
@@ -296,6 +296,9 @@ impl WorkspaceChats {
                     if !(this.on_screen && this.viewing == Some(session)) {
                         this.unread.insert(session);
                     }
+                    // Its stored row changed (when it last did something,
+                    // what it did): lists of the chats read it again.
+                    cx.emit(WorkspaceChatsEvent::SessionsChanged);
                     cx.notify();
                 }
             }),
@@ -525,6 +528,20 @@ impl WorkspaceChats {
             agent: thread.agent(),
             line,
         })
+    }
+
+    /// What chat `session` asks, when it waits for an answer: for a card
+    /// that offers the answers where the task is listed.
+    pub fn pending_request(
+        &self,
+        session: SessionId,
+        cx: &App,
+    ) -> Option<Entity<crate::permission::PermissionRequest>> {
+        self.threads
+            .get(&session)?
+            .thread
+            .read(cx)
+            .pending_request(cx)
     }
 
     /// Whether `session` is the chat on screen.

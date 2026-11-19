@@ -98,6 +98,9 @@ pub struct Workspace {
     _devices: Option<Subscription>,
     /// The title bar's inbox and to-dos.
     pub(crate) inbox: Entity<crate::inbox::InboxView>,
+    /// The branch, pull request and checks of the folders tasks work in
+    /// (shared by the windows), for the cards and the title bar.
+    facts: Entity<crate::task_facts::TaskFacts>,
 }
 
 impl Workspace {
@@ -204,7 +207,21 @@ impl Workspace {
             ],
             _devices: None,
             inbox,
+            facts: {
+                let store = AppState::store(cx).clone();
+                crate::task_facts::hub(&store, cx)
+            },
         };
+        // What a card says of its branch and pull request shows when found.
+        let facts = workspace.facts.clone();
+        cx.observe(&facts, |_, _, cx| cx.notify()).detach();
+        // A window that closes stops asking about its folders.
+        cx.on_release(move |this, cx| {
+            let window = this.handle.window_id();
+            facts.update(cx, |facts, _| facts.forget(window));
+        })
+        .detach();
+        workspace.want_facts(cx);
         // Copies made for agents that are no longer needed go, quietly.
         let tidy_store = AppState::store(cx).clone();
         cx.background_spawn(async move {
@@ -249,6 +266,28 @@ impl Workspace {
         // from the store, from the start.
         workspace.read_sessions(cx);
         workspace
+    }
+
+    /// Says which folders this window's tasks work in: each workspace's
+    /// first folder, and the folder of each open chat that has its own (a
+    /// worktree). Their branch and pull request are found for the cards.
+    fn want_facts(&mut self, cx: &mut Context<Self>) {
+        let mut folders = Vec::new();
+        for project in &self.projects {
+            folders.extend(project.folders().into_iter().next());
+            for session in self.sessions_of(project.id, cx).iter() {
+                if let Some(cwd) = &session.cwd
+                    && !self.is_settled(session.id)
+                {
+                    folders.push(std::path::PathBuf::from(cwd));
+                }
+            }
+        }
+        folders.sort();
+        folders.dedup();
+        let window = self.handle.window_id();
+        self.facts
+            .update(cx, |facts, cx| facts.want(window, folders, cx));
     }
 
     /// The workspaces (not the Chats space, nor GitHub repositories').
@@ -1115,6 +1154,7 @@ impl Workspace {
         self.status_ticks = self.status_ticks.wrapping_add(1);
         if self.status_ticks.is_multiple_of(5) {
             self.poll_sessions(cx);
+            self.want_facts(cx);
         }
         // The sidebar lists agent CLIs in terminals: redrawn when they change.
         let agents = {
@@ -1646,6 +1686,38 @@ impl Workspace {
                 space.project().name.clone(),
             )
         };
+        self.ask_for_task(root, parent_name, window, cx);
+    }
+
+    /// Asks for a task of workspace `id` on a branch of its own (from the
+    /// Bridge, where no workspace is in front): in its first folder that is
+    /// a repository.
+    pub(crate) fn new_task_in(
+        &mut self,
+        id: ProjectId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.projects.iter().find(|project| project.id == id) else {
+            return;
+        };
+        let root = project
+            .folders()
+            .into_iter()
+            .find(|folder| ph_git::is_repository(folder));
+        let name = project.name.clone();
+        self.ask_for_task(root, name, window, cx);
+    }
+
+    /// Asks the task's name, then makes its branch and worktree from
+    /// `root` and opens it as a workspace beside `parent_name`'s.
+    fn ask_for_task(
+        &mut self,
+        root: Option<std::path::PathBuf>,
+        parent_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = root.filter(|root| ph_git::is_repository(root)) else {
             window.push_notification(
                 Notification::error("A task needs a workspace whose folder is a Git repository."),

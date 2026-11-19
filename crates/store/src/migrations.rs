@@ -305,6 +305,10 @@ const MIGRATIONS: &[&str] = &[
     // 15: a chat's last line, for chats whose messages are not kept here
     // (an agent CLI's in a terminal, shown under its title once closed).
     "ALTER TABLE sessions ADD COLUMN last_line TEXT;",
+    // 16: what a chat did, in numbers (files and lines changed, tests,
+    // commands, screenshots), as JSON: written when a turn ends so its
+    // card can say so without reading the transcript.
+    "ALTER TABLE sessions ADD COLUMN facts TEXT;",
 ];
 
 /// Backups kept of a database file, newest first; older ones are deleted.

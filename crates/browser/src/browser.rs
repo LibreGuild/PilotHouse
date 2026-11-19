@@ -268,7 +268,8 @@ impl Browser {
         cx.spawn(async move |_, _| start.await.map_err(|err| anyhow!("{err}")))
     }
 
-    /// Starts Chrome (if needed) without waiting, e.g. when the pane opens.
+    /// Starts Chrome (if needed) without waiting: when the user asks for it
+    /// in the pane, or picks a browser.
     pub fn ensure_started(&mut self, cx: &mut Context<Self>) {
         if self.running.is_none() && self.starting.is_none() {
             self.connection(cx).detach();
@@ -631,15 +632,18 @@ impl Browser {
 
     // ---- The pane ----
 
-    /// Streams frames while `on` (the pane is visible).
-    pub fn set_screencast(&mut self, on: bool, cx: &mut Context<Self>) {
+    /// Streams frames while `on` (the pane is visible). Showing the pane
+    /// starts no browser: a look at Preview must not launch a program
+    /// nobody asked for (as a phone is not started by looking at its
+    /// pane). It starts when asked to in the pane, when an address is
+    /// entered, or when an agent uses it; frames flow from then on.
+    pub fn set_screencast(&mut self, on: bool) {
         self.last_used = Instant::now();
         if self.screencast == on {
             return;
         }
         self.screencast = on;
         if on {
-            self.ensure_started(cx);
             self.start_screencast();
         } else if let Some(cdp) = self.cdp() {
             cdp.fire("Page.stopScreencast", json!({}));
