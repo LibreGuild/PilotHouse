@@ -43,6 +43,7 @@ Each release also has **Merge notes** for organisations that build their own cop
 - **The title bar** names what is in front (*Bridge*, *Reviews*, the workspace), offers the next step of the task in front (*Review changes*, or its pull request) and holds the switches of what is shown there; Settings moved to the foot of the column of icons.
 - **⌘N on the Bridge** starts a chat in the workspace it is narrowed to, else in the one last in front. A command that acts on a workspace (a new chat, a tool's shortcut) brings that workspace forward first, so nothing happens unseen behind the Bridge or Reviews.
 - The command palette's names follow: *Show the Bridge*, *Show Reviews*, *Show Chats*, *Show or hide the chat*, *Show or hide the result pane*, *Let the result pane fill the window* (the old names still find them).
+- The website is new: it explains what PilotHouse is, how a task goes and what is in the window, with drawings made of HTML in place of screenshots (they went stale with every change of the app's look). The README's screenshots moved from `site/shots/` to `docs/images/shots/`.
 - For contributors: `cargo coverage -p <crate>` and `cargo coverage-summary -p <crate>` report line and function coverage of the tests ([docs/testing.md](docs/testing.md)). Code the redesign left unused is removed.
 
 ### Merge notes

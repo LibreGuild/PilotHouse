@@ -48,9 +48,9 @@ A day with coding agents usually means several agent CLIs in terminals, an edito
 - **Your own build**: an organisation sets its name, icons and features in `brand/`, adds views of its own beside Workspaces and GitHub, and keeps merging PilotHouse releases ([docs/customizing.md](docs/customizing.md)).
 
 <p align="center">
-  <img src="site/shots/studio-picture.webp" alt="Studio marking up a screenshot: an email blurred, one row spotlit and a label added" width="290">
-  <img src="site/shots/studio-video.webp" alt="Studio editing a screen recording on a timeline, one part at double speed" width="290">
-  <img src="site/shots/slides.webp" alt="A slide deck with a column chart in Studio, the slides down the side" width="290">
+  <img src="docs/images/shots/studio-picture.webp" alt="Studio marking up a screenshot: an email blurred, one row spotlit and a label added" width="290">
+  <img src="docs/images/shots/studio-video.webp" alt="Studio editing a screen recording on a timeline, one part at double speed" width="290">
+  <img src="docs/images/shots/slides.webp" alt="A slide deck with a column chart in Studio, the slides down the side" width="290">
 </p>
 
 ## Install
