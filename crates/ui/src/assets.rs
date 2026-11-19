@@ -24,6 +24,7 @@ icon_assets!(
         TabletSmartphone,
         Play,
         Plug,
+        CloudUpload,
         Puzzle,
         Server,
         FolderDown,

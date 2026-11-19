@@ -369,67 +369,46 @@ impl BrowserPanel {
                     .accessibility_label("Browser options")
                     .menu(gpui_kit::Anchor::TopRight, {
                         let browser = self.browser.clone();
-                        move |menu, _, cx| {
-                            let endpoint = browser.read(cx).devtools_url();
-                            let port_on = browser.read(cx).devtools_port_enabled();
+                        move |menu, _, _| {
                             let stop = browser.clone();
-                            let toggle_port = browser.clone();
-                            menu.item(
-                                PopupMenuItem::new("Allow other DevTools clients")
-                                    .checked(port_on)
-                                    .on_click(move |_, _, cx| {
-                                        toggle_port.update(cx, |browser, cx| {
-                                            browser.set_devtools_port(!port_on, cx)
-                                        })
-                                    }),
-                            )
-                            .when_some(endpoint, |menu, endpoint| {
-                                menu.item(
-                                    PopupMenuItem::new("Copy DevTools address")
-                                        .icon(Icons::Plug)
-                                        .on_click(move |_, _, cx| {
-                                            ph_ui::copy_with_toast(
-                                                endpoint.clone(),
-                                                "the DevTools address",
-                                                cx,
-                                            )
-                                        }),
+                            menu
+                                // Not in a build whose brand leaves the extension out.
+                                .when(
+                                    ph_brand::enabled(ph_brand::Feature::ChromeExtension),
+                                    |menu| {
+                                        menu.item(
+                                            PopupMenuItem::new("Let agents use your Chrome")
+                                                .icon(IconName::Globe)
+                                                .on_click(|_, window, cx| {
+                                                    window.dispatch_action(
+                                                        Box::new(
+                                                            crate::OpenChromeExtensionSettings,
+                                                        ),
+                                                        cx,
+                                                    )
+                                                }),
+                                        )
+                                    },
                                 )
-                            })
-                            .separator()
-                            // Not in a build whose brand leaves the extension out.
-                            .when(
-                                ph_brand::enabled(ph_brand::Feature::ChromeExtension),
-                                |menu| {
-                                    menu.item(
-                                        PopupMenuItem::new("Let agents use your Chrome")
-                                            .icon(IconName::Globe)
-                                            .on_click(|_, window, cx| {
-                                                window.dispatch_action(
-                                                    Box::new(crate::OpenChromeExtensionSettings),
-                                                    cx,
-                                                )
-                                            }),
-                                    )
-                                },
-                            )
-                            .item(
-                                PopupMenuItem::new(if running {
-                                    "Stop the browser"
-                                } else {
-                                    "Start the browser"
-                                })
-                                .icon(Icons::Power)
-                                .on_click(move |_, _, cx| {
-                                    stop.update(cx, |browser, cx| {
-                                        if running {
-                                            browser.stop(cx)
-                                        } else {
-                                            browser.ensure_started(cx)
-                                        }
+                                .item(
+                                    PopupMenuItem::new(if running {
+                                        "Stop the browser"
+                                    } else {
+                                        "Start the browser"
                                     })
-                                }),
-                            )
+                                    .icon(Icons::Power)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            stop.update(cx, |browser, cx| {
+                                                if running {
+                                                    browser.stop(cx)
+                                                } else {
+                                                    browser.ensure_started(cx)
+                                                }
+                                            })
+                                        },
+                                    ),
+                                )
                         }
                     }),
             )

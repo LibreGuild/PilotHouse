@@ -32,6 +32,7 @@ mod extension_view;
 mod hub;
 mod input;
 pub mod logs;
+pub mod preference;
 mod scripts;
 mod sourcemap;
 pub mod workflows;

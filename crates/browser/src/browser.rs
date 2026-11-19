@@ -87,8 +87,6 @@ struct Running {
     /// The page shown in the pane.
     cdp: Cdp,
     target_id: String,
-    /// `http://127.0.0.1:<port>`, only when the user opened a port.
-    devtools: Option<String>,
 }
 
 /// A JavaScript dialog waiting for an answer. Headless Chrome cannot show
@@ -204,29 +202,6 @@ impl Browser {
         self.frame.as_ref()
     }
 
-    /// Where other DevTools clients (e.g. a browser MCP server) can attach,
-    /// when the user opened a port for them.
-    pub fn devtools_url(&self) -> Option<String> {
-        self.running
-            .as_ref()
-            .and_then(|running| running.devtools.clone())
-    }
-
-    pub fn devtools_port_enabled(&self) -> bool {
-        self.store.setting::<bool>(&port_key(self.project_id))
-    }
-
-    /// Opens or closes the DevTools port (restarting Chrome). Off by default:
-    /// any local process could drive the browser through it.
-    pub fn set_devtools_port(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        let _ = self.store.set_setting(&port_key(self.project_id), &enabled);
-        let was_running = self.running.is_some() || self.starting.is_some();
-        self.stop(cx);
-        if was_running {
-            self.ensure_started(cx);
-        }
-    }
-
     pub fn dialog(&self) -> Option<&Dialog> {
         self.dialog.as_ref()
     }
@@ -316,12 +291,11 @@ impl Browser {
         self.status = BrowserStatus::Starting;
         cx.notify();
         let profile = chrome::profile_dir(self.project_id);
-        let open_port = self.devtools_port_enabled();
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let launched = cx
                 .background_spawn(async move {
-                    let mut chrome = Chrome::launch(&binary, &profile, open_port)?;
+                    let mut chrome = Chrome::launch(&binary, &profile)?;
                     let (reader, writer) = (chrome.reader.take(), chrome.writer.take());
                     let (browser, events) = Cdp::connect(
                         reader.context("Chrome pipe")?,
@@ -344,7 +318,6 @@ impl Browser {
                                 browser,
                                 cdp: cdp.clone(),
                                 target_id,
-                                devtools: None,
                             };
                             this.started(running, events, cx);
                             Ok(cdp)
@@ -376,11 +349,10 @@ impl Browser {
 
     fn started(
         &mut self,
-        mut running: Running,
+        running: Running,
         events: smol::channel::Receiver<CdpEvent>,
         cx: &mut Context<Self>,
     ) {
-        running.devtools = running._chrome.devtools.clone();
         let cdp = running.cdp.clone();
         self.running = Some(running);
         self.starting = None;
@@ -1201,10 +1173,6 @@ fn page_summary(this: &WeakEntity<Browser>, cx: &mut AsyncApp) -> Result<Value> 
 
 fn url_key(project_id: i64) -> String {
     format!("browser.{project_id}.url")
-}
-
-fn port_key(project_id: i64) -> String {
-    format!("browser.{project_id}.devtools_port")
 }
 
 /// The page a browser opens with when it has been nowhere yet.

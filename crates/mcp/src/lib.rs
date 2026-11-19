@@ -96,7 +96,18 @@ impl Session {
         // Notifications (no id) never get a response.
         let id = id?;
         let result = match method {
-            "initialize" => protocol::initialize_result(&params),
+            "initialize" => {
+                // Which browser the user prefers, for the instructions. Not
+                // answered (the app is still starting): the default holds.
+                let answer = self
+                    .client()
+                    .ok()
+                    .and_then(|client| client.call("browser.preference", json!({})).ok());
+                if answer.is_none() {
+                    self.client = None;
+                }
+                protocol::initialize_result(&params, protocol::Browsers::of(answer.as_ref()))
+            }
             "ping" => json!({}),
             "tools/list" => json!({ "tools": tools::definitions() }),
             "tools/call" => self.call_tool(&params),

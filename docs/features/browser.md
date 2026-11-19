@@ -21,13 +21,13 @@ Chrome's sync, component updates, metrics and other Google services are switched
 - **Address bar** with back, forward and reload. `localhost:3000`, `:5173` and `127.0.0.1:8080` work.
 - **Live tools** (the floating toolbar): annotate, pick an element, capture, record, before/after. See [live-panes.md](live-panes.md).
 - **Console and Network** drawer, with error counts on the tabs, **Errors only**, and **Send to chat**.
-- **⋯ menu**: **Allow other DevTools clients** opens a localhost port (off by default; any local process could use it) and then **Copy DevTools address**, so another client such as a browser MCP server can attach to the same browser. Also stop or start the browser.
+- **⋯ menu**: stop or start the browser, and *Let agents use your Chrome* (Settings → Chrome extension). (It could open a DevTools port for another client before 0.7, with an address to copy. Agents never needed it: they drive this browser through PilotHouse's own tools, over a private pipe. The address was one for tools and opened to nothing in a browser, and an open port lets any local process drive a signed-in browser. No port is opened now.)
 
 ## Agent tools
 
 Given to every agent through the PilotHouse MCP server. Agents use the same browser the user sees: the first time an agent (or a UI test run) acts in a workspace's built-in browser since PilotHouse started, the Browser tab comes to the front of that workspace's tools (not when you switched the Browser off in Settings → Features; while no window shows the workspace, the next use tries again), so you see that a test in the browser is going on (`BrowserHub::on_agent_use`).
 
-Which browser first: with the Chrome extension connected (the brand's `chrome_extension` feature on), the server's instructions and the tools' descriptions tell agents to use the `chrome_*` tools for any page, `localhost` included, and the built-in `browser_*` tools only when the extension is not connected.
+Which browser first: the user's choice, **Settings → Agents → Preferred browser** (`preference.rs`, the setting `browser.preferred`): *Chrome (PilotHouse Chrome)*, their own Chrome through the extension (the default), or the *Built-in browser*. Agents have both families of tools either way; the preference decides which they reach for. The bridge asks the app as a chat starts (`browser.preference`: the choice, and whether Chrome is connected) and says it once, in the server's instructions (`ph_mcp::protocol::web_pages`): Chrome first; or, with Chrome preferred but not connected, the built-in browser at once, so that no call has to fail to find that out; or the built-in browser first, and Chrome only when the user asks for it or a site needs their sign-ins. And a page asked for in Chrome while Chrome is not connected is not refused: `chrome.open` opens it in the built-in browser and its answer tells the agent to go on with the `browser_*` tools (`preference::FELL_BACK`). So the fallback does not depend on what an agent remembers of its instructions. A build with only one of the two browsers has no such choice.
 
 | Tool | Does |
 |---|---|

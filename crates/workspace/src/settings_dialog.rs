@@ -742,6 +742,50 @@ fn agents_page() -> SettingPage {
                 .keywords(["agent", "install", "sign in", spec.name, spec.id])
             })),
         )
+        .groups(web_pages_group())
+}
+
+/// Settings → Agents → Web pages: which browser agents open pages in first
+/// (see [`ph_browser::preference`]). Only in a build with both browsers:
+/// with one, there is nothing to choose.
+fn web_pages_group() -> Option<SettingGroup> {
+    use ph_brand::{Feature, enabled};
+    use ph_browser::preference::{self, Preferred};
+    if !(enabled(Feature::ChromeExtension) && enabled(Feature::Browser)) {
+        return None;
+    }
+    Some(
+        SettingGroup::new().title("Web pages").item(
+            SettingItem::new(
+                "Preferred browser",
+                SettingField::dropdown(
+                    Preferred::ALL
+                        .iter()
+                        .map(|browser| (browser.label().into(), browser.label().into()))
+                        .collect(),
+                    |cx| preference::preferred(AppState::store(cx)).label().into(),
+                    |picked, cx| {
+                        let Some(browser) = Preferred::ALL
+                            .into_iter()
+                            .find(|browser| browser.label() == picked.as_ref())
+                        else {
+                            return;
+                        };
+                        if let Err(err) = preference::set_preferred(AppState::store(cx), browser)
+                        {
+                            tracing::warn!("saving the preferred browser failed: {err:#}");
+                        }
+                    },
+                ),
+            )
+            .description(
+                "Where agents open web pages first. Chrome is your own, with your sign-ins, through the PilotHouse extension; when it is not connected, agents use the built-in browser.",
+            )
+            .keywords([
+                "browser", "chrome", "built-in", "inbuilt", "preferred", "default", "web", "extension",
+            ]),
+        ),
+    )
 }
 
 fn chat_page() -> SettingPage {

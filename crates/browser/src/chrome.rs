@@ -8,8 +8,9 @@
 //! not a TCP port: a DevTools port on localhost could be used by any process
 //! of any user on the machine to drive the logged-in browser and read its
 //! cookies. The pipe also ends Chrome when PilotHouse exits, even on a crash.
-//! A port is opened only when the user asks for one (for another DevTools
-//! client), see [`Chrome::launch`].
+//! No port is opened at all. (The pane's menu could open one for another
+//! DevTools client before 0.7; agents never needed it, and its address
+//! opened to nothing in a browser.)
 //!
 //! Any Chromium-family browser works. With none installed, the pane asks
 //! the user to choose one ([`resolve_choice`]) or links to Chrome's download
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 
 /// macOS app bundles, checked in order.
 const MAC_APPS: &[&str] = &[
@@ -127,8 +128,6 @@ pub struct Chrome {
     pub reader: Option<std::io::PipeReader>,
     /// Our messages to Chrome.
     pub writer: Option<std::io::PipeWriter>,
-    /// `http://127.0.0.1:<port>` when a port was asked for.
-    pub devtools: Option<String>,
 }
 
 impl Drop for Chrome {
@@ -139,14 +138,10 @@ impl Drop for Chrome {
 }
 
 impl Chrome {
-    /// Starts headless Chrome on `profile`. With `open_port`, Chrome also
-    /// listens on a random localhost port so other DevTools clients can
-    /// attach.
-    pub fn launch(binary: &Path, profile: &Path, open_port: bool) -> Result<Self> {
+    /// Starts headless Chrome on `profile`, reachable over its pipe alone.
+    pub fn launch(binary: &Path, profile: &Path) -> Result<Self> {
         ph_store::paths::ensure_private_dir(profile)?;
         stop_leftover(profile);
-        let port_file = profile.join("DevToolsActivePort");
-        let _ = std::fs::remove_file(&port_file);
 
         let (chrome_reads, writer) = std::io::pipe()?;
         let (reader, chrome_writes) = std::io::pipe()?;
@@ -180,9 +175,6 @@ impl Chrome {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if open_port {
-            command.arg("--remote-debugging-port=0");
-        }
         command.arg("about:blank");
         give_pipe(&mut command, &chrome_reads, &chrome_writes)?;
         let child = command
@@ -191,16 +183,11 @@ impl Chrome {
         // Chrome holds its ends now; ours must close so EOF reaches the reader.
         drop((chrome_reads, chrome_writes));
 
-        let mut chrome = Self {
+        Ok(Self {
             child,
             reader: Some(reader),
             writer: Some(writer),
-            devtools: None,
-        };
-        if open_port {
-            chrome.devtools = Some(wait_for_port(&port_file)?);
-        }
-        Ok(chrome)
+        })
     }
 }
 
@@ -264,27 +251,6 @@ fn give_pipe(
         writes.as_raw_handle() as usize
     ));
     Ok(())
-}
-
-/// Chrome writes its debugging port on the first line of this file.
-fn wait_for_port(port_file: &Path) -> Result<String> {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Ok(text) = std::fs::read_to_string(port_file)
-            && let Ok(port) = text
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .parse::<u16>()
-        {
-            return Ok(format!("http://127.0.0.1:{port}"));
-        }
-        if Instant::now() > deadline {
-            bail!("Chrome did not open its DevTools port within 15 seconds");
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
 }
 
 /// Stops a Chrome still holding this profile (one from an older PilotHouse

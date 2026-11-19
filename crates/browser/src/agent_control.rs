@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
-use gpui_kit::{App, Context, Task};
+use gpui_kit::{App, AppContext as _, Context, Task};
 use ph_control::ControlServer;
 use serde_json::Value;
 
@@ -18,10 +18,36 @@ use crate::agent_chrome::{AgentChrome, Target, Who};
 const MAX_WAIT: Duration = Duration::from_secs(60);
 
 pub fn register(cx: &mut App) {
-    action("chrome.open", cx, |chrome, who, params, cx| {
-        let url = string(&params, "url")?;
-        Ok(chrome.open(&who, &url, params["new_tab"].as_bool().unwrap_or(false), cx))
-    });
+    // A page asked for in Chrome while Chrome is not connected opens in the
+    // built-in browser (where the build has one), and the agent is told to
+    // go on there: it need not fail first and ask again. Every other
+    // `chrome.*` call answers that Chrome is not connected, as before.
+    ControlServer::handle_async(
+        "chrome.open",
+        |params, cx| {
+            let Some(chrome) = AgentChrome::global(cx) else {
+                return Task::ready(Err(anyhow!("agents' Chrome is not set up")));
+            };
+            if !crate::preference::chrome_connected(cx)
+                && ph_brand::enabled(ph_brand::Feature::Browser)
+            {
+                let opened = crate::control::open_in_built_in(&params, cx);
+                return cx.background_spawn(async move {
+                    let mut page = opened.await?;
+                    page["notes"] = serde_json::json!([crate::preference::FELL_BACK]);
+                    Ok(page)
+                });
+            }
+            let who = who(&params);
+            let url = match string(&params, "url") {
+                Ok(url) => url,
+                Err(err) => return Task::ready(Err(err)),
+            };
+            let new_tab = params["new_tab"].as_bool().unwrap_or(false);
+            chrome.update(cx, |chrome, cx| chrome.open(&who, &url, new_tab, cx))
+        },
+        cx,
+    );
     action("chrome.history", cx, |chrome, who, params, cx| {
         Ok(chrome.history(&who, &string(&params, "action")?, cx))
     });
@@ -271,6 +297,12 @@ fn action(name: &'static str, cx: &mut App, body: Action) {
             let Some(chrome) = AgentChrome::global(cx) else {
                 return Task::ready(Err(anyhow!("agents' Chrome is not set up")));
             };
+            // Said before anything else: without it an agent whose page
+            // opened in the built-in browser was told it had "no page open
+            // in Chrome yet" and to open one, which led it round in a ring.
+            if !crate::preference::chrome_connected(cx) {
+                return Task::ready(Err(crate::extension::not_connected()));
+            }
             let who = who(&params);
             match chrome.update(cx, |chrome, cx| body(chrome, who, params, cx)) {
                 Ok(task) => task,
