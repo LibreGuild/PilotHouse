@@ -2257,36 +2257,6 @@ impl Workspace {
     }
 }
 
-/// The gradient or image behind the frame, under the frame's veil.
-fn backdrop_layer(cx: &gpui_kit::App) -> Option<gpui_kit::AnyElement> {
-    use gpui_kit::StyledImage as _;
-    use ph_theme::preferences::BackdropPaint;
-    let backdrop = ph_theme::preferences::backdrop(cx)?;
-    let layer = || div().absolute().top_0().left_0().size_full();
-    let picture = match &backdrop.paint {
-        BackdropPaint::Gradient { from, to } => layer()
-            .bg(gpui_kit::linear_gradient(
-                135.,
-                gpui_kit::linear_color_stop(*from, 0.),
-                gpui_kit::linear_color_stop(*to, 1.),
-            ))
-            .into_any_element(),
-        BackdropPaint::Image(path) => layer()
-            .child(
-                gpui_kit::img(path.clone())
-                    .size_full()
-                    .object_fit(gpui_kit::ObjectFit::Cover),
-            )
-            .into_any_element(),
-    };
-    Some(
-        layer()
-            .child(picture)
-            .child(layer().bg(backdrop.veil))
-            .into_any_element(),
-    )
-}
-
 /// The light (or dark) version of the theme in use: its partner, else
 /// Modern Light (or Modern Dark).
 fn switch_mode(dark: bool, cx: &mut gpui_kit::App) {
@@ -2527,7 +2497,6 @@ impl Render for Workspace {
             // A gradient or picture behind the frame, when the user chose
             // one, then the frame's own light: first, so everything is
             // drawn over them.
-            .children(backdrop_layer(cx))
             .children(crate::frame::layers(self, cx))
             .child(
                 TitleBar::new()

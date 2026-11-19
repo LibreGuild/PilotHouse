@@ -6543,7 +6543,6 @@ version = "0.6.4"
 dependencies = [
  "anyhow",
  "gpui-kit",
- "image",
  "ph-brand",
  "serde",
  "serde_json",

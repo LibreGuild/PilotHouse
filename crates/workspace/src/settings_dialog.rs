@@ -15,9 +15,7 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use ph_theme::preferences::{self, installed_fonts};
-use ph_theme::{
-    Accent, Appearance, ChatWidth, Corners, Density, Gradient, Preferences, WindowStyle,
-};
+use ph_theme::{Accent, Appearance, ChatWidth, Corners, Density, Preferences};
 use ph_ui::Icons;
 
 use crate::app_state::AppState;
@@ -92,7 +90,7 @@ pub(crate) fn open(
         let (fonts, themes, workspace) = (fonts.clone(), themes.clone(), workspace.clone());
         // Opaque, also when the window lets something show through: a
         // dialog over the window must not.
-        let frame_color = ph_theme::preferences::opaque_frame(cx);
+        let frame_color = cx.theme().sidebar;
         let theme = cx.theme();
         let sidebar = gpui_kit::StyleRefinement {
             background: Some(frame_color.into()),
@@ -151,12 +149,7 @@ pub(crate) fn open(
                                     .pages(
                                         // In this order: see `Page::index`.
                                         [
-                                            Some(appearance_page(
-                                                &fonts,
-                                                &themes,
-                                                workspace,
-                                                prefs(cx).window,
-                                            )),
+                                            Some(appearance_page(&fonts, &themes, workspace)),
                                             Some(editor_page(&fonts)),
                                             Some(terminal_page()),
                                             Some(chat_page()),
@@ -341,7 +334,6 @@ fn appearance_page(
     fonts: &[(SharedString, SharedString)],
     themes: &[(SharedString, SharedString)],
     workspace: gpui_kit::WeakEntity<crate::Workspace>,
-    style: WindowStyle,
 ) -> SettingPage {
     // The system's own font is not among the installed families on macOS
     // (its name is hidden there), so it gets a row of its own.
@@ -350,94 +342,6 @@ fn appearance_page(
         Some((ph_theme::fonts::SYSTEM_INTERFACE, "System font")),
         fonts,
     );
-    // What shows behind the window, and under it the picture's own row.
-    let mut window_group = SettingGroup::new().title("Window").item(
-        SettingItem::new(
-            "Background",
-            SettingField::dropdown(
-                WindowStyle::available()
-                    .into_iter()
-                    .map(|style| (style.label().into(), style.label().into()))
-                    .collect(),
-                |cx| prefs(cx).window.label().into(),
-                |picked, cx| {
-                    let Some(style) = WindowStyle::available()
-                        .into_iter()
-                        .find(|style| style.label() == picked.as_ref())
-                    else {
-                        return;
-                    };
-                    // An image needs one: ask for it first.
-                    if style == WindowStyle::Image && prefs(cx).backdrop_image.is_empty() {
-                        crate::theme_mods::choose_backdrop(cx);
-                    } else {
-                        AppState::update_preferences(cx, |p| p.window = style);
-                    }
-                },
-            ),
-        )
-        .description(if cfg!(windows) {
-            "Translucent lets the desktop show through, blurred; Mica uses Windows 11's material. Gradient and Image show behind the frame, the panels stay easy to read."
-        } else {
-            "Translucent lets the desktop show through, blurred. Gradient and Image show behind the frame, the panels stay easy to read."
-        })
-        .keywords(["transparency", "opacity", "blur", "vibrancy", "mica", "gradient", "image", "wallpaper", "backdrop"]),
-    );
-    match style {
-        WindowStyle::Gradient => {
-            window_group = window_group.item(
-                SettingItem::new(
-                    "Gradient",
-                    choice(
-                        &Gradient::ALL,
-                        Gradient::label,
-                        |p| p.gradient,
-                        |p, v| p.gradient = v,
-                    ),
-                )
-                .description(
-                    "Its colors follow the theme: deep on a dark one, soft on a light one.",
-                )
-                .keywords(["gradient", "backdrop", "colors"]),
-            );
-        }
-        WindowStyle::Image => {
-            window_group = window_group.item(
-                SettingItem::new(
-                    "Image",
-                    SettingField::render(|_, _, _| {
-                        Button::new("choose-backdrop")
-                            .small()
-                            .icon(IconName::FolderOpen)
-                            .label("Choose image")
-                            .on_click(|_, _, cx| crate::theme_mods::choose_backdrop(cx))
-                    }),
-                )
-                .description(format!(
-                    "PNG, JPEG, WebP, GIF or BMP. {} keeps its own copy, sized for a screen.",
-                    ph_brand::NAME
-                ))
-                .keywords(["image", "wallpaper", "picture", "backdrop"]),
-            );
-        }
-        _ => {}
-    }
-    if style != WindowStyle::Solid {
-        window_group = window_group.item(
-            SettingItem::new(
-                "Panel opacity (%)",
-                number(
-                    55.0,
-                    100.0,
-                    5.0,
-                    |p| (p.opacity * 100.0).round() as f64,
-                    |p, v| p.opacity = (v / 100.0) as f32,
-                ),
-            )
-            .description("How solid the panels are over what shows behind them.")
-            .keywords(["transparency", "alpha"]),
-        );
-    }
     SettingPage::new("Appearance")
         .icon(Icon::new(Icons::Palette))
         .default_open(true)
@@ -544,7 +448,6 @@ fn appearance_page(
                         .description("How rounded panels, buttons and cards are."),
                 ),
         )
-        .group(window_group)
         .group(
             SettingGroup::new()
                 .title("Text")

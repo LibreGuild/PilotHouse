@@ -99,40 +99,6 @@ pub(crate) fn import_vscode_file(cx: &mut App) {
     .detach();
 }
 
-/// Asks for an image to show behind the frame; PilotHouse's own copy
-/// (made to fit a screen, off the UI thread) is what shows.
-pub(crate) fn choose_backdrop(cx: &mut App) {
-    use gpui_kit::component::notification::Notification;
-    let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-        files: true,
-        directories: false,
-        multiple: false,
-        prompt: Some("Use as background".into()),
-    });
-    let dir = ph_store::paths::data_dir().join("backdrops");
-    cx.spawn(async move |cx| {
-        let Ok(Ok(Some(paths))) = paths.await else {
-            return;
-        };
-        let Some(source) = paths.into_iter().next() else {
-            return;
-        };
-        let prepared = cx
-            .background_spawn(async move {
-                ph_theme::preferences::prepare_backdrop_image(&source, &dir)
-            })
-            .await;
-        cx.update(|cx| match prepared {
-            Ok(path) => AppState::update_preferences(cx, |preferences| {
-                preferences.window = ph_theme::WindowStyle::Image;
-                preferences.backdrop_image = path.to_string_lossy().into_owned();
-            }),
-            Err(err) => tell(Notification::warning(format!("{err:#}")), cx),
-        });
-    })
-    .detach();
-}
-
 fn reply(text: impl Into<String>) -> Result<Value> {
     Ok(json!({ "text": text.into() }))
 }

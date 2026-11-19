@@ -20,9 +20,6 @@ pub struct Preferences {
     pub code_font_size: f32,
     pub terminal_font_size: f32,
     pub corners: Corners,
-    pub window: WindowStyle,
-    /// How opaque panels are when the window is translucent (0.55–1.0).
-    pub opacity: f32,
     pub editor: EditorPreferences,
     /// Which palette dark mode used before themes had names: read once,
     /// to keep an old "Dark" choice looking the same.
@@ -35,11 +32,6 @@ pub struct Preferences {
     pub accent: Accent,
     /// How much room rows and spacing take.
     pub density: Density,
-    /// The gradient behind the frame ([`WindowStyle::Gradient`]).
-    pub gradient: Gradient,
-    /// The image behind the frame ([`WindowStyle::Image`]): PilotHouse's
-    /// own copy, made to fit a screen.
-    pub backdrop_image: String,
     /// Which default sizes these preferences were saved with (missing in
     /// ones saved before; see [`Preferences::migrate_sizes`]).
     #[serde(default)]
@@ -86,16 +78,12 @@ impl Default for Preferences {
             code_font_size: code_size,
             terminal_font_size: code_size,
             corners: Corners::Rounded,
-            window: WindowStyle::Solid,
-            opacity: 0.86,
             editor: EditorPreferences::default(),
             dark_theme: DarkTheme::default(),
             chat_width: ChatWidth::Comfortable,
             tool_labels: false,
             accent: Accent::Theme,
             density: Density::Comfortable,
-            gradient: Gradient::Dusk,
-            backdrop_image: String::new(),
             sizes_version: SIZES_VERSION,
             other: serde_json::Map::new(),
         }
@@ -257,42 +245,6 @@ impl Corners {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WindowStyle {
-    Solid,
-    /// See-through panels over a blurred desktop.
-    Translucent,
-    /// Windows 11's Mica material.
-    Mica,
-    /// A gradient behind the frame ([`Preferences::gradient`]).
-    Gradient,
-    /// An image behind the frame ([`Preferences::backdrop_image`]).
-    Image,
-}
-
-impl WindowStyle {
-    /// The styles this platform can show.
-    pub fn available() -> Vec<WindowStyle> {
-        let mut styles = vec![WindowStyle::Solid, WindowStyle::Translucent];
-        if cfg!(windows) {
-            styles.push(WindowStyle::Mica);
-        }
-        styles.extend([WindowStyle::Gradient, WindowStyle::Image]);
-        styles
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            WindowStyle::Solid => "Solid",
-            WindowStyle::Translucent => "Translucent",
-            WindowStyle::Mica => "Mica",
-            WindowStyle::Gradient => "Gradient",
-            WindowStyle::Image => "Image",
-        }
-    }
-}
-
 /// The accent: the theme's own, or one of these over it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -402,55 +354,6 @@ pub fn dense(rems: f32, cx: &App) -> gpui_kit::Rems {
     gpui_kit::rems(rems * density(cx))
 }
 
-/// A gradient behind the frame: deep on a dark theme, soft on a light one.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Gradient {
-    #[default]
-    Dusk,
-    Ocean,
-    Aurora,
-    Ember,
-    Graphite,
-}
-
-impl Gradient {
-    pub const ALL: [Gradient; 5] = [
-        Gradient::Dusk,
-        Gradient::Ocean,
-        Gradient::Aurora,
-        Gradient::Ember,
-        Gradient::Graphite,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Gradient::Dusk => "Dusk",
-            Gradient::Ocean => "Ocean",
-            Gradient::Aurora => "Aurora",
-            Gradient::Ember => "Ember",
-            Gradient::Graphite => "Graphite",
-        }
-    }
-
-    /// Its two colors, from the top left to the bottom right.
-    pub fn colors(self, dark: bool) -> (Hsla, Hsla) {
-        let (from, to) = match (self, dark) {
-            (Gradient::Dusk, true) => (0x1e1b4b, 0x701a75),
-            (Gradient::Dusk, false) => (0xe0e7ff, 0xfae8ff),
-            (Gradient::Ocean, true) => (0x0c1e3a, 0x0f4c5c),
-            (Gradient::Ocean, false) => (0xdbeafe, 0xccfbf1),
-            (Gradient::Aurora, true) => (0x064e3b, 0x4c1d95),
-            (Gradient::Aurora, false) => (0xd1fae5, 0xede9fe),
-            (Gradient::Ember, true) => (0x431407, 0x831843),
-            (Gradient::Ember, false) => (0xffedd5, 0xffe4e6),
-            (Gradient::Graphite, true) => (0x111827, 0x374151),
-            (Gradient::Graphite, false) => (0xf3f4f6, 0xd1d5db),
-        };
-        (rgb(from).into(), rgb(to).into())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatWidth {
@@ -555,19 +458,8 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
     let preferences = preferences(cx);
     let (ui_font, code_font) = effective_fonts(&preferences, cx);
     let (radius, radius_lg) = preferences.corners.radius();
-    // An image style without an image is solid.
-    let style = match preferences.window {
-        WindowStyle::Image if preferences.backdrop_image.is_empty() => WindowStyle::Solid,
-        style => style,
-    };
-    let painted = matches!(style, WindowStyle::Gradient | WindowStyle::Image);
-    let translucent = style != WindowStyle::Solid;
-    let alpha = preferences.opacity.clamp(0.55, 1.0);
-    let mut frame = None;
-    // From the theme's own colors every time: the edits below scale
-    // alphas, and on top of an earlier pass they would compound (more
-    // transparent with each change, never solid again). A pass of its own,
-    // so the edits below register as changes and reach the theme's tokens.
+    // From the theme's own colors every time, in a pass of its own, so the
+    // edits below register as changes and reach the theme's tokens.
     // The theme shown is the selected one, or the preview of one being
     // designed.
     let config = crate::themes::current(cx);
@@ -587,72 +479,13 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
         if let Some(accent) = preferences.accent.color(dark) {
             apply_accent(colors, accent, dark);
         }
-        frame = Some((colors.sidebar, dark));
-        if painted {
-            // A gradient or image shows through the frame (under a veil of
-            // the frame's color, so its text reads); the panels keep the
-            // chosen opacity over it.
-            colors.background = colors.background.opacity(alpha);
-            for color in [
-                &mut colors.sidebar,
-                &mut colors.title_bar,
-                &mut colors.status_bar,
-                &mut colors.tab_bar,
-                &mut colors.list,
-            ] {
-                *color = color.opacity(0.);
-            }
-        } else if translucent {
-            // The desktop shows through. The window paints `background`
-            // once under everything, and the panels (surfaces) paint it again
-            // on top, so each layer gets the alpha that makes a panel come
-            // out at `alpha` overall: the chrome around them (sidebar, title
-            // and status bars) is the base layer alone, the clearest part.
-            // The chrome's own fills turn transparent, so nothing stacks
-            // further and the slider's whole range shows.
-            let layer = 1. - (1. - alpha).sqrt();
-            colors.background = colors.background.opacity(layer);
-            for color in [
-                &mut colors.sidebar,
-                &mut colors.title_bar,
-                &mut colors.status_bar,
-                &mut colors.tab_bar,
-                &mut colors.list,
-            ] {
-                *color = color.opacity(0.);
-            }
-        }
     });
-    let backdrop = match (style, frame) {
-        (WindowStyle::Gradient, Some((frame, dark))) => {
-            let (from, to) = preferences.gradient.colors(dark);
-            Some(Backdrop {
-                paint: BackdropPaint::Gradient { from, to },
-                veil: frame.opacity(if dark { 0.55 } else { 0.5 }),
-            })
-        }
-        // A picture is busier than a gradient: a thicker veil keeps the
-        // frame's text readable over it.
-        (WindowStyle::Image, Some((frame, dark))) => Some(Backdrop {
-            paint: BackdropPaint::Image(
-                std::path::PathBuf::from(&preferences.backdrop_image).into(),
-            ),
-            veil: frame.opacity(if dark { 0.72 } else { 0.66 }),
-        }),
-        _ => None,
-    };
-    cx.set_global(CurrentBackdrop(backdrop));
-    if let Some((frame, _)) = frame {
-        cx.set_global(OpaqueFrame(frame));
-    }
+    // The window is opaque. (It could be see-through, Mica, or show a
+    // gradient or picture behind the frame before 0.7: five looks to keep
+    // readable in every theme, for a setting few changed. Old values of
+    // those settings are kept unread in `Preferences::other`.)
     if let Some(window) = window {
-        window.set_background_appearance(match style {
-            WindowStyle::Solid | WindowStyle::Gradient | WindowStyle::Image => {
-                WindowBackgroundAppearance::Opaque
-            }
-            WindowStyle::Translucent => WindowBackgroundAppearance::Blurred,
-            WindowStyle::Mica => WindowBackgroundAppearance::MicaBackdrop,
-        });
+        window.set_background_appearance(WindowBackgroundAppearance::Opaque);
     }
 }
 
@@ -706,101 +539,6 @@ fn apply_accent(colors: &mut gpui_kit::component::ThemeColor, accent: Hsla, dark
         colors.sidebar_primary = accent;
         colors.sidebar_primary_foreground = on_accent;
     }
-}
-
-/// What is painted behind the frame, under its veil.
-#[derive(Clone)]
-pub enum BackdropPaint {
-    Gradient { from: Hsla, to: Hsla },
-    Image(std::sync::Arc<std::path::Path>),
-}
-
-#[derive(Clone)]
-pub struct Backdrop {
-    pub paint: BackdropPaint,
-    /// The frame's own color, see-through: over the picture so the frame's
-    /// text reads.
-    pub veil: Hsla,
-}
-
-#[derive(Default)]
-struct CurrentBackdrop(Option<Backdrop>);
-
-impl Global for CurrentBackdrop {}
-
-/// The theme's frame color as the theme has it: opaque even when the frame
-/// lets the desktop or a picture through.
-struct OpaqueFrame(Hsla);
-
-impl Global for OpaqueFrame {}
-
-/// The frame's color, always opaque: for what sits over the window on its
-/// own (dialogs drawn like the frame).
-pub fn opaque_frame(cx: &App) -> Hsla {
-    cx.try_global::<OpaqueFrame>().map_or_else(
-        || gpui_kit::component::ActiveTheme::theme(cx).sidebar,
-        |frame| frame.0,
-    )
-}
-
-/// The largest backdrop kept: a screen's worth, so a camera photo costs a
-/// screen's memory, not its own.
-const BACKDROP_MAX: (u32, u32) = (2560, 1600);
-
-/// Makes PilotHouse's copy of an image for behind the frame, in `dir`:
-/// scaled to fit a screen, saved as JPEG; earlier copies go. Slow on a big
-/// photo: run it off the UI thread.
-pub fn prepare_backdrop_image(
-    source: &std::path::Path,
-    dir: &std::path::Path,
-) -> anyhow::Result<std::path::PathBuf> {
-    use anyhow::Context as _;
-    let image = image::ImageReader::open(source)
-        .with_context(|| format!("opening {}", source.display()))?
-        .with_guessed_format()?
-        .decode()
-        .with_context(|| {
-            format!(
-                "{} is not an image {} can read (PNG, JPEG, WebP, GIF, BMP)",
-                source.display(),
-                ph_brand::NAME
-            )
-        })?;
-    let (width, height) = BACKDROP_MAX;
-    let image = if image.width() > width || image.height() > height {
-        image.resize(width, height, image::imageops::FilterType::Triangle)
-    } else {
-        image
-    };
-    std::fs::create_dir_all(dir)?;
-    // A new name each time: the old one may still be shown (and cached).
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_millis())
-        .unwrap_or_default();
-    let target = dir.join(format!("backdrop-{stamp}.jpg"));
-    image
-        .to_rgb8()
-        .save_with_format(&target, image::ImageFormat::Jpeg)
-        .with_context(|| format!("writing {}", target.display()))?;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path != target
-                && path
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("backdrop-"))
-            {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
-    Ok(target)
-}
-
-/// The gradient or image behind the frame, if the user chose one.
-pub fn backdrop(cx: &App) -> Option<&Backdrop> {
-    cx.try_global::<CurrentBackdrop>()?.0.as_ref()
 }
 
 #[cfg(test)]
@@ -861,34 +599,6 @@ mod tests {
     }
 
     #[test]
-    fn a_backdrop_image_is_kept_at_a_screen_size() {
-        let dir = std::env::temp_dir().join(format!("ph-backdrop-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let source = dir.join("photo.png");
-        image::RgbImage::from_pixel(4000, 3000, image::Rgb([30, 60, 90]))
-            .save(&source)
-            .unwrap();
-        let backdrops = dir.join("backdrops");
-        let first = prepare_backdrop_image(&source, &backdrops).unwrap();
-        let (width, height) = image::image_dimensions(&first).unwrap();
-        assert!(
-            width <= BACKDROP_MAX.0 && height <= BACKDROP_MAX.1,
-            "{width}x{height}"
-        );
-        assert!(
-            (width as f32 / height as f32 - 4. / 3.).abs() < 0.01,
-            "the shape is kept"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let second = prepare_backdrop_image(&source, &backdrops).unwrap();
-        assert!(!first.exists() && second.exists(), "the earlier copy goes");
-        std::fs::write(dir.join("notes.txt"), "not an image").unwrap();
-        assert!(prepare_backdrop_image(&dir.join("notes.txt"), &backdrops).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn accents_read_on_both_modes() {
         for accent in Accent::ALL {
             assert_eq!(accent.color(true).is_none(), accent == Accent::Theme);
@@ -899,16 +609,6 @@ mod tests {
             1.0,
             "the default changes nothing"
         );
-        assert_eq!(Preferences::default().window, WindowStyle::Solid);
-    }
-
-    #[test]
-    fn two_layers_make_the_chosen_opacity() {
-        for alpha in [0.55_f32, 0.7, 0.85, 1.0] {
-            let layer = 1. - (1. - alpha).sqrt();
-            let panel = 1. - (1. - layer) * (1. - layer);
-            assert!((panel - alpha).abs() < 1e-5, "{alpha}: {panel}");
-        }
     }
 
     #[test]
@@ -917,6 +617,13 @@ mod tests {
             serde_json::from_str(r#"{"accent":"teal","code_font_size":15}"#).unwrap();
         assert_eq!(partial.code_font_size, 15.0);
         assert_eq!(partial.editor.tab_size, 4);
+        // Saved by a version that had window backgrounds to choose from:
+        // it loads, and what it chose is kept unread.
+        let old: Preferences = serde_json::from_str(
+            r#"{"window":"translucent","opacity":0.7,"gradient":"ocean","backdrop_image":"/tmp/a.jpg"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.other["window"], "translucent");
         assert_eq!(
             first_installed(&["Nope", "Menlo"], &["Menlo".to_string()]),
             "Menlo"
