@@ -69,23 +69,82 @@ impl ChatPanel {
             .into_any_element()
     }
 
-    pub(super) fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let place = self.render_place(cx);
-        let thread = self.active.read(cx);
-        let (dot, label) = match thread.status() {
-            ThreadStatus::Working => (cx.theme().success, "Working"),
-            ThreadStatus::Connecting => (cx.theme().warning, "Starting"),
-            ThreadStatus::Idle if thread.has_started() => {
-                (cx.theme().success.opacity(0.6), "Ready")
-            }
-            ThreadStatus::Idle => (cx.theme().muted_foreground.opacity(0.5), "Idle"),
-        };
+    /// The row over the chat: which chat this is (a workspace's panel shows
+    /// its open chats as tabs here; any other its place and title), what
+    /// it has used, and what can be done with it.
+    ///
+    /// It was two rows in a workspace (the tabs, then place, title, agent,
+    /// usage and four buttons), which said the title three times with the
+    /// window's own bar and left nothing easy to find. What is used once
+    /// in a while is in one menu now.
+    pub(super) fn render_header(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tabs = self.tabs.clone().and_then(|tabs| tabs(window, cx));
         let side_of = self.side_of().cloned();
+        let thread = self.active.read(cx);
+        let usage =
+            crate::usage_meter::render(thread.usage(), cx).map(IntoElement::into_any_element);
+        let who: Option<AnyElement> =
+            tabs.map(|tabs| div().flex_1().min_w_0().child(tabs).into_any_element());
+        let own = who.is_none().then(|| {
+            let place = self.render_place(cx);
+            let thread = self.active.read(cx);
+            let (dot, label) = match thread.status() {
+                ThreadStatus::Working => (cx.theme().success, "Working"),
+                ThreadStatus::Connecting => (cx.theme().warning, "Starting"),
+                ThreadStatus::Idle if thread.has_started() => {
+                    (cx.theme().success.opacity(0.6), "Ready")
+                }
+                ThreadStatus::Idle => (cx.theme().muted_foreground.opacity(0.5), "Idle"),
+            };
+            // The agent's mark with a dot for its state; the words are in
+            // the tooltip, to keep the header small.
+            let tip = format!("{} · {label}", thread.agent().name);
+            let agent = div()
+                .id("chat-agent-state")
+                .flex_none()
+                .relative()
+                .p_0p5()
+                .aria_label(SharedString::from(tip.clone()))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
+                .child(thread.agent().mark(ph_ui::rems_from_px(16.)))
+                .child(
+                    div()
+                        .absolute()
+                        .right(px(-1.))
+                        .bottom(px(-1.))
+                        .size(ph_ui::rems_from_px(7.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(cx.theme().background)
+                        .bg(dot),
+                );
+            let title = div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                .child(thread.title());
+            (place, title, agent)
+        });
+        let tabbed = who.is_some();
         h_flex()
             .flex_none()
-            .h_11()
-            .px_4()
-            .gap_3()
+            .h_10()
+            .map(|this| {
+                if tabbed {
+                    this.pl_2().pr_3()
+                } else {
+                    this.px_4()
+                }
+            })
+            .gap_2()
             .border_b_1()
             .border_color(cx.theme().border)
             .when_some(side_of, |this, parent| {
@@ -102,92 +161,57 @@ impl ChatPanel {
                         })),
                 )
             })
-            .child(place)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .font_weight(gpui_kit::FontWeight::MEDIUM)
-                    .child(thread.title()),
-            )
-            // The agent's mark with a dot for its state; the words are in the
-            // tooltip, to keep the header small.
-            .child({
-                let tip = format!("{} · {label}", thread.agent().name);
-                div()
-                    .id("chat-agent-state")
-                    .flex_none()
-                    .relative()
-                    .p_0p5()
-                    .aria_label(SharedString::from(tip.clone()))
-                    .tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                    })
-                    .child(thread.agent().mark(ph_ui::rems_from_px(16.)))
-                    .child(
-                        div()
-                            .absolute()
-                            .right(px(-1.))
-                            .bottom(px(-1.))
-                            .size(ph_ui::rems_from_px(7.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(cx.theme().background)
-                            .bg(dot),
-                    )
+            .children(who)
+            .when_some(own, |this, (place, title, agent)| {
+                this.child(place).child(title).child(agent)
             })
-            .children(crate::usage_meter::render(thread.usage(), cx))
-            .child(self.render_view_mode(cx))
-            .when(
-                thread.has_started() && *thread.status() == ThreadStatus::Idle,
-                |this| this.child(self.render_hand_off(cx)),
-            )
+            .children(usage)
+            .child(self.render_more(cx))
             .when(self.history_menu, |this| {
                 this.child(self.render_history(cx))
             })
     }
 
-    /// How much of the agents' work every chat shows.
-    pub(super) fn render_view_mode(&self, cx: &App) -> impl IntoElement {
+    /// What is done with a chat once in a while, in one menu: how much of
+    /// the agent's work to show, making the chat shorter, and going on
+    /// with another agent.
+    fn render_more(&self, cx: &mut Context<Self>) -> impl IntoElement {
         use crate::view_mode::ViewMode;
-        let current = ViewMode::current(cx);
+        let thread = self.active.read(cx);
+        let current_mode = ViewMode::current(cx);
+        let current_agent = thread.agent().id;
+        // Only a chat that has started and is at rest can be made shorter
+        // or handed on.
+        let rested = thread.has_started() && *thread.status() == ThreadStatus::Idle;
         let store = self.store.clone();
-        Button::new("chat-view-mode")
-            .ghost()
-            .xsmall()
-            .icon(Icons::Layers)
-            .tooltip("How much of the agent's work to show")
-            .accessibility_label("View mode")
-            .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-                ViewMode::ALL.into_iter().fold(menu, |menu, mode| {
-                    let store = store.clone();
-                    menu.item(
-                        PopupMenuItem::new(mode.label())
-                            .checked(mode == current)
-                            .on_click(move |_, window, cx| {
-                                mode.choose(&store, cx);
-                                window.refresh();
-                            }),
-                    )
-                })
-            })
-    }
-
-    /// "Continue with": the chat goes on with another agent.
-    pub(super) fn render_hand_off(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = self.active.read(cx).agent().id;
         let panel = cx.weak_entity();
-        Button::new("chat-hand-off")
+        Button::new("chat-more")
             .ghost()
             .xsmall()
-            .icon(Icons::MoveUpRight)
-            .tooltip("Compact this chat, or continue it with another agent")
-            .accessibility_label("Compact or continue with another agent")
+            .icon(IconName::Ellipsis)
+            .tooltip("View, compact, continue with another agent")
+            .accessibility_label("Chat menu")
             .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                let menu = ViewMode::ALL.into_iter().fold(
+                    menu.label("How much of the agent's work to show"),
+                    |menu, mode| {
+                        let store = store.clone();
+                        menu.item(
+                            PopupMenuItem::new(mode.label())
+                                .checked(mode == current_mode)
+                                .on_click(move |_, window, cx| {
+                                    mode.choose(&store, cx);
+                                    window.refresh();
+                                }),
+                        )
+                    },
+                );
+                if !rested {
+                    return menu;
+                }
                 let compact = panel.clone();
                 let menu = menu
+                    .separator()
                     .item(
                         PopupMenuItem::new("Compact chat")
                             .icon(Icons::FoldVertical)
@@ -199,7 +223,7 @@ impl ChatPanel {
                     .label("Continue with");
                 agents::AGENTS
                     .iter()
-                    .filter(|agent| agent.id != current)
+                    .filter(|agent| agent.id != current_agent)
                     .fold(menu, |menu, agent| {
                         let panel = panel.clone();
                         menu.item(
@@ -1301,7 +1325,7 @@ impl Render for ChatPanel {
                     this.drop_external(paths, window, cx)
                 }),
             )
-            .child(self.render_header(cx))
+            .child(self.render_header(window, cx))
             // Clipped: in a short pane the empty chat's welcome is taller
             // than the room and would draw over the header.
             .child(

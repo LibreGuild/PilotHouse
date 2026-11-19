@@ -6,17 +6,17 @@
 use super::*;
 
 impl WorkspaceScreen {
-    /// The chat, under the tabs of the workspace's open chats and what
-    /// finished while the workspace was away.
+    /// The chat, under what finished while the workspace was away. (Not
+    /// kept from one draw to the next: its header shows the workspace's
+    /// open chats as tabs, whose states change without the panel hearing
+    /// of it.)
     pub(super) fn render_chat(&self, cx: &mut Context<Self>) -> AnyElement {
-        let tabs = self.render_chat_tabs(cx);
-        if tabs.is_none() && self.away.is_none() {
-            return self.chat.clone().cached(filled()).into_any_element();
-        }
+        let Some(away) = &self.away else {
+            return self.chat.clone().into_any_element();
+        };
         v_flex()
             .size_full()
-            .children(tabs)
-            .children(self.away.as_ref().map(|away| self.render_away(away, cx)))
+            .child(self.render_away(away, cx))
             .child(div().flex_1().min_h_0().child(self.chat.clone()))
             .into_any_element()
     }

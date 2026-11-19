@@ -189,9 +189,15 @@ impl WorkspaceScreen {
             .or_else(|| sessions.first().map(|session| session.id));
 
         let store = store.clone();
+        let screen = cx.weak_entity();
         let chat = cx.new(|cx| {
             let mut chat = ChatPanel::new(store.clone(), project.clone(), window, cx);
             chat.set_runs_terminals(true);
+            // Its header shows the workspace's open chats as tabs.
+            chat.set_header_tabs(
+                std::rc::Rc::new(move |window, cx| tabs::render(&screen, window, cx)),
+                cx,
+            );
             let session = active_session
                 .and_then(|id| sessions.iter().find(|session| session.id == id).cloned());
             chat.set_session(session, cx);

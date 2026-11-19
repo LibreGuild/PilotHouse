@@ -55,7 +55,9 @@ pub mod usage_meter;
 pub mod view_mode;
 
 pub use attachments::{Attachment, LiveSources, PullBrief};
-pub use chat_panel::{ChatContext, ChatPanel, ChatPanelEvent, Instructions, Prepare, Starter};
+pub use chat_panel::{
+    ChatContext, ChatPanel, ChatPanelEvent, HeaderTabs, Instructions, Prepare, Starter,
+};
 pub use chats::{
     ChatHub, ChatState, ChatSummary, ChatsActivity, Preparing, WorkspaceChats, WorkspaceChatsEvent,
 };

@@ -251,6 +251,11 @@ pub struct ChatPanel {
     live: Option<LiveSources>,
     /// The header lists past chats (when the window's sidebar is hidden).
     history_menu: bool,
+    /// What the header shows in place of the chat's place and title: the
+    /// tabs of the workspace's open chats, drawn by whoever shows the
+    /// panel there. One row then says which chats there are, which is in
+    /// front and what can be done with it.
+    tabs: Option<HeaderTabs>,
     /// What the panel is for, when not a workspace's plain chat.
     context: Option<ChatContext>,
     /// A closed terminal's chat on screen, instead of `active`.
@@ -285,6 +290,9 @@ pub struct ChatPanel {
     _subscriptions: Vec<Subscription>,
     _active_subscriptions: Vec<Subscription>,
 }
+
+/// Draws the tabs a panel's header shows (see [`ChatPanel::set_header_tabs`]).
+pub type HeaderTabs = std::rc::Rc<dyn Fn(&mut Window, &mut App) -> Option<gpui_kit::AnyElement>>;
 
 impl EventEmitter<ChatPanelEvent> for ChatPanel {}
 
@@ -360,6 +368,7 @@ impl ChatPanel {
             next_title: None,
             live: None,
             history_menu: false,
+            tabs: None,
             terminal_session: None,
             context: None,
             busy: None,
@@ -642,6 +651,13 @@ impl ChatPanel {
     /// A message is being written (or something is attached to the next).
     pub fn has_draft(&self, cx: &App) -> bool {
         !self.composer.read(cx).value().trim().is_empty() || !self.attachments.is_empty()
+    }
+
+    /// Shows `tabs` in the header, in place of the chat's place and title
+    /// (the window names those where the panel is a workspace's chat).
+    pub fn set_header_tabs(&mut self, tabs: HeaderTabs, cx: &mut Context<Self>) {
+        self.tabs = Some(tabs);
+        cx.notify();
     }
 
     /// Offers past chats in the header (the sidebar that lists them is hidden).

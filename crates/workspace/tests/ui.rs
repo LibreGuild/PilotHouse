@@ -726,8 +726,8 @@ fn what_waits_for_a_look_is_put_away_at_once(cx: &mut TestAppContext) {
 }
 
 /// Several chats of one workspace are a click apart: each one still open
-/// has a tab over the chat, and one marked done leaves the row (it is
-/// under *Done* on the Bridge).
+/// has a tab in the chat's header, and one marked done leaves the row (it
+/// is under *Done* on the Bridge).
 #[gpui_kit::test]
 fn open_chats_are_tabs_over_the_chat(cx: &mut TestAppContext) {
     let (window, workspace) = open_workspace(cx);
@@ -790,9 +790,10 @@ fn open_chats_are_tabs_over_the_chat(cx: &mut TestAppContext) {
         let done: Vec<i64> = AppState::store(cx).setting("workspace.sidebar_settled");
         assert_eq!(done, vec![first], "kept as done");
         assert!(
-            window.try_find("chat-tabs").is_none(),
-            "one chat alone has no row of tabs"
+            window.try_find(("chat-tab", first as u64)).is_none(),
+            "it left the row"
         );
+        assert!(window.try_find(("chat-tab", second as u64)).is_some());
     })
     .unwrap();
     assert_eq!(front(cx), Some(second), "the chat in front stays");
