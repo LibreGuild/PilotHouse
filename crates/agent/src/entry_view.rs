@@ -86,15 +86,17 @@ pub fn render_entry(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> 
         } => {
             let user = render_user(ix, text, attachments, cx);
             match checkpoint {
-                // The restore button sits beside the message, shown on hover,
-                // so it takes no room of its own.
-                Some(checkpoint) => h_flex()
+                // The restore button sits under the message, at its side of
+                // the chat (the right), shown on hover. It stood at the
+                // left edge, across the chat from the message it belongs
+                // to, where it read as part of the agent's reply.
+                Some(checkpoint) => v_flex()
                     .id(("user-message", ix))
                     .group("user-message")
                     .items_end()
-                    .gap_1()
+                    .gap_0p5()
+                    .child(div().w_full().child(user))
                     .child(restore_button(thread_entity, ix, checkpoint, text, cx))
-                    .child(div().flex_1().min_w_0().child(user))
                     .into_any_element(),
                 None => user,
             }
@@ -1325,7 +1327,8 @@ pub fn permission_buttons(
         .into_any_element()
 }
 
-/// Under a user message, on hover: put the files back to before it.
+/// Under a user message, at its right, on hover: put the files back to
+/// before it.
 fn restore_button(
     thread: &Entity<ChatThread>,
     ix: usize,

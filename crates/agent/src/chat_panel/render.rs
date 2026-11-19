@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// From this width of the panel (pixels at the default interface size) the
+/// tabs and the chat's own controls share one row.
+const ONE_ROW: f32 = 760.;
+
 impl ChatPanel {
     /// Where the chat's agent works, before its title: a workspace (in its
     /// colour, and the folder when not the main one), a repository, or
@@ -69,107 +73,147 @@ impl ChatPanel {
             .into_any_element()
     }
 
-    /// The row over the chat: which chat this is (a workspace's panel shows
-    /// its open chats as tabs here; any other its place and title), what
-    /// it has used, and what can be done with it.
+    /// The top of the chat. Where the panel is a workspace's chat it is two
+    /// rows, each about one thing: which chats there are (their tabs, with
+    /// past chats and a new one at the end), then the chat in front (its
+    /// agent, title, what it has used, and a menu for what is done with it
+    /// once in a while). Anywhere else (a review's chat, the quick chat) it
+    /// is the second row alone, with the chat's place before its title.
     ///
-    /// It was two rows in a workspace (the tabs, then place, title, agent,
-    /// usage and four buttons), which said the title three times with the
-    /// window's own bar and left nothing easy to find. What is used once
-    /// in a while is in one menu now.
+    /// The two rows had eight small things in the second, and one row had
+    /// no room for the tabs' names in a narrow panel.
     pub(super) fn render_header(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tabs = self.tabs.clone().and_then(|tabs| tabs(window, cx));
+        let tabbed = tabs.is_some();
+        // With the room, the tabs and the rest are one row (the tab in
+        // front says the title); two rows are for a narrow panel, where
+        // one would leave the tabs no room for their names.
+        let (width, probe) = ph_ui::measure::width_of("chat-header-width", window, cx);
+        let wide = tabbed
+            && width.is_some_and(|width| ph_ui::measure::design_px(width, window) >= ONE_ROW);
         let side_of = self.side_of().cloned();
         let thread = self.active.read(cx);
         let usage =
             crate::usage_meter::render(thread.usage(), cx).map(IntoElement::into_any_element);
-        let who: Option<AnyElement> =
-            tabs.map(|tabs| div().flex_1().min_w_0().child(tabs).into_any_element());
-        let own = who.is_none().then(|| {
-            let place = self.render_place(cx);
-            let thread = self.active.read(cx);
-            let (dot, label) = match thread.status() {
-                ThreadStatus::Working => (cx.theme().success, "Working"),
-                ThreadStatus::Connecting => (cx.theme().warning, "Starting"),
-                ThreadStatus::Idle if thread.has_started() => {
-                    (cx.theme().success.opacity(0.6), "Ready")
-                }
-                ThreadStatus::Idle => (cx.theme().muted_foreground.opacity(0.5), "Idle"),
-            };
-            // The agent's mark with a dot for its state; the words are in
-            // the tooltip, to keep the header small.
-            let tip = format!("{} · {label}", thread.agent().name);
-            let agent = div()
-                .id("chat-agent-state")
-                .flex_none()
-                .relative()
-                .p_0p5()
-                .aria_label(SharedString::from(tip.clone()))
-                .tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                })
-                .child(thread.agent().mark(ph_ui::rems_from_px(16.)))
-                .child(
-                    div()
-                        .absolute()
-                        .right(px(-1.))
-                        .bottom(px(-1.))
-                        .size(ph_ui::rems_from_px(7.))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(cx.theme().background)
-                        .bg(dot),
-                );
-            let title = div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_sm()
-                .font_weight(gpui_kit::FontWeight::MEDIUM)
-                .child(thread.title());
-            (place, title, agent)
-        });
-        let tabbed = who.is_some();
-        h_flex()
+        let (dot, label) = match thread.status() {
+            ThreadStatus::Working => (cx.theme().success, "Working"),
+            ThreadStatus::Connecting => (cx.theme().warning, "Starting"),
+            ThreadStatus::Idle if thread.has_started() => {
+                (cx.theme().success.opacity(0.6), "Ready")
+            }
+            ThreadStatus::Idle => (cx.theme().muted_foreground.opacity(0.5), "Idle"),
+        };
+        // The agent's mark with a dot for its state; the words are in the
+        // tooltip, to keep the header small.
+        let tip = format!("{} · {label}", thread.agent().name);
+        let agent = div()
+            .id("chat-agent-state")
             .flex_none()
-            .h_10()
-            .map(|this| {
-                if tabbed {
-                    this.pl_2().pr_3()
-                } else {
-                    this.px_4()
-                }
+            .relative()
+            .p_0p5()
+            .aria_label(SharedString::from(tip.clone()))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
             })
+            .child(thread.agent().mark(ph_ui::rems_from_px(16.)))
+            .child(
+                div()
+                    .absolute()
+                    .right(px(-1.))
+                    .bottom(px(-1.))
+                    .size(ph_ui::rems_from_px(7.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(cx.theme().background)
+                    .bg(dot),
+            );
+        let title = div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_sm()
+            .font_weight(gpui_kit::FontWeight::MEDIUM)
+            .child(thread.title());
+        let back = side_of.map(|parent| {
+            Button::new("side-chat-back")
+                .ghost()
+                .xsmall()
+                .icon(IconName::ArrowLeft)
+                .tooltip(format!("Back to “{}”", parent.title))
+                .accessibility_label("Back to the chat")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.side = None;
+                    cx.emit(ChatPanelEvent::SelectSession(Some(parent.id)));
+                }))
+        });
+        if wide {
+            // One row: which chats, then this chat's agent, what it has
+            // used and its menu, then the chats not among the tabs and a
+            // new one.
+            return v_flex().flex_none().relative().child(probe).child(
+                h_flex()
+                    .flex_none()
+                    .h_10()
+                    .pl_2()
+                    .pr_3()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .children(back)
+                    .children(tabs.map(|tabs| div().flex_1().min_w_0().child(tabs)))
+                    .child(agent)
+                    .children(usage)
+                    .child(self.render_more(cx))
+                    .when(self.history_menu, |this| {
+                        this.child(self.render_history(cx))
+                    }),
+            );
+        }
+        // Which chats: the tabs, and at their end the chats not among
+        // them and a new one.
+        let which = tabs.map(|tabs| {
+            h_flex()
+                .flex_none()
+                .h_9()
+                .pl_2()
+                .pr_3()
+                .gap_2()
+                .child(div().flex_1().min_w_0().child(tabs))
+                .when(self.history_menu, |this| {
+                    this.child(self.render_history(cx))
+                })
+        });
+        let place = (!tabbed).then(|| self.render_place(cx));
+        // This chat.
+        let this_chat = h_flex()
+            .flex_none()
+            .h_9()
+            .px_4()
             .gap_2()
             .border_b_1()
             .border_color(cx.theme().border)
-            .when_some(side_of, |this, parent| {
-                this.child(
-                    Button::new("side-chat-back")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::ArrowLeft)
-                        .tooltip(format!("Back to “{}”", parent.title))
-                        .accessibility_label("Back to the chat")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.side = None;
-                            cx.emit(ChatPanelEvent::SelectSession(Some(parent.id)));
-                        })),
-                )
-            })
-            .children(who)
-            .when_some(own, |this, (place, title, agent)| {
-                this.child(place).child(title).child(agent)
-            })
+            .children(back)
+            // In a workspace the agent's mark leads (the window's bar
+            // names the place); elsewhere the place does, and the mark
+            // follows the title as it did.
+            .when(tabbed, |this| this.child(agent))
+            .children(place)
+            .child(title)
             .children(usage)
             .child(self.render_more(cx))
-            .when(self.history_menu, |this| {
+            .when(!tabbed && self.history_menu, |this| {
                 this.child(self.render_history(cx))
-            })
+            });
+        v_flex()
+            .flex_none()
+            .relative()
+            .child(probe)
+            .children(which)
+            .child(this_chat)
     }
 
     /// What is done with a chat once in a while, in one menu: how much of
@@ -281,7 +325,8 @@ impl ChatPanel {
                             ))
                             .separator();
                         // What each is doing, for those loaded in this run:
-                        // a chat at work is found without opening them all.
+                        // a chat at work is found (and gone to) without
+                        // opening them all.
                         let chats = crate::chats::ChatHub::existing(project_id, cx);
                         sessions.into_iter().take(30).fold(menu, |menu, session| {
                             let panel = panel.clone();
@@ -289,25 +334,18 @@ impl ChatPanel {
                             let state = chats
                                 .as_ref()
                                 .and_then(|chats| chats.read(cx).summary(id, cx))
-                                .and_then(|summary| match summary.state {
-                                    crate::chats::ChatState::NeedsYou => Some("needs you"),
-                                    crate::chats::ChatState::Working => Some("working"),
-                                    crate::chats::ChatState::Failed => Some("stopped"),
-                                    crate::chats::ChatState::Done => Some("finished"),
-                                    crate::chats::ChatState::Idle => None,
-                                });
-                            let label = match state {
-                                Some(state) => format!("{} · {state}", session.title),
-                                None => session.title,
-                            };
+                                .map(|summary| summary.state);
+                            let title = SharedString::from(session.title);
                             menu.item(
-                                PopupMenuItem::new(label)
-                                    .checked(active == Some(id))
-                                    .on_click(move |_, _, cx| {
-                                        _ = panel.update(cx, |_, cx| {
-                                            cx.emit(ChatPanelEvent::SelectSession(Some(id)))
-                                        });
-                                    }),
+                                PopupMenuItem::element(move |_, cx| {
+                                    history_row(state, title.clone(), cx)
+                                })
+                                .checked(active == Some(id))
+                                .on_click(move |_, _, cx| {
+                                    _ = panel.update(cx, |_, cx| {
+                                        cx.emit(ChatPanelEvent::SelectSession(Some(id)))
+                                    });
+                                }),
                             )
                         })
                     }),
@@ -1640,4 +1678,57 @@ fn centered_scroll(id: &'static str) -> gpui_kit::Stateful<gpui_kit::Div> {
         .overflow_y_scroll()
         .px_6()
         .py_6()
+}
+
+/// A chat in the Past chats menu: its title after a mark for what it is
+/// doing (at work, waiting for an answer, stopped on an error, finished and
+/// not looked at). One that is at rest, or not loaded in this run, has no
+/// mark; its title lines up with the others'.
+fn history_row(
+    state: Option<crate::chats::ChatState>,
+    title: SharedString,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    use crate::chats::ChatState;
+    let theme = cx.theme();
+    let dot = |color: gpui_kit::Hsla| {
+        div()
+            .size(ph_ui::rems_from_px(7.))
+            .rounded_full()
+            .bg(color)
+            .into_any_element()
+    };
+    let (mark, about) = match state {
+        Some(ChatState::Working) => (
+            ph_ui::Loader::new().xsmall().into_any_element(),
+            Some("working"),
+        ),
+        Some(ChatState::NeedsYou) => (dot(theme.warning), Some("needs you")),
+        Some(ChatState::Failed) => (dot(theme.danger), Some("stopped")),
+        Some(ChatState::Done) => (dot(theme.success), Some("finished")),
+        Some(ChatState::Idle) | None => (div().into_any_element(), None),
+    };
+    h_flex()
+        .gap_2()
+        .child(
+            h_flex()
+                .flex_none()
+                .w(ph_ui::rems_from_px(14.))
+                .justify_center()
+                .child(mark),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .max_w(ph_ui::rems_from_px(320.))
+                .truncate()
+                .child(title),
+        )
+        .children(about.map(|about| {
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(about)
+        }))
 }
