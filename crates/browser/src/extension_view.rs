@@ -407,7 +407,7 @@ impl Render for ChromeExtensionView {
                             ),
                     )
                     .child(div().text_xs().text_color(muted).child(format!(
-                        "Agents can use your own Chrome, with your sign-ins, but only the tabs in its PilotHouse tab group: tabs they open, and tabs you put in the group (in the PilotHouse panel: “Let agents use this tab”). And you can send pages, screenshots, elements and bug reports from Chrome to a chat. Your other tabs are read only when you ask.{}",
+                        "Agents can use your own Chrome, with your sign-ins, but only the tabs in the PilotHouse tab group. From Chrome you can send pages, screenshots and bug reports to a chat. Your other tabs are read only when you ask.{}",
                         if ph_brand::enabled(ph_brand::Feature::Browser) {
                             concat!(" Without the extension, agents use ", ph_brand::name!(), "'s built-in browser.")
                         } else {

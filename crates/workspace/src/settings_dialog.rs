@@ -39,7 +39,7 @@ impl Page {
         let drives = usize::from(enabled(Feature::NetworkDrives));
         match self {
             Page::First => 0,
-            Page::Chrome => 5,
+            Page::Chrome => 6,
             Page::GitHub => 6 + chrome,
             Page::Storage => 8 + chrome + drives,
         }
@@ -154,9 +154,9 @@ pub(crate) fn open(
                                             Some(terminal_page()),
                                             Some(chat_page()),
                                             Some(agents_page()),
+                                            Some(tools_page(tools.clone())),
                                             ph_brand::enabled(ph_brand::Feature::ChromeExtension)
                                                 .then(|| chrome_page(chrome.clone())),
-                                            Some(tools_page(tools.clone())),
                                             Some(github_page(accounts.clone())),
                                             Some(templates_page(templates.clone())),
                                             ph_brand::enabled(ph_brand::Feature::NetworkDrives)
@@ -344,13 +344,12 @@ fn appearance_page(
     );
     SettingPage::new("Appearance")
         .icon(Icon::new(Icons::Palette))
-        .default_open(true)
         .group(
             SettingGroup::new()
                 .title("Layout")
                 .item(
                     SettingItem::new("Density", choice(&Density::ALL, Density::label, |p| p.density, |p, v| p.density = v))
-                        .description("How much room rows and spacing take in lists, the file tree, the Git lists and the chat.")
+                        .description("How much room rows take in lists, the file tree and the chat.")
                         .keywords(["density", "compact", "spacing", "padding", "rows"]),
                 )
                 .item(
@@ -358,9 +357,7 @@ fn appearance_page(
                         "Names under the icons",
                         switch(|p| p.tool_labels, |p, v| p.tool_labels = v),
                     )
-                    .description(
-                        "Show each name under its icon in the column at the window's left edge, not only when pointing at it.",
-                    )
+                    .description("In the column at the window's left edge, not only when pointing at an icon.")
                     .keywords(["layout", "labels", "tools", "tool icons", "icons", "activity bar"]),
                 ),
         )
@@ -387,12 +384,12 @@ fn appearance_page(
                             },
                         ),
                     )
-                    .description("Match system follows your computer's light or dark mode with Modern Light and Modern Dark. Themes you design are listed too.")
+                    .description("Match system follows your computer's light or dark mode.")
                     .keywords(["dark", "light", "mode", "theme", "palette", "colors", "dracula", "one dark", "warm", "studio"]),
                 )
                 .item(
                     SettingItem::new("Accent", SettingField::render(|_, _, cx| accent_swatches(cx)))
-                        .description("One color for focus, links, selection and highlights, over the theme's own.")
+                        .description("The color of focus, links and selection. The first one is the theme's own.")
                         .keywords(["accent", "color", "highlight", "tint"]),
                 )
                 .item(
@@ -440,8 +437,11 @@ fn appearance_page(
                                 )
                         }),
                     )
-                    .description(format!("Describe the look you want in a chat: the agent changes {} as you talk, and saves it as a theme of your own. Or import a VS Code theme.", ph_brand::NAME))
-                    .keywords(["theme", "design", "customize", "colors", "mod", "agent"]),
+                    .description("Describe the look you want in a chat and the agent builds the theme as you talk, or import a VS Code theme.")
+                    // Its three buttons are wider than the room a row
+                    // leaves beside its text: they go under it.
+                    .layout(gpui_kit::Axis::Vertical)
+                    .keywords(["theme", "design", "customize", "colors", "mod", "agent", "vs code", "import"]),
                 )
                 .item(
                     SettingItem::new("Corners", choice(&Corners::ALL, Corners::label, |p| p.corners, |p, v| p.corners = v))
@@ -460,12 +460,12 @@ fn appearance_page(
                             |picked, cx| AppState::update_preferences(cx, |p| p.ui_font = picked.to_string()),
                         ),
                     )
-                    .description("Used for menus, chat and labels. The default looks the same on macOS, Windows and Linux.")
+                    .description("For menus, chat and labels.")
                     .keywords(["font", "typeface", "family"]),
                 )
                 .item(
                     SettingItem::new("Interface size", number(11.0, ph_theme::preferences::MAX_UI_FONT_SIZE as f64, 1.0, |p| p.ui_font_size as f64, |p, v| p.ui_font_size = v as f32))
-                        .description("Text, icons and spacing across the app grow and shrink together.")
+                        .description("Text, icons and spacing grow and shrink together.")
                         .keywords(["font size", "zoom", "bigger", "smaller"]),
                 ),
         )
@@ -491,9 +491,7 @@ fn editor_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {
                             },
                         ),
                     )
-                    .description(
-                        "Used for code, diffs and terminals. A monospaced font reads best.",
-                    )
+                    .description("For code, diffs and terminals.")
                     .keywords(["font", "monospace", "family"]),
                 )
                 .item(
@@ -565,7 +563,7 @@ fn editor_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {
                             |p, v| p.editor.auto_save = v,
                         ),
                     )
-                    .description("Writes a file's changes without ⌘S: a moment after you stop typing, or when you leave the editor. A file that changed on disk meanwhile is never written over by itself.")
+                    .description("Saves a file a moment after you stop typing, or when you leave the editor. A file that changed on disk meanwhile is never overwritten.")
                     .keywords(["autosave", "save", "write"]),
                 ),
         )
@@ -591,108 +589,157 @@ fn terminal_page() -> SettingPage {
                     .keywords(["terminal", "shell", "console"]),
                 )
                 .item(
-                    SettingItem::render(|_, _, cx| {
-                        let (shell, _) = ph_env::default_shell();
-                        note(format!("Shell: {}", shell.display()), cx)
-                    })
+                    SettingItem::new(
+                        "Shell",
+                        SettingField::render(|_, _, cx| {
+                            let (shell, _) = ph_env::default_shell();
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(shell.display().to_string())
+                        }),
+                    )
+                    .description("New terminals start your system's default shell.")
                     .keywords(["shell", "powershell", "zsh", "bash"]),
                 ),
         )
 }
 
-/// GitHub and GitHub Enterprise accounts, for pull requests.
+/// A page that is one view of its own. `keywords` are what Search finds it
+/// by: a view has no titles for it to read, and without any the page is in
+/// no search result.
+fn view_page<V: gpui_kit::Render>(
+    title: &'static str,
+    icon: Icons,
+    keywords: &'static [&'static str],
+    view: gpui_kit::Entity<V>,
+) -> SettingPage {
+    SettingPage::new(title).icon(Icon::new(icon)).group(
+        SettingGroup::new().item(
+            SettingItem::render(move |_, _, _| div().w_full().py_1().child(view.clone()))
+                .keywords(keywords.iter().copied()),
+        ),
+    )
+}
+
+/// Settings → MCP & skills: what every agent is given to work with.
 fn tools_page(tools: gpui_kit::Entity<ph_agent::tools_view::ToolsView>) -> SettingPage {
-    SettingPage::new("MCP & skills")
-        .icon(Icon::new(Icons::Plug))
-        .group(
-            SettingGroup::new().item(SettingItem::render(move |_, _, _| {
-                div().w_full().py_1().child(tools.clone())
-            })),
-        )
+    view_page(
+        "MCP & skills",
+        Icons::Plug,
+        &["mcp", "server", "skill", "tool", "plugin"],
+        tools,
+    )
 }
 
+/// Settings → GitHub: GitHub and GitHub Enterprise accounts, for pull
+/// requests.
 fn github_page(accounts: gpui_kit::Entity<ph_pulls::AccountsView>) -> SettingPage {
-    SettingPage::new("GitHub")
-        .icon(Icon::new(Icons::GitPullRequest))
-        .group(
-            SettingGroup::new().item(SettingItem::render(move |_, _, _| {
-                div().w_full().py_1().child(accounts.clone())
-            })),
-        )
+    view_page(
+        "GitHub",
+        Icons::GitPullRequest,
+        &[
+            "github",
+            "account",
+            "token",
+            "enterprise",
+            "sign in",
+            "pull request",
+        ],
+        accounts,
+    )
 }
 
-/// Settings → Network drives (see [`crate::network_drives`]).
+/// Settings → Review templates (see [`ph_pulls::TemplatesView`]). Named for
+/// what they are templates of: "Templates" alone said nothing in a list
+/// that also has themes and run configurations.
 fn templates_page(view: gpui_kit::Entity<ph_pulls::TemplatesView>) -> SettingPage {
-    SettingPage::new("Templates")
-        .icon(Icon::new(Icons::ScrollText))
-        .group(
-            SettingGroup::new().item(SettingItem::render(move |_, _, _| {
-                div().w_full().py_1().child(view.clone())
-            })),
-        )
+    view_page(
+        "Review templates",
+        Icons::ScrollText,
+        &["template", "review", "prompt", "pull request", "starter"],
+        view,
+    )
 }
 
 /// Settings → Storage (see [`crate::storage`]).
 fn storage_page(view: gpui_kit::Entity<crate::storage::StorageView>) -> SettingPage {
-    SettingPage::new("Storage")
-        .icon(Icon::new(Icons::HardDrive))
-        .group(SettingGroup::new().item(
-            SettingItem::render(move |_, _, _| div().w_full().py_1().child(view.clone())).keywords(
-                [
-                    "disk",
-                    "space",
-                    "clean",
-                    "clones",
-                    "worktrees",
-                    "tasks",
-                    "storage",
-                ],
-            ),
-        ))
+    view_page(
+        "Storage",
+        Icons::HardDrive,
+        &[
+            "disk",
+            "space",
+            "clean",
+            "clear",
+            "clones",
+            "worktrees",
+            "tasks",
+            "storage",
+            "logs",
+            "cache",
+        ],
+        view,
+    )
 }
 
+/// Settings → Network drives (see [`crate::network_drives`]).
 fn drives_page(view: gpui_kit::Entity<crate::network_drives::NetworkDrivesView>) -> SettingPage {
-    SettingPage::new("Network drives")
-        .icon(Icon::new(Icons::HardDrive))
-        .group(
-            SettingGroup::new().item(SettingItem::render(move |_, _, _| {
-                div().w_full().py_1().child(view.clone())
-            })),
-        )
+    view_page(
+        "Network drives",
+        Icons::Server,
+        &[
+            "network", "drive", "share", "ssh", "samba", "smb", "server", "mapped",
+        ],
+        view,
+    )
 }
 
 /// Settings → Chrome extension (see [`ph_browser::ChromeExtensionView`]).
 fn chrome_page(view: gpui_kit::Entity<ph_browser::ChromeExtensionView>) -> SettingPage {
-    SettingPage::new("Chrome extension")
-        .icon(Icon::new(IconName::Globe))
-        .group(SettingGroup::new().item(
-            SettingItem::render(move |_, _, _| div().w_full().py_1().child(view.clone())).keywords(
-                [
-                    "chrome",
-                    "edge",
-                    "brave",
-                    "browser",
-                    "extension",
-                    "tab group",
-                    "agents",
-                ],
-            ),
-        ))
+    view_page(
+        "Chrome extension",
+        Icons::Globe,
+        &[
+            "chrome",
+            "edge",
+            "brave",
+            "browser",
+            "extension",
+            "tab group",
+        ],
+        view,
+    )
 }
 
-/// Each agent's setup status, checked when the page renders.
+/// Each agent's setup status, checked when the page renders (what was found
+/// is remembered for a few seconds; *Check again* asks anew).
 fn agents_page() -> SettingPage {
     SettingPage::new("Agents")
         .icon(Icon::new(Icons::Bot))
+        .title_suffix(|_, _| {
+            div().pl_2().child(
+                Button::new("agents-recheck")
+                    .xsmall()
+                    .ghost()
+                    .icon(IconName::Redo)
+                    .label("Check again")
+                    .tooltip("Look again for agents installed or signed in since")
+                    .on_click(|_, window, cx| {
+                        ph_agent::installed::recheck(cx);
+                        window.refresh();
+                    }),
+            )
+        })
         .group(
             SettingGroup::new().items(ph_agent::agents::AGENTS.iter().map(|spec| {
                 SettingItem::render(move |_, _, cx| {
                     let checks = ph_agent::setup::checks(spec);
                     div()
                         .w_full()
-                        .py_1()
-                        .child(ph_agent::setup_view::card(spec, &checks, None, cx))
+                        .child(ph_agent::setup_view::status(spec, &checks, cx))
                 })
+                .keywords(["agent", "install", "sign in", spec.name, spec.id])
             })),
         )
 }
@@ -711,7 +758,7 @@ fn chat_page() -> SettingPage {
                         |p, v| p.chat_width = v,
                     ),
                 )
-                .description("How wide messages get on a large window.")
+                .description("How wide messages get in a large window.")
                 .keywords(["chat", "width", "column"]),
             ),
         );
@@ -725,8 +772,15 @@ fn chat_page() -> SettingPage {
                         SettingField::render(|_, _, _| crate::quick_chat::ShortcutRecorder),
                     )
                     .description(format!(
-                        "Opens a small chat window over every app, from anywhere, while {app} runs; again, it hides it. Its chats are under Chats. The command “pilothouse quick-chat” opens it too: give that a shortcut in your system's keyboard settings (on Wayland, the only way).",
-                        app = ph_brand::NAME
+                        "Opens a small chat window over any app while {app} runs, and hides it again. Its chats are kept in the Scratch workspace.{wayland}",
+                        app = ph_brand::NAME,
+                        // Only where it matters: a Wayland session gives
+                        // an app no key of its own.
+                        wayland = if cfg!(target_os = "linux") {
+                            " On Wayland, give the command “pilothouse quick-chat” a shortcut in your system's keyboard settings instead."
+                        } else {
+                            ""
+                        }
                     ))
                     .keywords(["quick", "chat", "shortcut", "hotkey", "global", "floating", "popup", "spotlight"]),
                 ),
@@ -738,8 +792,10 @@ fn features_page() -> SettingPage {
         .icon(Icon::new(Icons::LayoutGrid))
         .group(
             SettingGroup::new()
+                // A group's description shows only under a title.
+                .title("Workspace tools")
                 .description(
-                    "Turn off tools you do not use. Nothing runs for a tool until you open it.",
+                    "Turn off the ones you do not use. Nothing runs for a tool until you open it.",
                 )
                 .items(ContextTab::available().map(|tab| {
                     SettingItem::new(
@@ -749,7 +805,8 @@ fn features_page() -> SettingPage {
                             move |enabled, cx| AppState::set_tab_enabled(tab, enabled, cx),
                         ),
                     )
-                    .keywords(["feature", "tab", "panel"])
+                    .description(tab.about())
+                    .keywords(["feature", "tab", "panel", "tool"])
                 })),
         )
         .group(system_group())
@@ -760,20 +817,18 @@ fn system_group() -> SettingGroup {
     use crate::shell_integration as shell;
     let group = SettingGroup::new().title("System");
     if !shell::SUPPORTED {
+        // Nothing to switch on macOS: Finder offers it by itself. Said as
+        // text across the row (as a value beside it, it ran off the page).
         return group.item(
             SettingItem::new(
                 format!("Open with {}", ph_brand::NAME),
-                SettingField::render(|_, _, cx| {
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!(
-                            "In Finder: right-click → Open With → {}",
-                            ph_brand::NAME
-                        ))
-                }),
+                SettingField::render(|_, _, _| div()),
             )
-            .description("Folders open as workspaces, files in the editor. From a terminal: pilothouse <path>.")
+            .description(format!(
+                "In Finder, right-click a folder or a file, then Open With → {}. Folders open as workspaces, files in the editor. From a terminal: pilothouse <path>.",
+                ph_brand::NAME
+            ))
+            .layout(gpui_kit::Axis::Vertical)
             .keywords(["finder", "open with", "context menu"]),
         );
     }
@@ -889,24 +944,24 @@ fn about_page() -> SettingPage {
                 }))
                 .item(
                     SettingItem::new(
-                        "Check for updates",
+                        "Check for updates automatically",
                         SettingField::switch(
                             crate::updates::auto_check,
                             crate::updates::set_auto_check,
                         ),
                     )
-                    .description("Looks at the project's GitHub releases, or its mirrors, at start and every six hours. Nothing is sent.")
+                    .description("At start and every six hours, from the project's GitHub releases. Nothing about you is sent.")
                     .keywords(["update", "version", "release", "github", "mirror"]),
                 )
                 .item(
                     SettingItem::new(
-                        "Download updates by themselves",
+                        "Install updates automatically",
                         SettingField::switch(
                             crate::updates::auto_install,
                             crate::updates::set_auto_install,
                         ),
                     )
-                    .description("A new version downloads in the background and installs when you quit (or at once with Restart to update). Each download is checked against the SHA-256 in the release's signed manifest.")
+                    .description("A new version downloads in the background and installs when you quit. Each download is verified against the release's signed manifest.")
                     .keywords(["update", "install", "download"]),
                 ),
         )

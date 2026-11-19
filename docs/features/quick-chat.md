@@ -10,7 +10,7 @@ A small chat window over every other app, to ask an agent something without goin
 - **The command palette**: *Quick chat*.
 - **`pilothouse quick-chat`** (also `app.quick_chat` on the control socket): the same, from a shell or a shortcut set in the system's own keyboard settings. With PilotHouse not running, it starts with the window open. On Wayland this is the only way: the desktop keeps keys for itself, so no app can take one.
 
-**Settings → Chat → Quick chat** sets the shortcut: click the field and press the keys (a modifier and a letter, digit, Space or function key; F-keys alone are allowed). The shortcut held until then is let go meanwhile, so the same one can be pressed again. *Reset* goes back to the default, *Turn off* leaves none (the palette and the command still work). A shortcut another app or the system already holds is said there, as is Wayland's limit.
+**Settings → Chat → Quick chat** sets the shortcut (and says where its chats are kept): click the field and press the keys (a modifier and a letter, digit, Space or function key; F-keys alone are allowed). The shortcut held until then is let go meanwhile, so the same one can be pressed again. *Reset* goes back to the default, *Turn off* leaves none (the palette and the command still work). A shortcut another app or the system already holds is said there, as is Wayland's limit.
 
 The shortcut is the system's (`global-hotkey`: Carbon's `RegisterEventHotKey` on macOS, which needs no permission; `RegisterHotKey` on Windows; an X11 key grab on Linux). It only works while PilotHouse runs; on Windows and Linux PilotHouse quits when its last window closes.
 

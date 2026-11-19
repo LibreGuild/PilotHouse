@@ -8,7 +8,7 @@
 //! - [`PullView`]: one PR in full: description, conversation, files with
 //!   line comments, commits, checks; comment, approve, request changes,
 //!   merge, check out, review with an agent.
-//! - [`TemplatesView`]: Settings → Templates, what agents are asked to do
+//! - [`TemplatesView`]: Settings → Review templates, what agents are asked to do
 //!   with a pull request.
 //! - [`clones`]: the GitHub view's own clones of repositories, where agent
 //!   reviews run.

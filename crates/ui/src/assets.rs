@@ -24,6 +24,7 @@ icon_assets!(
         TabletSmartphone,
         Play,
         Plug,
+        Server,
         FolderDown,
         FoldVertical,
         Package,

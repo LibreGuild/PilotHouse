@@ -58,6 +58,22 @@ impl ContextTab {
         }
     }
 
+    /// What the tool is, in a line (Settings → Features).
+    pub fn about(self) -> &'static str {
+        match self {
+            ContextTab::Files => "The folder tree and the editor.",
+            ContextTab::Changes => "Changes to review, branches, history and stashes.",
+            ContextTab::Pulls => "The repository's pull requests.",
+            ContextTab::Board => "Cards of work to do, for you and for agents.",
+            ContextTab::Terminal => "Terminals in the workspace's folder.",
+            ContextTab::Browser => "A browser agents can drive, in Preview.",
+            ContextTab::Devices => "Android emulators and phones, in Preview.",
+            ContextTab::Runs => "Run configurations and the ports they open.",
+            ContextTab::Tests => "UI tests in plain words, run in the browser or on a device.",
+            ContextTab::Logcat => "The log of the Android device in use.",
+        }
+    }
+
     pub fn icon(self) -> Icons {
         match self {
             ContextTab::Files => Icons::Files,
