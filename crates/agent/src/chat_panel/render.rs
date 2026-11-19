@@ -46,7 +46,7 @@ impl ChatPanel {
         h_flex()
             .id("chat-place")
             .flex_none()
-            .max_w(px(220.))
+            .max_w(ph_ui::rems_from_px(220.))
             .h_6()
             .px_2()
             .gap_1p5()
@@ -58,7 +58,13 @@ impl ChatPanel {
                 gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
             })
             .children(icon.map(|icon| Icon::new(icon).xsmall()))
-            .children(color.map(|color| div().flex_none().size(px(8.)).rounded_full().bg(color)))
+            .children(color.map(|color| {
+                div()
+                    .flex_none()
+                    .size(ph_ui::rems_from_px(8.))
+                    .rounded_full()
+                    .bg(color)
+            }))
             .child(div().min_w_0().truncate().child(label))
             .into_any_element()
     }
@@ -119,13 +125,13 @@ impl ChatPanel {
                     .tooltip(move |window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
                     })
-                    .child(thread.agent().mark(px(16.)))
+                    .child(thread.agent().mark(ph_ui::rems_from_px(16.)))
                     .child(
                         div()
                             .absolute()
                             .right(px(-1.))
                             .bottom(px(-1.))
-                            .size(px(7.))
+                            .size(ph_ui::rems_from_px(7.))
                             .rounded_full()
                             .border_1()
                             .border_color(cx.theme().background)
@@ -169,7 +175,7 @@ impl ChatPanel {
             })
     }
 
-    /// "Continue with…": the chat goes on with another agent.
+    /// "Continue with": the chat goes on with another agent.
     pub(super) fn render_hand_off(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.active.read(cx).agent().id;
         let panel = cx.weak_entity();
@@ -190,7 +196,7 @@ impl ChatPanel {
                             }),
                     )
                     .separator()
-                    .label("Continue with…");
+                    .label("Continue with");
                 agents::AGENTS
                     .iter()
                     .filter(|agent| agent.id != current)
@@ -239,7 +245,7 @@ impl ChatPanel {
                             return menu.label("No chats yet");
                         }
                         let menu = menu
-                            .item(PopupMenuItem::new("Search chats… (⌘⇧K)").on_click(
+                            .item(PopupMenuItem::new("Search chats (⌘⇧K)").on_click(
                                 |_, window, cx| {
                                     // The workspace owns the search; this crate cannot name its action.
                                     if let Ok(action) =
@@ -280,6 +286,12 @@ impl ChatPanel {
 
     pub(super) fn render_transcript(&mut self, cx: &mut Context<Self>) -> AnyElement {
         if self.active.read(cx).entries().is_empty() {
+            // Something is being readied for a chat about to start: it
+            // shows as the run it is, not as the starters with a line of
+            // small print under them.
+            if let Some(label) = self.busy.clone() {
+                return self.render_preparing(label, cx);
+            }
             return self.render_empty(cx);
         }
         let thread = self.active.clone();
@@ -292,6 +304,95 @@ impl ChatPanel {
             render_entry(&thread, ix, cx)
         })
         .into_any_element()
+    }
+
+    /// A chat about to start, while what it needs is readied (a repository
+    /// cloned, a pull request checked out): what was asked for, as the
+    /// message that began the run, and the step under way with the time it
+    /// has taken, as the agent's own steps show.
+    fn render_preparing(&self, label: SharedString, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let agent = self.active.read(cx).agent();
+        let time = self
+            .busy_since
+            .map(|since| crate::entry_view::short_duration(since.elapsed()));
+        let first_clone = label.contains("Cloning");
+        v_flex()
+            .id("chat-preparing")
+            .size_full()
+            .items_center()
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(
+                        ph_theme::preferences::preferences(cx)
+                            .chat_width
+                            .max_width(),
+                    )
+                    .px_6()
+                    .pt_6()
+                    .gap_4()
+                    .when_some(self.busy_title.clone(), |this, title| {
+                        this.child(
+                            h_flex().justify_end().child(
+                                // As a message the user sent looks.
+                                div()
+                                    .max_w(gpui_kit::relative(0.85))
+                                    .px_3p5()
+                                    .py_2()
+                                    .rounded(theme.radius_lg)
+                                    .bg(theme.muted)
+                                    .text_sm()
+                                    .child(title),
+                            ),
+                        )
+                    })
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(agent.mark(ph_ui::rems_from_px(18.)))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                            .text_color(theme.muted_foreground)
+                                            .child(agent.name),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .text_sm()
+                                    .child(ph_ui::Loader::new().small())
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .child(ShimmerText::new(label).id("chat-preparing-step")),
+                                    )
+                                    .children(time.map(|time| {
+                                        div()
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(time)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(if first_clone {
+                                        "The repository is copied to this computer once, which takes a while for a large one. The agent starts by itself when it is here; later chats about it start at once."
+                                    } else {
+                                        "The agent starts by itself as soon as this is done."
+                                    }),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// The setup checks for `agent`. They search the PATH, so they run in
@@ -392,13 +493,13 @@ impl ChatPanel {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                .child(ph_ui::logo_mark(gpui_kit::px(32.)))
+                .child(ph_ui::logo_mark(ph_ui::rems_from_px(32.)))
                 .child(
                     h_flex()
                         .gap_2()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child(gpui_kit::component::spinner::Spinner::new().xsmall())
+                        .child(ph_ui::Loader::new().xsmall())
                         .child("Looking for your coding agents…"),
                 )
                 .into_any_element();
@@ -424,7 +525,7 @@ impl ChatPanel {
                 .child(
                     div()
                         .w_full()
-                        .max_w(gpui_kit::px(600.))
+                        .max_w(ph_ui::rems_from_px(600.))
                         .my_auto()
                         .child(setup_view::welcome(&checks, recheck, cx)),
                 )
@@ -468,50 +569,55 @@ impl ChatPanel {
                 .into_iter()
                 .filter(|spec| spec.id != agent.id)
                 .collect();
-            return v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .px_6()
-                .gap_4()
+            return centered_scroll("chat-setup")
                 .child(
-                    div()
+                    v_flex()
                         .w_full()
-                        .max_w(gpui_kit::px(560.))
-                        .child(setup_view::card(agent, &checks, Some(recheck), cx)),
-                )
-                .when(!others.is_empty(), |this| {
-                    this.child(
-                        v_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Or use an agent that is installed:"),
+                        .my_auto()
+                        .items_center()
+                        .gap_4()
+                        .child(
+                            div()
+                                .w_full()
+                                .max_w(ph_ui::rems_from_px(560.))
+                                .child(setup_view::card(agent, &checks, Some(recheck), cx)),
+                        )
+                        .when(!others.is_empty(), |this| {
+                            this.child(
+                                v_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Or use an agent that is installed:"),
+                                    )
+                                    .child(h_flex().flex_wrap().justify_center().gap_2().children(
+                                        others.into_iter().map(|spec| {
+                                            let panel = panel.clone();
+                                            Button::new(SharedString::from(format!(
+                                                "use-{}",
+                                                spec.id
+                                            )))
+                                            .small()
+                                            .outline()
+                                            .child(
+                                                h_flex()
+                                                    .gap_1p5()
+                                                    .child(spec.mark(ph_ui::rems_from_px(14.)))
+                                                    .child(format!("Use {}", spec.name)),
+                                            )
+                                            .on_click(move |_, window, cx| {
+                                                _ = panel.update(cx, |panel, cx| {
+                                                    panel.switch_agent(spec, window, cx)
+                                                });
+                                            })
+                                        }),
+                                    )),
                             )
-                            .child(h_flex().flex_wrap().justify_center().gap_2().children(
-                                others.into_iter().map(|spec| {
-                                    let panel = panel.clone();
-                                    Button::new(SharedString::from(format!("use-{}", spec.id)))
-                                        .small()
-                                        .outline()
-                                        .child(
-                                            h_flex()
-                                                .gap_1p5()
-                                                .child(spec.mark(gpui_kit::px(14.)))
-                                                .child(format!("Use {}", spec.name)),
-                                        )
-                                        .on_click(move |_, window, cx| {
-                                            _ = panel.update(cx, |panel, cx| {
-                                                panel.switch_agent(spec, window, cx)
-                                            });
-                                        })
-                                }),
-                            )),
-                    )
-                })
+                        }),
+                )
                 .into_any_element();
         }
         // The agent chosen for new chats went away: say which is used now.
@@ -530,97 +636,110 @@ impl ChatPanel {
                 check.state == setup::CheckState::Note && check.title.starts_with("Adapter")
             })
             .map(|check| check.detail.clone());
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .px_6()
-            .gap_6()
+        centered_scroll("chat-empty")
             .child(
                 v_flex()
-                    .items_center()
-                    .gap_2()
-                    // Whose chat this is: the agent's mark, not a decoration.
-                    .child(div().mb_1().child(agent.mark(gpui_kit::px(32.))))
-                    .child(
-                        div()
-                            .text_xl()
-                            .text_center()
-                            .font_weight(gpui_kit::FontWeight::MEDIUM)
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_center()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(subtitle),
-                    )
-                    .children(first_start.into_iter().chain(fallback).map(|note| {
-                        div()
-                            .text_xs()
-                            .text_center()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(note)
-                    })),
-            )
-            .child(
-                div()
                     .w_full()
-                    .max_w(
-                        ph_theme::preferences::preferences(cx)
-                            .chat_width
-                            .max_width(),
+                    .my_auto()
+                    .items_center()
+                    .gap_6()
+                    .child(
+                        v_flex()
+                            .items_center()
+                            .gap_2()
+                            // Whose chat this is: the agent's mark, not a decoration.
+                            .child(div().mb_1().child(agent.mark(ph_ui::rems_from_px(32.))))
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .text_center()
+                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_center()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(subtitle),
+                            )
+                            .children(first_start.into_iter().chain(fallback).map(|note| {
+                                div()
+                                    .text_xs()
+                                    .text_center()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(note)
+                            })),
                     )
-                    .grid()
-                    .grid_cols(2)
-                    .gap_2()
-                    .children(self.render_starters(cx))
-                    .when(self.context.is_none(), |this| {
-                        this.children(
-                            if self.project.empty && self.project.extra_dirs.is_empty() {
-                                FOLDERLESS_SUGGESTIONS
-                            } else {
-                                SUGGESTIONS
-                            }
-                            .iter()
-                            .enumerate()
-                            .map(|(ix, (title, hint, prompt))| {
-                                let panel = panel.clone();
-                                v_flex()
-                                    .id(("suggestion", ix))
-                                    .gap_0p5()
-                                    .px_3()
-                                    .py_2p5()
-                                    .rounded(cx.theme().radius_lg)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .cursor_pointer()
-                                    .hover(|style| {
-                                        style.bg(cx.theme().muted).border_color(cx.theme().input)
-                                    })
-                                    .on_click(move |_, window, cx| {
-                                        let (prompt, title) =
-                                            (prompt.to_string(), title.to_string());
-                                        _ = panel.update(cx, |panel, cx| {
-                                            panel.send_text(prompt, Some(title), window, cx)
-                                        });
-                                    })
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(gpui_kit::FontWeight::MEDIUM)
-                                            .child(*title),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(*hint),
-                                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(
+                                ph_theme::preferences::preferences(cx)
+                                    .chat_width
+                                    .max_width(),
+                            )
+                            .grid()
+                            // Side by side with room for two, else one under the
+                            // other: half of a narrow pane is too little for a card.
+                            .grid_cols(if self.narrow { 1 } else { 2 })
+                            .gap_2()
+                            .children(self.render_starters(cx))
+                            .when(self.context.is_none(), |this| {
+                                this.children(
+                                    if self.project.empty && self.project.extra_dirs.is_empty() {
+                                        FOLDERLESS_SUGGESTIONS
+                                    } else {
+                                        SUGGESTIONS
+                                    }
+                                    .iter()
+                                    .enumerate()
+                                    .map(
+                                        |(ix, (title, hint, prompt))| {
+                                            let panel = panel.clone();
+                                            v_flex()
+                                                .id(("suggestion", ix))
+                                                .gap_0p5()
+                                                .px_3()
+                                                .py_2p5()
+                                                .rounded(cx.theme().radius_lg)
+                                                .border_1()
+                                                .border_color(cx.theme().border)
+                                                .cursor_pointer()
+                                                .hover(|style| {
+                                                    style
+                                                        .bg(cx.theme().muted)
+                                                        .border_color(cx.theme().input)
+                                                })
+                                                .on_click(move |_, window, cx| {
+                                                    let (prompt, title) =
+                                                        (prompt.to_string(), title.to_string());
+                                                    _ = panel.update(cx, |panel, cx| {
+                                                        panel.send_text(
+                                                            prompt,
+                                                            Some(title),
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    });
+                                                })
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                                        .child(*title),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(*hint),
+                                                )
+                                        },
+                                    ),
+                                )
                             }),
-                        )
-                    }),
+                    ),
             )
             .into_any_element()
     }
@@ -749,7 +868,7 @@ impl ChatPanel {
                 .map(|(ix, tool)| {
                     let ix = *ix;
                     let glyph: AnyElement = match tool.status {
-                        _ if busy(tool) => gpui_kit::component::spinner::Spinner::new()
+                        _ if busy(tool) => ph_ui::Loader::new()
                             .xsmall()
                             .color(theme.info)
                             .into_any_element(),
@@ -781,7 +900,7 @@ impl ChatPanel {
                         .child(
                             div()
                                 .flex_none()
-                                .max_w(px(220.))
+                                .max_w(ph_ui::rems_from_px(220.))
                                 .truncate()
                                 .text_color(theme.foreground)
                                 .child(tool.display_title()),
@@ -824,11 +943,7 @@ impl ChatPanel {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .when(running > 0, |this| {
-                            this.child(
-                                gpui_kit::component::spinner::Spinner::new()
-                                    .xsmall()
-                                    .color(theme.info),
-                            )
+                            this.child(ph_ui::Loader::new().xsmall().color(theme.info))
                         })
                         .child(label)
                         .child(
@@ -933,7 +1048,21 @@ impl ChatPanel {
         let no_agent = agents::installed().is_some_and(|installed| installed.is_empty());
         let status_line: Option<SharedString> = match status {
             _ if no_agent => Some("Install one of the coding agents above to start a chat.".into()),
-            _ if self.busy.is_some() => self.busy.clone(),
+            // An empty chat shows it in place of the transcript
+            // (`render_preparing`); one with messages, here, with how long
+            // it has taken.
+            _ if self.busy.is_some() => self
+                .busy
+                .clone()
+                .filter(|_| !thread.entries().is_empty())
+                .map(|label| match self.busy_since {
+                    Some(since) => format!(
+                        "{label} {}",
+                        crate::entry_view::short_duration(since.elapsed())
+                    )
+                    .into(),
+                    None => label,
+                }),
             _ if self.reading_tabs => Some("Reading the shared Chrome tabs…".into()),
             ThreadStatus::Connecting => Some(format!("Starting {}…", agent.name).into()),
             // The transcript's working row says it.
@@ -1137,12 +1266,16 @@ impl ChatPanel {
 }
 
 impl Render for ChatPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.terminal_session.is_some() {
             return self.render_terminal_session(cx);
         }
+        let (narrow, probe) = ph_ui::measure::narrower_than("chat-width", 440., window, cx);
+        self.narrow = narrow;
         v_flex()
+            .relative()
             .size_full()
+            .child(probe)
             // Files and images dropped anywhere on the chat are attached.
             .on_drop(
                 cx.listener(|this, dragged: &ph_files::DraggedFiles, window, cx| {
@@ -1164,8 +1297,62 @@ impl Render for ChatPanel {
                     .overflow_hidden()
                     .child(self.render_transcript(cx)),
             )
+            .children(self.render_terminal_offer(cx))
             .child(self.render_composer(cx))
             .into_any_element()
+    }
+}
+
+impl ChatPanel {
+    /// Over the composer when this agent's CLI has no editor mode here (see
+    /// [`agents::chat_unsupported`]): the one way it does work, a click
+    /// away.
+    fn render_terminal_offer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let agent = self.active.read(cx).agent();
+        if !self.runs_terminals
+            || !agents::chat_unsupported(agent.id)
+            || !ph_brand::enabled(ph_brand::Feature::Terminal)
+            || self.project.read_only
+        {
+            return None;
+        }
+        let cwd = self.project.path.clone();
+        Some(
+            h_flex()
+                .flex_none()
+                .mx_6()
+                .mb_2()
+                .px_3()
+                .py_2()
+                .gap_3()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(cx.theme().warning.opacity(0.4))
+                .bg(cx.theme().warning.opacity(0.08))
+                .child(
+                    Icon::new(Icons::Terminal)
+                        .small()
+                        .text_color(cx.theme().warning),
+                )
+                .child(div().flex_1().min_w_0().text_sm().child(format!(
+                    "{} here has no chat mode. It works in a terminal, followed like a chat.",
+                    agent.name
+                )))
+                .child(
+                    Button::new("run-agent-in-terminal")
+                        .primary()
+                        .small()
+                        .label(format!("Run {} in a terminal", agent.name))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(ChatPanelEvent::ResumeInTerminal {
+                                agent: agent.id,
+                                session: None,
+                                cwd: cwd.clone(),
+                            })
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 }
 
@@ -1184,11 +1371,11 @@ pub(super) fn model_button(
         .unwrap_or_else(|| agent.name.to_string());
     let label = h_flex()
         .gap_1p5()
-        .child(agent.mark(px(14.)))
+        .child(agent.mark(ph_ui::rems_from_px(14.)))
         .child(
             // A long model name gives way, so the row's buttons all fit.
             div()
-                .max_w(px(150.))
+                .max_w(ph_ui::rems_from_px(150.))
                 .truncate()
                 .text_xs()
                 .font_weight(gpui_kit::FontWeight::MEDIUM)
@@ -1294,7 +1481,7 @@ pub(super) fn attach_button(panel: WeakEntity<ChatPanel>) -> impl IntoElement {
                 )
             })
             .item(
-                PopupMenuItem::new("File… (type @path)")
+                PopupMenuItem::new("File (type @path)")
                     .icon(IconName::File)
                     .on_click(move |_, window, cx| {
                         _ = mention.update(cx, |panel, cx| {
@@ -1309,7 +1496,7 @@ pub(super) fn attach_button(panel: WeakEntity<ChatPanel>) -> impl IntoElement {
             // Not in a build whose brand leaves parallel runs out.
             .when(ph_brand::enabled(ph_brand::Feature::ParallelRuns), |menu| {
                 menu.separator().item(
-                    PopupMenuItem::new("Run with several agents…")
+                    PopupMenuItem::new("Run with several agents")
                         .icon(Icons::GitCompareArrows)
                         .on_click(move |_, _, cx| {
                             _ = parallel.update(cx, |panel, cx| {
@@ -1401,4 +1588,18 @@ pub(super) fn more_options_button(
                 )
             })
         })
+}
+
+/// A pane whose content sits in its middle and scrolls once it is taller
+/// than the pane (the child takes `my_auto()`). Centring alone
+/// (`justify_center`) cuts tall content off at both ends, out of reach: a
+/// narrow chat beside a pull request, a large interface size.
+fn centered_scroll(id: &'static str) -> gpui_kit::Stateful<gpui_kit::Div> {
+    v_flex()
+        .id(id)
+        .size_full()
+        .items_center()
+        .overflow_y_scroll()
+        .px_6()
+        .py_6()
 }

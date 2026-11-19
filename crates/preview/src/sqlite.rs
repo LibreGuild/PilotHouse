@@ -7,7 +7,7 @@ use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div, px,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div,
 };
 use rusqlite::{Connection, OpenFlags, types::ValueRef};
 
@@ -265,7 +265,7 @@ impl Render for SqliteView {
             .child(
                 v_flex()
                     .id("db-objects")
-                    .w(px(200.))
+                    .w(ph_ui::rems_from_px(200.))
                     .flex_none()
                     .h_full()
                     .overflow_y_scroll()

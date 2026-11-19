@@ -22,7 +22,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div,
 };
 use ph_ui::Icons;
 
@@ -197,7 +197,7 @@ pub fn render(
                 .gap_1p5()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(agent.mark(px(14.)))
+                .child(agent.mark(ph_ui::rems_from_px(14.)))
                 .child(
                     div()
                         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
@@ -234,9 +234,7 @@ pub fn render(
                 row == highlight,
                 cx,
             )
-            .when(loading, |this| {
-                this.child(gpui_kit::component::spinner::Spinner::new().xsmall())
-            })
+            .when(loading, |this| this.child(ph_ui::Loader::new().xsmall()))
             .on_click(pick(Pick::Agent(agent)))
             .test_support()
             .into_any_element();
@@ -286,8 +284,8 @@ pub fn render(
     );
     v_flex()
         .id("model-picker-card")
-        .w(px(320.))
-        .max_h(px(300.))
+        .w(ph_ui::rems_from_px(320.))
+        .max_h(ph_ui::rems_from_px(300.))
         // The filter has the keyboard; these keys steer the list instead.
         .capture_action(move |_: &MoveUp, window, cx| up(window, cx))
         .capture_action(move |_: &MoveDown, window, cx| down(window, cx))
@@ -342,7 +340,7 @@ fn model_row(
         .when(!selected, |this| {
             this.hover(|style| style.bg(cx.theme().list_hover))
         })
-        .child(agent.mark(px(14.)))
+        .child(agent.mark(ph_ui::rems_from_px(14.)))
         .child(
             h_flex()
                 .flex_1()

@@ -190,7 +190,7 @@ impl ChatPanel {
                 .bottom_full()
                 .left_0()
                 .mb_1()
-                .w(px(420.))
+                .w(ph_ui::rems_from_px(420.))
                 .max_w_full()
                 .p_1()
                 .rounded(cx.theme().radius_lg)

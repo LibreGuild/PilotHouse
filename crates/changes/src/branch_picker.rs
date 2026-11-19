@@ -9,14 +9,13 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
-    spinner::Spinner,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    Window, div, px,
+    Window, div,
 };
 use ph_git::branches::{self, Branch};
 use ph_ui::Icons;
@@ -42,11 +41,15 @@ impl BranchPicker {
         let search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Find or create a branch…"));
         let subscriptions = vec![
-            cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            }),
+            cx.subscribe_in(
+                &search,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change => cx.notify(),
+                    InputEvent::PressEnter { .. } => this.enter(window, cx),
+                    _ => {}
+                },
+            ),
             // A switch or fetch changes the list.
             cx.observe(&repo, |this, _, cx| {
                 this.loaded_at = None;
@@ -111,7 +114,40 @@ impl BranchPicker {
         });
     }
 
-    fn create(&mut self, name: String, cx: &mut Context<Self>) {
+    /// Enter in the search: makes the branch it names, or switches to the
+    /// only one it finds.
+    fn enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.search.read(cx).value().trim().to_string();
+        if self.repo.read(cx).busy().is_some() {
+            return;
+        }
+        let lower = query.to_lowercase();
+        let found: Vec<&Branch> = self
+            .branches
+            .iter()
+            .filter(|branch| {
+                branch.remote == self.show_remote && branch.name.to_lowercase().contains(&lower)
+            })
+            .collect();
+        // The branch typed, also as it would be made ("fix login" is
+        // `fix-login`): one there already is switched to, not made again.
+        let made = new_branch_name(&query);
+        let exact = self.branches.iter().find(|branch| {
+            branch.name == query
+                || matches!(&made, Some(Ok(name)) if !branch.remote && branch.name == *name)
+        });
+        match (exact, made, &found[..]) {
+            (Some(branch), _, _) => self.switch(&branch.clone(), cx),
+            (None, Some(Ok(name)), _) => self.create(name, window, cx),
+            (None, _, [only]) => self.switch(&(*only).clone(), cx),
+            _ => {}
+        }
+    }
+
+    fn create(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        // The list shows every branch again, the new one among them.
+        self.search
+            .update(cx, |search, cx| search.set_value("", window, cx));
         self.repo.update(cx, |repo, cx| {
             repo.run(
                 format!("Creating {name}"),
@@ -241,7 +277,7 @@ impl BranchPicker {
                                 .gap_1()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(Spinner::new().xsmall())
+                                .child(ph_ui::Loader::new().xsmall())
                                 .child(busy),
                         )
                     }),
@@ -338,8 +374,17 @@ impl Render for BranchPicker {
             .cloned()
             .enumerate()
             .collect();
-        let exact = self.branches.iter().any(|branch| branch.name == query);
-        let can_create = !query.is_empty() && !exact && self.repo.read(cx).busy().is_none();
+        let busy = self.repo.read(cx).busy().is_some();
+        let current = self
+            .repo
+            .read(cx)
+            .status()
+            .and_then(|status| status.branch.clone());
+        // What the search would make: a branch that is not there yet.
+        let new_branch = new_branch_name(&query).filter(|name| match name {
+            Ok(name) => !self.branches.iter().any(|branch| &branch.name == name),
+            Err(_) => true,
+        });
         let local_count = matching.iter().filter(|(_, b)| !b.remote).count();
         let remote_count = matching.len() - local_count;
         // Long lists of either kind: one at a time, chosen by the tabs.
@@ -391,8 +436,8 @@ impl Render for BranchPicker {
                 cx,
             ));
         v_flex()
-            .w(px(400.))
-            .max_h(px(520.))
+            .w(ph_ui::rems_from_px(400.))
+            .max_h(ph_ui::rems_from_px(520.))
             .child(self.render_header(cx))
             .child(
                 div().p_2().child(
@@ -402,27 +447,61 @@ impl Render for BranchPicker {
                 ),
             )
             .child(tabs)
-            .when(can_create, |this| {
-                let name = query.clone();
-                this.child(
-                    h_flex()
-                        .id("create-branch")
-                        .mx_2()
-                        .gap_2()
-                        .px_2()
-                        .py_1p5()
-                        .rounded(cx.theme().radius)
+            // Making a branch is always on offer here: what to do with no
+            // name yet, the branch a name would make, or why a name will
+            // not do.
+            .child(match new_branch {
+                None if !query.is_empty() => div().into_any_element(),
+                None => {
+                    let search = self.search.clone();
+                    create_row(cx)
+                        .text_color(cx.theme().muted_foreground)
                         .cursor_pointer()
                         .hover(|style| style.bg(cx.theme().list_hover))
-                        .text_sm()
-                        .on_click(cx.listener(move |this, _, _, cx| this.create(name.clone(), cx)))
+                        .on_click(move |_, window, cx| {
+                            search.update(cx, |search, cx| search.focus(window, cx))
+                        })
+                        .child(Icon::new(IconName::Plus).small())
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child("New branch: type its name above, then Enter"),
+                        )
+                        .into_any_element()
+                }
+                Some(Ok(name)) => {
+                    let from = current.clone().unwrap_or_else(|| "here".into());
+                    let label = format!("Create branch “{name}” from {from}");
+                    create_row(cx)
+                        .when(!busy, |this| {
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(cx.theme().list_hover))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.create(name.clone(), window, cx)
+                                }))
+                        })
+                        .when(busy, |this| this.opacity(0.5))
                         .child(
                             Icon::new(IconName::Plus)
                                 .small()
                                 .text_color(cx.theme().info),
                         )
-                        .child(format!("Create branch “{query}” from here")),
-                )
+                        .child(div().flex_1().min_w_0().child(label))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Enter"),
+                        )
+                        .into_any_element()
+                }
+                Some(Err(why)) => create_row(cx)
+                    .text_color(cx.theme().warning)
+                    .child(Icon::new(IconName::TriangleAlert).small())
+                    .child(div().flex_1().min_w_0().child(why))
+                    .into_any_element(),
             })
             .child(
                 v_flex()
@@ -457,3 +536,74 @@ impl Render for BranchPicker {
 }
 
 pub use ph_ui::time::ago;
+
+/// The row under the search that makes a branch.
+fn create_row(cx: &gpui_kit::App) -> gpui_kit::Stateful<gpui_kit::Div> {
+    h_flex()
+        .id("create-branch")
+        .flex_none()
+        .mx_2()
+        .mt_1()
+        .gap_2()
+        .px_2()
+        .py_1p5()
+        .rounded(cx.theme().radius)
+        .text_sm()
+}
+
+/// The branch `query` would make: spaces become dashes (as GitHub and VS
+/// Code do), and a name Git refuses comes back with why. `None` for no
+/// name yet.
+fn new_branch_name(query: &str) -> Option<Result<String, &'static str>> {
+    let name = query.split_whitespace().collect::<Vec<_>>().join("-");
+    if name.is_empty() {
+        return None;
+    }
+    // git check-ref-format's rules, said in words before Git is asked.
+    let refused = if name
+        .chars()
+        .any(|c| "~^:?*[\\".contains(c) || c.is_control())
+    {
+        Some("A branch name cannot contain ~ ^ : ? * [ or \\")
+    } else if name.contains("..") || name.contains("@{") || name.contains("//") {
+        Some("A branch name cannot contain “..”, “@{” or “//”")
+    } else if name.starts_with(['-', '/', '.']) || name.contains("/.") {
+        Some("A branch name, or a part of it after a /, cannot start with - / or .")
+    } else if name.ends_with(['/', '.']) || name.ends_with(".lock") || name.contains(".lock/") {
+        Some("A branch name, or a part of it before a /, cannot end with / . or .lock")
+    } else if name == "@" || name == "HEAD" {
+        Some("That name is taken by Git itself")
+    } else {
+        None
+    };
+    Some(match refused {
+        Some(why) => Err(why),
+        None => Ok(name),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::new_branch_name;
+
+    #[test]
+    fn a_typed_name_becomes_a_branch_name_or_says_why_not() {
+        assert_eq!(new_branch_name("   "), None);
+        assert_eq!(
+            new_branch_name("fix login  page"),
+            Some(Ok("fix-login-page".into()))
+        );
+        assert_eq!(
+            new_branch_name("feature/auto-save"),
+            Some(Ok("feature/auto-save".into()))
+        );
+        for refused in [
+            "a..b", "-x", "x.lock", "x/", "a~1", "what?", "HEAD", "a:b", "a/.b", "a.lock/b",
+        ] {
+            assert!(
+                matches!(new_branch_name(refused), Some(Err(_))),
+                "{refused}"
+            );
+        }
+    }
+}

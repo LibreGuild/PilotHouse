@@ -303,7 +303,7 @@ pub(crate) fn notice(text: impl Into<gpui_kit::SharedString>, cx: &App) -> AnyEl
         .child(
             div()
                 .w_full()
-                .max_w(gpui_kit::px(560.))
+                .max_w(ph_ui::rems_from_px(560.))
                 .text_center()
                 .child(text.into()),
         )

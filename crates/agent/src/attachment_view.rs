@@ -15,7 +15,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ObjectFit,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Window, div, img, px,
+    StyledImage as _, Window, div, img,
 };
 use ph_ui::Icons;
 
@@ -161,8 +161,8 @@ fn card(preview: Preview, cx: &App) -> AnyElement {
             .gap_1p5()
             .child(
                 img(path)
-                    .max_w(px(480.))
-                    .max_h(px(340.))
+                    .max_w(ph_ui::rems_from_px(480.))
+                    .max_h(ph_ui::rems_from_px(340.))
                     .object_fit(ObjectFit::Contain)
                     .rounded(cx.theme().radius),
             )
@@ -181,7 +181,7 @@ fn text_card(text: &str, path: Option<&Path>, hint: gpui_kit::Div, cx: &App) -> 
     let lines: Vec<&str> = text.lines().take(CARD_LINES).collect();
     let more = text.lines().count() > CARD_LINES;
     v_flex()
-        .w(px(460.))
+        .w(ph_ui::rems_from_px(460.))
         .gap_1p5()
         .when_some(path, |this, path| {
             this.child(
@@ -245,7 +245,7 @@ pub fn open_dialog(label: String, preview: Preview, window: &mut Window, cx: &mu
                 .child(
                     img(path.clone())
                         .max_w_full()
-                        .max_h(px(620.))
+                        .max_h(ph_ui::rems_from_px(620.))
                         .object_fit(ObjectFit::Contain)
                         .rounded(cx.theme().radius),
                 )
@@ -263,8 +263,11 @@ pub fn open_dialog(label: String, preview: Preview, window: &mut Window, cx: &mu
             })
         }
     };
-    window.open_dialog(cx, move |dialog, _, cx| {
-        dialog.title(label.clone()).w(px(860.)).child(body(cx))
+    window.open_dialog(cx, move |dialog, window, cx| {
+        dialog
+            .title(label.clone())
+            .w(ph_ui::scaled_px(860., window))
+            .child(body(cx))
     });
 }
 
@@ -275,7 +278,7 @@ fn full_text(text: SharedString, cut: Option<&PathBuf>, cx: &App) -> AnyElement 
         .child(
             div()
                 .id("attachment-text")
-                .max_h(px(560.))
+                .max_h(ph_ui::rems_from_px(560.))
                 .overflow_y_scroll()
                 .p_3()
                 .rounded(cx.theme().radius)

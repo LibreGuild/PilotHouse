@@ -1,6 +1,6 @@
 # Schedules
 
-Code: `crates/workspace/src/schedules/` (runner and dialog), `crates/store/src/schedules.rs` (data, times). Open with **Schedules…** in the command palette.
+Code: `crates/workspace/src/schedules/` (runner and dialog), `crates/store/src/schedules.rs` (data, times). Open with **Schedules** in the command palette.
 
 A schedule does one thing for a workspace, at set times or when something happens:
 

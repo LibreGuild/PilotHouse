@@ -28,9 +28,13 @@ const GAP_Y: f32 = 44.;
 
 pub fn open(space: WeakEntity<WorkspaceScreen>, root: PathBuf, window: &mut Window, cx: &mut App) {
     let view = cx.new(|cx| ArchMap::new(space, root, cx));
-    let viewport = window.viewport_size();
-    let width = (viewport.width - px(80.)).clamp(px(560.), px(1100.));
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
+        // As wide as the interface size asks for, within the window.
+        let room = window.viewport_size().width - px(80.);
+        let width = room.clamp(
+            ph_ui::scaled_px(560., window).min(room),
+            ph_ui::scaled_px(1100., window),
+        );
         dialog
             .title("Architecture map")
             .w(width)
@@ -185,7 +189,7 @@ impl Render for ArchMap {
             .child(
                 div()
                     .id("arch-map")
-                    .max_h(px(560.))
+                    .max_h(ph_ui::rems_from_px(560.))
                     .overflow_scroll()
                     .child(
                         div()

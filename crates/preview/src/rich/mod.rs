@@ -235,7 +235,7 @@ impl Render for DragGhost {
         div()
             .px_3()
             .py_1()
-            .max_w(px(320.))
+            .max_w(ph_ui::rems_from_px(320.))
             .truncate()
             .rounded(cx.theme().radius)
             .bg(cx.theme().popover)
@@ -1207,46 +1207,47 @@ impl RichEditor {
         let mut rows = Vec::with_capacity(table.rows.len());
         for (r, row) in table.rows.iter().enumerate() {
             let cells = row.iter().enumerate().map(|(c, text)| {
-                let content: AnyElement =
-                    match editing.filter(|cell| cell.row == r && cell.col == c) {
-                        Some(cell) => div()
-                            .key_context(CELL_CONTEXT)
-                            .on_action(cx.listener(|this, _: &NextCell, window, cx| {
-                                this.move_cell(1, 0, window, cx)
-                            }))
-                            .on_action(cx.listener(|this, _: &PreviousCell, window, cx| {
-                                this.move_cell(-1, 0, window, cx)
-                            }))
-                            .on_action(cx.listener(|this, _: &EndCell, window, cx| {
-                                this.finish_cell(cx);
-                                window.focus(&this.focus, cx);
-                            }))
-                            .child(
-                                Textarea::new(&cell.input)
-                                    .appearance(false)
-                                    .bordered(false)
-                                    .xsmall()
-                                    .text_size(text_size)
-                                    .p_0(),
-                            )
-                            .into_any_element(),
-                        None if text.is_empty() => div().h(px(20.)).into_any_element(),
-                        None => markdown_text(
-                            SharedString::from(format!("rich-cell-text-{id}-{r}-{c}")),
-                            text.clone().into(),
-                            &self.path,
-                            dark,
-                            crate::markdown::opener(cx.weak_entity()),
+                let content: AnyElement = match editing
+                    .filter(|cell| cell.row == r && cell.col == c)
+                {
+                    Some(cell) => div()
+                        .key_context(CELL_CONTEXT)
+                        .on_action(cx.listener(|this, _: &NextCell, window, cx| {
+                            this.move_cell(1, 0, window, cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &PreviousCell, window, cx| {
+                            this.move_cell(-1, 0, window, cx)
+                        }))
+                        .on_action(cx.listener(|this, _: &EndCell, window, cx| {
+                            this.finish_cell(cx);
+                            window.focus(&this.focus, cx);
+                        }))
+                        .child(
+                            Textarea::new(&cell.input)
+                                .appearance(false)
+                                .bordered(false)
+                                .xsmall()
+                                .text_size(text_size)
+                                .p_0(),
                         )
                         .into_any_element(),
-                    };
+                    None if text.is_empty() => div().h(ph_ui::rems_from_px(20.)).into_any_element(),
+                    None => markdown_text(
+                        SharedString::from(format!("rich-cell-text-{id}-{r}-{c}")),
+                        text.clone().into(),
+                        &self.path,
+                        dark,
+                        crate::markdown::opener(cx.weak_entity()),
+                    )
+                    .into_any_element(),
+                };
                 let weak = cx.weak_entity();
                 let align = table.align.get(c).copied();
                 let is_editing = editing.is_some_and(|cell| cell.row == r && cell.col == c);
                 div()
                     .id(SharedString::from(format!("rich-cell-{id}-{r}-{c}")))
                     .flex_1()
-                    .min_w(px(72.))
+                    .min_w(ph_ui::rems_from_px(72.))
                     .px_2()
                     .py_1()
                     .border_r_1()
@@ -1478,9 +1479,9 @@ impl RichEditor {
                     div()
                         .id(("rich-check", id))
                         .flex_none()
-                        .mt(px(3.))
+                        .mt(ph_ui::rems_from_px(3.))
                         .mr_2()
-                        .size(px(16.))
+                        .size(ph_ui::rems_from_px(16.))
                         .rounded(px(4.))
                         .border_1()
                         .border_color(if checked {
@@ -1521,10 +1522,10 @@ impl RichEditor {
             .group("rich-block")
             .items_start()
             .w_full()
-            .pl(px(indent))
+            .pl(ph_ui::rems_from_px(indent))
             .child(
                 h_flex()
-                    .w(px(GUTTER))
+                    .w(ph_ui::rems_from_px(GUTTER))
                     .flex_none()
                     .justify_end()
                     .gap_0p5()
@@ -1576,7 +1577,10 @@ impl RichEditor {
             (kind, _) if kind.is_list() => 2.,
             _ => 6.,
         };
-        div().pt(px(space)).child(row).into_any_element()
+        div()
+            .pt(ph_ui::rems_from_px(space))
+            .child(row)
+            .into_any_element()
     }
 
     /// A block not being edited, formatted.
@@ -1625,9 +1629,11 @@ impl RichEditor {
                 return self.render_table(id, &table, cx);
             }
             kind if kind.is_list() && block.body.trim().is_empty() => {
-                div().h(px(22.)).into_any_element()
+                div().h(ph_ui::rems_from_px(22.)).into_any_element()
             }
-            Kind::Paragraph if block.body.trim().is_empty() => div().h(px(22.)).into_any_element(),
+            Kind::Paragraph if block.body.trim().is_empty() => {
+                div().h(ph_ui::rems_from_px(22.)).into_any_element()
+            }
             kind => {
                 let source: SharedString = if kind.is_list() {
                     block.body.clone().into()
@@ -1649,7 +1655,7 @@ impl RichEditor {
         div()
             .id(("rich-shown", id))
             .w_full()
-            .min_h(px(22.))
+            .min_h(ph_ui::rems_from_px(22.))
             .cursor_text()
             .child(shown)
             .on_click(
@@ -1691,7 +1697,7 @@ impl RichEditor {
         let input = match &block.kind {
             Kind::Heading(level) => input
                 .font_weight(gpui_kit::FontWeight::BOLD)
-                .text_size(px(heading_size(*level))),
+                .text_size(ph_ui::rems_from_px(heading_size(*level))),
             Kind::Code { .. } | Kind::Raw => {
                 input.font_family(theme.mono_font_family.clone()).text_sm()
             }
@@ -1813,7 +1819,7 @@ impl RichEditor {
                 .collect()
         };
         let list = div()
-            .w(px(280.))
+            .w(ph_ui::rems_from_px(280.))
             .p_1()
             .rounded(theme.radius_lg)
             .border_1()
@@ -1853,7 +1859,7 @@ impl Render for RichEditor {
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(READING_WIDTH + GUTTER))
+                            .max_w(ph_ui::rems_from_px(READING_WIDTH + GUTTER))
                             .pr_8()
                             .child(row),
                     )
@@ -1862,7 +1868,7 @@ impl Render for RichEditor {
         )
         .size_full()
         .pt_6()
-        .pb(px(160.));
+        .pb(ph_ui::rems_from_px(160.));
         v_flex()
             .id("rich-editor")
             .key_context("RichEditor")
@@ -1936,8 +1942,8 @@ impl RichEditor {
         let empty = self.document.blocks.is_empty();
         div()
             .id("rich-end")
-            .ml(px(GUTTER))
-            .h(px(120.))
+            .ml(ph_ui::rems_from_px(GUTTER))
+            .h(ph_ui::rems_from_px(120.))
             .cursor_text()
             .when(empty, |this| {
                 this.text_color(theme.muted_foreground).child(

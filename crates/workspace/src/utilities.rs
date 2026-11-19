@@ -27,8 +27,11 @@ pub fn open(id: Option<&str>, window: &mut Window, cx: &mut App) {
         .unwrap_or(0);
     let view = cx.new(|cx| UtilitiesView::new(selected, window, cx));
     let focus = view.read(cx).text.clone();
-    window.open_dialog(cx, move |dialog, _, _| {
-        dialog.title("Utilities").w(px(880.)).child(view.clone())
+    window.open_dialog(cx, move |dialog, window, _| {
+        dialog
+            .title("Utilities")
+            .w(ph_ui::scaled_px(880., window))
+            .child(view.clone())
     });
     focus.update(cx, |text, cx| text.focus(window, cx));
 }
@@ -158,9 +161,9 @@ impl UtilitiesView {
         }
         v_flex()
             .id("utilities-list")
-            .w(px(170.))
+            .w(ph_ui::rems_from_px(170.))
             .flex_none()
-            .h(px(440.))
+            .h(ph_ui::rems_from_px(440.))
             .overflow_y_scroll()
             .pr_2()
             .border_r_1()
@@ -245,6 +248,10 @@ impl Render for UtilitiesView {
                             .font_family(cx.theme().mono_font_family.clone())
                             .text_xs()
                             .when(picture && output.is_ok(), |this| {
+                                // In pixels, not with the interface size:
+                                // the code's rows must touch with no seam
+                                // (a line height of a fraction of a pixel
+                                // leaves one), or it does not scan.
                                 this.text_size(px(9.)).line_height(px(9.))
                             })
                             .when(output.is_err(), |this| this.text_color(cx.theme().danger))

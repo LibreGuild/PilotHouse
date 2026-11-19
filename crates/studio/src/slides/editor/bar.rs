@@ -201,7 +201,7 @@ impl SlidesEditor {
                             Button::new("bar-svg-edit")
                                 .ghost()
                                 .small()
-                                .label("Edit SVG…")
+                                .label("Edit SVG")
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.open_svg(Some(id.clone()), window, cx)
                                 }))
@@ -249,7 +249,7 @@ impl SlidesEditor {
         h_flex()
             .id("slides-bar")
             .flex_none()
-            .h(px(42.))
+            .h(ph_ui::rems_from_px(42.))
             .px_2()
             .gap_0p5()
             .border_t_1()
@@ -437,7 +437,7 @@ impl SlidesEditor {
                 .label(shorten(&shown, 18))
                 .dropdown_caret(true)
                 .tooltip("Font")
-                .menu(gpui_kit::Anchor::BottomLeft, move |menu, _, _| {
+                .menu(gpui_kit::Anchor::BottomLeft, move |menu, window, _| {
                     let item = |label: String, font: &'static str, value: String| {
                         let editor = font_editor.clone();
                         let _ = font;
@@ -475,7 +475,7 @@ impl SlidesEditor {
                             menu = menu.item(item(family.to_string(), "", family.to_string()));
                         }
                     }
-                    menu.max_h(px(420.)).scrollable(true)
+                    menu.max_h(ph_ui::scaled_px(420., window)).scrollable(true)
                 })
                 .into_any_element(),
         );
@@ -1066,7 +1066,7 @@ impl SlidesEditor {
             Button::new("bar-replace")
                 .ghost()
                 .small()
-                .label("Replace…")
+                .label("Replace")
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.replace_picture(id.clone(), window, cx)
                 }))
@@ -1087,7 +1087,7 @@ impl SlidesEditor {
                 .ghost()
                 .small()
                 .icon(Icons::Pencil)
-                .label("Edit cells…")
+                .label("Edit cells")
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.open_table(id.clone(), window, cx)),
                 )
@@ -1177,7 +1177,7 @@ impl SlidesEditor {
                 .ghost()
                 .small()
                 .icon(Icons::Pencil)
-                .label("Edit data…")
+                .label("Edit data")
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.open_chart(id.clone(), window, cx)),
                 )
@@ -1257,7 +1257,7 @@ impl SlidesEditor {
                     language.clone()
                 })
                 .dropdown_caret(true)
-                .menu(gpui_kit::Anchor::BottomLeft, move |menu, _, _| {
+                .menu(gpui_kit::Anchor::BottomLeft, move |menu, window, _| {
                     LANGUAGES
                         .iter()
                         .fold(menu, |menu, name| {
@@ -1277,7 +1277,7 @@ impl SlidesEditor {
                                     }),
                             )
                         })
-                        .max_h(px(360.))
+                        .max_h(ph_ui::scaled_px(360., window))
                         .scrollable(true)
                 })
                 .into_any_element(),
@@ -1389,7 +1389,7 @@ impl SlidesEditor {
             Button::new("bar-icon-change")
                 .ghost()
                 .small()
-                .label("Change…")
+                .label("Change")
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_icons(Some(id.clone()), window, cx)
                 }))
@@ -1765,7 +1765,7 @@ impl SlidesEditor {
         let border = cx.theme().border;
         let trigger = Button::new(id).ghost().small().tooltip(tooltip).child(
             div()
-                .size(px(16.))
+                .size(ph_ui::rems_from_px(16.))
                 .rounded(px(3.))
                 .border_1()
                 .border_color(border)
@@ -1788,7 +1788,7 @@ impl SlidesEditor {
                     let selected = color.eq_ignore_ascii_case(&current);
                     div()
                         .id(gpui_kit::SharedString::from(format!("swatch-{color}")))
-                        .size(px(18.))
+                        .size(ph_ui::rems_from_px(18.))
                         .rounded(px(3.))
                         .border_1()
                         .border_color(if selected { ring } else { border })
@@ -1828,7 +1828,7 @@ impl SlidesEditor {
                         cell(color, title)
                     })));
                 }
-                rows = rows.child(div().h(px(4.))).child(
+                rows = rows.child(div().h(ph_ui::rems_from_px(4.))).child(
                     h_flex().gap_1().children(
                         STANDARD
                             .iter()
@@ -1918,7 +1918,7 @@ fn divider(cx: &App) -> AnyElement {
     div()
         .flex_none()
         .w(px(1.))
-        .h(px(18.))
+        .h(ph_ui::rems_from_px(18.))
         .mx_1()
         .bg(cx.theme().border)
         .into_any_element()

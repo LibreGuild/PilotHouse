@@ -93,7 +93,10 @@ impl ListDelegate for QuickOpenDelegate {
                 h_flex()
                     .gap_2()
                     .min_w_0()
-                    .child(ph_ui::file_icon_element(path.as_ref(), gpui_kit::px(16.)))
+                    .child(ph_ui::file_icon_element(
+                        path.as_ref(),
+                        ph_ui::rems_from_px(16.),
+                    ))
                     .child(div().flex_none().child(name.to_string()))
                     .child(
                         div()

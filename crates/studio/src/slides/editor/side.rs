@@ -504,7 +504,7 @@ impl SlidesEditor {
             v_flex()
                 .id("slides-side")
                 .flex_none()
-                .w(px(300.))
+                .w(ph_ui::rems_from_px(300.))
                 .h_full()
                 .border_l_1()
                 .border_color(theme.border)
@@ -512,7 +512,7 @@ impl SlidesEditor {
                 .child(
                     h_flex()
                         .flex_none()
-                        .h(px(36.))
+                        .h(ph_ui::rems_from_px(36.))
                         .px_3()
                         .gap_2()
                         .border_b_1()
@@ -583,7 +583,7 @@ impl SlidesEditor {
                         .child(
                             div()
                                 .flex_none()
-                                .size(px(18.))
+                                .size(ph_ui::rems_from_px(18.))
                                 .rounded_full()
                                 .bg(theme.primary)
                                 .text_color(theme.primary_foreground)
@@ -991,7 +991,7 @@ impl SlidesEditor {
                         .outline()
                         .small()
                         .icon(Icons::Plus)
-                        .label("Add files…")
+                        .label("Add files")
                         .on_click(cx.listener(|this, _, window, cx| this.pick_references(window, cx))),
                 ),
             )

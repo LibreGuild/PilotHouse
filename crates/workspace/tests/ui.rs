@@ -64,11 +64,38 @@ fn a_first_start_opens_into_a_chat(cx: &mut TestAppContext) {
         let chats = workspace.chats_space().expect("the Chats space").id;
         assert_eq!(workspace.active_project_id(), Some(chats));
         assert!(workspace.projects().is_empty(), "it is not a workspace");
+        assert_eq!(workspace.section(), ph_workspace::Section::Chats);
         assert!(window.try_find("sidebar-chats").is_some());
-        assert!(window.try_find("sidebar-workspaces").is_some());
-        assert!(window.try_find("sidebar-open-folder").is_some());
+        assert!(
+            window.try_find("sidebar-workspaces").is_none(),
+            "one list at a time"
+        );
         // Nothing to show of files there.
         assert!(window.try_find("context-tab-files").is_none());
+    })
+    .unwrap();
+
+    // The left column leads to the workspaces: none yet, so how to get one,
+    // in the list and in place of a screen.
+    click(window, "view-workspaces", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            workspace.read(cx).section(),
+            ph_workspace::Section::Workspaces
+        );
+        assert!(window.try_find("sidebar-workspaces").is_some());
+        assert!(window.try_find("sidebar-chats").is_none());
+        assert!(window.try_find("sidebar-open-folder").is_some());
+        assert!(window.try_find("empty-open-folder").is_some());
+    })
+    .unwrap();
+    // And back to the chat.
+    click(window, "view-chats", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("sidebar-chats").is_some());
+        assert!(window.try_find("empty-open-folder").is_none());
     })
     .unwrap();
 
@@ -164,7 +191,7 @@ fn command_palette_runs_a_command(cx: &mut TestAppContext) {
                 .try_find_by_label("Type a command or search…")
                 .is_some()
         );
-        window.input("toggle sidebar", cx);
+        window.input("hide the sidebar", cx);
     })
     .unwrap();
     cx.run_until_parked();
@@ -190,7 +217,7 @@ fn files_open_in_front_of_the_chat(cx: &mut TestAppContext) {
             workspace.add_project_path(&folder, window, cx)
         });
         window.render_frame(cx);
-        assert!(window.try_find("sidebar-chats").is_some());
+        assert!(window.try_find("sidebar-workspaces").is_some());
         assert!(
             window.try_find_by_label("Close file").is_none(),
             "no editor yet"
@@ -219,8 +246,12 @@ fn files_open_in_front_of_the_chat(cx: &mut TestAppContext) {
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         assert!(
-            window.try_find("sidebar-chats").is_none(),
+            window.try_find("sidebar-workspaces").is_none(),
             "⌘B hid the sidebar"
+        );
+        assert!(
+            window.try_find("view-workspaces").is_some(),
+            "the column of icons stays"
         );
         assert!(
             window.try_find("chat-history").is_some(),
@@ -480,6 +511,12 @@ fn the_github_view_asks_for_an_account(cx: &mut TestAppContext) {
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(workspace.read(cx).view(), ph_workspace::View::Workspaces);
+        assert!(window.try_find("sidebar-workspaces").is_some());
+    })
+    .unwrap();
+    press(window, "secondary-shift-d", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
         assert!(window.try_find("sidebar-chats").is_some());
     })
     .unwrap();

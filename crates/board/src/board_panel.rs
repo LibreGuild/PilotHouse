@@ -11,7 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, px,
+    Styled as _, Subscription, Window, div,
 };
 use ph_store::Store;
 use ph_store::board::{Card, CardId, CardStatus};
@@ -57,8 +57,8 @@ impl Render for DragPreview {
 }
 
 /// Columns keep one width so cards line up and the board scrolls sideways
-/// when the panel is narrow.
-const COLUMN_WIDTH: Pixels = px(248.);
+/// when the panel is narrow (248 pixels at the default interface size).
+const COLUMN_WIDTH: gpui_kit::Rems = ph_ui::rems_from_px(248.);
 
 pub struct BoardPanel {
     store: Store,
@@ -67,6 +67,8 @@ pub struct BoardPanel {
     /// How many UI tests each card needs to pass to be Done.
     test_counts: std::collections::HashMap<CardId, usize>,
     error: Option<SharedString>,
+    /// The pane is too narrow for the toolbar's button names: icons only.
+    narrow: bool,
     _subscription: Subscription,
 }
 
@@ -95,6 +97,7 @@ impl BoardPanel {
             cards: Vec::new(),
             test_counts: Default::default(),
             error: None,
+            narrow: false,
             _subscription: subscription,
         };
         panel.reload(cx);
@@ -153,6 +156,7 @@ impl BoardPanel {
             .cards
             .iter()
             .any(|card| card.status == CardStatus::Todo);
+        let narrow = self.narrow;
 
         h_flex()
             .flex_none()
@@ -162,6 +166,8 @@ impl BoardPanel {
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
+                    .truncate()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(format!(
@@ -175,8 +181,13 @@ impl BoardPanel {
                     .ghost()
                     .small()
                     .icon(Icons::ListTodo)
-                    .label("Plan with agent")
-                    .tooltip("Describe a goal; the agent breaks it into cards")
+                    .when(!narrow, |this| this.label("Plan with agent"))
+                    .accessibility_label("Plan with agent")
+                    .tooltip(if narrow {
+                        "Plan with agent: describe a goal, the agent breaks it into cards"
+                    } else {
+                        "Describe a goal; the agent breaks it into cards"
+                    })
                     .on_click(cx.listener(|_, _, window, cx| {
                         let board = cx.weak_entity();
                         plan_dialog::open(board, window, cx);
@@ -187,9 +198,14 @@ impl BoardPanel {
                     .ghost()
                     .small()
                     .icon(Icons::Bot)
-                    .label("Work through board")
+                    .when(!narrow, |this| this.label("Work through board"))
+                    .accessibility_label("Work through board")
                     .disabled(!has_todo)
-                    .tooltip("Ask the agent to take cards from To do one by one")
+                    .tooltip(if narrow {
+                        "Work through board: the agent takes cards from To do one by one"
+                    } else {
+                        "Ask the agent to take cards from To do one by one"
+                    })
                     .on_click(cx.listener(|_, _, _, cx| {
                         cx.emit(BoardPanelEvent::SendToAgent {
                             prompt: prompts::work_through_board(),
@@ -202,7 +218,9 @@ impl BoardPanel {
                     .outline()
                     .small()
                     .icon(Icons::Plus)
-                    .label("Add card")
+                    .when(!narrow, |this| this.label("Add card"))
+                    .when(narrow, |this| this.tooltip("Add card"))
+                    .accessibility_label("Add card")
                     .on_click(move |_, window, cx| {
                         card_editor::open_new(store.clone(), project_id, window, cx)
                     }),
@@ -363,9 +381,14 @@ impl BoardPanel {
 }
 
 impl Render for BoardPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The toolbar's three named buttons need about this much room.
+        let (narrow, probe) = ph_ui::measure::narrower_than("board-width", 600., window, cx);
+        self.narrow = narrow;
         v_flex()
+            .relative()
             .size_full()
+            .child(probe)
             .child(self.render_header(cx))
             .when_some(self.error.clone(), |this, error| {
                 this.child(

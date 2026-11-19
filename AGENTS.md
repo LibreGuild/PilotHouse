@@ -32,13 +32,13 @@ Always run the app on a throwaway data folder (`PILOTHOUSE_DATA_DIR`), never the
 
 - **One crate per feature.** A feature's model, views and commands live in its crate; the shell composes features, and features never depend on the shell.
 - **A feature the brand can switch off** is listed in `ph_brand::Feature` (and `FEATURES` in `crates/brand/build.rs`), and every way into it checks it: its tool or view, its palette and menu entries (`crates/workspace/src/features.rs` maps actions to features), its dialogs, its MCP tools (`crates/mcp/src/tools/mod.rs`). A new PilotHouse feature that can be left out gets a key there, on by default.
-- **Colours come from the theme** (`cx.theme()`); raw colours belong in `crates/theme/themes/pilothouse.json`. Layout uses rem helpers; pane widths live in `crates/theme/src/layout.rs`.
+- **Colours come from the theme** (`cx.theme()`); raw colours belong in `crates/theme/themes/pilothouse.json`. Layout uses rem helpers, and `ph_ui::rems_from_px` for a size off their scale, so everything follows the interface size; `px` is for hairlines, strokes and radii, and pane widths live in `crates/theme/src/layout.rs`. Nothing in a view is sized by platform: the fonts (`crates/theme/fonts`) and sizes are the same on macOS, Windows and Linux.
 - **Stable element ids** from domain ids, never list positions. **Every icon-only button gets an `accessibility_label`**: screen readers and the automation harness use it.
 - **No blocking work in `render`**: disk, git and processes run on background tasks.
 - **Database migrations are append-only** (`crates/store/src/migrations.rs`): add one at the end, never edit or reorder one that shipped.
 - **Settings** are JSON values by key (`Store::setting`, `Store::set_setting`); fields a build does not know are kept (`Preferences::other`).
 - **Changes an organisation's build depends on** (`brand.toml` keys, `ph_brand`, `ph_custom`, `Store::apply_track`) keep working for one release when they change, and get a line in the *Merge notes* of `CHANGELOG.md`.
-- Only permissively licensed dependencies (Apache-2.0, MIT, BSD, ISC, Zlib).
+- Only permissively licensed dependencies (Apache-2.0, MIT, BSD, ISC, Zlib). The two bundled fonts are under the SIL Open Font License 1.1 (see `NOTICE`).
 - Comments say why, not what. Every module starts with a `//!` summary.
 
 ## Names that stay as they are

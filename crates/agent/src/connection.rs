@@ -386,12 +386,23 @@ async fn initialize(
     let params = serde_json::to_value(&request).unwrap_or_else(|_| json!({}));
     let result = process.request("initialize", params).await.map_err(|err| {
         let tail = process.stderr_tail().join("\n");
+        // A build of the CLI without its editor mode: said plainly, with
+        // the way that does work.
+        if let Some(flag) = spec.refused_flag(&format!("{err:#}\n{tail}")) {
+            crate::agents::note_chat_unsupported(spec);
+            return SharedString::from(format!(
+                "{name} here cannot run in a chat: this build of it does not know `{flag}`, its editor mode. It works in a terminal of a workspace, where {app} follows it like a chat.",
+                name = spec.name,
+                app = ph_brand::NAME,
+            ));
+        }
         SharedString::from(if tail.trim().is_empty() {
             format!("{} did not start: {err:#}", spec.name)
         } else {
             format!("{} did not start: {err:#}\n{tail}", spec.name)
         })
     })?;
+    crate::agents::note_chat_supported(spec);
     let steering = result["_meta"]["steering"]["supported"].as_bool() == Some(true);
     // Sign-in methods are read from raw JSON: the typed enum also holds
     // terminal-based methods we cannot run.

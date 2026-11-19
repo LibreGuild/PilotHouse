@@ -76,10 +76,19 @@ pub(crate) fn open(
         cx.new(|cx| ph_agent::tools_view::ToolsView::new(store, project, open_file, window, cx));
     let storage = cx.new(crate::storage::StorageView::new);
     let chrome = cx.new(ph_browser::ChromeExtensionView::new);
-    let viewport = window.viewport_size();
-    let width = (viewport.width - px(80.)).clamp(px(560.), px(960.));
-    let height = (viewport.height - px(120.)).clamp(px(420.), px(680.));
-    window.open_dialog(cx, move |dialog, _, cx| {
+    window.open_dialog(cx, move |dialog, window, cx| {
+        // As large as the interface size asks for, within the window.
+        // Worked out as it is drawn: the size is changed in this dialog.
+        let viewport = window.viewport_size();
+        let fit = |room: gpui_kit::Pixels, least: f32, most: f32| {
+            let (least, most) = (
+                ph_ui::scaled_px(least, window),
+                ph_ui::scaled_px(most, window),
+            );
+            room.clamp(least.min(room), most)
+        };
+        let width = fit(viewport.width - px(80.), 560., 960.);
+        let height = fit(viewport.height - px(120.), 420., 680.);
         let (fonts, themes, workspace) = (fonts.clone(), themes.clone(), workspace.clone());
         // Opaque, also when the window lets something show through: a
         // dialog over the window must not.
@@ -199,7 +208,7 @@ fn accent_swatches(cx: &App) -> impl IntoElement + use<> {
             let selected = accent == chosen;
             let swatch = div()
                 .id(id)
-                .size(px(20.))
+                .size(ph_ui::rems_from_px(20.))
                 .rounded_full()
                 .cursor_pointer()
                 .border_2()
@@ -253,17 +262,27 @@ const FRAME: f32 = 8.;
 /// Room above the page and the list, under the title.
 const TOP: f32 = 4.;
 
-/// "System default" first, then every installed family.
+/// Every installed family (PilotHouse's own fonts among them).
 fn font_options(cx: &App) -> Vec<(SharedString, SharedString)> {
+    installed_fonts(cx)
+        .into_iter()
+        .map(|name| (SharedString::from(name.clone()), SharedString::from(name)))
+        .collect()
+}
+
+/// The choices of a font setting: PilotHouse's own font first (saved as no
+/// choice), then `extra`, then every installed family.
+fn font_choices(
+    default: &str,
+    extra: Option<(&'static str, &'static str)>,
+    installed: &[(SharedString, SharedString)],
+) -> Vec<(SharedString, SharedString)> {
     std::iter::once((
         SharedString::default(),
-        SharedString::from("System default"),
+        SharedString::from(format!("Default ({default})")),
     ))
-    .chain(
-        installed_fonts(cx)
-            .into_iter()
-            .map(|name| (SharedString::from(name.clone()), SharedString::from(name))),
-    )
+    .chain(extra.map(|(family, label)| (family.into(), label.into())))
+    .chain(installed.iter().cloned())
     .collect()
 }
 
@@ -324,7 +343,13 @@ fn appearance_page(
     workspace: gpui_kit::WeakEntity<crate::Workspace>,
     style: WindowStyle,
 ) -> SettingPage {
-    let ui_fonts = fonts.to_vec();
+    // The system's own font is not among the installed families on macOS
+    // (its name is hidden there), so it gets a row of its own.
+    let ui_fonts = font_choices(
+        ph_theme::fonts::INTERFACE,
+        Some((ph_theme::fonts::SYSTEM_INTERFACE, "System font")),
+        fonts,
+    );
     // What shows behind the window, and under it the picture's own row.
     let mut window_group = SettingGroup::new().title("Window").item(
         SettingItem::new(
@@ -384,7 +409,7 @@ fn appearance_page(
                         Button::new("choose-backdrop")
                             .small()
                             .icon(IconName::FolderOpen)
-                            .label("Choose image…")
+                            .label("Choose image")
                             .on_click(|_, _, cx| crate::theme_mods::choose_backdrop(cx))
                     }),
                 )
@@ -491,7 +516,7 @@ fn appearance_page(
                                         .small()
                                         .ghost()
                                         .icon(IconName::ArrowDown)
-                                        .label("Import…")
+                                        .label("Import")
                                         .tooltip("Import a VS Code color theme (.json)")
                                         .on_click(|_, _, cx| crate::theme_mods::import_vscode_file(cx)),
                                 )
@@ -532,19 +557,19 @@ fn appearance_page(
                             |picked, cx| AppState::update_preferences(cx, |p| p.ui_font = picked.to_string()),
                         ),
                     )
-                    .description("Used for menus, chat and labels.")
+                    .description("Used for menus, chat and labels. The default looks the same on macOS, Windows and Linux.")
                     .keywords(["font", "typeface", "family"]),
                 )
                 .item(
                     SettingItem::new("Interface size", number(11.0, ph_theme::preferences::MAX_UI_FONT_SIZE as f64, 1.0, |p| p.ui_font_size as f64, |p, v| p.ui_font_size = v as f32))
-                        .description("Text size across the app, in points.")
+                        .description("Text, icons and spacing across the app grow and shrink together.")
                         .keywords(["font size", "zoom", "bigger", "smaller"]),
                 ),
         )
 }
 
 fn editor_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {
-    let code_fonts = fonts.to_vec();
+    let code_fonts = font_choices(ph_theme::fonts::CODE, None, fonts);
     SettingPage::new("Editor")
         .icon(Icon::new(Icons::FileCode))
         .group(
@@ -626,6 +651,19 @@ fn editor_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {
                         switch(|p| p.editor.folding, |p, v| p.editor.folding = v),
                     )
                     .keywords(["fold", "collapse"]),
+                )
+                .item(
+                    SettingItem::new(
+                        "Auto save",
+                        choice(
+                            &ph_theme::AutoSave::ALL,
+                            ph_theme::AutoSave::label,
+                            |p| p.editor.auto_save,
+                            |p, v| p.editor.auto_save = v,
+                        ),
+                    )
+                    .description("Writes a file's changes without ⌘S: a moment after you stop typing, or when you leave the editor. A file that changed on disk meanwhile is never written over by itself.")
+                    .keywords(["autosave", "save", "write"]),
                 ),
         )
 }

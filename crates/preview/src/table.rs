@@ -13,7 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Task, UniformListScrollHandle, Window, div, px, uniform_list,
+    Task, UniformListScrollHandle, Window, div, uniform_list,
 };
 
 /// Rows of text under column names.
@@ -211,14 +211,14 @@ impl Render for TableGrid {
             format!("{shown} of {all} rows")
         };
         let header = h_flex()
-            .h(px(ROW_HEIGHT + 4.))
-            .w(px(total))
+            .h(ph_ui::rems_from_px(ROW_HEIGHT + 4.))
+            .w(ph_ui::rems_from_px(total))
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.secondary)
             .text_xs()
             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-            .child(div().w(px(NUMBER_WIDTH)).flex_none())
+            .child(div().w(ph_ui::rems_from_px(NUMBER_WIDTH)).flex_none())
             .children(self.data.columns.iter().enumerate().map(|(ix, name)| {
                 let arrow = match self.sort {
                     Some((column, true)) if column == ix => Some(IconName::ChevronUp),
@@ -228,7 +228,7 @@ impl Render for TableGrid {
                 h_flex()
                     .id(("table-column", ix))
                     .flex_none()
-                    .w(px(self.widths[ix]))
+                    .w(ph_ui::rems_from_px(self.widths[ix]))
                     .h_full()
                     .px_2()
                     .gap_1()
@@ -250,8 +250,8 @@ impl Render for TableGrid {
                     let ix = order[position];
                     let row = &data.rows[ix];
                     h_flex()
-                        .h(px(ROW_HEIGHT))
-                        .w(px(total))
+                        .h(ph_ui::rems_from_px(ROW_HEIGHT))
+                        .w(ph_ui::rems_from_px(total))
                         .text_sm()
                         .border_b_1()
                         .border_color(theme.border.opacity(0.35))
@@ -260,7 +260,7 @@ impl Render for TableGrid {
                         })
                         .child(
                             div()
-                                .w(px(NUMBER_WIDTH))
+                                .w(ph_ui::rems_from_px(NUMBER_WIDTH))
                                 .flex_none()
                                 .px_2()
                                 .text_xs()
@@ -270,7 +270,7 @@ impl Render for TableGrid {
                         .children(widths.iter().enumerate().map(|(column, width)| {
                             div()
                                 .flex_none()
-                                .w(px(*width))
+                                .w(ph_ui::rems_from_px(*width))
                                 .px_2()
                                 .truncate()
                                 .border_l_1()
@@ -282,7 +282,7 @@ impl Render for TableGrid {
                 .collect::<Vec<_>>()
         })
         .track_scroll(&self.rows_scroll)
-        .w(px(total))
+        .w(ph_ui::rems_from_px(total))
         .h_full();
         v_flex()
             .size_full()
@@ -295,7 +295,11 @@ impl Render for TableGrid {
                     .gap_2()
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(div().w(px(240.)).child(Input::new(&self.filter).small()))
+                    .child(
+                        div()
+                            .w(ph_ui::rems_from_px(240.))
+                            .child(Input::new(&self.filter).small()),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -322,7 +326,7 @@ impl Render for TableGrid {
                     .child(
                         v_flex()
                             .h_full()
-                            .w(px(total))
+                            .w(ph_ui::rems_from_px(total))
                             .child(header)
                             .child(div().flex_1().min_h_0().child(rows)),
                     ),

@@ -4,7 +4,7 @@
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, kbd::Kbd, v_flex};
 use gpui_kit::{
     Action, AnyElement, App, IntoElement, Keystroke, ParentElement as _, SharedString, Styled as _,
-    Window, div, px,
+    Window, div,
 };
 
 use crate::actions::*;
@@ -14,7 +14,7 @@ pub fn open(window: &mut Window, cx: &mut App) {
     window.open_dialog(cx, |dialog, window, cx| {
         dialog
             .title("Keyboard shortcuts")
-            .w(px(640.))
+            .w(ph_ui::scaled_px(640., window))
             .child(render(false, window, cx))
     });
 }
@@ -58,7 +58,8 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
         (
             "Workspaces and layout",
             vec![
-                ("Workspaces view", action(Box::new(ShowWorkspacesView))),
+                ("Workspaces", action(Box::new(ShowWorkspacesView))),
+                ("Chats", action(Box::new(ShowChatsView))),
                 ("Agents", action(Box::new(ShowAgentsView))),
                 ("GitHub view", action(Box::new(ShowGitHubView))),
                 ("Workspace 1 to 9", Keys::Text(workspace_keys.into())),

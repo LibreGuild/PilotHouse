@@ -174,7 +174,7 @@ impl FilesPanel {
         } else {
             menu = menu
                 .item(
-                    PopupMenuItem::new("New File…")
+                    PopupMenuItem::new("New File")
                         .icon(Icons::FilePlus)
                         .action(Box::new(crate::NewFile))
                         .on_click(run(|panel, target, window, cx| {
@@ -182,7 +182,7 @@ impl FilesPanel {
                         })),
                 )
                 .item(
-                    PopupMenuItem::new("New Folder…")
+                    PopupMenuItem::new("New Folder")
                         .icon(Icons::FolderPlus)
                         .action(Box::new(crate::NewFolder))
                         .on_click(run(|panel, target, window, cx| {
@@ -217,7 +217,7 @@ impl FilesPanel {
             );
         if target.is_folder {
             menu = menu.item(
-                PopupMenuItem::new("Find in Folder…")
+                PopupMenuItem::new("Find in Folder")
                     .icon(IconName::Search)
                     .on_click(run(|panel, target, window, cx| {
                         panel.find_in_folder(target.path.clone(), window, cx)
@@ -245,7 +245,7 @@ impl FilesPanel {
                         })),
                 )
                 .item(
-                    PopupMenuItem::new("Ask Agent About This…")
+                    PopupMenuItem::new("Ask Agent About This")
                         .icon(Icons::Sparkles)
                         .on_click(run(|_, target, _, cx| {
                             cx.emit(FilesPanelEvent::AskAboutFile(target.path.clone()))
@@ -317,7 +317,7 @@ impl FilesPanel {
             menu = menu
                 .separator()
                 .item(
-                    PopupMenuItem::new("Rename…")
+                    PopupMenuItem::new("Rename")
                         .icon(Icons::Pencil)
                         .action(Box::new(crate::RenameEntry))
                         .on_click(run(|panel, target, window, cx| {
@@ -360,7 +360,7 @@ impl FilesPanel {
                                 })),
                         )
                         .item(
-                            PopupMenuItem::new("Discard Changes…")
+                            PopupMenuItem::new("Discard Changes")
                                 .icon(Icons::Undo2)
                                 .on_click(run(|panel, target, window, cx| {
                                     panel.discard_entry(target, window, cx)
@@ -777,14 +777,14 @@ impl FilesPanel {
             }
         };
         menu.item(
-            PopupMenuItem::new("New File…")
+            PopupMenuItem::new("New File")
                 .icon(Icons::FilePlus)
                 .on_click(run(|panel, folder, _, window, cx| {
                     panel.new_entry(folder.to_string(), false, window, cx)
                 })),
         )
         .item(
-            PopupMenuItem::new("New Folder…")
+            PopupMenuItem::new("New Folder")
                 .icon(Icons::FolderPlus)
                 .on_click(run(|panel, folder, _, window, cx| {
                     panel.new_entry(folder.to_string(), true, window, cx)
@@ -811,7 +811,7 @@ impl FilesPanel {
                 })),
         )
         .item(
-            PopupMenuItem::new("Find in Workspace…")
+            PopupMenuItem::new("Find in Workspace")
                 .icon(IconName::Search)
                 .on_click(run(|panel, _, _, window, cx| {
                     panel.find_in_folder(String::new(), window, cx)

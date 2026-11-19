@@ -22,6 +22,7 @@ mod copies;
 mod detect;
 mod features;
 mod file_window;
+mod frame;
 mod github_view;
 mod housekeeping;
 mod inbox;
@@ -31,6 +32,7 @@ mod open;
 mod parallel;
 mod presentations;
 mod quick_chat;
+mod rail;
 mod rename_dialog;
 mod review;
 mod schedules;
@@ -80,7 +82,7 @@ pub fn open_in_studio(path: std::path::PathBuf, cx: &mut gpui_kit::App) -> anyho
     studio_window::open(path, None, cx)
 }
 pub use windows::{open_window, window_options};
-pub use workspace::{View, Workspace};
+pub use workspace::{Section, View, Workspace};
 pub use workspace_screen::WorkspaceScreen;
 
 use gpui_kit::App;

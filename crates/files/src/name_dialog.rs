@@ -7,9 +7,7 @@ use std::rc::Rc;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{
-    App, AppContext as _, ParentElement as _, SharedString, Styled as _, Window, div, px,
-};
+use gpui_kit::{App, AppContext as _, ParentElement as _, SharedString, Styled as _, Window, div};
 
 /// What the dialog calls with the name; an error keeps the dialog open and
 /// is shown under the field.
@@ -39,12 +37,12 @@ pub fn ask_name(
     let error: Rc<RefCell<Option<SharedString>>> = Rc::default();
     let title = title.into();
     let focus = input.clone();
-    window.open_dialog(cx, move |dialog, _, cx| {
+    window.open_dialog(cx, move |dialog, window, cx| {
         let (input, done, error) = (input.clone(), done.clone(), error.clone());
         let shown = error.borrow().clone();
         dialog
             .title(title.clone())
-            .w(px(440.))
+            .w(ph_ui::scaled_px(440., window))
             .child(
                 v_flex()
                     .gap_1p5()

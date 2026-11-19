@@ -23,7 +23,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, ClipboardEntry, ClipboardItem, Context, Entity,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, Styled as _, Subscription, UniformListScrollHandle, Window, div, px,
+    Render, Styled as _, Subscription, UniformListScrollHandle, Window, div,
 };
 use ph_ui::{Icons, MenuButton as _};
 use serde_json::json;
@@ -1140,14 +1140,14 @@ impl SlidesEditor {
                     ))
                     .separator()
                     .item(
-                        PopupMenuItem::new("Export as…").on_click(move |_, window, cx| {
+                        PopupMenuItem::new("Export as").on_click(move |_, window, cx| {
                             _ = save_as.update(cx, |this, cx| {
                                 this.export_as(ExportFormat::Pptx, window, cx)
                             });
                         }),
                     )
                     .item(
-                        PopupMenuItem::new("More options…").on_click(move |_, window, cx| {
+                        PopupMenuItem::new("More options").on_click(move |_, window, cx| {
                             _ = dialog.update(cx, |this, cx| this.open_export(window, cx));
                         }),
                     )
@@ -1167,18 +1167,16 @@ impl SlidesEditor {
                         editor.clone(),
                         editor.clone(),
                     );
-                    menu.item(
-                        PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
-                            _ = rename.update(cx, |this, cx| this.open_rename(window, cx));
-                        }),
-                    )
-                    .item(PopupMenuItem::new("Save theme for other decks…").on_click(
+                    menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+                        _ = rename.update(cx, |this, cx| this.open_rename(window, cx));
+                    }))
+                    .item(PopupMenuItem::new("Save theme for other decks").on_click(
                         move |_, window, cx| {
                             _ = theme.update(cx, |this, cx| this.open_save_theme(window, cx));
                         },
                     ))
                     .item(
-                        PopupMenuItem::new("Earlier versions…").on_click(move |_, window, cx| {
+                        PopupMenuItem::new("Earlier versions").on_click(move |_, window, cx| {
                             _ = versions.update(cx, |this, cx| this.open_versions(window, cx));
                         }),
                     )
@@ -1200,7 +1198,7 @@ impl SlidesEditor {
                     div()
                         .text_xs()
                         .text_color(cx.theme().danger)
-                        .max_w(px(220.))
+                        .max_w(ph_ui::rems_from_px(220.))
                         .truncate()
                         .child(format!("Not saved: {error}")),
                 )

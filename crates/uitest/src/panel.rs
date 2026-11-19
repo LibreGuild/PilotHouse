@@ -17,7 +17,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     ObjectFit, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledImage as _, Task, Window, div, img, px,
+    Styled as _, StyledImage as _, Task, Window, div, img,
 };
 use ph_ui::Icons;
 use ph_ui::MenuButton as _;
@@ -428,8 +428,8 @@ impl TestsPanel {
         v_flex()
             .id("tests-list")
             .w(gpui_kit::relative(0.34))
-            .max_w(px(220.))
-            .min_w(px(120.))
+            .max_w(ph_ui::rems_from_px(220.))
+            .min_w(ph_ui::rems_from_px(120.))
             .flex_none()
             .h_full()
             .overflow_y_scroll()
@@ -706,82 +706,84 @@ impl TestsPanel {
                         }))
                 }))
         });
-        let rows =
-            steps.into_iter().enumerate().map(|(ix, (text, result))| {
-                let looks_different = result
-                    .and_then(|result| result.visual.as_ref())
-                    .filter(|visual| visual.differs())
-                    .map(|visual| visual.changed);
-                let (icon, color) = match result.map(|result| result.outcome.as_str()) {
-                    Some("passed") if looks_different.is_some() => {
-                        (IconName::TriangleAlert, cx.theme().warning)
-                    }
-                    Some("passed") => (IconName::Check, cx.theme().success),
-                    Some("failed") => (IconName::CircleX, cx.theme().danger),
-                    Some(_) => (IconName::Minus, muted),
-                    None => (IconName::Minus, muted),
-                };
-                let has_shot = result.is_some_and(|result| result.screenshot.is_some());
-                v_flex()
-                    .gap_0p5()
-                    .child(
-                        h_flex()
-                            .id(("test-step", ix))
-                            .gap_2()
-                            .text_sm()
-                            .when(has_shot, |this| {
-                                this.cursor_pointer().on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.zoomed = if this.zoomed == Some(ix) {
-                                            None
-                                        } else {
-                                            Some(ix)
-                                        };
-                                        cx.notify();
-                                    },
-                                ))
-                            })
-                            .child(Icon::new(icon).xsmall().text_color(color))
-                            .child(
-                                div()
-                                    .text_color(muted)
-                                    .w(px(22.))
-                                    .child(format!("{}", ix + 1)),
-                            )
-                            .child(div().flex_1().min_w_0().truncate().child(text))
-                            .when_some(result.map(|result| result.millis), |this, millis| {
-                                this.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(muted)
-                                        .child(format!("{:.1}s", millis as f64 / 1000.0)),
-                                )
-                            })
-                            .when(has_shot, |this| {
-                                this.child(Icon::new(Icons::Image).xsmall().text_color(muted))
-                            }),
-                    )
-                    .when_some(looks_different, |this, changed| {
-                        this.child(div().pl(px(44.)).text_xs().text_color(cx.theme().warning).child(
-                        format!(
-                            "Looks different from the baseline: {:.1}% of the screen changed",
-                            changed * 100.0
-                        ),
-                    ))
-                    })
-                    .when_some(
-                        result.and_then(|result| result.error.clone()),
-                        |this, error| {
+        let rows = steps.into_iter().enumerate().map(|(ix, (text, result))| {
+            let looks_different = result
+                .and_then(|result| result.visual.as_ref())
+                .filter(|visual| visual.differs())
+                .map(|visual| visual.changed);
+            let (icon, color) = match result.map(|result| result.outcome.as_str()) {
+                Some("passed") if looks_different.is_some() => {
+                    (IconName::TriangleAlert, cx.theme().warning)
+                }
+                Some("passed") => (IconName::Check, cx.theme().success),
+                Some("failed") => (IconName::CircleX, cx.theme().danger),
+                Some(_) => (IconName::Minus, muted),
+                None => (IconName::Minus, muted),
+            };
+            let has_shot = result.is_some_and(|result| result.screenshot.is_some());
+            v_flex()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .id(("test-step", ix))
+                        .gap_2()
+                        .text_sm()
+                        .when(has_shot, |this| {
+                            this.cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.zoomed = if this.zoomed == Some(ix) {
+                                        None
+                                    } else {
+                                        Some(ix)
+                                    };
+                                    cx.notify();
+                                }))
+                        })
+                        .child(Icon::new(icon).xsmall().text_color(color))
+                        .child(
+                            div()
+                                .text_color(muted)
+                                .w(ph_ui::rems_from_px(22.))
+                                .child(format!("{}", ix + 1)),
+                        )
+                        .child(div().flex_1().min_w_0().truncate().child(text))
+                        .when_some(result.map(|result| result.millis), |this, millis| {
                             this.child(
                                 div()
-                                    .pl(px(44.))
                                     .text_xs()
-                                    .text_color(cx.theme().danger)
-                                    .child(error),
+                                    .text_color(muted)
+                                    .child(format!("{:.1}s", millis as f64 / 1000.0)),
                             )
-                        },
+                        })
+                        .when(has_shot, |this| {
+                            this.child(Icon::new(Icons::Image).xsmall().text_color(muted))
+                        }),
+                )
+                .when_some(looks_different, |this, changed| {
+                    this.child(
+                        div()
+                            .pl(ph_ui::rems_from_px(44.))
+                            .text_xs()
+                            .text_color(cx.theme().warning)
+                            .child(format!(
+                                "Looks different from the baseline: {:.1}% of the screen changed",
+                                changed * 100.0
+                            )),
                     )
-            });
+                })
+                .when_some(
+                    result.and_then(|result| result.error.clone()),
+                    |this, error| {
+                        this.child(
+                            div()
+                                .pl(ph_ui::rems_from_px(44.))
+                                .text_xs()
+                                .text_color(cx.theme().danger)
+                                .child(error),
+                        )
+                    },
+                )
+        });
 
         // The zoomed step's screenshot, and its changes from the baseline.
         let zoom = self.zoomed.and_then(|ix| {
@@ -934,7 +936,7 @@ impl TestsPanel {
                             img(path)
                                 .flex_none()
                                 .w_full()
-                                .h(px(360.))
+                                .h(ph_ui::rems_from_px(360.))
                                 .object_fit(ObjectFit::Contain)
                                 .rounded(cx.theme().radius)
                         };

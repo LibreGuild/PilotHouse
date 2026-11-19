@@ -146,13 +146,13 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
             &["session", "conversation"],
         ),
         Entry::action(
-            "New task in a worktree…",
+            "New task in a worktree",
             Icons::GitBranch,
             NewTask,
             &["worktree", "branch", "task", "parallel"],
         ),
         Entry::action(
-            "Finish this task…",
+            "Finish this task",
             Icons::Check,
             FinishTask,
             &["worktree", "task", "done", "archive"],
@@ -164,10 +164,16 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
             &["aside", "btw", "question", "fork"],
         ),
         Entry::action(
-            "Open folder as workspace…",
+            "Open a folder as a workspace",
             Icons::FolderPlus,
             AddProject,
-            &["open", "folder", "project", "workspace"],
+            &[
+                "open folder as workspace",
+                "open",
+                "folder",
+                "project",
+                "workspace",
+            ],
         ),
         Entry::action(
             "New workspace",
@@ -176,22 +182,34 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
             &["empty", "chat", "workspace", "project"],
         ),
         Entry::action(
-            "Add folder to workspace…",
+            "Add a folder to this workspace",
             Icons::FolderPlus,
             AddFolderToWorkspace,
-            &["multi", "root", "folder", "repository"],
+            &[
+                "add folder to workspace",
+                "multi",
+                "root",
+                "folder",
+                "repository",
+            ],
         ),
         Entry::action(
-            "Open workspace in new window",
+            "Open this workspace in a new window",
             Icons::ExternalLink,
             OpenInNewWindow,
-            &["window", "move", "monitor", "detach"],
+            &[
+                "open workspace in new window",
+                "window",
+                "move",
+                "monitor",
+                "detach",
+            ],
         ),
         Entry::action(
-            "Rename workspace…",
+            "Rename this workspace",
             IconName::Replace,
             RenameWorkspace,
-            &["name", "workspace", "project"],
+            &["rename workspace", "name", "workspace", "project"],
         ),
         Entry::action(
             "Settings",
@@ -201,25 +219,32 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         ),
     ];
     general.push(Entry::action(
-        "New presentation…",
+        "New presentation",
         Icons::Presentation,
         NewPresentation,
         &["slides", "deck", "powerpoint", "pptx", "keynote", "studio"],
     ));
     general.push(Entry::action(
-        "Open presentation…",
+        "Open a presentation",
         Icons::Presentation,
         OpenPresentation,
-        &["slides", "deck", "powerpoint", "pptx", "studio"],
+        &[
+            "open presentation",
+            "slides",
+            "deck",
+            "powerpoint",
+            "pptx",
+            "studio",
+        ],
     ));
     general.push(Entry::action(
-        "Search chats…",
+        "Search chats",
         IconName::Search,
         SearchChats,
         &["find", "history", "messages", "conversation"],
     ));
     general.push(Entry::action(
-        "Architecture map…",
+        "Architecture map",
         IconName::Network,
         ShowArchitecture,
         &[
@@ -232,25 +257,25 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         ],
     ));
     general.push(Entry::action(
-        "Parallel runs…",
+        "Parallel runs",
         IconName::GalleryVerticalEnd,
         ShowParallelRuns,
         &["compare", "agents", "worktree", "side by side"],
     ));
     general.push(Entry::action(
-        "Agent instructions…",
+        "Agent instructions",
         IconName::BookOpen,
         ShowInstructions,
         &["agents.md", "claude.md", "gemini.md", "sync", "rules"],
     ));
     general.push(Entry::action(
-        "Schedules…",
+        "Schedules",
         Icons::CalendarClock,
         ShowSchedules,
         &["schedule", "cron", "timer", "summary", "nightly", "every"],
     ));
     general.push(Entry::action(
-        "Network drives…",
+        "Network drives",
         Icons::HardDrive,
         ShowNetworkDrives,
         &[
@@ -264,7 +289,7 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         &["keys", "keymap", "hotkeys", "help", "cheat sheet"],
     ));
     general.push(Entry::action(
-        "Usage…",
+        "Usage",
         IconName::ChartPie,
         ShowUsage,
         &["tokens", "cost", "spend", "context"],
@@ -276,40 +301,63 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         &["floating", "popup", "overlay", "ask", "spotlight", "hotkey"],
     ));
     general.push(Entry::action(
-        "Toggle sidebar",
+        "Show or hide the sidebar",
         IconName::PanelLeft,
         ToggleSidebar,
-        &["hide", "show"],
+        &["toggle sidebar", "toggle", "hide", "show", "list"],
     ));
     general.push(Entry::action(
-        "Toggle tools",
+        "Show or hide the tools",
         IconName::PanelRight,
         ToggleContextPanel,
-        &["hide", "show", "context", "panel", "column"],
+        &[
+            "toggle tools",
+            "toggle",
+            "hide",
+            "show",
+            "context",
+            "panel",
+            "column",
+        ],
     ));
     general.push(Entry::action(
-        "Toggle bottom panel",
+        "Show or hide the bottom panel",
         IconName::PanelBottom,
         ToggleBottomPanel,
-        &["hide", "show", "terminal", "logcat", "panel"],
+        &[
+            "toggle bottom panel",
+            "toggle",
+            "hide",
+            "show",
+            "terminal",
+            "logcat",
+            "panel",
+        ],
     ));
     general.push(Entry::action(
-        "Toggle terminal",
+        "Show or hide the terminal",
         IconName::SquareTerminal,
         ToggleTerminal,
-        &["shell", "console"],
+        &["toggle terminal", "toggle", "shell", "console"],
     ));
     general.push(Entry::action(
-        "Maximize panel",
+        "Maximize the panel in front",
         IconName::Maximize,
         ToggleZoom,
-        &["zoom", "full"],
+        &["maximize panel", "zoom", "full"],
     ));
     general.push(Entry::action(
-        "Reset layout",
+        "Reset the layout",
         Icons::LayoutGrid,
         ResetLayout,
-        &["panes", "dock", "default", "restore", "arrange"],
+        &[
+            "reset layout",
+            "panes",
+            "dock",
+            "default",
+            "restore",
+            "arrange",
+        ],
     ));
     groups.push(("General", general));
 
@@ -327,16 +375,16 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
             "Files",
             vec![
                 Entry::action(
-                    "Go to file…",
+                    "Go to a file",
                     IconName::File,
                     ph_files::QuickOpen,
-                    &["open", "find", "fuzzy"],
+                    &["go to file", "open", "find", "fuzzy"],
                 ),
                 Entry::action(
-                    "Search in workspace…",
+                    "Search in the workspace",
                     IconName::Search,
                     ph_files::FindInProject,
-                    &["grep", "text"],
+                    &["search in workspace", "grep", "text"],
                 ),
             ],
         ));
@@ -346,13 +394,19 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         "Views",
         vec![
             Entry::action(
-                "Show the Workspaces view",
+                "Show Workspaces",
                 ph_ui::Icons::LayoutGrid,
                 ShowWorkspacesView,
-                &["view", "sidebar", "chats"],
+                &["workspaces view", "view", "sidebar", "list", "folders"],
             ),
             Entry::action(
-                "Let agents use your Chrome (the PilotHouse extension)…",
+                "Show Chats",
+                ph_ui::Icons::MessagesSquare,
+                ShowChatsView,
+                &["view", "sidebar", "list", "loose", "pinned"],
+            ),
+            Entry::action(
+                "Let agents use your Chrome",
                 IconName::Globe,
                 ph_browser::OpenChromeExtensionSettings,
                 &[
@@ -372,10 +426,10 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
                 &["agents", "board", "working", "needs", "waiting"],
             ),
             Entry::action(
-                "Show the GitHub view",
+                "Show GitHub",
                 ph_ui::Icons::Github,
                 ShowGitHubView,
-                &["view", "pull", "review", "pr"],
+                &["github view", "view", "pull", "review", "pr"],
             ),
         ]
         .into_iter()
@@ -423,7 +477,7 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
     groups.push((
         "Utilities",
         std::iter::once(Entry::action(
-            "Utilities…",
+            "Utilities",
             Icons::Wrench,
             ShowUtilities,
             &["tools", "convert", "format", "encode", "decode"],

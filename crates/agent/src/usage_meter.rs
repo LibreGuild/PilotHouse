@@ -6,7 +6,7 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
-    Styled as _, div, px,
+    Styled as _, div,
 };
 use ph_store::usage::SessionUsage;
 
@@ -99,11 +99,17 @@ pub fn render(usage: Option<&SessionUsage>, cx: &App) -> Option<impl IntoElement
             .when_some(share, |this, share| {
                 this.child(
                     div()
-                        .w(px(36.))
-                        .h(px(4.))
+                        .w(ph_ui::rems_from_px(36.))
+                        .h(ph_ui::rems_from_px(4.))
                         .rounded_full()
                         .bg(cx.theme().muted)
-                        .child(div().h_full().rounded_full().bg(fill).w(px(36. * share))),
+                        .child(
+                            div()
+                                .h_full()
+                                .rounded_full()
+                                .bg(fill)
+                                .w(gpui_kit::relative(share)),
+                        ),
                 )
             })
             .child(label)

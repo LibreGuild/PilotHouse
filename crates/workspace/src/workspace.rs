@@ -45,13 +45,21 @@ pub enum View {
     Custom(&'static str),
 }
 
+/// Which list the sidebar shows beside the screen in front (while the view
+/// is [`View::Workspaces`]): the workspaces, or the chats outside any. The
+/// left column switches between them, and the screen in front follows: a
+/// workspace's with Workspaces, the Chats space's with Chats.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    #[default]
+    Workspaces,
+    Chats,
+}
+
 /// Owns the project list and the open [`WorkspaceScreen`]s, and routes workspace
 /// actions to whichever project is active.
 pub struct Workspace {
     focus_handle: FocusHandle,
-    /// The sidebar's pane headers (Chats, Workspaces), focusable from the
-    /// keyboard to collapse or open their pane.
-    pub(crate) pane_focus: [FocusHandle; 2],
     /// This window.
     handle: gpui_kit::AnyWindowHandle,
     /// The workspaces, newest first (the sidebar's order, and ⌃1–⌃9's).
@@ -59,6 +67,10 @@ pub struct Workspace {
     /// The space for chats outside any workspace.
     chats_space: Option<Project>,
     view: View,
+    section: Section,
+    /// The workspace last in front, shown again when the Workspaces list
+    /// is.
+    last_workspace: Option<ProjectId>,
     /// The GitHub view, made when first shown.
     github: Option<Entity<GithubView>>,
     /// The organisation's own views (`ph_custom::views`), each made when
@@ -161,11 +173,12 @@ impl Workspace {
         );
         let mut workspace = Self {
             focus_handle,
-            pane_focus: [cx.focus_handle(), cx.focus_handle()],
             handle: window.window_handle(),
             projects,
             chats_space,
             view: View::Workspaces,
+            section: Section::Workspaces,
+            last_workspace: None,
             github: None,
             custom_views: HashMap::new(),
             expanded: expanded.into_iter().collect(),
@@ -262,6 +275,91 @@ impl Workspace {
 
     pub fn view(&self) -> View {
         self.view
+    }
+
+    /// The list the sidebar shows while a workspace or a chat is in front.
+    pub fn section(&self) -> Section {
+        self.section
+    }
+
+    /// An entry of the left column was pressed: shows it, or, with it in
+    /// front already, hides or shows its list (as VS Code's activity bar
+    /// does).
+    pub(crate) fn show(
+        &mut self,
+        target: crate::rail::Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::rail::Target;
+        let in_front = match target {
+            Target::Section(section) => self.view == View::Workspaces && self.section == section,
+            Target::View(view) => self.view == view,
+        };
+        if in_front {
+            self.set_sidebar_collapsed(!self.sidebar_collapsed, cx);
+            return;
+        }
+        if self.sidebar_collapsed {
+            self.set_sidebar_collapsed(false, cx);
+        }
+        match target {
+            Target::Section(section) => self.show_section(section, window, cx),
+            Target::View(view) => self.set_view(view, window, cx),
+        }
+    }
+
+    /// Shows the Workspaces or the Chats list, and in front what was last
+    /// seen there: the workspace last used, or the Chats space.
+    pub fn show_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
+        if self.view != View::Workspaces {
+            self.set_view(View::Workspaces, window, cx);
+        }
+        let front = match section {
+            Section::Chats => self.chats_space.as_ref().map(|chats| chats.id),
+            // One shown in another window stays there: opening it here
+            // would only raise that window, time after time.
+            Section::Workspaces => {
+                let wanted: Vec<ProjectId> = self
+                    .last_workspace
+                    .filter(|id| self.has_project(*id))
+                    .into_iter()
+                    .chain(self.projects.iter().map(|project| project.id))
+                    .collect();
+                wanted
+                    .into_iter()
+                    .find(|id| !self.shown_by_another(*id, cx))
+            }
+        };
+        self.section = section;
+        match front {
+            Some(id) if self.active_project != Some(id) => self.open_project(id, window, cx),
+            // Already the active one, but possibly hidden behind "no
+            // workspace yet": it streams frames again.
+            Some(id) => {
+                if let Some(space) = self.spaces.get(&id) {
+                    space.update(cx, |space, cx| space.set_visible(true, cx));
+                }
+            }
+            // Nothing to show there (no workspace yet): the screen in front
+            // makes way for the invitation to open one.
+            None => {
+                if let Some(space) = self.active_space().cloned() {
+                    space.update(cx, |space, cx| space.set_visible(false, cx));
+                }
+            }
+        }
+        self.focus_front(window, cx);
+        cx.notify();
+    }
+
+    /// The screen to draw: the active one, unless the Workspaces list is
+    /// shown and no workspace is open (the Chats space's screen belongs to
+    /// the Chats list).
+    fn screen_in_front(&self) -> Option<&Entity<WorkspaceScreen>> {
+        self.active_project
+            .filter(|id| !(self.section == Section::Workspaces && self.is_chats(*id)))
+            .and_then(|id| self.spaces.get(&id))
     }
 
     /// Shows the Workspaces, Agents or GitHub view.
@@ -565,15 +663,11 @@ impl Workspace {
     }
 
     /// Reads the chats of unfolded workspaces without a screen, and of the
-    /// Chats space (listed whenever its section is not folded away).
+    /// Chats space.
     fn read_sessions(&mut self, cx: &mut Context<Self>) -> bool {
         let store = AppState::store(cx).clone();
         let mut changed = self.read_pinned(cx);
-        let chats = self
-            .chats_space
-            .as_ref()
-            .filter(|_| !self.folded.contains(crate::sidebar::CHATS))
-            .map(|chats| chats.id);
+        let chats = self.chats_space.as_ref().map(|chats| chats.id);
         let wanted: Vec<ProjectId> = self
             .expanded
             .iter()
@@ -730,11 +824,11 @@ impl Workspace {
     ) {
         let (id, workspace) = (session.id, cx.entity().downgrade());
         let title = session.title.clone();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let workspace = workspace.clone();
             dialog
                 .title("Delete chat?")
-                .w(gpui_kit::px(420.))
+                .w(ph_ui::scaled_px(420., window))
                 .child(format!(
                     "“{title}” and its transcript will be deleted. This cannot be undone."
                 ))
@@ -810,7 +904,9 @@ impl Workspace {
             }
             return;
         }
-        match self.active_space().cloned() {
+        // The screen that is drawn: one hidden behind "no workspace yet"
+        // cannot take the keyboard (no shortcut would reach the window).
+        match self.screen_in_front().cloned() {
             Some(space) => space.update(cx, |space, cx| space.focus_chat(window, cx)),
             None => self.focus_handle.focus(window, cx),
         }
@@ -1106,6 +1202,13 @@ impl Workspace {
             return;
         }
         self.view = View::Workspaces;
+        // The sidebar's list follows what is in front.
+        if self.is_chats(id) {
+            self.section = Section::Chats;
+        } else {
+            self.section = Section::Workspaces;
+            self.last_workspace = Some(id);
+        }
         if !self.is_chats(id) && self.expanded.insert(id) {
             self.save_expanded(cx);
         }
@@ -1383,11 +1486,13 @@ impl Workspace {
         crate::schedules::Automation::global(cx).update(cx, |automation, _| automation.forget(id));
         if self.active_project == Some(id) {
             self.active_project = None;
-            let next = self
-                .chats_space
-                .as_ref()
-                .map(|chats| chats.id)
-                .or_else(|| self.projects.first().map(|project| project.id));
+            // Another workspace first (one not in a window of its own):
+            // the Workspaces list stays in front.
+            let others: Vec<ProjectId> = self.projects.iter().map(|project| project.id).collect();
+            let next = others
+                .into_iter()
+                .find(|other| !self.shown_by_another(*other, cx))
+                .or(self.chats_space.as_ref().map(|chats| chats.id));
             if let Some(next) = next {
                 self.open_project(next, window, cx);
             }
@@ -2054,18 +2159,20 @@ impl Render for Workspace {
         let github = (self.view == View::GitHub)
             .then(|| self.github.clone())
             .flatten();
-        // An organisation's view fills the window below the title bar, as
-        // the GitHub view does.
+        // An organisation's view is an island of the frame, as wide as the
+        // window allows (it has no list beside it).
         let custom = match self.view {
             View::Custom(id) => self.custom_views.get(id).cloned(),
             _ => None,
         };
-        let content = match (&github, self.active_space()) {
+        let content = match (&github, self.screen_in_front()) {
             _ if custom.is_some() => div()
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .children(custom.clone())
+                .pr_2()
+                .pb(crate::frame::gap())
+                .child(crate::frame::island(window, cx).children(custom.clone()))
                 .into_any_element(),
             (Some(github), _) => div()
                 .flex_1()
@@ -2079,7 +2186,17 @@ impl Render for Workspace {
                 .h_full()
                 .child(space.clone())
                 .into_any_element(),
-            (None, None) => div().flex_1().into_any_element(),
+            (None, None) => div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .pr_2()
+                .pb(crate::frame::gap())
+                .child(
+                    crate::frame::island(window, cx)
+                        .child(no_workspace_in_front(!self.projects.is_empty())),
+                )
+                .into_any_element(),
         };
 
         v_flex()
@@ -2088,7 +2205,7 @@ impl Render for Workspace {
             .track_focus(&self.focus_handle)
             .size_full()
             .relative()
-            // The app background; panels float on it as surfaces.
+            // The frame's colour; the islands sit on it.
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::add_project))
@@ -2124,7 +2241,10 @@ impl Render for Workspace {
                 this.show_tab(ContextTab::Files, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowWorkspacesView, window, cx| {
-                this.set_view(View::Workspaces, window, cx)
+                this.show_section(Section::Workspaces, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowChatsView, window, cx| {
+                this.show_section(Section::Chats, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowGitHubView, window, cx| {
                 this.set_view(View::GitHub, window, cx)
@@ -2226,7 +2346,14 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &SearchChats, window, cx| {
-                crate::chat_search::open(this.active_project_id(), window, cx)
+                // Beside a workspace the search starts with its chats (one
+                // click widens it); from the Chats list or GitHub it is of
+                // every chat, as the list itself is of no one workspace.
+                let workspace = (this.view == View::Workspaces
+                    && this.section == Section::Workspaces)
+                    .then(|| this.active_project_id())
+                    .flatten();
+                crate::chat_search::open(workspace, window, cx)
             }))
             .on_action(cx.listener(Self::switch_to))
             .on_action(cx.listener(Self::previous_workspace))
@@ -2238,14 +2365,17 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|_, _: &UseDarkAppearance, _, cx| switch_mode(true, cx)))
             // A gradient or picture behind the frame, when the user chose
-            // one: first, so everything is drawn over it.
+            // one, then the frame's own light: first, so everything is
+            // drawn over them.
             .children(backdrop_layer(cx))
+            .children(crate::frame::layers(self, cx))
             .child(
                 TitleBar::new()
                     .h(ph_theme::layout::TITLE_BAR_HEIGHT)
-                    .bg(cx.theme().title_bar)
-                    // No line under it: the bar, the sidebar and the side
-                    // toolbar read as one surface around the bordered center.
+                    // Clear, with no line under it: the bar, the columns of
+                    // icons and the status bar are one frame, painted once
+                    // behind them all (`frame::layers`).
+                    .bg(gpui_kit::transparent_black())
                     .border_b_0()
                     .child(title_bar::render(self, window, cx)),
             )
@@ -2257,29 +2387,71 @@ impl Render for Workspace {
                     // Dragging a sidebar's edge (this one's or the GitHub
                     // view's, which share the width) resizes it.
                     .on_drag_move(cx.listener(
-                        |_, event: &gpui_kit::DragMoveEvent<sidebar::SidebarEdge>, _, cx| {
-                            sidebar::drag_width(event.event.position.x - event.bounds.left(), cx);
+                        |_, event: &gpui_kit::DragMoveEvent<sidebar::SidebarEdge>, window, cx| {
+                            // The list starts after the column of icons.
+                            let rail = ph_ui::scaled_px(
+                                crate::rail::width_px(crate::rail::labels(cx)),
+                                window,
+                            );
+                            sidebar::drag_width(
+                                event.event.position.x - event.bounds.left() - rail,
+                                cx,
+                            );
                         },
                     ))
+                    .child(crate::rail::render_views(self, cx))
                     // The GitHub view draws its own sidebar; an organisation's
                     // view has none.
                     .when(
                         !self.sidebar_collapsed && github.is_none() && custom.is_none(),
                         |this| {
-                            this.child(
-                                div()
-                                    .relative()
-                                    .flex_none()
-                                    .h_full()
-                                    .child(sidebar::render(self, cx))
-                                    .child(sidebar::resize_edge(cx)),
-                            )
+                            let list = sidebar::render(self, cx).into_any_element();
+                            this.child(crate::frame::list_island(list, window, cx))
                         },
                     )
                     .child(content),
             )
             .child(status_bar::render(self, cx))
     }
+}
+
+/// What fills the window while the Workspaces list is shown and none is
+/// open: how to get one.
+fn no_workspace_in_front(some_exist: bool) -> impl IntoElement {
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    let (title, description) = if some_exist {
+        (
+            "Pick a workspace",
+            "Choose one in the list on the left, or open another folder.",
+        )
+    } else {
+        (
+            "No workspace yet",
+            "A workspace is a folder you work on with agents: its files, Git, runs and tests sit beside the chat.",
+        )
+    };
+    ph_ui::EmptyState::new(title)
+        .icon(ph_ui::Icons::LayoutGrid)
+        .description(description)
+        .action(
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("empty-open-folder")
+                        .primary()
+                        .icon(ph_ui::Icons::FolderOpen)
+                        .label("Open a folder")
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(AddProject), cx)),
+                )
+                .child(
+                    Button::new("empty-new-workspace")
+                        .outline()
+                        .label("New workspace")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(NewWorkspace), cx)
+                        }),
+                ),
+        )
 }
 
 /// Where to make a task for `hosting`'s pull requests: the first of

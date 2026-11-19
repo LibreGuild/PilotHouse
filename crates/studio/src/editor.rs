@@ -1128,7 +1128,7 @@ impl ImageEditor {
                     }),
                 )
                 .item(
-                    PopupMenuItem::new("Make app icons…").on_click(move |_, window, cx| {
+                    PopupMenuItem::new("Make app icons").on_click(move |_, window, cx| {
                         _ = icons.update(cx, |this, cx| this.make_icons(window, cx));
                     }),
                 )
@@ -1142,7 +1142,7 @@ impl ImageEditor {
                     }),
                 )
                 .item(
-                    PopupMenuItem::new("Replace the original…").on_click(move |_, window, cx| {
+                    PopupMenuItem::new("Replace the original").on_click(move |_, window, cx| {
                         _ = replace.update(cx, |this, cx| this.replace_original(window, cx));
                     }),
                 )
@@ -1200,7 +1200,7 @@ impl ImageEditor {
                     .primary()
                     .small()
                     .icon(Icons::Download)
-                    .label("Export…")
+                    .label("Export")
                     .disabled(!ready)
                     .tooltip(format!("Save the result as a new file ({export_key})"))
                     .on_click(cx.listener(|this, _, window, cx| this.open_export(window, cx))),
@@ -1213,7 +1213,7 @@ impl ImageEditor {
         let current = self.tool;
         v_flex()
             .flex_none()
-            .w(px(44.))
+            .w(ph_ui::rems_from_px(44.))
             .h_full()
             .py_2()
             .gap_0p5()
@@ -1225,7 +1225,7 @@ impl ImageEditor {
                 match tool {
                     None => div()
                         .my_1()
-                        .w(px(20.))
+                        .w(ph_ui::rems_from_px(20.))
                         .h(px(1.))
                         .bg(theme.border)
                         .into_any_element(),
@@ -1769,7 +1769,7 @@ impl ImageEditor {
                         .gap_1()
                         .child(
                             div()
-                                .size(px(10.))
+                                .size(ph_ui::rems_from_px(10.))
                                 .rounded(px(2.))
                                 .border_1()
                                 .border_color(theme.border)

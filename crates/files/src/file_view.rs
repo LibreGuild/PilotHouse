@@ -64,7 +64,15 @@ impl AskIntent {
             AskIntent::Explain => "Explain",
             AskIntent::FindBugs => "Find bugs",
             AskIntent::WriteTests => "Write tests",
-            AskIntent::Custom => "Ask…",
+            AskIntent::Custom => "Ask",
+        }
+    }
+
+    /// Its name in a menu, where "Ask" alone would not say what happens.
+    fn menu_label(self) -> &'static str {
+        match self {
+            AskIntent::Custom => "Add to the chat and ask your own question",
+            other => other.label(),
         }
     }
 }
@@ -102,11 +110,7 @@ impl Ask {
 
     /// The chat's title: `Explain src/app.py:10-14`.
     pub fn title(&self) -> String {
-        format!(
-            "{} {}",
-            self.intent.label().trim_end_matches('…'),
-            self.label()
-        )
+        format!("{} {}", self.intent.label(), self.label())
     }
 
     /// The prompt for the intent; `None` for a custom question. Each asks
@@ -157,6 +161,9 @@ static LAST_VIEWS: LazyLock<Mutex<HashMap<Kind, View>>> = LazyLock::new(Mutex::d
 
 /// How long the preview waits after typing stops before it follows.
 const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// How long auto save waits after typing stops (VS Code's default).
+const AUTO_SAVE_PAUSE: std::time::Duration = std::time::Duration::from_millis(1000);
 
 impl gpui_kit::EventEmitter<FileViewEvent> for FileView {}
 use ph_lsp::{Binding, LspEvent, LspManager};
@@ -242,6 +249,14 @@ pub struct FileView {
     disk: Option<(std::time::SystemTime, u64)>,
     /// Keeps the unsaved text a second after the last change.
     _keep: Option<Task<()>>,
+    /// The wait before an auto save (see [`Self::schedule_auto_save`]).
+    _auto_save: Option<Task<()>>,
+    /// Saves begun and not yet done, and what tells the next one that the
+    /// last is (see [`Self::write`]).
+    saves_under_way: usize,
+    last_save: Option<smol::channel::Receiver<()>>,
+    /// An auto save came due while a save was under way.
+    auto_save_due: bool,
     /// The file being read again (the newest read only).
     _load: Option<Task<()>>,
     /// Line to reveal once loading finishes (0-based).
@@ -262,6 +277,7 @@ pub struct FileView {
     /// Markdown edited as formatted text (the Rich view).
     rich: Option<Entity<RichEditor>>,
     _rich_events: Option<Subscription>,
+    _rich_blur: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -318,14 +334,25 @@ impl FileView {
                     );
                 });
             });
-        let subscription = cx.subscribe(&editor, |this: &mut Self, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.text_changed(cx);
-                this.schedule_sync(cx);
-                this.schedule_preview(cx);
+        let subscription = cx.subscribe_in(
+            &editor,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.text_changed(cx);
+                    this.schedule_sync(cx);
+                    this.schedule_preview(cx);
+                    this.schedule_auto_save(window, cx);
+                }
+            },
+        );
+        // Auto save "when leaving the editor".
+        let editor_focus = gpui_kit::Focusable::focus_handle(editor.read(cx), cx);
+        let blur = cx.on_blur(&editor_focus, window, |this: &mut Self, window, cx| {
+            if this.auto_save(cx) == ph_theme::AutoSave::OnFocusLoss {
+                this.save_by_itself(window, cx);
             }
         });
-        // The footer follows the cursor.
         // The footer follows the cursor; far jumps are remembered for Back.
         let cursor = cx.observe(&editor, |this: &mut Self, editor, cx| {
             let line = editor.read(cx).cursor_position().line;
@@ -363,6 +390,10 @@ impl FileView {
             save_error: None,
             disk: None,
             _keep: None,
+            _auto_save: None,
+            saves_under_way: 0,
+            last_save: None,
+            auto_save_due: false,
             _load: None,
             pending_line: None,
             asks: true,
@@ -373,8 +404,9 @@ impl FileView {
             _preview_events: None,
             rich: None,
             _rich_events: None,
+            _rich_blur: None,
             label: SharedString::default(),
-            _subscriptions: vec![subscription, preferences, cursor],
+            _subscriptions: vec![subscription, preferences, cursor, blur],
             lsp: None,
             index: crate::code_index::CodeIndex::for_root(root),
             open_location,
@@ -1079,8 +1111,37 @@ impl FileView {
                         let restored = kept.is_some();
                         this.saved = Rope::from(text.as_str());
                         let shown = kept.unwrap_or(text);
-                        this.editor
-                            .update(cx, |editor, cx| editor.set_value(shown, window, cx));
+                        // Read again while it is open (the watcher saw it
+                        // written): the user stays where they were. With
+                        // the same text (their own save, a touch) nothing
+                        // is set at all, since setting the text puts the
+                        // cursor and the scroll back at the top.
+                        let reread = this.content == Content::Text;
+                        let same = reread && this.editor.read(cx).value().as_ref() == shown;
+                        if !same {
+                            this.editor.update(cx, |editor, cx| {
+                                let place = reread
+                                    .then(|| (editor.selected_range(), editor.scroll_offset()));
+                                let len = shown.len();
+                                editor.set_value(shown, window, cx);
+                                // Changed underneath (an agent's edit): the
+                                // same place in the new text, without
+                                // taking the keyboard from where it is.
+                                if let Some((selection, scroll)) = place {
+                                    let at = |offset: usize| {
+                                        let mut offset = offset.min(len);
+                                        let text = editor.value();
+                                        while !text.is_char_boundary(offset) {
+                                            offset -= 1;
+                                        }
+                                        offset
+                                    };
+                                    let range = at(selection.start)..at(selection.end);
+                                    editor.set_selected_range(range, cx);
+                                    editor.set_scroll_offset(scroll, cx);
+                                }
+                            });
+                        }
                         this.content = Content::Text;
                         this.restored = restored;
                         this.text_changed(cx);
@@ -1166,6 +1227,14 @@ impl FileView {
                             this.on_preview(event, window, cx)
                         },
                     ));
+                    // Auto save "when leaving the editor", for this editor.
+                    let focus = rich.read(cx).focus_handle(cx);
+                    self._rich_blur =
+                        Some(cx.on_focus_out(&focus, window, |this, _, window, cx| {
+                            if this.auto_save(cx) == ph_theme::AutoSave::OnFocusLoss {
+                                this.save_by_itself(window, cx);
+                            }
+                        }));
                     self.rich = Some(rich.clone());
                     rich
                 }
@@ -1249,6 +1318,9 @@ impl FileView {
         self.text_changed(cx);
         self.schedule_sync(cx);
         self.update_preview(window, cx);
+        // An edit like one typed (the rich editor's, a reformat): setting
+        // the text tells nobody.
+        self.schedule_auto_save(window, cx);
         cx.notify();
     }
 
@@ -1309,6 +1381,9 @@ impl FileView {
         crate::unsaved::forget(&self.absolute);
         self.restored = false;
         self._keep = None;
+        // No longer the user's text: a read keeps what is unsaved, and
+        // would leave the restored text standing.
+        self.dirty = false;
         self.load(window, cx);
     }
 
@@ -1316,37 +1391,111 @@ impl FileView {
         self.save_file(window, cx).detach();
     }
 
-    /// Writes the text to the file. Resolves to whether it was saved (a
-    /// failure shows in the footer).
-    pub fn save_file(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
-        if self.content != Content::Text || self.not_utf8 {
-            return Task::ready(false);
+    fn auto_save(&self, cx: &gpui_kit::App) -> ph_theme::AutoSave {
+        ph_theme::preferences::preferences(cx).editor.auto_save
+    }
+
+    /// Auto save "after a pause": writes the file once typing has stopped
+    /// for [`AUTO_SAVE_PAUSE`] (each keystroke starts the wait again).
+    fn schedule_auto_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.auto_save(cx) != ph_theme::AutoSave::AfterPause {
+            self._auto_save = None;
+            return;
         }
-        // The rich editor's last keystrokes, before its timer.
+        self._auto_save = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(AUTO_SAVE_PAUSE).await;
+            _ = this.update_in(cx, |this, window, cx| this.save_by_itself(window, cx));
+        }));
+    }
+
+    /// Saves without being asked, when there is something to save. Never
+    /// what only the user may decide (⌘S): not after a save that failed
+    /// (the file changed on disk, or could not be written), not text
+    /// brought back after a crash (the file may be newer; the footer offers
+    /// to discard it), and not while another save is under way (its outcome
+    /// decides; this one runs after it).
+    fn save_by_itself(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.saves_under_way > 0 {
+            self.auto_save_due = true;
+            return;
+        }
+        self.take_rich_text(window, cx);
+        if self.saves_by_itself(cx) {
+            self.write(false, window, cx).detach();
+        }
+    }
+
+    /// What auto save would do now, for a tab being closed: resolves to
+    /// whether the file was written. Like every save by itself it refuses
+    /// what only the user may decide (the footer then says why).
+    pub fn save_unasked(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
+        self.write(false, window, cx)
+    }
+
+    /// Whether auto save is on and would write this file now. Closing such
+    /// a file needs no question: it is written (see `FilesPanel`).
+    pub fn saves_by_itself(&self, cx: &gpui_kit::App) -> bool {
+        self.auto_save(cx) != ph_theme::AutoSave::Off
+            && self.dirty
+            && !self.restored
+            && self.save_error.is_none()
+    }
+
+    /// The rich editor's last keystrokes, before its timer brings them.
+    fn take_rich_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let (Some(rich), View::Rich) = (self.rich.clone(), self.view) {
             let text = rich.update(cx, |rich, cx| rich.text(cx));
             self.replace_text(text, window, cx);
         }
+    }
+
+    /// Writes the text to the file. Resolves to whether it was saved (a
+    /// failure shows in the footer).
+    pub fn save_file(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
+        self.write(true, window, cx)
+    }
+
+    /// Writes the text to the file, `asked` by the user or by itself (auto
+    /// save, which does not bring back a file that is gone).
+    fn write(&mut self, asked: bool, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
+        if self.content != Content::Text || self.not_utf8 {
+            return Task::ready(false);
+        }
+        self.take_rich_text(window, cx);
         // The text being written; typing on meanwhile stays unsaved.
         let text = self.editor.read(cx).text().clone();
         let path = self.absolute.clone();
         let written = text.clone();
-        let expected = self.disk;
-        let write = cx.background_spawn(async move {
-            // Changed on disk since it was read here: not written over
-            // unasked (the next save does write it).
-            let now = disk_stamp(&path);
-            if let (Some(expected), Some(now)) = (expected, now)
-                && expected != now
-            {
-                return Err(SaveError::Changed(now));
+        // One write at a time, each starting where the last left the file:
+        // two at once share the temporary file's name (a file cut short on
+        // a slow drive), and the second would find the file "changed on
+        // disk" by the first.
+        let (done, is_done) = smol::channel::bounded::<()>(1);
+        let before = self.last_save.replace(is_done);
+        self.saves_under_way += 1;
+        cx.spawn_in(window, async move |this, cx| {
+            if let Some(before) = before {
+                _ = before.recv().await;
             }
-            write_rope(&path, &written).map_err(SaveError::Io)?;
-            Ok(disk_stamp(&path))
-        });
-        cx.spawn(async move |this, cx| {
-            let result = write.await;
-            this.update(cx, |this, cx| {
+            let expected = this.read_with(cx, |this, _| this.disk).ok().flatten();
+            let result = cx
+                .background_spawn(async move {
+                    // Changed on disk since it was read here: not written
+                    // over unasked (the next save does write it).
+                    match (expected, disk_stamp(&path)) {
+                        (Some(expected), Some(now)) if expected != now => {
+                            return Err(SaveError::Changed(now));
+                        }
+                        (Some(_), None) if !asked => return Err(SaveError::Gone),
+                        _ => {}
+                    }
+                    write_rope(&path, &written).map_err(SaveError::Io)?;
+                    Ok(disk_stamp(&path))
+                })
+                .await;
+            drop(done);
+            this.update_in(cx, |this, window, cx| {
+                this.saves_under_way = this.saves_under_way.saturating_sub(1);
                 let saved = result.is_ok();
                 match result {
                     Ok(disk) => {
@@ -1370,9 +1519,18 @@ impl FileView {
                                 .into(),
                         );
                     }
+                    Err(SaveError::Gone) => {
+                        this.save_error = Some(
+                            "The file is no longer on disk. Save to write it again, or close without saving."
+                                .into(),
+                        );
+                    }
                     Err(SaveError::Io(err)) => {
                         this.save_error = Some(format!("Could not save: {err}").into())
                     }
+                }
+                if this.saves_under_way == 0 && std::mem::take(&mut this.auto_save_due) {
+                    this.save_by_itself(window, cx);
                 }
                 cx.notify();
                 saved
@@ -1722,6 +1880,8 @@ fn paint_line_marks(
 enum SaveError {
     /// The file changed on disk since it was read (its stamp now).
     Changed((std::time::SystemTime, u64)),
+    /// The file was removed or renamed, and nobody asked for it back.
+    Gone,
     Io(std::io::Error),
 }
 
@@ -1887,8 +2047,8 @@ fn editor_menu_lines(asks: bool, navigates: bool) -> Vec<MenuLine> {
     }
     lines.extend([
         None,
-        item("Find…", Box::new(edit::Search)),
-        item("Replace…", Box::new(edit::Replace)),
+        item("Find", Box::new(edit::Search)),
+        item("Replace", Box::new(edit::Replace)),
         item("Select All", Box::new(edit::SelectAll)),
     ]);
     if asks {
@@ -2217,87 +2377,116 @@ impl FileView {
             })
             .children(self.render_kind_actions(cx))
             .children(self.render_view_switch(cx))
-            .when(
-                self.lsp
-                    .as_ref()
-                    .is_some_and(|lsp| lsp.read(cx).is_open(&self.absolute)),
-                |this| {
-                    this.child(
-                        Button::new("show-outline")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Menu)
-                            .accessibility_label("Outline")
-                            .tooltip("Symbols in this file (⌘⇧O)")
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ShowOutline), cx)
-                            }),
-                    )
-                    .child(
-                        Button::new("find-references")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Search)
-                            .accessibility_label("References")
-                            .tooltip("Uses of the symbol at the cursor (⇧F12); F2 renames it")
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(FindReferences), cx)
-                            }),
-                    )
-                },
-            )
-            // Asking and blame work on the editor's text.
-            .when(
-                self.content == Content::Text && self.shows_editor(),
-                |this| {
-                    this.when(self.asks, |this| {
-                        this.child(
-                            Button::new("ask-about-selection")
-                                .ghost()
-                                .xsmall()
-                                .icon(ph_ui::Icons::Sparkles)
-                                .label("Ask")
-                                .tooltip("Ask the agent about the selected code (⌘L)")
-                                .menu(gpui_kit::Anchor::TopRight, {
-                                    let view = cx.weak_entity();
-                                    move |menu, _, _| {
-                                        AskIntent::ALL.iter().fold(menu, |menu, intent| {
-                                            let (view, intent) = (view.clone(), *intent);
-                                            menu.item(
-                                                gpui_kit::component::menu::PopupMenuItem::new(
-                                                    intent.label(),
-                                                )
-                                                .on_click(move |_, _, cx| {
-                                                    _ = view.update(cx, |view, cx| {
-                                                        view.ask(intent, cx)
-                                                    });
-                                                }),
-                                            )
-                                        })
-                                    }
-                                }),
+            // Blame, while it shows, says so and turns off here.
+            .when(self.show_blame, |this| {
+                this.child(
+                    Button::new("hide-blame")
+                        .ghost()
+                        .xsmall()
+                        .icon(Icons::GitBranch)
+                        .label("Blame")
+                        .selected(true)
+                        .tooltip("Hide blame")
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_blame(cx))),
+                )
+            })
+            .children(self.render_more_menu(cx))
+    }
+
+    /// Everything else the file offers, behind one button: finding,
+    /// symbols, asking the agent, blame. They were buttons of their own,
+    /// always in view though most are used now and then; the keyboard and
+    /// the right-click menu reach them too.
+    fn render_more_menu(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        if self.content != Content::Text || !self.shows_editor() {
+            return None;
+        }
+        let view = cx.weak_entity();
+        let (asks, blame) = (self.asks, self.show_blame);
+        let navigates = self
+            .lsp
+            .as_ref()
+            .is_some_and(|lsp| lsp.read(cx).is_open(&self.absolute));
+        Some(
+            Button::new("file-more")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Ellipsis)
+                .accessibility_label("More for this file")
+                .tooltip("Find, symbols, ask the agent, blame")
+                .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                    use gpui_kit::component::menu::PopupMenuItem;
+                    let item =
+                        |label: &'static str, icon: Icon| PopupMenuItem::new(label).icon(icon);
+                    let mut menu = menu.item({
+                        let view = view.clone();
+                        item("Find in this file", Icon::new(IconName::Search)).on_click(
+                            move |_, window, cx| {
+                                // The find bar is the editor's: it opens
+                                // once the editor has the keyboard.
+                                _ = view.update(cx, |view, cx| {
+                                    view.editor
+                                        .update(cx, |editor, cx| editor.focus(window, cx))
+                                });
+                                window.defer(cx, |window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(gpui_kit::component::input::Search),
+                                        cx,
+                                    )
+                                });
+                            },
                         )
-                    })
-                    .child(
-                        Button::new("toggle-blame")
-                            .ghost()
-                            .xsmall()
-                            .icon(Icons::GitBranch)
-                            .label(if self.show_blame {
+                    });
+                    if navigates {
+                        menu = menu
+                            .item(
+                                item("Symbols in this file", Icon::new(IconName::Menu)).on_click(
+                                    |_, window, cx| {
+                                        window.dispatch_action(Box::new(ShowOutline), cx)
+                                    },
+                                ),
+                            )
+                            .item(
+                                item(
+                                    "Uses of the symbol at the cursor",
+                                    Icon::new(ph_ui::Icons::Crosshair),
+                                )
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(FindReferences), cx)
+                                }),
+                            );
+                    }
+                    if asks {
+                        menu = AskIntent::ALL.iter().fold(
+                            menu.separator().label("Ask the agent about the selection"),
+                            |menu, intent| {
+                                let (view, intent) = (view.clone(), *intent);
+                                menu.item(
+                                    item(intent.menu_label(), Icon::new(ph_ui::Icons::Sparkles))
+                                        .on_click(move |_, _, cx| {
+                                            _ = view.update(cx, |view, cx| view.ask(intent, cx));
+                                        }),
+                                )
+                            },
+                        );
+                    }
+                    let view = view.clone();
+                    menu.separator().item(
+                        item(
+                            if blame {
                                 "Hide blame"
                             } else {
-                                "Blame"
-                            })
-                            .selected(self.show_blame)
-                            .tooltip(if self.show_blame {
-                                "Hide blame"
-                            } else {
-                                "Blame: who last changed each line"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_blame(cx))),
+                                "Show blame (who changed each line)"
+                            },
+                            Icon::new(Icons::GitBranch),
+                        )
+                        .on_click(move |_, _, cx| {
+                            _ = view.update(cx, |view, cx| view.toggle_blame(cx));
+                        }),
                     )
-                },
-            )
+                })
+                .into_any_element(),
+        )
     }
 
     /// The bar of a file shown alone in a window: what its kind offers

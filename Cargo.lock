@@ -6107,7 +6107,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "ph-agent"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "agent-client-protocol-schema",
  "anyhow",
@@ -6123,6 +6123,7 @@ dependencies = [
  "ph-env",
  "ph-files",
  "ph-git",
+ "ph-preview",
  "ph-review",
  "ph-store",
  "ph-theme",
@@ -6138,7 +6139,7 @@ dependencies = [
 
 [[package]]
 name = "ph-agy"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "agent-client-protocol-schema",
  "anyhow",
@@ -6149,7 +6150,7 @@ dependencies = [
 
 [[package]]
 name = "ph-board"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -6164,7 +6165,7 @@ dependencies = [
 
 [[package]]
 name = "ph-brand"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "serde",
  "toml 1.1.8+spec-1.1.0",
@@ -6172,7 +6173,7 @@ dependencies = [
 
 [[package]]
 name = "ph-browser"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6195,7 +6196,7 @@ dependencies = [
 
 [[package]]
 name = "ph-changes"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -6210,7 +6211,7 @@ dependencies = [
 
 [[package]]
 name = "ph-control"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -6226,7 +6227,7 @@ dependencies = [
 
 [[package]]
 name = "ph-custom"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "gpui-kit",
  "ph-store",
@@ -6236,7 +6237,7 @@ dependencies = [
 
 [[package]]
 name = "ph-devices"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6255,14 +6256,14 @@ dependencies = [
 
 [[package]]
 name = "ph-env"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "tracing",
 ]
 
 [[package]]
 name = "ph-files"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -6289,7 +6290,7 @@ dependencies = [
 
 [[package]]
 name = "ph-git"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "ph-env",
@@ -6299,7 +6300,7 @@ dependencies = [
 
 [[package]]
 name = "ph-github"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6315,7 +6316,7 @@ dependencies = [
 
 [[package]]
 name = "ph-lsp"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "futures",
@@ -6330,7 +6331,7 @@ dependencies = [
 
 [[package]]
 name = "ph-mcp"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "ph-brand",
@@ -6341,7 +6342,7 @@ dependencies = [
 
 [[package]]
 name = "ph-media"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -6354,7 +6355,7 @@ dependencies = [
 
 [[package]]
 name = "ph-preview"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6381,6 +6382,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "similar 3.2.1",
  "tar",
  "toml 1.1.8+spec-1.1.0",
  "tracing",
@@ -6393,7 +6395,7 @@ dependencies = [
 
 [[package]]
 name = "ph-pulls"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -6412,7 +6414,7 @@ dependencies = [
 
 [[package]]
 name = "ph-remote"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6428,7 +6430,7 @@ dependencies = [
 
 [[package]]
 name = "ph-review"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6443,7 +6445,7 @@ dependencies = [
 
 [[package]]
 name = "ph-runs"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -6460,7 +6462,7 @@ dependencies = [
 
 [[package]]
 name = "ph-store"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "dirs 7.0.0",
@@ -6476,7 +6478,7 @@ dependencies = [
 
 [[package]]
 name = "ph-studio"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6517,7 +6519,7 @@ dependencies = [
 
 [[package]]
 name = "ph-terminal"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -6537,7 +6539,7 @@ dependencies = [
 
 [[package]]
 name = "ph-theme"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -6550,7 +6552,7 @@ dependencies = [
 
 [[package]]
 name = "ph-ui"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6567,7 +6569,7 @@ dependencies = [
 
 [[package]]
 name = "ph-uitest"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6585,7 +6587,7 @@ dependencies = [
 
 [[package]]
 name = "ph-utils"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6611,7 +6613,7 @@ dependencies = [
 
 [[package]]
 name = "ph-workspace"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6760,7 +6762,7 @@ checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
 
 [[package]]
 name = "pilothouse"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "embed-resource",

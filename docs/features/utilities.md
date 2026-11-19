@@ -1,6 +1,6 @@
 # Utilities
 
-Crate: `ph-utils` (each utility a function from text to text, with tests); dialog: `crates/workspace/src/utilities.rs`. Open **Utilities…** from the command palette, or a single one by name ("JWT", "Cron"…). Everything runs on this machine.
+Crate: `ph-utils` (each utility a function from text to text, with tests); dialog: `crates/workspace/src/utilities.rs`. Open **Utilities** from the command palette, or a single one by name ("JWT", "Cron"…). Everything runs on this machine.
 
 | Group | Utilities |
 |---|---|

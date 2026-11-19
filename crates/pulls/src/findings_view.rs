@@ -19,7 +19,6 @@ use gpui_kit::component::{
     h_flex,
     input::{Textarea, TextareaState},
     notification::Notification,
-    spinner::Spinner,
     text::{TextView, TextViewState},
     v_flex,
 };
@@ -594,7 +593,7 @@ impl FindingsView {
                     h_flex()
                         .gap_1()
                         .text_xs()
-                        .child(Spinner::new().xsmall())
+                        .child(ph_ui::Loader::new().xsmall())
                         .child(busy),
                 )
             })
@@ -1053,8 +1052,8 @@ impl FindingsView {
             .flex_wrap()
             .when(open, |this| {
                 this.child(status_button("fixed", "Fixed", cx))
-                    .child(status_button("not_problem", "Not a problem…", cx))
-                    .child(status_button("wont_fix", "Won't fix…", cx))
+                    .child(status_button("not_problem", "Not a problem", cx))
+                    .child(status_button("wont_fix", "Won't fix", cx))
             })
             .when(!open && local, |this| {
                 this.child(
@@ -1102,7 +1101,7 @@ impl FindingsView {
                     Button::new(id("reply"))
                         .xsmall()
                         .ghost()
-                        .label("Reply…")
+                        .label("Reply")
                         .on_click(cx.listener({
                             let label = label.clone();
                             move |this, _, window, cx| {
@@ -1135,7 +1134,7 @@ impl FindingsView {
                     Button::new(id("remember"))
                         .xsmall()
                         .ghost()
-                        .label("Remember why…")
+                        .label("Remember why")
                         .tooltip("Later reviews of this repository are told, so they don't raise it again")
                         .on_click(cx.listener({
                             let label = label.clone();

@@ -2,7 +2,7 @@
 
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::{App, AppContext as _, ParentElement as _, Window, px};
+use gpui_kit::{App, AppContext as _, ParentElement as _, Window};
 
 /// Asks for a name, starting from `current`; `done` gets it on OK (or
 /// Enter, which presses OK).
@@ -32,11 +32,11 @@ pub fn ask(
     });
     let done = std::rc::Rc::new(done);
     let focus = input.clone();
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let (input, done) = (input.clone(), done.clone());
         dialog
             .title(title)
-            .w(px(420.))
+            .w(ph_ui::scaled_px(420., window))
             .child(Input::new(&input))
             .footer(ph_ui::dialog_buttons(ok, true))
             .on_ok(move |_, window, cx| {

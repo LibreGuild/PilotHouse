@@ -178,7 +178,7 @@ impl WalkthroughView {
         v_flex()
             .p_4()
             .gap_3()
-            .max_w(gpui_kit::px(640.))
+            .max_w(ph_ui::rems_from_px(640.))
             .child(
                 div()
                     .text_base()
@@ -289,7 +289,11 @@ impl Render for WalkthroughView {
                             .on_click(cx.listener(|this, _, _, cx| this.ask(cx))),
                     ),
             )
-            .child(div().max_w(gpui_kit::px(820.)).child(shown.view.clone()))
+            .child(
+                div()
+                    .max_w(ph_ui::rems_from_px(820.))
+                    .child(shown.view.clone()),
+            )
             .into_any_element()
     }
 }

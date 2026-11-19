@@ -13,7 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    WeakEntity, Window, div, px,
+    WeakEntity, Window, div,
 };
 use ph_store::projects::ProjectId;
 use ph_store::schedules::{Job, Schedule, ScheduleId, When};
@@ -214,8 +214,11 @@ pub(crate) fn open_with(
             }
         });
     }
-    window.open_dialog(cx, move |dialog, _, _| {
-        dialog.title("Schedules").w(px(660.)).child(view.clone())
+    window.open_dialog(cx, move |dialog, window, _| {
+        dialog
+            .title("Schedules")
+            .w(ph_ui::scaled_px(660., window))
+            .child(view.clone())
     });
 }
 
@@ -670,7 +673,7 @@ impl SchedulesView {
                             h_flex()
                                 .gap_2()
                                 .child(div().text_xs().child("at"))
-                                .child(div().w(px(80.)).child(Input::new(&form.time).small())),
+                                .child(div().w(ph_ui::rems_from_px(80.)).child(Input::new(&form.time).small())),
                         )
                     })
                     .when(form.every == Every::Files, |this| {
@@ -827,7 +830,7 @@ impl Render for SchedulesView {
                 v_flex()
                     .id("schedules-list")
                     .gap_2()
-                    .max_h(px(420.))
+                    .max_h(ph_ui::rems_from_px(420.))
                     .overflow_y_scroll()
                     .children(rows),
             )

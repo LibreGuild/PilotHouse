@@ -97,8 +97,11 @@ actions!(
         FinishTask,
         /// Back to the workspace shown before this one (Ctrl+Tab).
         PreviousWorkspace,
-        /// The Workspaces view: workspaces and their chats (⌘⇧E).
+        /// The Workspaces list, and the workspace last used in front (⌘⇧E).
         ShowWorkspacesView,
+        /// The Chats list (chats outside any workspace), and its chat in
+        /// front (⌘⇧D).
+        ShowChatsView,
         /// The GitHub view: pull requests across repositories, reviews (⌘⇧G).
         ShowGitHubView,
         /// The Agents pop-up: chats at work or waiting, across workspaces (⌘⇧A).
@@ -170,6 +173,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
             ShowWorkspacesView,
             context,
         ),
+        KeyBinding::new(ph_ui::keys("secondary-shift-d"), ShowChatsView, context),
         KeyBinding::new(ph_ui::keys("secondary-shift-g"), ShowGitHubView, context),
         KeyBinding::new(ph_ui::keys("secondary-shift-a"), ShowAgentsView, context),
     ]);

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
-use gpui_kit::{AnyElement, Image, ImageFormat, IntoElement as _, Pixels, Styled as _, img};
+use gpui_kit::{AnyElement, Image, ImageFormat, IntoElement as _, Length, Styled as _, img};
 
 static LOGOS: LazyLock<HashMap<&'static str, Arc<Image>>> = LazyLock::new(|| {
     let svg = |bytes: &[u8]| Arc::new(Image::from_bytes(ImageFormat::Svg, bytes.to_vec()));
@@ -25,7 +25,7 @@ static LOGOS: LazyLock<HashMap<&'static str, Arc<Image>>> = LazyLock::new(|| {
 });
 
 /// The app icon, `size` across (`brand/icons/app-256.png`).
-pub fn app_icon(size: Pixels) -> AnyElement {
+pub fn app_icon(size: impl Clone + Into<Length>) -> AnyElement {
     static ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
         Arc::new(Image::from_bytes(
             ImageFormat::Png,
@@ -38,7 +38,7 @@ pub fn app_icon(size: Pixels) -> AnyElement {
 /// The mark for the title bar, `height` square (`brand/icons/title-bar.png`):
 /// PilotHouse's is the app icon's tile (a white mast and pennant, the
 /// pennant the P's bowl, on violet).
-pub fn logo_mark(height: Pixels) -> AnyElement {
+pub fn logo_mark(height: impl Clone + Into<Length>) -> AnyElement {
     static MARK: LazyLock<Arc<Image>> = LazyLock::new(|| {
         Arc::new(Image::from_bytes(
             ImageFormat::Png,
@@ -53,7 +53,7 @@ pub fn logo_mark(height: Pixels) -> AnyElement {
 
 /// The mark of the agent named `logo` (`claude`, `codex`, `gemini`,
 /// `antigravity`, `cline`), `size` across.
-pub fn agent_logo(logo: &str, size: Pixels) -> Option<AnyElement> {
+pub fn agent_logo(logo: &str, size: impl Clone + Into<Length>) -> Option<AnyElement> {
     let image = LOGOS.get(logo)?.clone();
     Some(img(image).flex_none().size(size).into_any_element())
 }
@@ -65,6 +65,6 @@ mod tests {
         for logo in ["claude", "codex", "gemini", "antigravity", "cline"] {
             assert!(super::LOGOS.contains_key(logo));
         }
-        assert!(super::agent_logo("unknown", gpui_kit::px(16.)).is_none());
+        assert!(super::agent_logo("unknown", crate::rems_from_px(16.)).is_none());
     }
 }

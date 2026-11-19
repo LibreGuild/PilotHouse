@@ -14,6 +14,8 @@ The shared `Repo` model (`repo.rs`) holds status and runs one operation at a tim
 
 ## The Git tab
 
+Its four views are a row of tabs that fits the room (`ph_ui::PillTabs`): with space for every name they all show; in a narrow column the ones not in front fold to their icons, their names in tooltips. The list's header does the same with its named buttons (*All changes*, *Review*), and the commit row moves **Commit** to a line of its own.
+
 - **Changes**
   - **Commit box**: message, **Write message** (an agent writes it from the staged diff), **Amend** (prefills the last message), Commit. Staged files, each with Unstage.
   - **Conflicts**: during a merge, rebase or cherry-pick, conflicted files are listed with **Abort**. **Resolve** opens the resolver: each block side by side with **Ours / Theirs / Both / Ask agent**; **Save and mark resolved** writes the file and stages it. Unresolved blocks keep their markers.
@@ -23,7 +25,12 @@ The shared `Repo` model (`repo.rs`) holds status and runs one operation at a tim
   - **Review** (over the changes): an agent reviews what is not pushed yet; its findings come back as notes on their lines, and the bar's button becomes **Fix with agent**. See [pull requests](pulls.md#review-your-changes-before-pushing).
 - **Branch**: what the branch checked out changed against the default branch (`origin/HEAD`, else `main` or `master`) since it left it, file by file (`ph_git::diff::branch_changes`). With the turn summary in chat (one turn) and Changes (uncommitted), it gives three scopes of review.
 - **History**: commits with a branch graph (lanes, merges, branch and tag badges), all branches or HEAD only, 200 per page. Clicking a commit shows its message and diff against its first parent. **Write changelog**: an agent writes release notes from the commits since the last tag.
+- **The branch picker** (the branch in the status bar) always offers a new branch under its search: with no name yet it says to type one; a name that is not a branch offers *Create branch “name” from current* (Enter does it too; spaces become dashes); a name Git would refuse says why (`new_branch_name`). Enter on a name that finds one branch switches to it.
 - **Stashes**: stash everything (new files included) with an optional message; list, show diff, Apply, Pop, Drop.
+
+## Diffs in lists
+
+The diffs under a file in the Git tab, in commit details, stashes, a pull request's files, `.diff` files and a chat's summary of an edit are drawn by one piece of code (`ph_preview::diff`): the line numbers of the old and the new file, `+` or `−` in a column of its own, lines tinted by kind, and where a line replaces another the words that changed marked more strongly (a renamed variable shows as that word, not as two lines to compare by eye; `similar`'s word diff, skipped for lines that share too little). A long line neither wraps nor is cut: a file's diff scrolls sideways as one, with a scrollbar (a swipe, Shift with the wheel, or the bar; the wheel alone stays the list's, so a list of diffs scrolls on over a long line). Comparing words costs time, so it is done for the lines that are drawn (a hunk's first 300), not for lines over 400 bytes (a minified file), and each comparison is remembered while the app runs. In the Git tab, a line's review note button shows over its line number.
 
 ## Diffs in the editor
 

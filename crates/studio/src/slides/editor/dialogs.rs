@@ -138,11 +138,11 @@ impl SlidesEditor {
             .join("\n");
         let input = self.textarea(text, 6, window, cx);
         let editor = cx.entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let (input, editor, table, id) = (input.clone(), editor.clone(), table.clone(), id.clone());
             dialog
                 .title("Table")
-                .w(px(560.))
+                .w(ph_ui::scaled_px(560., window))
                 .child(
                     v_flex()
                         .gap_2()
@@ -242,15 +242,15 @@ impl SlidesEditor {
         let data = self.textarea(lines.join("\n"), 6, window, cx);
         let title = self.input(chart.title.clone(), "No title", window, cx);
         let editor = cx.entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let (data, title, editor, chart, id) = (data.clone(), title.clone(), editor.clone(), chart.clone(), id.clone());
             dialog
                 .title("Chart data")
-                .w(px(560.))
+                .w(ph_ui::scaled_px(560., window))
                 .child(
                     v_flex()
                         .gap_2()
-                        .child(h_flex().gap_2().child(div().w(px(60.)).text_sm().child("Title")).child(div().flex_1().child(Input::new(&title))))
+                        .child(h_flex().gap_2().child(div().w(ph_ui::rems_from_px(60.)).text_sm().child("Title")).child(div().flex_1().child(Input::new(&title))))
                         .child(hint(
                             if scatter {
                                 "The first row names the series; then a line a point: its x, then each series' y."
@@ -322,7 +322,7 @@ impl SlidesEditor {
             }
         });
         self.dialog_watch = Some(watch);
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let query = search.read(cx).value().trim().to_lowercase();
             let shown: Vec<String> = names
                 .iter()
@@ -355,8 +355,8 @@ impl SlidesEditor {
                     let (editor, target, title) = (editor.clone(), target.clone(), name.clone());
                     div()
                         .id(SharedString::from(format!("icon-{name}")))
-                        .size(px(44.))
-                        .p(px(9.))
+                        .size(ph_ui::rems_from_px(44.))
+                        .p(ph_ui::rems_from_px(9.))
                         .rounded(px(6.))
                         .border_1()
                         .border_color(border)
@@ -375,15 +375,18 @@ impl SlidesEditor {
                             });
                         })
                 }));
-            dialog.title("Icons").w(px(620.)).child(
-                v_flex().gap_2().child(Input::new(&search)).child(
-                    div()
-                        .id("icon-grid")
-                        .max_h(px(420.))
-                        .overflow_y_scroll()
-                        .child(grid),
-                ),
-            )
+            dialog
+                .title("Icons")
+                .w(ph_ui::scaled_px(620., window))
+                .child(
+                    v_flex().gap_2().child(Input::new(&search)).child(
+                        div()
+                            .id("icon-grid")
+                            .max_h(ph_ui::rems_from_px(420.))
+                            .overflow_y_scroll()
+                            .child(grid),
+                    ),
+                )
         });
     }
 
@@ -477,23 +480,23 @@ impl SlidesEditor {
             .unwrap_or_default();
         let input = self.textarea(source, 8, window, cx);
         let editor = cx.entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let (input, editor, target) = (input.clone(), editor.clone(), target.clone());
             let file_input = input.clone();
             dialog
                 .title("SVG drawing")
-                .w(px(620.))
+                .w(ph_ui::scaled_px(620., window))
                 .child(
                     v_flex()
                         .gap_2()
                         .child(hint("Paste SVG markup, or read it from a file. Ask the agent beside you for diagrams and illustrations as SVG.", cx))
-                        .child(div().id("svg-source").max_h(px(380.)).overflow_y_scroll().child(Textarea::new(&input).font_family(cx.theme().mono_font_family.clone())))
+                        .child(div().id("svg-source").max_h(ph_ui::rems_from_px(380.)).overflow_y_scroll().child(Textarea::new(&input).font_family(cx.theme().mono_font_family.clone())))
                         .child(
                             Button::new("svg-file")
                                 .ghost()
                                 .small()
                                 .icon(Icons::FolderOpen)
-                                .label("From a file…")
+                                .label("From a file")
                                 .on_click(move |_, window, cx| {
                                     let chosen = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
                                         files: true,
@@ -575,7 +578,7 @@ impl SlidesEditor {
         let range = self.input(format!("1-{count}"), "1-3, 5", window, cx);
         let editor = cx.entity();
         let current = self.current;
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let (format, scope, notes, width, range, editor) =
                 (format.clone(), scope.clone(), notes.clone(), width.clone(), range.clone(), editor.clone());
             let chip = |id: &'static str, label: &'static str, on: bool, set: Rc<dyn Fn()>| {
@@ -585,7 +588,7 @@ impl SlidesEditor {
                 })
             };
             let row = |label: &'static str, children: Vec<AnyElement>| {
-                h_flex().gap_2().child(div().w(px(80.)).text_sm().child(label)).child(h_flex().gap_1().flex_wrap().children(children))
+                h_flex().gap_2().child(div().w(ph_ui::rems_from_px(80.)).text_sm().child(label)).child(h_flex().gap_1().flex_wrap().children(children))
             };
             let chosen = format.get();
             let formats: Vec<AnyElement> = [
@@ -605,7 +608,7 @@ impl SlidesEditor {
                     let scope = scope.clone();
                     chip(id, label, scope.get() == value, Rc::new(move || scope.set(value))).into_any_element()
                 })
-                .chain(std::iter::once(div().w(px(110.)).child(Input::new(&range).small()).into_any_element()))
+                .chain(std::iter::once(div().w(ph_ui::rems_from_px(110.)).child(Input::new(&range).small()).into_any_element()))
                 .collect();
             let go = {
                 let (format, scope, notes, width, range) = (format.clone(), scope.clone(), notes.clone(), width.clone(), range.clone());
@@ -621,7 +624,7 @@ impl SlidesEditor {
             };
             dialog
                 .title("Export")
-                .w(px(500.))
+                .w(ph_ui::scaled_px(500., window))
                 .child(
                     v_flex()
                         .gap_3()
@@ -690,11 +693,11 @@ impl SlidesEditor {
         let input = self.input(title, "Title", window, cx);
         input.update(cx, |input, cx| input.focus(window, cx));
         let doc = self.doc.clone();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let (input, doc) = (input.clone(), doc.clone());
             dialog
                 .title("Rename")
-                .w(px(420.))
+                .w(ph_ui::scaled_px(420., window))
                 .child(v_flex().gap_2().child(Input::new(&input)).child(hint(
                     "The title shows in the list of presentations and names exports.",
                     cx,
@@ -716,11 +719,11 @@ impl SlidesEditor {
         let input = self.input(name, "Name", window, cx);
         input.update(cx, |input, cx| input.focus(window, cx));
         let editor = cx.entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let (input, editor) = (input.clone(), editor.clone());
             dialog
                 .title("Save theme")
-                .w(px(440.))
+                .w(ph_ui::scaled_px(440., window))
                 .child(v_flex().gap_2().child(Input::new(&input)).child(hint("Its colours, fonts, background, logo and layouts, for any presentation (Theme menu, under Yours).", cx)))
                 .footer(footer("theme-save", "Save", move |window, cx| {
                     let name = input.read(cx).value().trim().to_string();
@@ -770,38 +773,38 @@ impl SlidesEditor {
             self.dialog_subscriptions.push(watch);
         }
         let editor = cx.entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let (colors_in, fonts_in, editor, closing) = (colors.clone(), fonts.clone(), editor.clone(), editor.clone());
             let swatches = colors.iter().map(|(slot, input)| {
                 let value = input.read(cx).value().to_string();
                 let color = Rgba::parse_hex(value.trim()).map(super::canvas::to_hsla);
                 h_flex()
                     .gap_2()
-                    .w(px(250.))
-                    .child(div().w(px(84.)).text_sm().child(slot_label(slot)))
+                    .w(ph_ui::rems_from_px(250.))
+                    .child(div().w(ph_ui::rems_from_px(84.)).text_sm().child(slot_label(slot)))
                     .child(
                         div()
-                            .size(px(18.))
+                            .size(ph_ui::rems_from_px(18.))
                             .rounded(px(3.))
                             .border_1()
                             .border_color(cx.theme().border)
                             .when_some(color, |this, color| this.bg(color)),
                     )
-                    .child(div().w(px(110.)).child(Input::new(input).small()))
+                    .child(div().w(ph_ui::rems_from_px(110.)).child(Input::new(input).small()))
             });
             let font_rows = fonts.iter().map(|(key, input)| {
                 h_flex()
                     .gap_2()
-                    .child(div().w(px(84.)).text_sm().child(match *key {
+                    .child(div().w(ph_ui::rems_from_px(84.)).text_sm().child(match *key {
                         "heading" => "Headings",
                         "body" => "Body text",
                         _ => "Code",
                     }))
-                    .child(div().w(px(220.)).child(Input::new(input).small()))
+                    .child(div().w(ph_ui::rems_from_px(220.)).child(Input::new(input).small()))
             });
             dialog
                 .title("Colours and fonts")
-                .w(px(560.))
+                .w(ph_ui::scaled_px(560., window))
                 .child(
                     v_flex()
                         .gap_3()
@@ -848,7 +851,7 @@ impl SlidesEditor {
         let height = self.input(inches(size.height), "Height", window, cx);
         let unit = Rc::new(Cell::new(0u8));
         let editor = cx.entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let (width, height, unit, editor) =
                 (width.clone(), height.clone(), unit.clone(), editor.clone());
             let units: Vec<AnyElement> = [
@@ -874,16 +877,20 @@ impl SlidesEditor {
             .collect();
             dialog
                 .title("Custom size")
-                .w(px(440.))
+                .w(ph_ui::scaled_px(440., window))
                 .child(
                     v_flex()
                         .gap_3()
                         .child(
                             h_flex()
                                 .gap_2()
-                                .child(div().w(px(110.)).child(Input::new(&width)))
+                                .child(div().w(ph_ui::rems_from_px(110.)).child(Input::new(&width)))
                                 .child("×")
-                                .child(div().w(px(110.)).child(Input::new(&height))),
+                                .child(
+                                    div()
+                                        .w(ph_ui::rems_from_px(110.))
+                                        .child(Input::new(&height)),
+                                ),
                         )
                         .child(h_flex().gap_1().children(units))
                         .child(hint("What is on the slides is scaled to the new size.", cx)),
@@ -943,7 +950,7 @@ impl SlidesEditor {
         );
         input.update(cx, |input, cx| input.focus(window, cx));
         let editor = cx.entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let (input, editor, slide, existing) = (
                 input.clone(),
                 editor.clone(),
@@ -970,7 +977,7 @@ impl SlidesEditor {
             });
             dialog
                 .title("Section")
-                .w(px(420.))
+                .w(ph_ui::scaled_px(420., window))
                 .child(
                     v_flex()
                         .gap_2()
@@ -1005,7 +1012,7 @@ impl SlidesEditor {
     pub(crate) fn open_versions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let versions = self.doc.read(cx).space().versions();
         let editor = cx.entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let rows: Vec<AnyElement> = if versions.is_empty() {
                 vec![hint(
                     "None yet: a version is kept every few minutes while you work.",
@@ -1056,11 +1063,14 @@ impl SlidesEditor {
                     })
                     .collect()
             };
-            dialog.title("Earlier versions").w(px(420.)).child(
-                v_flex()
-                    .children(rows)
-                    .child(hint("Going back can be undone.", cx)),
-            )
+            dialog
+                .title("Earlier versions")
+                .w(ph_ui::scaled_px(420., window))
+                .child(
+                    v_flex()
+                        .children(rows)
+                        .child(hint("Going back can be undone.", cx)),
+                )
         });
     }
 }
@@ -1084,7 +1094,7 @@ impl SlidesEditor {
         });
         self.dialog_watch = Some(watch);
         let editor = cx.entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let wanted = find.read(cx).value().to_string();
             // Where it is: slide, element.
             let found: Vec<(usize, String)> = if wanted.is_empty() {
@@ -1163,7 +1173,7 @@ impl SlidesEditor {
                 });
             dialog
                 .title("Find and replace")
-                .w(px(460.))
+                .w(ph_ui::scaled_px(460., window))
                 .child(
                     v_flex()
                         .gap_2()

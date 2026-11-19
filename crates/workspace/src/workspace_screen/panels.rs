@@ -588,7 +588,7 @@ impl WorkspaceScreen {
             let sessions = list.await;
             _ = this.update_in(cx, |_, window, cx| {
                 let screen = cx.entity().downgrade();
-                window.open_dialog(cx, move |dialog, _, cx| {
+                window.open_dialog(cx, move |dialog, window, cx| {
                     let rows = sessions.iter().map(|session| {
                         let (screen, cwd, id) = (screen.clone(), cwd.clone(), session.id.clone());
                         let (chat_screen, past) = (screen.clone(), session.clone());
@@ -662,7 +662,7 @@ impl WorkspaceScreen {
                     });
                     dialog
                         .title(format!("Resume a {name} session"))
-                        .w(gpui_kit::px(560.))
+                        .w(ph_ui::scaled_px(560., window))
                         .child(if sessions.is_empty() {
                             gpui_kit::div()
                                 .py_4()
@@ -673,7 +673,7 @@ impl WorkspaceScreen {
                         } else {
                             gpui_kit::component::v_flex()
                                 .id("agent-sessions")
-                                .max_h(gpui_kit::px(420.))
+                                .max_h(ph_ui::rems_from_px(420.))
                                 .overflow_y_scroll()
                                 .children(rows)
                                 .into_any_element()

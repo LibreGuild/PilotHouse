@@ -516,7 +516,11 @@ impl LargeFileView {
                     .truncate()
                     .child(format!("Read-only · {summary}")),
             )
-            .child(div().w(px(180.)).child(Input::new(&self.search).xsmall()))
+            .child(
+                div()
+                    .w(ph_ui::rems_from_px(180.))
+                    .child(Input::new(&self.search).xsmall()),
+            )
             .child(
                 Button::new("large-find-prev")
                     .ghost()
@@ -539,7 +543,11 @@ impl LargeFileView {
                         this.find(&text, false, cx);
                     })),
             )
-            .child(div().w(px(72.)).child(Input::new(&self.go_to).xsmall()))
+            .child(
+                div()
+                    .w(ph_ui::rems_from_px(72.))
+                    .child(Input::new(&self.go_to).xsmall()),
+            )
             .child(
                 Button::new("large-follow")
                     .ghost()

@@ -14,11 +14,15 @@ mod file_icons;
 pub mod images;
 pub mod images_safe;
 mod keys;
+mod loader;
 pub mod markdown;
+pub mod measure;
 mod menu;
 mod pane_header;
+mod pill_tabs;
 pub mod platform;
 pub mod rich_copy;
+mod scale;
 mod surface;
 pub mod time;
 mod truncated;
@@ -34,8 +38,11 @@ pub use file_icons::{
     file_icon, file_icon_element, file_svg_name, folder_icon_element, folder_svg_name,
 };
 pub use keys::keys;
+pub use loader::Loader;
 pub use menu::{MenuButton, POPUP_GAP, SpacedMenu};
 pub use pane_header::PaneHeader;
+pub use pill_tabs::{PillTab, PillTabs};
+pub use scale::{rems_from_px, scaled_px};
 pub use surface::Surface;
 pub use truncated::truncated_label;
 pub use workspace_colors::{WORKSPACE_COLORS, workspace_color};

@@ -14,7 +14,6 @@ use gpui_kit::component::{
     h_flex,
     input::{Input, InputState, Textarea, TextareaState},
     notification::Notification,
-    spinner::Spinner,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -476,33 +475,34 @@ impl PullsPanel {
             Missing::NoAccount { host } => ("Connect GitHub", format!("Add a token for {host} in Settings → GitHub to see and review pull requests here."), true),
             Missing::Failed(reason) => ("Could not connect", reason.clone(), true),
         };
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_3()
-            .child(
-                EmptyState::new(title)
-                    .icon(Icons::GitPullRequest)
-                    .description(description),
-            )
-            .when(settings, |this| {
-                this.child(
-                    Button::new("pulls-open-settings")
-                        .small()
-                        .primary()
-                        .label("Open Settings")
-                        .on_click(
-                            cx.listener(|_, _, _, cx| cx.emit(PullsPanelEvent::OpenSettings)),
-                        ),
-                )
-            })
-            .child(
-                Button::new("pulls-retry")
-                    .small()
-                    .ghost()
-                    .label("Check again")
-                    .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
+        // The buttons are the message's own (its `action`): the message
+        // fills the pane, so anything after it would sit at the bottom.
+        EmptyState::new(title)
+            .icon(Icons::GitPullRequest)
+            .description(description)
+            .action(
+                h_flex()
+                    .flex_wrap()
+                    .justify_center()
+                    .gap_2()
+                    .when(settings, |this| {
+                        this.child(
+                            Button::new("pulls-open-settings")
+                                .small()
+                                .primary()
+                                .label("Open Settings")
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.emit(PullsPanelEvent::OpenSettings)
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new("pulls-retry")
+                            .small()
+                            .outline()
+                            .label("Check again")
+                            .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
+                    ),
             )
             .into_any_element()
     }
@@ -660,7 +660,9 @@ impl PullsPanel {
                         cx,
                     ))
                     .child(div().flex_1())
-                    .when(self.loading, |this| this.child(Spinner::new().xsmall()))
+                    .when(self.loading, |this| {
+                        this.child(ph_ui::Loader::new().xsmall())
+                    })
                     .when(
                         !has_pr && branch.is_some() && self.create.is_none(),
                         |this| {
@@ -837,6 +839,15 @@ impl Render for PullsPanel {
             && let Some(number) = self.pending_open.take()
         {
             self.open_pull(number, window, cx);
+            // Said again once this frame is drawn: what changes while the
+            // panel draws is not heard by those watching it, and the GitHub
+            // view puts the pull request's chat beside it when it opens.
+            // Without this a pull request opened from the inbox had no
+            // chat, and a review started there showed nothing happening.
+            let panel = cx.entity().downgrade();
+            window.defer(cx, move |_, cx| {
+                _ = panel.update(cx, |_, cx| cx.notify());
+            });
         }
         if let Some((view, _)) = &self.open {
             return view.clone().into_any_element();
@@ -846,7 +857,7 @@ impl Render for PullsPanel {
                 .size_full()
                 .items_center()
                 .justify_center()
-                .child(Spinner::new())
+                .child(ph_ui::Loader::new())
                 .into_any_element(),
             State::Missing(missing) => {
                 let missing = missing.clone();

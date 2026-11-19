@@ -4,6 +4,46 @@ What changed in each release, newest first. The full notes are on the [releases 
 
 Each release also has **Merge notes** for organisations that build their own copy of PilotHouse ([docs/customizing.md](docs/customizing.md)): what to look at when merging it. These cover new `[features]` keys (new features arrive switched on), new or renamed keys in `brand/brand.toml`, changes to `crates/custom` or `Store::apply_track`, and moved files.
 
+## 0.6.4
+
+- **The same look on macOS, Windows and Linux.** PilotHouse now carries its fonts, Inter for the interface and JetBrains Mono (without ligatures) for code, so text has the same shapes and takes the same room on every system; before, each system's own font made the same layout sit differently. *Settings → Appearance → Interface font* still offers the system's font and every installed family.
+- **One interface size, 16, on every system** (it was 15 on macOS and Linux, 18 on Windows). At 16 every text size, row and gap is a whole pixel, also on a screen at 150 % or 200 %; the earlier sizes fell between pixels, which a Windows screen at 100 % showed as rows and paddings a pixel off. A size you chose yourself stays; the old defaults move to the new one, once.
+- **Interface size scales everything**, as zooming a web page does: icons, agent marks, badges, indents, the file tree's rows, the chat's spacing and reading width, the tool icons' column and dialogs grow and shrink with the text. They had fixed pixel sizes before, so a larger text sat beside small icons in dialogs that were too narrow for it.
+- **Workspaces, Chats and GitHub in a column of icons at the left edge**, like the tools' column on the right. Each shows its own list beside the screen in front: the workspaces, the chats outside any workspace (with the pinned ones), or GitHub's inbox and repositories. They shared the sidebar as two stacked panes before, which grew crowded. Pressing the icon in front hides or shows the list. Chats has a shortcut of its own, ⌘⇧D (Ctrl+Shift+D). The title bar names what is in front instead of holding the switch.
+- **A frame with islands in it.** The title bar, the two columns of icons and the status bar are now one piece, with no line between them and a little light from above in the theme's own colour. What changes with what you look at, the list and the panes, sits in it as rounded panels with a small gap between them.
+- **The frame takes the colour of the workspace in front**: faint, strongest in the title bar and fading down the two edges, with the workspace's dot before its name. A glance at the window's edge says where a new chat would go. Chats and GitHub belong to no workspace and stay plain.
+- **New chat and Search chats lead the Chats list only.** Over the workspaces, *New chat* went to whichever workspace was in front without naming it; there a chat starts from the workspace's own row, the chat's header or ⌘N. Search from the Chats list covers every chat of every workspace; beside a workspace it starts with that workspace's chats.
+- **Views fit the room they have.** A tool's row of views (Git's Changes, Branch, History and Stashes; a pull request's six tabs) folds the ones not in front to their icons in a narrow pane instead of cutting them off. Rows of named buttons (the board's, the Git list's) fold to icons, the commit row wraps, sentences wrap, and the empty chat's starters stack in one column.
+- **Fixed: a narrow chat's starters could not be reached.** Beside a pull request (or at a large interface size) the cards of an empty chat stack in one column; taller than the pane, they were cut off at both ends. The chat's empty states now scroll.
+- **Fixed: *Check again* at the bottom of the Pull requests tool** when a folder has no GitHub remote: it sits under the message now.
+- **Fixed: the chat came back a sliver after *Reset layout* and a restart.** The saved layout held a guess of the pane sizes, not what was drawn. Layouts saved that way are put right when they are loaded.
+- **Diffs are easier to read**, wherever they are listed (the Git tab, commits, stashes, a pull request's files, a chat's edits): both files' line numbers, `+` and `−` in a column of their own, and the words that changed in a replaced line marked more strongly. Long lines scroll sideways instead of being cut, also in a pull request's **Files** tab.
+- **A review says at once that it has begun.** *Review with agent* opens the chat with the request and its first step, *Cloning owner/repo…* with the time it has taken, as part of the run; the Agents pop-up lists it as work. Before, a small line over the composer was all that showed, and for a pull request opened from the inbox nothing at all (its chat was not attached).
+- **A pull request's page** has one button, *Review with agent*; Watch, Check out, Address comments and Refresh are in its ⋯ menu.
+- **The editor's bar** holds the file's path and one ⋯ menu (find, symbols, ask the agent, blame) instead of a row of buttons.
+- **Auto save** (Settings → Editor): after a pause in typing, or when you leave the editor. Off by default. It never writes what only you may decide (a file changed or removed on disk, text restored after a crash), and with it on, closing a tab writes the file instead of asking.
+- **Fixed: two saves at once** (⌘S twice, or beside an auto save) could report a file as changed on disk, or on a slow drive leave it cut short. Saves now run one after the other.
+- **Fixed: *Discard* of text restored after a crash** left the restored text standing.
+- **Fixed: saving a file (⌘S) jumped to its start.** A file read again while it is open keeps the cursor and the scroll.
+- **A new branch is always on offer in the branch picker**: type a name and press Enter (spaces become dashes; a name Git refuses says why).
+- **Cline without `--acp`** (an organisation's own build, an old version): the chat says so and offers to run Cline in a terminal, where PilotHouse follows it like a chat.
+- **A working mark of PilotHouse's own**, a small fluttering pennant, where a 12 px spinner used to go unnoticed.
+- **Names in the command palette and the menus are complete**: no trailing "…", and *Show or hide the sidebar* rather than *Toggle sidebar* (the old names still find them).
+- **Contrast:** muted text, filled buttons and links in Warm Light, One Dark, One Light and Studio Dark now reach WCAG AA (4.5:1) on every surface, as the Modern themes did.
+- **Title bar:** in a narrow window or at a large interface size the search box gives way, and the buttons on the right (Inbox, Agents, the panel toggles, Settings) stay on screen. **Git:** in a narrow column the Commit button moves to a line of its own instead of past the panel's edge.
+
+### Merge notes
+
+- New files: `crates/theme/fonts/` (the font files and their licences, about 3.2 MB in the binary) and `crates/theme/src/fonts.rs`; `NOTICE` names them. A copy that wants its own fonts replaces the files and the names in `fonts.rs`.
+- `Preferences::sizes_version` is now 2. A copy with its own default sizes changes `DEFAULT_SIZES` in `crates/theme/src/preferences.rs`; nothing there depends on the platform any more.
+- An organisation's own view (`ph_custom::views`) is now drawn inside a rounded panel of the window's frame (`crates/workspace/src/frame.rs`), with the frame around it. A view that drew its own border, rounded corners or outer padding should drop them, or it shows a panel in a panel.
+- Views in the main window sit in islands: `crate::frame::island(window, cx)` in `crates/workspace`, which is `ph_ui::Surface::new().behind(top, bottom)`. A plain `Surface` still works; its children then show square in its corners where the frame behind is another colour.
+- `View` has no new variant: Workspaces and Chats are `Section`s of `View::Workspaces` (`Workspace::section`, `show_section`). An organisation's views (`ph_custom::views`) now show as icons in the left column (`crates/workspace/src/rail.rs`) instead of the title bar's switch; nothing changes in `crates/custom`.
+- New in `ph_ui`: `Loader` (use it instead of gpui-component's `Spinner`), `PillTabs`, `measure::{width_of, narrower_than}`. `ph_preview::diff` draws every listed diff (`lines`, `line_row`, `scroller`).
+- `EditorPreferences` has a new field, `auto_save`; a value this build does not know reads as off.
+- The command palette's labels changed (articles added, "…" removed, *Toggle …* became *Show or hide …*). The old names are kept as keywords; a build that added entries of its own may want the same wording.
+- Views size things with `ph_ui::rems_from_px` and `ph_ui::scaled_px` (new, `crates/ui/src/scale.rs`) rather than `px`. `ph_ui::file_icon_element`, `folder_icon_element`, `agent_logo`, `logo_mark`, `app_icon` and `AgentSpec::mark` take any length (`px(16.)` still compiles); `ChatWidth::max_width` returns rems. Your own crates keep working as they are; converting their `px` sizes makes them follow the interface size too.
+
 ## 0.6.3
 
 - **Copy rendered Markdown as rich text.** Text selected in a Markdown document (the formatted editor and the preview) or in a chat reply is copied as plain text and as HTML, so it pastes into Confluence, a mail or a document with its headings, tables, lists and code, as from VS Code's Markdown preview (macOS and Windows).

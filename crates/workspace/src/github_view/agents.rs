@@ -112,13 +112,23 @@ impl GithubView {
         };
         let chat = self.chat_for(&id, project.clone(), window, cx);
         let first = !id.clone_dir().join(".git").exists();
+        // The chat shows the review as begun, its first step the copy of
+        // the repository: a click on Review must show at once that
+        // something is under way, however long a clone takes.
+        let what = match kind {
+            "followup" => "Check the fixes for",
+            "second" => "A second opinion on",
+            "double_check" => "Double-check the review of",
+            _ => "Review",
+        };
         chat.update(cx, |chat, cx| {
-            chat.set_busy(
-                Some(if first {
-                    format!("Cloning {} for the review of #{number}…", id.full_name())
+            chat.set_preparing(
+                format!("{what} #{number} {}", pull.title),
+                if first {
+                    format!("Cloning {}…", id.full_name())
                 } else {
-                    format!("Getting #{number} ready for the review…")
-                }),
+                    format!("Checking out #{number}…")
+                },
                 cx,
             )
         });

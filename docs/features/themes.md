@@ -28,6 +28,7 @@ All in **Settings → Appearance**; the defaults are the look PilotHouse has alw
 
 - **Accent**: one color for focus outlines, links, selected text, highlights and progress, laid over whichever theme is chosen (the first, empty swatch is the theme's own). The main buttons take it too when the theme draws them in its accent (Modern Dark's Send), not when they are its own color (Modern Light's black). Each color comes in a shade that reads on a dark theme and one for a light theme.
 - **Density** (*Layout*): Compact, Comfortable or Spacious: the height of rows and the spacing in the sidebar, the file tree, the Git lists and the chat. Text keeps its size (that is *Interface size*).
+- **Interface font and size** (*Text*): the default font is Inter, which PilotHouse carries, so the interface looks the same on macOS, Windows and Linux; *System font* is the system's own, and every installed family is listed. *Interface size* (11 to 24, 16 by default) is the size of everything, not only of text: rows, icons, paddings and dialogs grow and shrink with it, as a web page does when it is zoomed (⌘+ and ⌘− do the same in half steps). Code has its own font (JetBrains Mono by default, without ligatures) and size in *Editor* and *Terminal*.
 - **Terminal colors** follow the theme: Dracula's terminal looks like Dracula. The themes from earlier versions keep the terminal as it was; a theme file sets its own with `terminal`.
 - **Background** (*Window*): Solid, Translucent (the desktop, blurred), Mica on Windows, a **Gradient** (Dusk, Ocean, Aurora, Ember, Graphite; deep on a dark theme, soft on a light one) or an **Image** of yours. A gradient or image shows behind the frame (sidebar, title bar, the strips around the panels) under a veil of the frame's color, so its text stays readable; the panels keep *Panel opacity*. PilotHouse keeps its own copy of the image, scaled to a screen's size off the UI thread, so a large photo costs a screen's worth of memory.
 
@@ -47,9 +48,13 @@ The agent works with the `theme_*` tools of PilotHouse's MCP server:
 | `theme_import` | Imports a VS Code color theme from its JSON (the agent can fetch it from a link first) |
 | `theme_delete` | Deletes one of yours |
 
+## The frame's colour
+
+The window's frame (the title bar, the two columns of icons, the status bar; see [the workspace page](workspace.md)) is one piece and takes one colour: the theme's `sidebar.background`, a little lighter at the top and darker at the bottom, with the colour of the workspace in front laid faintly over it. A theme's `title_bar.background` and `status_bar.background` are not painted there (a theme that gave its status bar a colour of its own, as some imported ones do, shows the frame's instead); other windows (a file's own, Studio) still use them.
+
 ## Importing a VS Code theme
 
-**Import…** (under the theme) takes a VS Code color theme file (`.json`, comments and trailing commas allowed): its workbench colors (editor, side bar, title and status bars, lists, buttons, inputs, menus), its code colors (matched by TextMate scope: an exact scope first, then a narrower one) and its terminal colors become one of your themes, saved and in use. What the file leaves out comes from Modern Dark or Modern Light, by its type. An agent can import from a link too (`theme_import`).
+**Import** (under the theme) takes a VS Code color theme file (`.json`, comments and trailing commas allowed): its workbench colors (editor, side bar, title and status bars, lists, buttons, inputs, menus), its code colors (matched by TextMate scope: an exact scope first, then a narrower one) and its terminal colors become one of your themes, saved and in use. What the file leaves out comes from Modern Dark or Modern Light, by its type. An agent can import from a link too (`theme_import`).
 
 ## Theme files
 
@@ -63,6 +68,8 @@ Your themes are JSON files in `<data dir>/themes` (**Open folder** in Settings s
 | `crates/theme/src/themes.rs` | The themes to choose from (PilotHouse's and yours), the selected one, the preview, saving and deleting |
 | `crates/theme/src/appearance.rs` | The choice (`Appearance`: the system, or a theme by name) and showing it |
 | `crates/theme/src/preferences.rs` | Fonts, sizes, corners, accent, density and the window's background, laid over the theme |
+| `crates/theme/src/fonts.rs`, `crates/theme/fonts/` | The fonts PilotHouse carries (Inter, JetBrains Mono) and loading them |
+| `crates/ui/src/scale.rs` | `rems_from_px` and `scaled_px`: sizes that follow the interface size |
 | `crates/theme/src/vscode.rs` | Importing VS Code color themes |
 | `crates/terminal/src/palette.rs` | The terminal's colors: the theme's, else its palette for the mode |
 | `crates/workspace/src/theme_mods.rs` | The `theme.*` control methods behind the tools |

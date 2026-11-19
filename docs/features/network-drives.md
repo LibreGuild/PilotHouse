@@ -13,9 +13,9 @@ Many teams keep code on a Linux server and reach it as a network drive: a Samba 
 
 ## Setting one up
 
-**Settings → Network drives**, the palette (**Network drives…**), or the **Network drive** chip in the status bar of a workspace on one (it fills in the server and share):
+**Settings → Network drives**, the palette (**Network drives**), or the **Network drive** chip in the status bar of a workspace on one (it fills in the server and share):
 
-1. **The folder here**: the drive or folder (`Z:\`, `\\server\share`, `/Volumes/code`). **Choose…** picks it and reads the server from the system.
+1. **The folder here**: the drive or folder (`Z:\`, `\\server\share`, `/Volumes/code`). **Choose** picks it and reads the server from the system.
 2. **The server**: `user@server`, or a host from `~/.ssh/config` (aliases, jump hosts and keys there apply), and the port if it is not 22.
 3. **The same folder on the server** (`/srv/code`). Left empty, PilotHouse asks Samba on the server (`testparm`) where the share is, by the share's name (from the drive, else the folder's own name).
 4. **Check and save** goes through:

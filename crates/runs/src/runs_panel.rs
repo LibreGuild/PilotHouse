@@ -629,7 +629,13 @@ impl Render for RunsPanel {
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(Icon::new(Icons::Network).small())
-                        .child("No server from this project is listening."),
+                        // Wraps in a narrow pane instead of running out of it.
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child("No server from this project is listening."),
+                        ),
                 )
             })
             .children(

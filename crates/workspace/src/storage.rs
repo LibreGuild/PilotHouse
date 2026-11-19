@@ -16,7 +16,6 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     notification::Notification,
-    spinner::Spinner,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -336,7 +335,7 @@ impl Render for StorageView {
                                     .text_sm()
                                     .child(format!("{} uses {} on disk", ph_brand::NAME, format_size(total))),
                             )
-                            .when(self.measuring, |this| this.child(Spinner::new().xsmall()))
+                            .when(self.measuring, |this| this.child(ph_ui::Loader::new().xsmall()))
                             .child(
                                 Button::new("storage-refresh")
                                     .ghost()
@@ -378,7 +377,7 @@ impl Render for StorageView {
                             .child(
                                 Button::new("copies-choose")
                                     .xsmall()
-                                    .label("Change…")
+                                    .label("Change")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.choose_folder(window, cx)
                                     })),

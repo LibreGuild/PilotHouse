@@ -15,7 +15,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Window, div, px,
+    Styled as _, Window, div,
 };
 
 use crate::manager::DeviceManager;
@@ -255,11 +255,11 @@ pub fn open(manager: Entity<DeviceManager>, window: &mut Window, cx: &mut App) {
         connect_address,
         error: None,
     });
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let (form, manager) = (form.clone(), manager.clone());
         dialog
             .title("Connect a device")
-            .w(px(500.))
+            .w(ph_ui::scaled_px(500., window))
             .child(form.clone())
             .footer(ph_ui::dialog_buttons("Connect", true))
             .on_ok(move |_, window, cx| {

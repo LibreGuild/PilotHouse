@@ -14,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, HighlightStyle,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Task, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Task, Window, div,
 };
 use ph_store::projects::ProjectId;
 use ph_store::search::{MATCH_END, MATCH_START, SearchHit};
@@ -31,11 +31,11 @@ const DEBOUNCE: Duration = Duration::from_millis(120);
 pub fn open(project: Option<ProjectId>, window: &mut Window, cx: &mut App) {
     let search = cx.new(|cx| ChatSearch::new(project, window, cx));
     let focus = search.read(cx).input.clone();
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let first = search.clone();
         dialog
             .title("Search chats")
-            .w(px(640.))
+            .w(ph_ui::scaled_px(640., window))
             .child(search.clone())
             // Enter in the dialog opens the best match.
             .on_ok(move |_, window, cx| {
@@ -238,7 +238,7 @@ impl Render for ChatSearch {
             .child(
                 v_flex()
                     .id("chat-search-results")
-                    .max_h(px(420.))
+                    .max_h(ph_ui::rems_from_px(420.))
                     .overflow_y_scroll()
                     .children(rows)
                     .when(self.searched && self.hits.is_empty() && !empty, |this| {

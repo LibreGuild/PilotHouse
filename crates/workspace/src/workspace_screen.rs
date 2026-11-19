@@ -18,7 +18,6 @@
 //! sends what they produce to the chat, `dock` arranges the panes, `render`
 //! draws the screen.
 
-use gpui_kit::TestSupportExt as _;
 use std::collections::{HashMap, HashSet};
 
 use gpui_kit::component::{
@@ -32,7 +31,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, px,
+    Styled as _, Subscription, Window, div,
 };
 use ph_agent::{Attachment, ChatPanel, ChatPanelEvent, LiveSources, WorkspaceChatsEvent};
 use ph_board::{BoardPanel, BoardPanelEvent};
@@ -181,6 +180,7 @@ impl WorkspaceScreen {
         let store = store.clone();
         let chat = cx.new(|cx| {
             let mut chat = ChatPanel::new(store.clone(), project.clone(), window, cx);
+            chat.set_runs_terminals(true);
             let session = active_session
                 .and_then(|id| sessions.iter().find(|session| session.id == id).cloned());
             chat.set_session(session, cx);

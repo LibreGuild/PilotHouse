@@ -10,7 +10,6 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     popover::Popover,
-    spinner::Spinner,
     status_bar::StatusBar,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -73,6 +72,9 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
     let device = device_item(cx);
 
     StatusBar::new()
+        // Part of the window's frame: clear, and no line over it.
+        .bg(gpui_kit::transparent_black())
+        .border_t_0()
         .left(
             h_flex()
                 .gap_3()
@@ -156,8 +158,8 @@ fn limits(cx: &Context<Workspace>) -> Vec<AnyElement> {
                         |this, used| {
                             this.child(
                                 div()
-                                    .w(gpui_kit::px(28.))
-                                    .h(gpui_kit::px(4.))
+                                    .w(ph_ui::rems_from_px(28.))
+                                    .h(ph_ui::rems_from_px(4.))
                                     .rounded_full()
                                     .bg(theme.muted)
                                     .child(
@@ -200,7 +202,10 @@ fn ci_item(ci: Option<&crate::signals::Ci>, cx: &Context<Workspace>) -> Option<A
         )
     } else if ci.pending > 0 {
         (
-            Spinner::new().xsmall().color(theme.info).into_any_element(),
+            ph_ui::Loader::new()
+                .xsmall()
+                .color(theme.info)
+                .into_any_element(),
             "CI running".into(),
             theme.muted_foreground,
         )
@@ -426,7 +431,7 @@ fn branch_item(
             )
         })
         .when_some(busy, |this, busy| {
-            this.child(Spinner::new().xsmall()).child(busy)
+            this.child(ph_ui::Loader::new().xsmall()).child(busy)
         });
     let trigger = Button::new("status-branch")
         .ghost()

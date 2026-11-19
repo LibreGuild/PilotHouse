@@ -9,7 +9,7 @@ Studio is a window of its own for editing a picture, a video or a presentation, 
 ## The window
 
 ```
-┌ title: Studio · name ●                         ↶ ↷ 👁 ⋯ [Export…] [Agent] ┐
+┌ title: Studio · name ●                         ↶ ↷ 👁 ⋯ [Export] [Agent] ┐
 │ tools │ the picture                                            │ chat      │
 │       │                                                        │ (toggle)  │
 │       ├────────────────────────────────────────────────────────┤           │
@@ -21,7 +21,7 @@ Studio is a window of its own for editing a picture, a video or a presentation, 
 - **Tools** (left): Select (V); Crop and turn (C), Adjust colors, Resize, Frame; Arrow (A), Rectangle (R), Ellipse (O), Line (L), Pen (P), Text (T), Numbered step (N), Highlight (H); Blur (B), Pixelate (X), Spotlight (S). Letters work while the picture has the keyboard.
 - **The bar** under the picture shows one thing at a time: the selected mark's color, line width, text, size, box or fill; the crop's proportions (Free, 1:1, 4:3, 3:2, 16:9, 9:16) and turn and flip; the color sliders; width and height (proportions locked or free, 25/50/75%); the frame's background, padding, corners and shadow. With nothing to show it gives a hint.
 - **Marks**: drag to draw; click to place text (then type in the bar; left, centered or right lines) or numbered steps (1, 2, 3…). With Select, click a mark to change it, drag it to move it, drag its corners or ends to resize it; Delete removes it, Esc lets go. A text left empty goes when let go of.
-- **Title bar**: undo and redo (⌘Z, ⇧⌘Z), Compare (hold to see the original), ⋯ (copy the picture, make app icons, start over, replace the original), **Export…** (⌘S), and **Agent**, which slides the chat in or out. Drag the chat's left edge to make it wider or narrower (the picture keeps at least 420 pixels); both are remembered for the next window while the app runs.
+- **Title bar**: undo and redo (⌘Z, ⇧⌘Z), Compare (hold to see the original), ⋯ (copy the picture, make app icons, start over, replace the original), **Export** (⌘S), and **Agent**, which slides the chat in or out. Drag the chat's left edge to make it wider or narrower (the picture keeps at least 420 pixels); both are remembered for the next window while the app runs.
 - **Status line**: the original's size, format and weight, the result's size, and under the pointer its pixel position and color.
 - **Zoom**: pinch with two fingers on a trackpad, or ⌘ (Ctrl) and the wheel, zooms around the pointer; with two fingers (or the wheel) the picture moves when zoomed in, never all the way out of sight. The buttons at the bottom right zoom, show actual size, and fit. When the canvas changes size (the window, the chat) a fitted picture fits again at once.
 - Closing with changes not saved asks first. The file itself is never changed until it is saved over (Replace the original, which asks).
@@ -46,7 +46,7 @@ Undo keeps 200 steps. A slider dragged, or a mark moved, is one step.
 
 ## Saving
 
-**Export…** chooses the format and quality, then **Save a copy…** asks where (`name-edited.png` beside the original by default):
+**Export** chooses the format and quality, then **Save a copy** asks where (`name-edited.png` beside the original by default):
 
 - PNG (optionally 256 colors: often a third of the size for screenshots), JPEG (quality), WebP (lossless), GIF, BMP, TIFF, ICO (16 to 256 pixels in one file).
 - **At most … KB**: JPEG lowers its quality, then PNG drops to 256 colors, then the picture gets smaller, until the file fits; Export says what gave way.
@@ -54,7 +54,7 @@ Undo keeps 200 steps. A slider dragged, or a mark moved, is one step.
 - Formats without transparency put see-through parts on white. Saved pictures carry no metadata (camera, place).
 - Files are written beside their place first and then moved there, so a failed save never leaves half a picture.
 
-**⋯ → Copy the picture** (⇧⌘C) puts it on the clipboard as PNG. **Make app icons…** writes a folder `AppIcons` with Android launcher icons (`mipmap-*`, Play Store 512), an iOS `AppIcon.appiconset` (1024, opaque), a macOS `AppIcon.iconset` (`iconutil -c icns` makes the `.icns`) and website icons (`favicon.ico`, `apple-touch-icon.png`, 192 and 512).
+**⋯ → Copy the picture** (⇧⌘C) puts it on the clipboard as PNG. **Make app icons** writes a folder `AppIcons` with Android launcher icons (`mipmap-*`, Play Store 512), an iOS `AppIcon.appiconset` (1024, opaque), a macOS `AppIcon.iconset` (`iconutil -c icns` makes the `.icns`) and website icons (`favicon.ico`, `apple-touch-icon.png`, 192 and 512).
 
 ## With an agent
 
@@ -72,10 +72,10 @@ They are the `studio.*` control methods (`control.rs`). With several pictures op
 
 ## Video
 
-The same window, for a video. Nothing is written until **Export…**, always to a new file.
+The same window, for a video. Nothing is written until **Export**, always to a new file.
 
 ```
-┌ title: Studio · name ●                              ↶ ↷ ⋯ [Export…] [Agent] ┐
+┌ title: Studio · name ●                              ↶ ↷ ⋯ [Export] [Agent] ┐
 │ tools │ the video, with its marks                                │ chat      │
 │       ├──────────────────────────────────────────────────────────┤ (toggle)  │
 │       │ ◀◀ ◀ ▶ ▶  0:12.345 / 1:05.000  frame 371   A B Δ  ✂ 🔊 │           │
@@ -92,7 +92,7 @@ The same window, for a video. Nothing is written until **Export…**, always to 
 - **Crop** (Free, 16:9, 9:16, 1:1, 4:3) and **Resize** (Original, 1080p, 720p, 480p).
 - **Sound**: 🔊 (or **Sound** in Export) turns it off in the result, for a smaller file. Parts sped up or slowed down are silent.
 - **⋯**: copy or save the frame shown (as made for the result), keep all of it again, start over.
-- **Export…**: MP4 (H.264, plays everywhere), MP4 with HEVC (about half the size), GIF (no sound; 480 to 1280 wide, 8 to 24 frames a second), WebM (VP9 and Opus: GStreamer on Linux, else ffmpeg). Only what this system can write is offered (HEVC needs an HEVC encoder: on Windows the HEVC Video Extensions or a graphics card that has one). **At most … MB** (10, 25, 50 for Confluence, 100) sets the bitrate so the file fits; a GIF over its limit is made again smaller. Frames a second as recorded or 60, 30, 24. The dialog shows the result's size, length and about how much it will weigh. Then a save panel; the export runs in the background (its progress and **Stop** in the title bar) and says when it is done. A file that is open somewhere cannot be replaced on Windows: the result is then saved beside it (`name (2).mp4`) and the window says so, rather than losing the export.
+- **Export**: MP4 (H.264, plays everywhere), MP4 with HEVC (about half the size), GIF (no sound; 480 to 1280 wide, 8 to 24 frames a second), WebM (VP9 and Opus: GStreamer on Linux, else ffmpeg). Only what this system can write is offered (HEVC needs an HEVC encoder: on Windows the HEVC Video Extensions or a graphics card that has one). **At most … MB** (10, 25, 50 for Confluence, 100) sets the bitrate so the file fits; a GIF over its limit is made again smaller. Frames a second as recorded or 60, 30, 24. The dialog shows the result's size, length and about how much it will weigh. Then a save panel; the export runs in the background (its progress and **Stop** in the title bar) and says when it is done. A file that is open somewhere cannot be replaced on Windows: the result is then saved beside it (`name (2).mp4`) and the window says so, rather than losing the export.
 
 **Reading and writing** (`video/media.rs`): the system's own framework first, so no codec ships with PilotHouse; `ffmpeg` and `ffprobe` when installed (on the PATH, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`), never bundled, for what the system cannot do (kinds it cannot read, WebM on macOS and Windows, a missing encoder). A video the system reads is written by it too (it reads the sound); one ffmpeg reads, by ffmpeg.
 

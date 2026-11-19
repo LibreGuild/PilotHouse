@@ -74,12 +74,12 @@ impl ChatPanel {
         let theme = cx.theme();
         let header = h_flex()
             .flex_none()
-            .h(px(40.))
+            .h(ph_ui::rems_from_px(40.))
             .px_3()
             .gap_2()
             .border_b_1()
             .border_color(theme.border)
-            .child(agent.mark(px(16.)))
+            .child(agent.mark(ph_ui::rems_from_px(16.)))
             .child(
                 div()
                     .flex_1()
@@ -91,6 +91,9 @@ impl ChatPanel {
             )
             .child(
                 h_flex()
+                    // Kept whole: the title beside it gives way.
+                    .flex_none()
+                    .whitespace_nowrap()
                     .gap_1()
                     .text_xs()
                     .text_color(theme.muted_foreground)

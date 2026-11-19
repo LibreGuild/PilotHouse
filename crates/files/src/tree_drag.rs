@@ -15,7 +15,7 @@ use std::time::Duration;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex};
 use gpui_kit::{
     AppContext as _, Context, ExternalPaths, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Task, Window, px,
+    Styled as _, Task, Window,
 };
 
 use crate::files_panel::FilesPanel;
@@ -75,9 +75,9 @@ impl Render for DragPreview {
             .shadow_md()
             .text_sm()
             .child(if self.folder {
-                ph_ui::folder_icon_element(&self.label, px(14.))
+                ph_ui::folder_icon_element(&self.label, ph_ui::rems_from_px(14.))
             } else {
-                ph_ui::file_icon_element(&self.label, px(14.))
+                ph_ui::file_icon_element(&self.label, ph_ui::rems_from_px(14.))
             })
             .child(self.label.clone())
     }

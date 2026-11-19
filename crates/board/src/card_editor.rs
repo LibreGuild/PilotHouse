@@ -401,12 +401,12 @@ fn open(store: Store, target: Target, title: &str, window: &mut Window, cx: &mut
     let is_existing = matches!(target, Target::Existing(_));
     let editor = cx.new(|cx| CardEditor::new(store, target, window, cx));
     let title: SharedString = title.to_string().into();
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let save_editor = editor.clone();
         let delete_editor = editor.clone();
         dialog
             .title(title.clone())
-            .w(gpui_kit::px(520.))
+            .w(ph_ui::scaled_px(520., window))
             .child(editor.clone())
             .footer(
                 h_flex()

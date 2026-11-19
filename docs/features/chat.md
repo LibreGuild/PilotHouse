@@ -26,8 +26,12 @@ Agents and terminals use your **login shell's** environment (`ph-env`), so tools
    - **View** (the layers button in the header, for every chat, kept in `chat.view_mode`): *Detailed* shows every step, *Normal* folds runs, *Summary* shows only messages, replies, questions and the turn summaries.
 4. **Permission requests** appear inline and in the title-bar **Approvals** inbox (across all projects). Answering either one answers the agent once. Stop, or an agent exit, cancels them. Once answered, a request shrinks to a muted line.
    - **Plans.** When the agent asks to leave plan mode (ACP `switch_mode`), the card shows the plan, as Markdown, above the choices.
-   - **Questions.** PilotHouse accepts ACP form elicitation (`elicitation/create`, `form.rs`): Claude Code's *AskUserQuestion* and MCP servers asking for values arrive as a question card. Pick one (radio) or several (checks) of the offered answers, or type your own (*Other…*); **Answer** sends, **Skip** declines. A single one-answer question is answered by the pick. Questions wait in the inbox like permissions, and make the chat *Needs you*.
+   - **Questions.** PilotHouse accepts ACP form elicitation (`elicitation/create`, `form.rs`): Claude Code's *AskUserQuestion* and MCP servers asking for values arrive as a question card. Pick one (radio) or several (checks) of the offered answers, or type your own (*Other*); **Answer** sends, **Skip** declines. A single one-answer question is answered by the pick. Questions wait in the inbox like permissions, and make the chat *Needs you*.
    - **Subagents.** While subagents work, a line above the composer says how many ("2 subagents running"); it opens to each one's state, latest step, steps and time, and a row jumps to it in the transcript. Claude starts subagents in the background, so one counts as working while a step of it runs or for a few seconds after its last. Codex's `spawnAgent` calls show as subagents too, but its adapter keeps their own steps to itself.
+
+## A chat being readied
+
+Some chats need something made before their agent can start: a review needs the repository cloned and the pull request checked out. That is part of the run to whoever asked for it, so it shows as one (`ChatPanel::set_preparing`, `render_preparing`): the chat opens at once with what was asked as its first message, and under the agent's name the step under way (*Cloning acme/shop…*) with PilotHouse's working mark and the time it has taken. The workspace counts it as work, and the Agents pop-up lists it under **Working** (`WorkspaceChats::preparing`). When it is done the agent starts by itself; a failure stays over the composer in red. In a chat that has messages already, the step shows over the composer with its time.
 
 ## The composer
 
@@ -84,7 +88,7 @@ From the editor (see [files.md](files.md)): *Explain*, *Find bugs* and *Write te
 
 ## Handing off to another agent
 
-The ↗ button in the chat header (*Continue with…*) moves the work to another agent: a new chat opens with that agent, says where it came from, and offers a first message to send or edit. With that message the new agent gets a recap of the old chat (its recent messages and tool calls, up to 8,000 characters) and is told to check the files' current state first. The old chat stays as it was.
+The ↗ button in the chat header (*Continue with*) moves the work to another agent: a new chat opens with that agent, says where it came from, and offers a first message to send or edit. With that message the new agent gets a recap of the old chat (its recent messages and tool calls, up to 8,000 characters) and is told to check the files' current state first. The old chat stays as it was.
 
 ## Side chat
 
@@ -94,7 +98,7 @@ The ↗ button in the chat header (*Continue with…*) moves the work to another
 
 When an agent reports usage (ACP `usage_update`: context used and window, running cost; the prompt reply's `usage`: running token totals), the chat header shows a small bar of how full the context is, its share, and the cost so far; the tooltip has the tokens in and out. Reports are running totals per agent session, so the store keeps the last one and adds only the difference: a restarted agent adds on, a resumed one is not counted twice (`ph_store::usage`, migration 5). What each report adds is also kept by local day and model (`usage_days`, migration 14), and chats from before that keep their totals on the day they were last used.
 
-**Usage…** (the palette, the app menu) opens a compact dialog (`usage_view`), one page read top to bottom:
+**Usage** (the palette, the app menu) opens a compact dialog (`usage_view`), one page read top to bottom:
 
 - **Period and grouping**: a menu for the last 7, 30 or 90 days or 12 months, and whether the list is by **Agents**, **Workspaces** (where the work happened: the session's folder, matched to the workspace whose folder holds it, else the folder's name) or **Models**. *Refresh* reads again.
 - **Headline**: tokens processed (input, cached or not, and output) and **≈ what they would cost at API prices**, then sessions, the share of input read from a cache, output, and any cost agents reported.
@@ -109,7 +113,7 @@ Where the numbers come from (`ph_agent::usage_logs`): where an agent keeps its o
 
 ## Agent instructions
 
-*Agent instructions…* in the palette shows the project's `AGENTS.md` (Codex, Antigravity, Cline and most agents), `CLAUDE.md` (Claude Code) and `GEMINI.md` (Gemini CLI), and **Sync** makes `AGENTS.md` the one place to write instructions: Claude Code and Gemini follow an `@AGENTS.md` line as an import, so their files start with one, and a project without `AGENTS.md` gets one made from its existing file. Nothing is deleted; each file's own lines stay below the import (`instructions.rs`).
+*Agent instructions* in the palette shows the project's `AGENTS.md` (Codex, Antigravity, Cline and most agents), `CLAUDE.md` (Claude Code) and `GEMINI.md` (Gemini CLI), and **Sync** makes `AGENTS.md` the one place to write instructions: Claude Code and Gemini follow an `@AGENTS.md` line as an import, so their files start with one, and a project without `AGENTS.md` gets one made from its existing file. Nothing is deleted; each file's own lines stay below the import (`instructions.rs`).
 
 ## MCP servers and skills
 
@@ -121,7 +125,7 @@ Where the numbers come from (`ph_agent::usage_logs`): where an agent keeps its o
 
 ## Several agents at once
 
-*Run with several agents…* in the composer's **+** menu gives one prompt to two or more installed agents. PilotHouse takes a checkpoint of the project (uncommitted and new files included), makes a worktree per agent from it in its data folder (the dialog says how much space each copy takes), and starts a chat per agent working there. *Parallel runs…* in the palette compares them: files changed and lines added and removed per agent (counting new files), a link to each chat, **Keep** (applies that agent's changes to the project after a checkpoint, three-way when the project moved on) and **Discard** (removes the copy). A kept lane's copy stays for its chat until *Remove copy* (`ph_git::parallel`, `ph_store::parallel`, migration 6, `workspace/src/parallel.rs`).
+*Run with several agents* in the composer's **+** menu gives one prompt to two or more installed agents. PilotHouse takes a checkpoint of the project (uncommitted and new files included), makes a worktree per agent from it in its data folder (the dialog says how much space each copy takes), and starts a chat per agent working there. *Parallel runs* in the palette compares them: files changed and lines added and removed per agent (counting new files), a link to each chat, **Keep** (applies that agent's changes to the project after a checkpoint, three-way when the project moved on) and **Discard** (removes the copy). A kept lane's copy stays for its chat until *Remove copy* (`ph_git::parallel`, `ph_store::parallel`, migration 6, `workspace/src/parallel.rs`).
 
 ## Search
 
@@ -166,6 +170,7 @@ Cline's CLI speaks ACP itself (`cline --acp`), with your own install. Its ACP si
 - **Started quietly.** `CLINE_NO_AUTO_UPDATE=1`, since Cline otherwise updates itself (a global npm install) on every start, and `CLINE_SESSION_BACKEND_MODE=local`, since it otherwise runs sessions through a background hub daemon that outlives it. Both only for the processes PilotHouse starts; Cline in a terminal is as you run it.
 - **Runs as in your terminal.** Over ACP Cline on its own only uses a Cline account, ClinePass or a ChatGPT subscription saved by `cline auth`. When the provider Cline last used in a terminal is another one that needs no key (Vertex AI on Google Cloud's own sign-in, a local Ollama), PilotHouse starts Cline on it: `CLINE_PROVIDER`, its model as `CLINE_MODEL`, and a stand-in `CLINE_API_KEY`, which Cline asks for though the provider's settings sign it in (`cline::launch_env`). PilotHouse reads no keys, so a provider set up with an API key (Anthropic, OpenRouter…) works only with an account or with `CLINE_PROVIDER` and `CLINE_API_KEY` in your shell; the setup card says so. Your own `CLINE_PROVIDER` or `CLINE_API_KEY` always wins.
 - **Choosing the provider.** The chat's **⋯ → Provider** lists Cline's accounts and the saved providers that need no key (`cline::adjust_options`). Between accounts Cline switches over ACP. To or from a saved provider, which Cline takes only when it starts, PilotHouse starts Cline again (`AgentConnection::restart`, not while one of its chats works): its chats go on in new sessions, given their history, and the models come in again. The choice is PilotHouse's own; your terminal keeps `cline auth`'s. An expired sign-in ("cline requires re-authentication") shows a sign-in card with Cline's own methods (they open the browser).
+- **A Cline without `--acp`** (an organisation's own build with editor mode left out, an old version): the first chat fails on that flag, which PilotHouse recognises in what the CLI printed (`AgentSpec::refused_flag`: "unknown option" and the like, naming the flag). The chat then says so in words and offers **Run Cline in a terminal** over the composer: the CLI starts in a terminal of the workspace, where PilotHouse follows it like a chat ([terminal](terminal.md)). Remembered until PilotHouse quits (`agents::chat_unsupported`); the same holds for any agent whose CLI speaks ACP itself.
 - **Text only.** Cline reads only a prompt's text: attached files go as a line naming the file (it reads it with its tools), and images as their file's path.
 - **No resume.** Its `session/load` is missing before 3.0.74 and answers the first prompt after it with nothing in 3.0.74, so a reopened chat starts a new Cline session that is given the chat's recent history. Its own sessions still resume in a terminal (`cline --id`).
 - **MCP.** Cline ignores the servers a session is given and reads its own settings file, so its process is pointed (`CLINE_MCP_SETTINGS_PATH`) at a copy PilotHouse writes in `<data dir>/agents/cline/`: your servers from `~/.cline/data/settings/cline_mcp_settings.json` with PilotHouse's and those from Settings → MCP & skills (one file per workspace, private, written when the agent starts).
