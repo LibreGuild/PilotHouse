@@ -235,6 +235,12 @@ impl Workspace {
             if let Some(space) = workspace.active_space().cloned() {
                 space.update(cx, |space, cx| space.set_visible(false, cx));
             }
+            // Opening the workspace behind noted it as what is in front,
+            // and its chat may have taken the keyboard: neither holds. A
+            // chat that is not drawn would keep every shortcut from the
+            // window until something was clicked.
+            let _ = AppState::store(cx).set_setting(keys::FRONT_VIEW, &front_key(View::Bridge));
+            workspace.focus_handle.focus(window, cx);
         }
         // The Bridge lists the chats of spaces whose screen is not open
         // from the store, from the start.

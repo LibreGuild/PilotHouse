@@ -14,6 +14,14 @@ use ph_workspace::{AppState, ContextTab, Workspace};
 /// Opens a workspace on a fresh in-memory database. The data folder (for
 /// scratch folders, reports) is a temporary one, never the user's.
 fn open_workspace(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Workspace>) {
+    open_workspace_on(Store::open_in_memory().unwrap(), cx)
+}
+
+/// Opens a workspace window on `store`, as a start with what it holds.
+fn open_workspace_on(
+    store: Store,
+    cx: &mut TestAppContext,
+) -> (AnyWindowHandle, Entity<Workspace>) {
     static DATA: std::sync::Once = std::sync::Once::new();
     DATA.call_once(|| {
         let dir = std::env::temp_dir().join(format!("ph-ui-data-{}", std::process::id()));
@@ -24,7 +32,7 @@ fn open_workspace(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Workspace
     cx.update(|cx| {
         gpui_kit::init(cx);
         ph_theme::init(cx);
-        AppState::install(Store::open_in_memory().unwrap(), cx);
+        AppState::install(store, cx);
         ph_workspace::init(cx);
         // Real file watchers run on their own threads, which the test
         // scheduler cannot follow.
@@ -119,6 +127,51 @@ fn a_first_start_opens_into_a_chat(cx: &mut TestAppContext) {
 
 /// A tool that is not one of the four names shows beside them once it is
 /// in front; ⌥⌘B hides the result pane and brings it back as it was.
+/// Someone who has workspaces meets the Bridge when the window opens, the
+/// workspace shown last ready behind it. The keyboard is the window's from
+/// the start (no click needed before a shortcut works), and opening on the
+/// Bridge does not make the next start open on the workspace.
+#[gpui_kit::test]
+fn a_window_with_workspaces_opens_on_the_bridge(cx: &mut TestAppContext) {
+    let store = Store::open_in_memory().unwrap();
+    let folder = temp_project("start");
+    let project = store.add_project(&folder).unwrap().id;
+    // As a run before left it: that workspace was the one shown last.
+    store
+        .set_setting("workspace.last_project", &Some(project))
+        .unwrap();
+    let (window, workspace) = open_workspace_on(store, cx);
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.view(), ph_workspace::View::Bridge);
+        assert_eq!(workspace.active_project_id(), Some(project));
+        assert!(window.try_find("bridge").is_some());
+        let front: String = AppState::store(cx).setting("workspace.front_view");
+        assert_ne!(
+            front, "workspace",
+            "the Bridge was in front, and is next time"
+        );
+    })
+    .unwrap();
+    press(
+        window,
+        if cfg!(target_os = "macos") {
+            "ctrl-1"
+        } else {
+            "alt-1"
+        },
+        cx,
+    );
+    cx.update(|cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.view(), ph_workspace::View::Workspaces);
+        let front: String = AppState::store(cx).setting("workspace.front_view");
+        assert_eq!(front, "workspace");
+    });
+}
+
 #[gpui_kit::test]
 fn switching_tabs_and_hiding_the_panel(cx: &mut TestAppContext) {
     let (window, workspace) = open_workspace(cx);
