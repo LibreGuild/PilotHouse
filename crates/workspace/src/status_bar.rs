@@ -243,10 +243,7 @@ fn ci_item(ci: Option<&crate::signals::Ci>, cx: &Context<Workspace>) -> Option<A
         )
     } else if ci.pending > 0 {
         (
-            ph_ui::Loader::new()
-                .xsmall()
-                .color(theme.info)
-                .into_any_element(),
+            ph_ui::Loader::new().xsmall().into_any_element(),
             "CI running".into(),
             theme.muted_foreground,
         )

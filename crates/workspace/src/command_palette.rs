@@ -567,6 +567,11 @@ fn row(entry: &Entry) -> CommandItem {
 
 /// Opens the palette. Takes the workspace by reference because it is called
 /// from a workspace action handler, while the entity is already borrowed.
+/// The palette's width and the most its list is high, at the default
+/// interface size.
+const PALETTE_WIDTH: f32 = 680.;
+const PALETTE_LIST: f32 = 460.;
+
 pub(crate) fn open(
     workspace: &Workspace,
     handle: Entity<Workspace>,
@@ -583,12 +588,20 @@ pub(crate) fn open(
         focus_state.read(cx).focus_handle(cx).focus(window, cx);
     });
 
-    window.open_dialog(cx, move |dialog, _, cx| {
+    window.open_dialog(cx, move |dialog, window, cx| {
         let confirm_groups = groups.clone();
         let workspace = workspace.clone();
+        // Wide enough to read a chat's title or a command with its key,
+        // and long enough to show a dozen rows: the kit's own size (448 by
+        // 300) cut titles short and showed eight. Never more than the
+        // window has.
+        let view = window.viewport_size();
+        let width = ph_ui::scaled_px(PALETTE_WIDTH, window).min(view.width - gpui_kit::px(32.));
+        let list = ph_ui::scaled_px(PALETTE_LIST, window).min(view.height * 0.6);
         let mut command = Command::new(&state)
             .bordered(false)
             .rounded(cx.theme().radius_lg)
+            .max_h(list)
             .placeholder("Type a command or search…")
             .on_confirm(move |index_path, window, cx| {
                 let Some(entry) = confirm_groups
@@ -631,6 +644,6 @@ pub(crate) fn open(
                     .items(entries.iter().map(row)),
             );
         }
-        dialog.close_button(false).p_0().child(command)
+        dialog.close_button(false).w(width).p_0().child(command)
     });
 }

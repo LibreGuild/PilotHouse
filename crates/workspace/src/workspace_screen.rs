@@ -1,5 +1,5 @@
 //! Everything shown for one open workspace: the chat and, beside it, one
-//! result pane for what the task produced, under a row of names (Changes,
+//! result pane for what the task produced, under a row of names (Git,
 //! Preview, Terminal, Files and the workspace's other tools; see
 //! [`layout`]). The Bridge lists its chats with every other workspace's.
 //!
@@ -56,6 +56,7 @@ use crate::detect::{Stack, detect};
 mod layout;
 mod panels;
 mod render;
+mod tabs;
 mod to_chat;
 
 use layout::{Layout, Pane, ResultTab};
@@ -108,6 +109,15 @@ struct Away {
 
 pub struct WorkspaceScreen {
     project: Project,
+    /// The window it is in, for what the window knows of its chats (which
+    /// are marked done or pinned) and does with them. Read while drawing
+    /// and in what a click does, never in what the window calls: the
+    /// window is being changed then.
+    shell: gpui_kit::WeakEntity<crate::workspace::Workspace>,
+    /// Where the tabs over the chat are scrolled to, and the chat they
+    /// were last scrolled to show.
+    tabs_scroll: gpui_kit::ScrollHandle,
+    tabs_front: std::cell::Cell<Option<SessionId>>,
     /// Shared with the sidebar, which lists them on each draw.
     sessions: std::rc::Rc<[Session]>,
     active_session: Option<SessionId>,
@@ -167,7 +177,12 @@ pub struct WorkspaceScreen {
 impl EventEmitter<WorkspaceScreenEvent> for WorkspaceScreen {}
 
 impl WorkspaceScreen {
-    pub fn new(project: Project, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        project: Project,
+        shell: gpui_kit::WeakEntity<crate::workspace::Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let store = AppState::store(cx);
         let saved = store.project_ui_state(project.id).unwrap_or_default();
         let sessions = store.sessions(project.id).unwrap_or_default();
@@ -362,6 +377,9 @@ impl WorkspaceScreen {
             branch_pickers: HashMap::new(),
             saved,
             project,
+            shell,
+            tabs_scroll: gpui_kit::ScrollHandle::new(),
+            tabs_front: std::cell::Cell::new(None),
             sessions: sessions.into(),
             active_session,
             chat,

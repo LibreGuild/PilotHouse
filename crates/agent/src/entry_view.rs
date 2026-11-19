@@ -207,10 +207,7 @@ fn run_line(
     let (summary, failed) = transcript::run_summary(&tools);
     let (icon, title): (AnyElement, SharedString) = match running {
         Some(tool) => (
-            ph_ui::Loader::new()
-                .xsmall()
-                .color(cx.theme().info)
-                .into_any_element(),
+            ph_ui::Loader::new().xsmall().into_any_element(),
             format!("Running {}", tool.display_title()).into(),
         ),
         None => (
@@ -436,7 +433,7 @@ fn working_row(
         .gap_2()
         .text_xs()
         .text_color(cx.theme().muted_foreground)
-        .child(ph_ui::Loader::new().xsmall().color(cx.theme().info))
+        .child(ph_ui::Loader::new().xsmall())
         .child(
             div()
                 .min_w_0()
@@ -748,10 +745,9 @@ fn tool_status_icon(tool: &ToolEntry, cx: &App) -> AnyElement {
         }
     };
     match tool.status {
-        ToolStatus::Pending | ToolStatus::Running => ph_ui::Loader::new()
-            .xsmall()
-            .color(cx.theme().info)
-            .into_any_element(),
+        ToolStatus::Pending | ToolStatus::Running => {
+            ph_ui::Loader::new().xsmall().into_any_element()
+        }
         ToolStatus::Failed => icon()
             .xsmall()
             .text_color(cx.theme().danger)
@@ -772,10 +768,7 @@ fn render_tool(thread: &Entity<ChatThread>, ix: usize, tool: &ToolEntry, cx: &Ap
         && *thread.read(cx).status() == crate::thread::ThreadStatus::Working
         && tool.is_busy();
     let icon = if busy {
-        ph_ui::Loader::new()
-            .xsmall()
-            .color(cx.theme().info)
-            .into_any_element()
+        ph_ui::Loader::new().xsmall().into_any_element()
     } else {
         tool_status_icon(tool, cx)
     };

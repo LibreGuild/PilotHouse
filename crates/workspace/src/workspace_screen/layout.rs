@@ -1,6 +1,6 @@
 //! How a workspace's screen is divided: the chat on one side and, beside
 //! it, one result pane for what the task produced, under a row of names
-//! (Changes, Preview, Terminal, Files, and the workspace's other tools).
+//! (Git, Preview, Terminal, Files, and the workspace's other tools).
 //!
 //! The screen was a dock before: every tool a tab that could be dragged
 //! anywhere. Few arranged it, an arrangement saved could come back wrong,
@@ -29,8 +29,10 @@ pub(crate) enum Pane {
 /// phone's log) each stand for themselves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResultTab {
-    /// The review of what changed (the Git tool).
-    Changes,
+    /// The review of what changed, and the repository's branches, history
+    /// and stashes. Named as people know it: its first view is *Changes*,
+    /// and a name over it saying the same read as a mistake.
+    Git,
     /// What the work looks like when it runs: the browser, or a phone.
     Preview,
     Terminal,
@@ -43,7 +45,7 @@ impl ResultTab {
     /// The name `tool` shows under.
     pub(crate) fn of(tool: ContextTab) -> Self {
         match tool {
-            ContextTab::Changes => ResultTab::Changes,
+            ContextTab::Changes => ResultTab::Git,
             ContextTab::Browser | ContextTab::Devices => ResultTab::Preview,
             ContextTab::Terminal => ResultTab::Terminal,
             ContextTab::Files => ResultTab::Files,
@@ -53,7 +55,7 @@ impl ResultTab {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            ResultTab::Changes => "Changes",
+            ResultTab::Git => ContextTab::Changes.label(),
             ResultTab::Preview => "Preview",
             ResultTab::Terminal => "Terminal",
             ResultTab::Files => "Files",
@@ -63,7 +65,7 @@ impl ResultTab {
 
     pub(crate) fn icon(self) -> Icons {
         match self {
-            ResultTab::Changes => ContextTab::Changes.icon(),
+            ResultTab::Git => ContextTab::Changes.icon(),
             ResultTab::Preview => Icons::Eye,
             ResultTab::Terminal => ContextTab::Terminal.icon(),
             ResultTab::Files => ContextTab::Files.icon(),
@@ -75,7 +77,7 @@ impl ResultTab {
     /// the automation socket click.
     pub(crate) fn key(self) -> &'static str {
         match self {
-            ResultTab::Changes => ContextTab::Changes.key(),
+            ResultTab::Git => ContextTab::Changes.key(),
             ResultTab::Preview => "preview",
             ResultTab::Terminal => ContextTab::Terminal.key(),
             ResultTab::Files => ContextTab::Files.key(),
@@ -171,7 +173,7 @@ impl Layout {
     /// Shows what name `tab` stands for.
     pub fn show_tab(&mut self, tab: ResultTab) {
         self.show_tool(match tab {
-            ResultTab::Changes => ContextTab::Changes,
+            ResultTab::Git => ContextTab::Changes,
             ResultTab::Preview => self.preview,
             ResultTab::Terminal => ContextTab::Terminal,
             ResultTab::Files => ContextTab::Files,
@@ -268,7 +270,7 @@ mod tests {
         layout.show_tab(ResultTab::Preview);
         assert_eq!(layout.tool, ContextTab::Browser);
         layout.show_tool(ContextTab::Devices);
-        layout.show_tab(ResultTab::Changes);
+        layout.show_tab(ResultTab::Git);
         layout.show_tab(ResultTab::Preview);
         assert_eq!(layout.tool, ContextTab::Devices, "the phone was shown last");
         assert_eq!(layout.tab(), ResultTab::Preview);

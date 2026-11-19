@@ -3,19 +3,20 @@
 //! one in front shows (the review of the changes, the browser or a phone,
 //! the terminal, the files and their editor, another tool).
 
-use gpui_kit::component::Selectable as _;
-
 use super::*;
 
 impl WorkspaceScreen {
-    /// The chat, under what finished while the workspace was away.
+    /// The chat, under the tabs of the workspace's open chats and what
+    /// finished while the workspace was away.
     pub(super) fn render_chat(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(away) = &self.away else {
+        let tabs = self.render_chat_tabs(cx);
+        if tabs.is_none() && self.away.is_none() {
             return self.chat.clone().cached(filled()).into_any_element();
-        };
+        }
         v_flex()
             .size_full()
-            .child(self.render_away(away, cx))
+            .children(tabs)
+            .children(self.away.as_ref().map(|away| self.render_away(away, cx)))
             .child(div().flex_1().min_h_0().child(self.chat.clone()))
             .into_any_element()
     }
@@ -133,9 +134,9 @@ impl WorkspaceScreen {
         let mut names = Vec::new();
         let git = on(ContextTab::Changes);
         let changes =
-            git && (self.is_relevant(ContextTab::Changes) || front == Some(ResultTab::Changes));
+            git && (self.is_relevant(ContextTab::Changes) || front == Some(ResultTab::Git));
         if changes {
-            names.push(ResultTab::Changes);
+            names.push(ResultTab::Git);
         }
         if on(ContextTab::Browser) || on(ContextTab::Devices) {
             names.push(ResultTab::Preview);
@@ -184,7 +185,7 @@ impl WorkspaceScreen {
         let tabs = names.into_iter().map(|tab| {
             let space = space.clone();
             let label = match tab {
-                ResultTab::Changes if changes > 0 => format!("{} {changes}", tab.label()),
+                ResultTab::Git if changes > 0 => format!("{} {changes}", tab.label()),
                 _ => tab.label().to_string(),
             };
             ph_ui::PillTab::new(
@@ -219,27 +220,28 @@ impl WorkspaceScreen {
                 })
         });
         let enabled = AppState::enabled_tabs(cx);
-        // Preview: the browser or a phone, when the build has both.
+        // Preview: the browser or a phone, when the build has both; the
+        // one switch other panes have for two views of one thing (a
+        // file's changes, unified or split).
         let preview = (front == ResultTab::Preview
             && enabled.contains(&ContextTab::Browser)
             && enabled.contains(&ContextTab::Devices))
         .then(|| {
-            let choice = |tool: ContextTab, label: &'static str, id: &'static str| {
-                let space = space.clone();
-                Button::new(id)
-                    .ghost()
-                    .xsmall()
-                    .label(label)
-                    .selected(self.layout.tool == tool)
-                    .on_click(move |_, window, cx| {
-                        space.update(cx, |space, cx| space.show_tab(tool, window, cx))
-                    })
-            };
-            h_flex()
-                .flex_none()
-                .gap_0p5()
-                .child(choice(ContextTab::Browser, "Browser", "preview-browser"))
-                .child(choice(ContextTab::Devices, "Phone", "preview-devices"))
+            let space = space.clone();
+            gpui_kit::component::tab::TabBar::new("preview-kind")
+                .segmented()
+                .small()
+                .selected_index(usize::from(self.layout.tool == ContextTab::Devices))
+                .on_click(move |ix: &usize, window, cx| {
+                    let tool = if *ix == 1 {
+                        ContextTab::Devices
+                    } else {
+                        ContextTab::Browser
+                    };
+                    space.update(cx, |space, cx| space.show_tab(tool, window, cx))
+                })
+                .child(gpui_kit::component::tab::Tab::new().label("Browser"))
+                .child(gpui_kit::component::tab::Tab::new().label("Phone"))
                 .into_any_element()
         });
         // Files: the tree makes way for the editor.

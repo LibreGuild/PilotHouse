@@ -703,7 +703,7 @@ fn badge_glyph(badge: crate::AgentBadge, cx: &App) -> AnyElement {
     match badge {
         crate::AgentBadge::Working => div()
             .ml_1()
-            .child(ph_ui::Loader::new().xsmall().color(cx.theme().info))
+            .child(ph_ui::Loader::new().xsmall())
             .into_any_element(),
         crate::AgentBadge::NeedsYou => dot(cx.theme().warning),
         crate::AgentBadge::Done => dot(cx.theme().success),

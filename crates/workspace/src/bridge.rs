@@ -94,7 +94,7 @@ pub(crate) struct Card {
 
 /// The Bridge's columns, most urgent first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Column {
+pub(crate) enum Column {
     NeedsYou,
     Working,
     Review,
@@ -110,20 +110,31 @@ impl Column {
     ];
 
     fn of(card: &Card, now: i64) -> Self {
-        let quiet = now - card.updated_at > QUIET_AFTER;
-        match card.summary.state {
+        Self::place(
+            card.summary.state,
+            card.settled,
+            card.automated,
+            now - card.updated_at > QUIET_AFTER,
+        )
+    }
+
+    /// Where a chat in `state` stands: `settled` when it was marked done,
+    /// `automated` when PilotHouse started it, `quiet` when nobody touched
+    /// it for a week.
+    pub(crate) fn place(state: ChatState, settled: bool, automated: bool, quiet: bool) -> Self {
+        match state {
             ChatState::NeedsYou => Column::NeedsYou,
             ChatState::Working => Column::Working,
             // A turn that failed asks for a look until it is put away (a
             // chat that ends on an error counts as failed whenever it is
             // loaded, however old).
-            ChatState::Failed if card.settled || quiet => Column::Done,
+            ChatState::Failed if settled || quiet => Column::Done,
             ChatState::Failed => Column::NeedsYou,
             ChatState::Done => Column::Review,
             // Runs PilotHouse started (a schedule's, a test's) wait for a
             // look only while their news is fresh: they would bury the
             // user's own tasks otherwise. The inbox lists what they did.
-            ChatState::Idle if card.settled || quiet || card.automated => Column::Done,
+            ChatState::Idle if settled || quiet || automated => Column::Done,
             ChatState::Idle => Column::Review,
         }
     }
@@ -292,11 +303,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
     for (project, place, color, has_folders) in places.iter().cloned() {
         let chats = ph_agent::ChatHub::existing(project, cx);
         for stored in workspace.sessions_of(project, cx).iter() {
-            // An agent CLI's chat whose terminal is open is that terminal's
-            // card.
-            if stored.kind == "terminal"
-                && crate::terminal_agents::TerminalAgents::of_session(stored.id, cx).is_some()
-            {
+            if in_terminal(stored, cx) {
                 continue;
             }
             let loaded = chats
@@ -314,13 +321,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                     summary
                 }
                 None if live => continue,
-                None => ChatSummary {
-                    state: ChatState::Idle,
-                    title: stored.title.clone().into(),
-                    agent: ph_agent::agents::find(&stored.agent_id)
-                        .unwrap_or(&ph_agent::agents::AGENTS[0]),
-                    line: stored.last_line.clone(),
-                },
+                None => stored_summary(stored),
             };
             cards.push(Card {
                 project,
@@ -375,6 +376,70 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
     }
     cards.sort_by_key(|card| std::cmp::Reverse(card.updated_at));
     cards
+}
+
+/// An agent CLI's chat whose terminal is open: that terminal's card.
+fn in_terminal(stored: &Session, cx: &App) -> bool {
+    stored.kind == "terminal"
+        && crate::terminal_agents::TerminalAgents::of_session(stored.id, cx).is_some()
+}
+
+/// A chat not loaded in this run, as it was stored: nothing is going on.
+fn stored_summary(stored: &Session) -> ChatSummary {
+    ChatSummary {
+        state: ChatState::Idle,
+        title: stored.title.clone().into(),
+        agent: ph_agent::agents::find(&stored.agent_id).unwrap_or(&ph_agent::agents::AGENTS[0]),
+        line: stored.last_line.clone(),
+    }
+}
+
+/// A chat among the tabs over a workspace's chat.
+pub(crate) struct OpenChat {
+    pub session: Session,
+    pub summary: ChatSummary,
+    pub pinned: bool,
+    pub settled: bool,
+}
+
+/// Of a workspace's chats `sessions`, those still open (one needs the user,
+/// is being worked on, or waits for a look) and `front` whatever its state,
+/// in the order they were started: a tab keeps its place while another
+/// works. What the Bridge lists under *Done* is not among them.
+pub(crate) fn open_chats(
+    workspace: &Workspace,
+    project: ProjectId,
+    sessions: &[Session],
+    front: Option<SessionId>,
+    cx: &App,
+) -> Vec<OpenChat> {
+    let now = jiff::Timestamp::now().as_millisecond();
+    let chats = ph_agent::ChatHub::existing(project, cx);
+    let mut open: Vec<OpenChat> = sessions
+        .iter()
+        .filter(|stored| !in_terminal(stored, cx))
+        .filter_map(|stored| {
+            let summary = chats
+                .as_ref()
+                .and_then(|chats| chats.read(cx).summary(stored.id, cx))
+                .unwrap_or_else(|| stored_summary(stored));
+            let settled = workspace.is_settled(stored.id);
+            let column = Column::place(
+                summary.state,
+                settled,
+                is_automated(stored),
+                now - stored.updated_at > QUIET_AFTER,
+            );
+            (column != Column::Done || front == Some(stored.id)).then(|| OpenChat {
+                session: stored.clone(),
+                summary,
+                pinned: workspace.is_pinned(stored.id),
+                settled,
+            })
+        })
+        .collect();
+    open.sort_by_key(|chat| chat.session.id);
+    open
 }
 
 /// How many tasks need the user and how many are being worked on, across
@@ -960,7 +1025,7 @@ fn card_view(
                         div()
                             .flex_none()
                             .pt_0p5()
-                            .child(ph_ui::Loader::new().xsmall().color(theme.info)),
+                            .child(ph_ui::Loader::new().xsmall()),
                     )
                 })
                 .when(state == ChatState::Done, |this| {
@@ -1179,7 +1244,7 @@ fn chat_menu(
     workspace: WeakEntity<Workspace>,
     project: ProjectId,
     session: Session,
-    (pinned, settled): (bool, bool),
+    marks: (bool, bool),
     busy: bool,
 ) -> impl IntoElement {
     let id = session.id;
@@ -1189,54 +1254,68 @@ fn chat_menu(
         .icon(IconName::Ellipsis)
         .accessibility_label("Task menu")
         .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-            let (pin, settle, rename, delete) = (
-                workspace.clone(),
-                workspace.clone(),
-                workspace.clone(),
-                workspace.clone(),
-            );
-            let (rename_session, delete_session) = (session.clone(), session.clone());
-            menu.item(
-                PopupMenuItem::new(if pinned { "Unpin" } else { "Pin to the top" })
-                    .icon(Icon::new(if pinned { Icons::PinOff } else { Icons::Pin }))
-                    .on_click(move |_, _, cx| {
-                        _ = pin.update(cx, |workspace, cx| workspace.toggle_pin(id, cx));
-                    }),
-            )
-            .item(
-                PopupMenuItem::new(if settled { "Not done" } else { "Mark as done" })
-                    .icon(Icon::new(if settled { Icons::Undo2 } else { Icons::Check }))
-                    .on_click(move |_, _, cx| {
-                        _ = settle.update(cx, |workspace, cx| {
-                            workspace.toggle_settled(project, id, cx)
-                        });
-                    }),
-            )
-            .item(
-                PopupMenuItem::new("Rename")
-                    .icon(Icon::new(Icons::Pencil))
-                    .on_click(move |_, window, cx| {
-                        _ = rename.update(cx, |workspace, cx| {
-                            workspace.rename_chat(project, &rename_session, window, cx)
-                        });
-                    }),
-            )
-            .separator()
-            .item(
-                PopupMenuItem::new(if busy {
-                    "Delete (still working)"
-                } else {
-                    "Delete"
-                })
-                .icon(Icon::new(Icons::Trash))
-                .disabled(busy)
-                .on_click(move |_, window, cx| {
-                    _ = delete.update(cx, |workspace, cx| {
-                        workspace.delete_chat(project, &delete_session, window, cx)
-                    });
-                }),
-            )
+            chat_menu_items(menu, &workspace, project, &session, marks, busy)
         })
+}
+
+/// What can be done with a chat (pinned and marked done as `marks` say):
+/// the menu of its card, and of its tab over a workspace's chat.
+pub(crate) fn chat_menu_items(
+    menu: PopupMenu,
+    workspace: &WeakEntity<Workspace>,
+    project: ProjectId,
+    session: &Session,
+    (pinned, settled): (bool, bool),
+    busy: bool,
+) -> PopupMenu {
+    let id = session.id;
+    let (pin, settle, rename, delete) = (
+        workspace.clone(),
+        workspace.clone(),
+        workspace.clone(),
+        workspace.clone(),
+    );
+    let (rename_session, delete_session) = (session.clone(), session.clone());
+    menu.item(
+        PopupMenuItem::new(if pinned { "Unpin" } else { "Pin to the top" })
+            .icon(Icon::new(if pinned { Icons::PinOff } else { Icons::Pin }))
+            .on_click(move |_, _, cx| {
+                _ = pin.update(cx, |workspace, cx| workspace.toggle_pin(id, cx));
+            }),
+    )
+    .item(
+        PopupMenuItem::new(if settled { "Not done" } else { "Mark as done" })
+            .icon(Icon::new(if settled { Icons::Undo2 } else { Icons::Check }))
+            .on_click(move |_, _, cx| {
+                _ = settle.update(cx, |workspace, cx| {
+                    workspace.toggle_settled(project, id, cx)
+                });
+            }),
+    )
+    .item(
+        PopupMenuItem::new("Rename")
+            .icon(Icon::new(Icons::Pencil))
+            .on_click(move |_, window, cx| {
+                _ = rename.update(cx, |workspace, cx| {
+                    workspace.rename_chat(project, &rename_session, window, cx)
+                });
+            }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new(if busy {
+            "Delete (still working)"
+        } else {
+            "Delete"
+        })
+        .icon(Icon::new(Icons::Trash))
+        .disabled(busy)
+        .on_click(move |_, window, cx| {
+            _ = delete.update(cx, |workspace, cx| {
+                workspace.delete_chat(project, &delete_session, window, cx)
+            });
+        }),
+    )
 }
 
 /// Opens tool `tab` beside a task's chat (the review of its changes).

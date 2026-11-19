@@ -1120,7 +1120,8 @@ impl Workspace {
             .chain(self.chats_space.as_ref())
             .find(|project| project.id == id)
             .cloned()?;
-        let space = cx.new(|cx| WorkspaceScreen::new(project, window, cx));
+        let shell = cx.weak_entity();
+        let space = cx.new(|cx| WorkspaceScreen::new(project, shell, window, cx));
         let subscription = cx.subscribe_in(
             &space,
             window,

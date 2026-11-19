@@ -232,7 +232,7 @@ impl ChatPanel {
                     .icon(Icons::RotateCcwClock)
                     .tooltip("Past chats")
                     .accessibility_label("Past chats")
-                    .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                    .menu(gpui_kit::Anchor::TopRight, move |menu, _, cx| {
                         let sessions: Vec<_> = store
                             .sessions(project_id)
                             .unwrap_or_default()
@@ -256,11 +256,28 @@ impl ChatPanel {
                                 },
                             ))
                             .separator();
+                        // What each is doing, for those loaded in this run:
+                        // a chat at work is found without opening them all.
+                        let chats = crate::chats::ChatHub::existing(project_id, cx);
                         sessions.into_iter().take(30).fold(menu, |menu, session| {
                             let panel = panel.clone();
                             let id = session.id;
+                            let state = chats
+                                .as_ref()
+                                .and_then(|chats| chats.read(cx).summary(id, cx))
+                                .and_then(|summary| match summary.state {
+                                    crate::chats::ChatState::NeedsYou => Some("needs you"),
+                                    crate::chats::ChatState::Working => Some("working"),
+                                    crate::chats::ChatState::Failed => Some("stopped"),
+                                    crate::chats::ChatState::Done => Some("finished"),
+                                    crate::chats::ChatState::Idle => None,
+                                });
+                            let label = match state {
+                                Some(state) => format!("{} · {state}", session.title),
+                                None => session.title,
+                            };
                             menu.item(
-                                PopupMenuItem::new(session.title)
+                                PopupMenuItem::new(label)
                                     .checked(active == Some(id))
                                     .on_click(move |_, _, cx| {
                                         _ = panel.update(cx, |_, cx| {
@@ -868,10 +885,7 @@ impl ChatPanel {
                 .map(|(ix, tool)| {
                     let ix = *ix;
                     let glyph: AnyElement = match tool.status {
-                        _ if busy(tool) => ph_ui::Loader::new()
-                            .xsmall()
-                            .color(theme.info)
-                            .into_any_element(),
+                        _ if busy(tool) => ph_ui::Loader::new().xsmall().into_any_element(),
                         crate::transcript::ToolStatus::Failed => Icon::new(IconName::Close)
                             .xsmall()
                             .text_color(theme.danger)
@@ -943,7 +957,7 @@ impl ChatPanel {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .when(running > 0, |this| {
-                            this.child(ph_ui::Loader::new().xsmall().color(theme.info))
+                            this.child(ph_ui::Loader::new().xsmall())
                         })
                         .child(label)
                         .child(

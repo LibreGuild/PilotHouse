@@ -729,6 +729,88 @@ fn what_waits_for_a_look_is_put_away_at_once(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+/// Several chats of one workspace are a click apart: each one still open
+/// has a tab over the chat, and one marked done leaves the row (it is
+/// under *Done* on the Bridge).
+#[gpui_kit::test]
+fn open_chats_are_tabs_over_the_chat(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let (alpha, _beta) = two_workspaces("tabs", window, &workspace, cx);
+    let [first, second] = cx.update(|cx| {
+        let store = AppState::store(cx);
+        ["Sort the arrivals", "Name the berths"]
+            .map(|title| store.create_session(alpha, title, "claude").unwrap().id)
+    });
+    // Alpha's screen is made anew, with the chats now stored.
+    workspace.update(cx, |workspace, cx| {
+        workspace.unload_idle(std::time::Duration::ZERO, cx)
+    });
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_chat(alpha, first, window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let front = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let space = workspace.read(cx).active_space().unwrap().clone();
+            space.read(cx).active_session()
+        })
+    };
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        for session in [first, second] {
+            assert!(
+                window.try_find(("chat-tab", session as u64)).is_some(),
+                "each open chat has a tab"
+            );
+        }
+    })
+    .unwrap();
+    assert_eq!(front(cx), Some(first));
+    click_id(window, ("chat-tab", second as u64), cx);
+    assert_eq!(front(cx), Some(second), "a tab shows its chat");
+
+    // The first is marked done from its tab, which shows what to press
+    // while the pointer is on it.
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        gpui_kit::test::TestWindowExt::hover(window, ("chat-tab", first as u64), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    click_id(window, ("chat-tab-done", first as u64), cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let done: Vec<i64> = AppState::store(cx).setting("workspace.sidebar_settled");
+        assert_eq!(done, vec![first], "kept as done");
+        assert!(
+            window.try_find("chat-tabs").is_none(),
+            "one chat alone has no row of tabs"
+        );
+    })
+    .unwrap();
+    assert_eq!(front(cx), Some(second), "the chat in front stays");
+
+    // On the Bridge it is under Done, its card without the button.
+    press(window, "secondary-shift-e", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window
+                .try_find(gpui_kit::SharedString::from(format!("bridge-card-{first}")))
+                .is_some()
+        );
+        assert!(
+            window
+                .try_find(gpui_kit::SharedString::from(format!("bridge-done-{first}")))
+                .is_none()
+        );
+    })
+    .unwrap();
+}
+
 /// Reviews is one click away; without an account it asks for one. The
 /// Bridge and the chats that need no folder each have their key.
 #[gpui_kit::test]
