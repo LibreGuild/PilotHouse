@@ -5,3 +5,11 @@
 dev = "run -p pilothouse --features automation"
 # Build the dev binary without running it.
 dev-build = "build -p pilothouse --features automation"
+# Line and function coverage of the tests, as pages in target/llvm-cov/html.
+# Needs `cargo install cargo-llvm-cov` and `rustup component add
+# llvm-tools-preview`. A run builds what it covers once more, instrumented,
+# in target/llvm-cov-target: for the whole workspace that is tens of GB, so
+# `cargo coverage -p ph-store` (one crate) is the usual way to look.
+coverage = "llvm-cov --features pilothouse/automation --no-fail-fast --html"
+# The same as a table in the terminal (per file: regions, functions, lines).
+coverage-summary = "llvm-cov --features pilothouse/automation --no-fail-fast --summary-only"

@@ -297,9 +297,10 @@ type MenuEntry = (&'static str, Icons, fn() -> Box<dyn gpui_kit::Action>);
 /// How much more room each side of the bar gets, so its middle is the
 /// window's: the width of the window's own buttons on the other side.
 fn chrome_bias(window: &Window) -> (gpui_kit::Pixels, gpui_kit::Pixels) {
-    // gpui-component's title bar: 80 px for macOS's buttons on the left, 12
-    // elsewhere; Windows and client-decorated Linux draw three 34 px
-    // buttons on the right.
+    // gpui-component's title bar: 80 px for macOS's buttons on the left;
+    // elsewhere the bar starts at the window's edge (its 12 px there are
+    // taken off, see where the bar is made). Windows and client-decorated
+    // Linux draw three 34 px buttons on the right.
     if cfg!(target_os = "macos") {
         return (px(0.), px(80.));
     }
@@ -309,9 +310,9 @@ fn chrome_bias(window: &Window) -> (gpui_kit::Pixels, gpui_kit::Pixels) {
             gpui_kit::Decorations::Client { .. }
         );
     if controls {
-        (px(102. - 12.), px(0.))
+        (px(102.), px(0.))
     } else {
-        (px(0.), px(12.))
+        (px(0.), px(0.))
     }
 }
 
@@ -403,15 +404,16 @@ fn update_item(cx: &App) -> Option<AnyElement> {
 }
 
 /// The app's mark, its icon in small. Off macOS, where there is no menu
-/// bar, it opens the app's menu.
-fn app_icon(_: &App) -> AnyElement {
-    let mark = div()
-        .mx_1()
-        .child(ph_ui::logo_mark(ph_ui::rems_from_px(20.)));
+/// bar, it opens the app's menu, and stands centred over the column of
+/// icons under the bar (as wide as that column, from the window's edge):
+/// the mark and the icons are on one line.
+fn app_icon(cx: &App) -> AnyElement {
+    let mark = ph_ui::logo_mark(ph_ui::rems_from_px(20.));
     if cfg!(target_os = "macos") {
-        return mark.into_any_element();
+        return div().mx_1().child(mark).into_any_element();
     }
-    Button::new("app-menu")
+    let column = crate::rail::width_px(crate::rail::labels(cx));
+    let button = Button::new("app-menu")
         .occlude()
         .ghost()
         .small()
@@ -434,7 +436,12 @@ fn app_icon(_: &App) -> AnyElement {
                 .item(item("Settings", || Box::new(OpenSettings)))
                 .separator()
                 .item(item(concat!("Quit ", ph_brand::name!()), || Box::new(Quit)))
-        })
+        });
+    h_flex()
+        .flex_none()
+        .w(ph_ui::rems_from_px(column))
+        .justify_center()
+        .child(button)
         .into_any_element()
 }
 

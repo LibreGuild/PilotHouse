@@ -2468,16 +2468,27 @@ impl Render for Workspace {
             // one, then the frame's own light: first, so everything is
             // drawn over them.
             .children(crate::frame::layers(self, cx))
-            .child(
-                TitleBar::new()
+            .child({
+                let bar = TitleBar::new()
                     .h(ph_theme::layout::TITLE_BAR_HEIGHT)
                     // Clear, with no line under it: the bar, the columns of
                     // icons and the status bar are one frame, painted once
                     // behind them all (`frame::layers`).
                     .bg(gpui_kit::transparent_black())
-                    .border_b_0()
-                    .child(title_bar::render(self, window, cx)),
-            )
+                    .border_b_0();
+                // On macOS the bar starts after the window's buttons. On
+                // Windows and Linux those are on the right, and the bar
+                // would start a fixed 12 px in: the app's mark then stood
+                // right of the line the icons under it are on. It starts at
+                // the window's edge there, and the mark is centred over the
+                // column (`title_bar::app_icon`).
+                let bar = if cfg!(target_os = "macos") {
+                    bar
+                } else {
+                    bar.pl_0()
+                };
+                bar.child(title_bar::render(self, window, cx))
+            })
             .child(
                 h_flex()
                     .items_stretch()
