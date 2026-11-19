@@ -43,12 +43,6 @@ impl ContextTab {
         ContextTab::Logcat,
     ];
 
-    /// Its home is the bottom panel, where long lines have the window's
-    /// width (the others' is the column beside the chat).
-    pub fn in_bottom_panel(self) -> bool {
-        matches!(self, ContextTab::Terminal | ContextTab::Logcat)
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             ContextTab::Files => "Files",

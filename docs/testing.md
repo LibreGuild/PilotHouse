@@ -22,7 +22,7 @@ Use `gpui_kit::test::TestWindowExt` (`click`, `press`, `input`, `find`) and `Tes
 ```sh
 export PILOTHOUSE_DATA_DIR=/tmp/ph-profile        # same value as the running app
 pilothouse ctl app.add_project '{"path":"/path/to/repo"}'
-pilothouse ctl ui.click '{"label":"Board"}'        # by accessible label
+pilothouse ctl ui.click '{"label":"Terminal"}'     # by accessible label
 pilothouse ctl ui.click '{"id":"send-message"}'    # by element id
 pilothouse ctl ui.dispatch '{"action":"files::QuickOpen"}'
 pilothouse ctl ui.input '{"text":"main.rs"}'

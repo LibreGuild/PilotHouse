@@ -46,7 +46,7 @@ The interface size setting (`ui_font_size`, 16 by default on every system) is th
 
 ## 3. Space and density
 
-- 4 px rhythm (`gap_1` = 4 px). Rows are 28 px (`h_7`), compact rows 24 px (`h_6`), sidebar cards two or three lines.
+- 4 px rhythm (`gap_1` = 4 px). Rows are 28 px (`h_7`), compact rows 24 px (`h_6`), Bridge cards two to four lines.
 - **Everything follows the interface size**, as a web page does when it is zoomed: text, rows, icons, marks, paddings, dialogs. Use the rem helpers (`h_7()`, `gap_2()`, `size_4()`), and for a size off that scale `ph_ui::rems_from_px(14.)` (or `ph_ui::scaled_px(560., window)` where only pixels are taken, such as a dialog's width). A length in `px(…)` stays as it is at every size, so it is only for what must not scale: hairlines and strokes, corner radii, a window's size and the limits of its panes (`crates/theme/src/layout.rs`), and marks drawn on a picture.
 - Panels run edge to edge; padding belongs inside lists (`px_2`), not around panels.
 - Line up text to a visible left edge; right-align numbers, counts, shortcuts and ages.
@@ -72,7 +72,7 @@ Three levels, no fourth:
 
 ## 6. One way to each place
 
-Each tool has one launcher on screen: the icon bar on the right. Panes show one tab strip; zoom, split and move live in the pane's ⋯ menu. Do not add a second switcher for the same thing.
+Each place has one way in on screen: the column of icons for what the window shows (the Bridge, Reviews, a workspace), the row of names over the result pane for a workspace's tools. Do not add a second switcher for the same thing.
 
 ## 7. Feedback
 
@@ -90,13 +90,13 @@ Short and functional: expanding rows, a spinner, the working shimmer. Nothing de
 
 The window is a frame with islands in it (`crates/workspace/src/frame.rs`; the [workspace page](features/workspace.md) says what each is):
 
-- **The frame** is the title bar, the two columns of icons and the status bar. It is painted once, behind them all; none of them has a fill or a border of its own, and nothing draws a line across it. Its paint is the theme's `sidebar` colour, a little lighter at the top than at the bottom, and over it the colour of the workspace in front, faint, fading downwards.
+- **The frame** is the title bar, the column of icons and the status bar. It is painted once, behind them all; none of them has a fill or a border of its own, and nothing draws a line across it. Its paint is the theme's `sidebar` colour, a little lighter at the top than at the bottom, and over it the colour of the workspace in front, faint, fading downwards.
 - **An island** is `frame::island(window, cx)`: a `ph_ui::Surface` (rounded by `radius_lg`, hairline border, the theme's `background`) that knows what is behind its corners. Whatever a view shows between the frame's parts goes in one; islands are `frame::gap()` apart and end the same distance over the status bar. Do not round or fill the corners of what is inside: the island does it.
-- A workspace's colour belongs to the frame, its row in the list and its dot. Do not use it for fills, buttons or text inside an island.
+- A workspace's colour belongs to the frame, its badge in the column of icons and its dot. Do not use it for fills, buttons or text inside an island.
 
 ## 10. Room
 
-A pane is as narrow as 100 px (the dock's least) and as wide as the window, and every view holds up across that:
+A pane is as narrow as 320 px (`CONTEXT_PANEL_MIN`; less in a small window) and as wide as the window, and every view holds up across that:
 
 - Text in a row gives way before it is cut: `div().flex_1().min_w_0().truncate()` for a name, `min_w_0()` without `truncate()` for a sentence that should wrap. A bare string in an `h_flex` does neither.
 - A row of named buttons folds to icons when the pane is narrow (`ph_ui::measure::narrower_than`, the breakpoint in pixels at the default interface size); each keeps its name in its tooltip and `accessibility_label`.

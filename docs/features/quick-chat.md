@@ -2,7 +2,7 @@
 
 Crate: `ph-workspace` (`quick_chat.rs`), behind the `quick_chat` feature (`brand/brand.toml`).
 
-A small chat window over every other app, to ask an agent something without going to PilotHouse. Its chats are in the **Chats** space (no folder): they list under *Chats* in the sidebar and go on there like any other.
+A small chat window over every other app, to ask an agent something without going to PilotHouse. Its chats are in the **Chats** space (no folder): they are in *Chats* (the column of icons) and on the Bridge, and go on there like any other.
 
 ## Opening it
 
@@ -22,7 +22,7 @@ The shortcut is the system's (`global-hotkey`: Carbon's `RegisterEventHotKey` on
 
 It can be moved by its title bar and resized (at least 320 × 240). It opens where it was last, while that is still on a screen, else centred on the main screen; and with the chat it showed last, while that chat is still there.
 
-- **Esc** hides it (the chat goes on: a reply still comes, and the sidebar shows it).
+- **Esc** hides it (the chat goes on: a reply still comes, and the Bridge shows it).
 - **⌘N / Ctrl+N** or the pen button: a new chat.
 - The arrow button opens the chat in the main window, under *Chats*, and hides the quick window.
 

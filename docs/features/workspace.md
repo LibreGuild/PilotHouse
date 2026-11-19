@@ -3,52 +3,66 @@
 Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 
 ```
-┌ title bar: ◆ ● name · ⌘K search · ⋯ · inbox · agents · list · bottom · tools · settings ┐
-│ ▦ ╭──────────────╮ ╭──────────────────────────────┬─────────────────╮ icon │
-│ 💬 │ WORKSPACES + │ │ chat / editor (tabs)         │ tools column    │ bar  │
-│ ⌥ │ ▾ ● app  ⟳   │ │                              │ (Files, Git, …) │      │
-│   │   + New chat │ ├──────────────────────────────┴─────────────────┤      │
-│   │              │ │ bottom panel: Terminal · Logcat (when opened)  │      │
-│   ╰──────────────╯ ╰────────────────────────────────────────────────╯      │
-└ status bar: branch · CI · folder · ports · device     agent limits · detected stack · version ┘
+┌ title bar: ◆ ● name · ⌘K search · ⋯ · inbox · chat · result pane ┐
+│ ⎈ ╭──────────────────────╮ ╭─────────────────────────────────────╮ │
+│ ⌥ │ chat                 │ │ Changes · Preview · Terminal · Files │ │
+│ ─ │                      │ │ ⋯                                    │ │
+│ A │                      │ │ the result pane: one tool at a time  │ │
+│ B │                      │ │                                      │ │
+│ 💬 │                      │ │                                      │ │
+│ + ╰──────────────────────╯ ╰─────────────────────────────────────╯ │
+│ ⚙                                                                    │
+└ status bar: branch · CI · folder · ports · tasks        agent limits ┘
 ```
 
-- **The frame and its islands** (`frame.rs`). The title bar, the two columns of icons and the status bar are one piece, the window's frame, with no line between them: what stays the same whatever is shown. What changes sits in it as islands, rounded panels with a small gap between them: the list, and the panes (in the GitHub view: the list, the page, the pull request's chat). The frame is lit from above, a little lighter at its top than at its bottom, in the theme's own colour. **With a workspace in front the light has that workspace's colour**, strongest in the title bar and fading down the two columns (and the workspace's dot stands before its name in the title bar), so the window's edge says where a new chat would go; Chats and GitHub belong to no workspace and stay plain. The colour is faint on purpose: it says which workspace, and is not there to be looked at. A window whose frame shows the desktop or a picture (Settings → Appearance → Window) has that behind it instead of the light, the workspace's colour over it.
+- **Three places, one column of icons.** The window shows the **Bridge** (every task, by state), **Reviews** (other people's pull requests) or **a workspace's screen** (a task: its chat and what it produced). They are picked in the column of icons at the left edge; there is no list beside it and no column of tools on the right.
+- **The frame and its islands** (`frame.rs`). The title bar, the column of icons and the status bar are one piece, the window's frame, with no line between them: what stays the same whatever is shown. What changes sits in it as islands, rounded panels with a small gap between them: the chat and the result pane (in Reviews: the list, the page, the pull request's chat). The frame is lit from above, a little lighter at its top than at its bottom, in the theme's own colour. **With a workspace in front the light has that workspace's colour**, strongest in the title bar and fading down the column (and the workspace's dot stands before its name in the title bar), so the window's edge says where a new chat would go; the Bridge, Chats and Reviews belong to no workspace and stay plain. The colour is faint on purpose: it says which workspace, and is not there to be looked at. A window whose frame shows the desktop or a picture (Settings → Appearance → Window) has that behind it instead of the light, the workspace's colour over it.
 - **Rounded corners.** The UI framework clips children to a panel's rectangle, not to its rounding, so a tab bar or a terminal that fills an island would poke out of its corners. An island (`frame::island`, a `ph_ui::Surface` told what is behind it) paints its corners over with the frame's colour at that height, worked out from the same numbers the frame is painted with (`Paint::at`). No such fill where the frame is not a colour (the desktop, a picture).
-- **`Workspace`** (`workspace.rs`) is a window's root: the title bar, the column of icons, the list, the workspace in front and the status bar. It keeps one `WorkspaceScreen` per workspace opened in the window, and the window's [GitHub view](pulls.md#the-github-view) once shown.
-- **What the window shows** is picked in the column of icons at its left edge (`rail.rs`, drawn like the tools' column on the right): **Workspaces** (⌘⇧E), **Chats** (⌘⇧D), **GitHub** (⌘⇧G) and an organisation's own views. Workspaces and Chats are two lists beside the screen in front (`Section` in `workspace.rs`): showing one brings what was last seen there to the front, the workspace last used or the Chats space, and opening a workspace or a chat anywhere shows its list. The GitHub view shows pull requests across repositories and their agent reviews, apart from any workspace; it has its own list. Pressing the icon already in front hides or shows the list, as in VS Code. *Workspaces* and *Chats* carry a dot when something there wants you (amber: an agent waits for an answer; green: news not seen); *GitHub* shows how many pull requests wait for your review. **Agents** (⌘⇧A) is a pop-up from the title bar listing the chats at work across every workspace (below).
+- **`Workspace`** (`workspace.rs`) is a window's root: the title bar, the column of icons, what is in front (`View`: `Bridge`, `Workspaces` for a workspace's screen, `GitHub` for Reviews, `Custom` for an organisation's view) and the status bar. It keeps one `WorkspaceScreen` per workspace opened in the window, and the window's [Reviews view](pulls.md#reviews) once shown. Which of the Bridge or a workspace was in front is kept (`workspace.front_view`); a window opens on the Bridge when there are workspaces, and on the chat when there are none yet.
 - The look follows [the style guide](../styleguide.md): quiet graphite chrome, colour only for state, focus and selection.
-- **`WorkspaceScreen`** (`workspace_screen.rs`) is a workspace's screen: the chat, the editor (only while a file is open) and the tools, each a pane of a dockable layout (`workspace_screen/dock.rs`, on gpui-component's `DockArea`), and the icon bar on the right that shows a tool. The drawing above is the layout a workspace starts with. Panels are made the first time they are shown. Its state is saved per workspace: the dock layout (`workspace.dock.<id>`), the tool shown last, chat, open files, sidebar folds.
+- **`WorkspaceScreen`** (`workspace_screen.rs`) is a workspace's screen: the chat and one result pane (`workspace_screen/layout.rs`). Panels are made the first time they are shown. Its state is saved per workspace (`ProjectUiState`): the tool shown last, whether the result pane is open, whether the chat is folded, whether the folder tree shows, what Preview showed last, the chat and the open files.
 - **Running work outlives the screen.** Chats (`ph_agent::chats`), shells (`ph_terminal::TerminalHub`), test runs (`ph_uitest::runner`) and schedules (`schedules::Automation`) belong to the workspace or the app, not to a window. A screen can be closed and rebuilt (another window, folders changed, idle) without stopping anything.
 - **Actions** (`actions.rs`) are the single source for every command. Shortcuts, the palette, menus and buttons all dispatch them.
 
 ## Title bar
 
-- On the left, the app's mark (its icon in small) beside the window buttons (off macOS, it opens the app menu) and the name of what is in front: the workspace, *Chats*, *GitHub*.
+- On the left, the app's mark (its icon in small) beside the window buttons (off macOS, it opens the app menu) and the name of what is in front: *Bridge*, *Reviews*, the workspace (with its colour dot) or *Chats*.
 - In the middle, search and commands (⌘K).
-- On the right: updates, the inbox (bell), **Agents** (its icon shows how many chats wait for an answer, amber, else how many work), light or dark, settings, and the sidebar and tool-panel toggles side by side.
+- On the right: updates, the inbox (bell), and with a workspace in front the two switches of its screen: the chat (⌘B) and the result pane (⌥⌘B). In Reviews the one switch shows or hides its list.
 - The bar has no fill or line of its own: it is part of the frame (above), which carries the colour of the workspace in front (`ph_ui::WORKSPACE_COLORS`, a chosen one saved in `projects.color`).
 
-## Sidebar
+## The column of icons
 
-One list at a time, chosen in the column of icons (`sidebar.rs`). Workspaces and chats shared the sidebar as two panes before; with use it grew crowded:
+`rail.rs`. From the top:
 
-- **The Chats list** starts with **New chat** (⌘N) and **Search chats** (⌘⇧K), each a plain row with its shortcut, above a hairline. They are that list's alone. Over the workspaces they said less than they seemed to: a new chat went to whichever workspace was in front, which the row did not name (a chat begun in the wrong workspace was the result), and each workspace has its own way to start one. There a chat starts from the workspace's row (the pencil on hover; *New chat* under an unfolded workspace with none), the chat pane's header, or ⌘N.
-- **Search chats** is of every chat in every workspace when asked from the Chats list or GitHub; beside a workspace (⌘⇧K, the palette) it starts with that workspace's chats, *All workspaces* one click away.
-- **The Workspaces list** has its title and a **+** (open a folder as a workspace, or a new one without folders). With no workspace yet, the list and the room beside it say how to open a folder.
-- Drag the gap at the list's right edge to resize it (180–520 px; kept in `workspace.sidebar_width`). The GitHub view's list follows the same width.
-- **Pinned**, at the top of the Chats list: chats pinned from any workspace (each chat's ⋯ menu: *Pin to top*), with the workspace each belongs to. Kept in `workspace.sidebar_pinned`; its own header folds it.
-- **Chats** list: the Chats space, for chats that need no folder (thinking something through, the browser, the board). A first start opens straight into a chat there. Its chats are grouped *Today*, *Yesterday*, *This week*, *Older*, the 50 newest (*Show all* for the rest).
-- **Workspaces** list, newest first (an order that stays put as they are used): each with its colour dot and, in a word, what it is doing (*needs you* in amber, *failing* in red, *2 working*; a green dot for something finished and not seen; the tooltip says more, with the ⌃1–⌃9 shortcut). Workspace names are a weight heavier than chat titles. The chevron unfolds a workspace to list its five newest chats (*Show all* for the rest) on an indent guide under it, or **+ New chat** when it has none; opening a workspace unfolds it. Picking a chat opens its workspace at that chat. On hover, a row offers a new chat there and its menu: *Add a folder*, *Rename*, *Open in new window*, *Colour*, *Remove from PilotHouse*. The pane's **+** opens a folder as a workspace or makes one without folders.
-- **Chat rows are small cards**: a state glyph (a spinner while working, an amber **?** when it waits for an answer, red when its last turn failed, green when it finished and you have not looked yet), the title and how long ago (*now*, *5m*, *3h*, *Tue*); under it, for chats loaded in this run, the agent's mark and what it is doing, the question it asks, or the start of its last reply. A finished turn counts as read once the chat is on screen (`WorkspaceChats::summary`, `set_viewing`). Chats PilotHouse started (schedules, test recording and repair) fold into *Runs*.
-- Each chat's ⋯ menu (on hover) pins or unpins it, **marks it done**, renames it, or deletes it with its transcript after asking (not while its agent works or waits for an answer). Chats marked done (`workspace.sidebar_settled`) fold into *Done · N* under their workspace and leave the Agents list; one that works or asks again comes back on its own.
-- Which workspaces are unfolded is kept (`workspace.sidebar_expanded`). The chats of a workspace whose screen is closed are read from the store each second, so a schedule's new chat shows up.
-- ⌘B hides the list (the column of icons stays), and the chat header then offers the chat list.
-- **Pane sizes** (`workspace_screen/dock.rs`): a workspace starts with the tool beside the chat at about 28 % of the room, 280 to 520 px, never leaving the chat less than its least width. Both panes are given their size (the dock library guessed one otherwise, and a saved layout came back after a restart with the chat a sliver), and a saved layout whose chat is narrower than its least width gets the room back when it is loaded.
+- **Bridge** (⌘⇧E, also ⌘⇧A) and **Reviews** (⌘⇧G), which shows how many pull requests wait for your review, then an organisation's own views.
+- **One badge per workspace**, newest first (an order that stays put as they are used): its first letter on its colour, a ring when it is in front, and a dot for what goes on there (amber: an agent waits for an answer; red: a turn failed; green: news not seen; blue: working). The tooltip says the name, what it is doing and its shortcut (⌃1–⌃9, Alt+1–9 off macOS). A click opens the workspace; right-click is its menu: *New chat*, *New task*, *Add a folder*, *Rename*, *Open in new window*, *Colour*, *Finish task*, *Remove from PilotHouse*. The badges scroll when there are many.
+- **Chats** (⌘⇧D): the Chats space, for chats that need no folder.
+- **+**: open a folder as a workspace, or make one without folders.
+- **Settings**, at the foot.
 
-## Agents
+Names show in tooltips, or under the icons with *Settings → Appearance → Names under tool icons*.
 
-`agents_board.rs`: the title bar's **Agents** pop-up (⌘⇧A) lists every chat loaded in this run of PilotHouse, from every workspace and the Chats space (the list scrolls within the window's height), in sections: **Needs you**, **Working**, **Finished** (news not seen, or a failed turn) and **Recent** (the newest eight others). A row shows the state glyph, title and age; the workspace (its colour dot) and the agent; and what the agent is doing, asks, or said last. A row opens its chat in its workspace.
+## The Bridge
+
+`bridge.rs`. The window's home: **every task of every workspace, by what it needs from you**. A task is a chat (or an agent CLI in a terminal, or a review being readied). Four columns:
+
+| Column | What is in it |
+|---|---|
+| **Needs you** | an agent waits for an answer, or its last turn failed |
+| **Working** | an agent is at it, also a review whose repository is still being cloned |
+| **Ready for review** | the agent finished, or the chat is idle and nobody marked it done |
+| **Done** | marked done, or untouched for a week |
+
+- A card shows the workspace (its colour dot) and the agent, the title, how long ago, and what the agent is doing, asks, or said last. A click opens the workspace at that chat. *Answer* does the same for one that waits; **Review changes** opens it with the Changes of its workspace beside the chat; **Done** marks it done (`workspace.sidebar_settled`). One that works or asks again comes back on its own. The ⋯ on hover pins it to the top of its column, renames it, or deletes it with its transcript after asking (not while its agent works or waits).
+- **Chips** over the columns narrow the Bridge to one workspace, or to the chats that need no folder. **New task** starts a chat: in the workspace the Bridge is narrowed to or that was last in front, in another one, or without a folder; it also opens a folder or makes a workspace.
+- *Ready for review* starts with a link to Reviews when pull requests wait for your review.
+- A column lists twelve cards, then *Show N more*. In a narrow window the columns become two rows of two, then one column.
+- With nothing under way the Bridge says how to begin: open a folder, or start a chat without one.
+- The status bar's *N need you · N working · N to look at* counts the same cards from anywhere, and a click on it shows the Bridge.
+- The chats of a workspace whose screen is closed are read from the store each second, so a schedule's new chat shows up.
+
+The Bridge takes the place of the lists that stood beside the workspace (workspaces, their chats, the pinned ones) and of the *Agents* pop-up. Those listed chats by where they live; what one wants to know on opening the window is which of them need something.
 
 ## Notifications
 
@@ -56,7 +70,7 @@ One list at a time, chosen in the column of icons (`sidebar.rs`). Workspaces and
 
 ## Tasks
 
-A **task** is a branch in its own worktree, opened as a workspace, so an agent can work on it while the main checkout stays as it is (`tasks.rs`). *New task* (a workspace's menu, or ⌘K *New task in a worktree*) asks for a name; PilotHouse makes branch `task/<name>` from the folder's HEAD in a worktree under `tasks/` in the folder for copies (the data folder, unless another was chosen in Settings → Storage), opens it as *Repo · Name*, and runs its setup in a terminal named *Setup*. The repository can say how in a checked-in `pilothouse.toml`:
+A **task** is a branch in its own worktree, opened as a workspace, so an agent can work on it while the main checkout stays as it is (`tasks.rs`). *New task* (a workspace's menu on its badge, or ⌘K *New task in a worktree*) asks for a name; PilotHouse makes branch `task/<name>` from the folder's HEAD in a worktree under `tasks/` in the folder for copies (the data folder, unless another was chosen in Settings → Storage), opens it as *Repo · Name*, and runs its setup in a terminal named *Setup*. The repository can say how in a checked-in `pilothouse.toml`:
 
 ```toml
 [worktree]
@@ -77,21 +91,23 @@ When an agent reports how much of its subscription window is used, the status ba
 
 ## The Chats space
 
-A row of kind `chats` in `projects` (`ph_store::projects::ProjectKind`): no folders, agents working in a private scratch folder, made the first time the app starts. It has a screen like a workspace's with the tools that need no folder (board, terminal, browser, devices, tests), but it is not a workspace: it is not listed under *Workspaces*, has no colour or menu, cannot move to another window, and *Add a folder* from it opens the folder as a new workspace instead.
+A row of kind `chats` in `projects` (`ph_store::projects::ProjectKind`): no folders, agents working in a private scratch folder, made the first time the app starts. It has a screen like a workspace's with the tools that need no folder (board, terminal, browser, devices, tests), but it is not a workspace: it has no badge among the workspaces (its icon is under them), no colour or menu, cannot move to another window, and *Add a folder* from it opens the folder as a new workspace instead.
 
-## Editor, chat and tools
+## A workspace's screen
 
-- **Files** is the first tool (⌘1): the folder tree, each folder a root when there are several (the primary one says so), with an icon per file type, chevrons, indent guides and Git marks (**M** changed, **U** new, **D** deleted; a dot on a folder holding changes). Its header's search button (⌘⇧F) turns the tree into workspace search; the others make a file or a folder, fold every folder and add a folder to the workspace. Right-click any row for the file menu ([files](files.md)); a folder root's also makes it primary or takes it out.
-- The **chat and the editor** are two tabs of one group in the layout a workspace starts with: picking a file (from the tree, ⌘P, search, a link) brings the Editor tab to the front, and anything sent to the chat, or ⌘L from the editor, brings the Chat tab back. The Editor tab shows only while a file is open. The panes sit on a rounded card between the sidebar and the icon bar.
-- The **icon bar** on the right shows the tools this workspace uses (Files in a workspace, Git with a repository, PRs with a hosted remote, Browser for web code, Devices for Android, Run with something to run, Tests with tests or an app); the rest are under **⋯**. Names show in tooltips, or under the icons with *Settings → Appearance → Names under tool icons*.
-- **Docking.** Every pane has a tab. Drag a tab into another group to share it, onto a group's edge to split beside or below it, or to the window's left, right or bottom edge to dock it there. A pane's ⋯ menu does the same (*Move into the chat's tabs*, *Move beside the chat*, *Move below the chat*, *Move to the left side*, *to the right side*, *to the bottom*), and also works where a drag cannot: the last pane of a dock does not drag out of it. A dock left empty goes away. Tools close with their tab's ×; the chat and the editor stay. The layout is kept per workspace and comes back with it (version `dock::LAYOUT_VERSION`; a layout this build cannot read falls back to the default). *Reset layout* (the ⋯ menu, or the palette) goes back to the default.
-- **Where tools open.** Lists and panes sit in the **tools column** beside the chat (Files, Git, PRs, Board, Browser, Devices, Run, Tests); output read line by line opens in the **bottom panel** (Terminal, Logcat), which spans the chat, the editor and the tools column, so long lines have the window's width. The tools column is a split of the main area, not a side dock, which is what lets the bottom panel run under it. It starts at about 30% of the main area (between 280 and 520 px), the chat keeping the rest; drag its edge and the width is kept with the layout. A tool shown from the icon bar is selected where it is (its dock opens if closed), or put in its home when it is not. The icon bar lists the column's tools, then (after a line) the bottom panel's, and highlights every tool on screen.
-- **Showing and hiding.** ⌘J opens or closes the bottom panel (the first time, with a terminal); Ctrl+backtick shows the terminal, or hides the bottom panel when the terminal is in front there; ⌥⌘B (and the title bar's right button) hides the tools column, and brings it back as it was, its tabs and the one in front. ⌘⇧J lets the tool shown last fill the window (each pane's ⋯ menu does the same for it). The title bar's three buttons are the sidebar, the bottom panel and the tools column, then Settings.
-- **Layouts from before.** A layout saved by 0.4 (tools in the right dock) is moved once: its tools to the column, the terminal to the bottom panel; a tool placed anywhere else stays there, and a right dock that was closed comes back as a hidden column.
+`workspace_screen/layout.rs`, `workspace_screen/render.rs`. Two islands side by side: the **chat**, and one **result pane** for what the task produced, under a row of names.
+
+- **Changes**: the review of what changed (the Git tool). **Preview**: what the work looks like when it runs, the browser or a phone (a switch at the end of the row picks, and the name remembers which). **Terminal**. **Files**: the folder tree and the files open from it, side by side (the button at the end of the row hides the tree). The workspace's other tools (Board, Run, Tests, Pull requests, Logcat) are under **⋯**, and the one in use shows as a name of its own beside the four.
+- **One tool at a time**, with the whole pane: the browser, a phone and the board need the room. Each tool was a tab in a dock before, which could be dragged anywhere; few arranged it, an arrangement saved could come back wrong, every tool was named twice (its icon in a column and its tab), and the wide tools sat in a narrow column.
+- **Files** is the first tool (⌘1): the folder tree, each folder a root when there are several (the primary one says so), with an icon per file type, chevrons, indent guides and Git marks (**M** changed, **U** new, **D** deleted; a dot on a folder holding changes). Its header's search button (⌘⇧F) turns the tree into workspace search; the others make a file or a folder, fold every folder and add a folder to the workspace. Right-click any row for the file menu ([files](files.md)); a folder root's also makes it primary or takes it out. Picking a file (from the tree, ⌘P, search, a link in the chat) shows Files with that file in the editor.
+- **Sizes.** The chat starts at two fifths of the window (never under its least width, 380 px at the default interface size); drag the gap between the two to change it.
+- **Showing and hiding.** ⌘B (and the title bar's left switch) folds the chat to a strip at the pane's edge, so the result pane has the window; the strip says what the chat is doing and brings it back, as does anything sent to the chat. ⌥⌘B (the right switch) hides the result pane, and brings it back as it was. ⌘⇧J gives the result pane the window in one step. ⌘J and Ctrl+backtick show the terminal; pressed again they go back to what was there. Something is always on screen: with the result pane hidden the chat cannot be folded. *Reset the layout* (the palette) shows both again.
+- **The chat lists its workspace's chats** in its header (the clock), with *New chat* beside it (⌘N).
+- **Layouts from before.** An arrangement of the dock saved by 0.6.4 or earlier (`workspace.dock.<id>`) is not read any more; the tool shown last, whether the pane was open, the chat and the open files come back as they were.
 
 ## Several workspaces
 
-- Switch from the sidebar, with ⌃1–⌃9 (macOS) or Alt+1–9 (elsewhere) for the sidebar's rows, or Ctrl+Tab for the one before.
+- Switch with the badges in the column of icons, with ⌃1–⌃9 (macOS) or Alt+1–9 (elsewhere) for the first nine, or Ctrl+Tab for the one before.
 - Coming back to a workspace shows **While you were away**: the chats that finished and a test run that ended, one click each.
 - Clicking a schedule's or reminder's system notification opens its workspace (and the chat it ran).
 - **Open in new window** moves a workspace to its own window (`windows.rs`). A workspace shows in one window at a time: picking it in another window brings its window forward. Files with unsaved changes must be saved first.
@@ -101,7 +117,7 @@ A row of kind `chats` in `projects` (`ph_store::projects::ProjectKind`): no fold
 
 A **workspace** (a `Project` in the code, table `projects`) is a name and any number of folders, from none up.
 
-- *New workspace* makes an empty one; add folders whenever you like (the Files tool, the workspace's menu in the sidebar, the palette). *Open folder* (⌘O) is a shortcut that makes a workspace with that folder, or reopens the one that has it.
+- *New workspace* makes an empty one; add folders whenever you like (the Files tool, the workspace's menu on its badge, the palette). *Open folder* (⌘O) is a shortcut that makes a workspace with that folder, or reopens the one that has it.
 - The first folder is the **primary** one: agents work there, and the terminal and run tools start there. Every folder:
   - is a root of Files, its paths named with the folder first (`server/src/main.js`), in ⌘P, search and `@` mentions too (`ph_files::roots`);
   - is given to agents as an extra root (ACP `additionalDirectories`), and a chat's first message tells the agent the folders and how paths name them;
@@ -119,14 +135,14 @@ Removing a folder leaves it on disk; removing the primary folder makes the next 
 | ⌘O | Open a folder as a workspace |
 | ⌘N | New chat |
 | ⌘⇧K | Search chats |
-| ⌘B | Show or hide the list (workspaces, chats, GitHub) |
-| ⌥⌘B | Show or hide the tools |
-| ⌘J / ⌃` | Show or hide the bottom panel / the terminal |
-| ⌘⇧J | Let the panel in front fill the window |
-| ⌘⇧E / ⌘⇧D / ⌘⇧G | Workspaces / Chats / GitHub |
+| ⌘B | Fold the chat away, or bring it back (in Reviews: its list) |
+| ⌥⌘B | Show or hide the result pane |
+| ⌘J / ⌃` | The terminal, and back to what was there |
+| ⌘⇧J | The result pane fills the window |
+| ⌘⇧E / ⌘⇧D / ⌘⇧G | The Bridge / Chats / Reviews |
 | ⌘1 | Files |
 | ⌘2–9 | Git, Board, Terminal, Browser, Devices, Run, PRs, Tests |
-| ⌃1–⌃9 (Alt+1–9 off macOS) | Workspace 1–9 in the sidebar |
+| ⌃1–⌃9 (Alt+1–9 off macOS) | Workspace 1–9 in the column of icons |
 | Ctrl+Tab | The workspace shown before |
 | ⌘P / ⌘⇧F | Go to file / search in workspace |
 | ⌘, | Settings |
@@ -154,4 +170,4 @@ Stored in the `settings` table:
 
 1. Create a feature crate with a view entity. Anything that must keep running when the panel closes (a process, a task) goes in a model held by a global keyed by workspace, like `TerminalHub`.
 2. Add a `ContextTab` variant (`context_panel.rs`) with a label, icon, key and action, and say when it is relevant in `WorkspaceScreen::is_relevant`.
-3. Create the panel in `WorkspaceScreen::ensure_panel` and render it in `render_tab_content`.
+3. Create the panel in `WorkspaceScreen::ensure_panel` and render it in `render_tab_content`. It shows under **⋯** over the result pane, and as a name there once it is in use.

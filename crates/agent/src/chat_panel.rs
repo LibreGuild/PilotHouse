@@ -794,6 +794,7 @@ impl ChatPanel {
     /// Starts review round `review_id` as a chat of its own, behind the one
     /// in view: several pull requests can be reviewed at once without each
     /// taking the panel from the one before. Returns its session.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_review_behind(
         &mut self,
         review_id: i64,

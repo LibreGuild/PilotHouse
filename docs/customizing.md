@@ -73,7 +73,7 @@ A feature that is off is not in the app at all. It is not in the tools beside th
 | Key | What |
 |---|---|
 | `files`, `changes`, `pulls`, `board`, `browser`, `devices`, `runs`, `tests`, `terminal`, `logcat` | The tools beside the chat (`changes` is Git; `pulls` is pull requests; `devices` is Android; `runs` is run configurations and ports; `tests` is UI tests) |
-| `github` | The GitHub view beside Workspaces (agent reviews of pull requests run there too) |
+| `github` | Reviews, in the column of icons (agent reviews of pull requests run there) |
 | `schedules` | Schedules: agent prompts and test runs at set times or on events |
 | `utilities` | The offline utilities (formats, hashes, times…) and their agent tools |
 | `usage` | The usage dashboard |
@@ -184,7 +184,6 @@ Some changes need PilotHouse's own code, such as a new tool beside the chat (lik
 - `actions.rs` (a `Show…` action and its key)
 - `workspace.rs` (its handler)
 - `workspace_screen/panels.rs` and `render.rs` (making and drawing the panel)
-- `workspace_screen/dock.rs` (its saved name)
 - `shortcuts.rs`
 
 Copy what `Board` does in each.

@@ -31,7 +31,7 @@ Agents and terminals use your **login shell's** environment (`ph-env`), so tools
 
 ## A chat being readied
 
-Some chats need something made before their agent can start: a review needs the repository cloned and the pull request checked out. That is part of the run to whoever asked for it, so it shows as one (`ChatPanel::set_preparing`, `render_preparing`): the chat opens at once with what was asked as its first message, and under the agent's name the step under way (*Cloning acme/shop…*) with PilotHouse's working mark and the time it has taken. The workspace counts it as work, and the Agents pop-up lists it under **Working** (`WorkspaceChats::preparing`). When it is done the agent starts by itself; a failure stays over the composer in red. In a chat that has messages already, the step shows over the composer with its time.
+Some chats need something made before their agent can start: a review needs the repository cloned and the pull request checked out. That is part of the run to whoever asked for it, so it shows as one (`ChatPanel::set_preparing`, `render_preparing`): the chat opens at once with what was asked as its first message, and under the agent's name the step under way (*Cloning acme/shop…*) with PilotHouse's working mark and the time it has taken. The workspace counts it as work, and the Bridge lists it under **Working** (`WorkspaceChats::preparing`). When it is done the agent starts by itself; a failure stays over the composer in red. In a chat that has messages already, the step shows over the composer with its time.
 
 ## The composer
 
@@ -54,7 +54,7 @@ Some chats need something made before their agent can start: a review needs the 
 - **Models load in the background.** A few seconds after start (and after a later look finds a newly installed agent), for each installed agent whose models were never cached or were cached more than a day ago, one at a time, PilotHouse starts the agent in its own neutral folder (`<data dir>/agents`), asks for a new session (where ACP lists models, modes and efforts), caches what it offers and stops it: no chat is made and nothing is prompted. Each gets 90 seconds; one that fails (not signed in, offline) is not tried again in this run, and its picker row says why and still offers **Load its models** (`preload.rs`). Claude Code and Codex run through an npm adapter, so the first of these loads downloads it with `npx`, as the first chat would; Codex may note the session in its own history.
 - An empty chat suggests starter prompts.
 - **While the agent works**, Enter queues the message instead of sending it. Queued messages wait above the composer and go one at a time when a turn ends; each can be edited or removed. **Send now** adds the first to the turn under way when the agent supports steering (Claude Code and Codex: `_session/steering`, advertised in the handshake's `_meta.steering`), and otherwise (Gemini CLI, Antigravity) stops the agent and sends it.
-- **⌘Enter** (Ctrl+Enter elsewhere) sends and opens a new chat at once: the sent one carries on in the sidebar, where its card shows how it does.
+- **⌘Enter** (Ctrl+Enter elsewhere) sends and opens a new chat at once: the sent one carries on behind it, and its card on the Bridge shows how it does.
 - **Commands.** `/` at the start of a message offers the agent's own commands (ACP `available_commands_update`, e.g. Claude Code's `/review` or `/compact`) with their descriptions.
 
 ## Mentions
@@ -129,7 +129,7 @@ Where the numbers come from (`ph_agent::usage_logs`): where an agent keeps its o
 
 ## Search
 
-⌘⇧K (or *Search chats* in the sidebar, the palette, or the chat's history menu when the sidebar is hidden) searches the words of every message in the project's chats, or in all projects. Results come as you type (the last word matches as a prefix), best first, with the matched words highlighted; picking one opens that chat scrolled to the message. The index is SQLite FTS5 (`message_search`, migration 4), kept in step with the messages by triggers, so it needs no upkeep.
+⌘⇧K (or *Search chats* in the palette or the chat's history menu) searches the words of every message in the project's chats, or in all projects. Results come as you type (the last word matches as a prefix), best first, with the matched words highlighted; picking one opens that chat scrolled to the message. The index is SQLite FTS5 (`message_search`, migration 4), kept in step with the messages by triggers, so it needs no upkeep.
 
 ## Persistence and restarts
 

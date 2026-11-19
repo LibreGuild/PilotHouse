@@ -9,8 +9,8 @@ Code is split by **capability**, one crate per feature. The app shell composes f
 ```
 crates/
   app/        pilothouse binary: startup, menus, CLI subcommands, control methods
-  workspace/  window shell: the Workspaces and GitHub views, the sidebar of workspaces and
-              chats, editor | chat | tools, palette, settings, schedules and triggers, inbox and
+  workspace/  window shell: the Bridge (every task by state), Reviews, a workspace's screen
+              (chat | result pane), palette, settings, schedules and triggers, inbox and
               to-dos, utilities dialog
   agent/      chat with coding agents over ACP, approval inbox
   board/      Kanban board + its control methods (used by MCP)
@@ -20,7 +20,7 @@ crates/
               fonts, hex
   changes/    Git tab, branch picker, blame data: commit, history, stashes, conflicts, review
   github/     GitHub REST client, accounts, secrets in the OS keychain
-  pulls/      PR list and view, Settings → GitHub, the GitHub view's managed clones
+  pulls/      PR list and view, Settings → GitHub, the Reviews view's managed clones
   review/     agent PR reviews: template, parsing, re-review merge, posting
   git/        git operations over the CLI (status, branches, log graph, blame, conflicts, worktrees,
               checkpoints, parallel-run patches)
