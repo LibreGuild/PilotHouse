@@ -791,6 +791,48 @@ impl ChatPanel {
         cx.notify();
     }
 
+    /// Starts review round `review_id` as a chat of its own, behind the one
+    /// in view: several pull requests can be reviewed at once without each
+    /// taking the panel from the one before. Returns its session.
+    pub fn start_review_behind(
+        &mut self,
+        review_id: i64,
+        agent: &'static AgentSpec,
+        cwd: std::path::PathBuf,
+        title: String,
+        display: String,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) -> Option<SessionId> {
+        let store = self.store.clone();
+        // A review works in its worktree alone.
+        let project = ThreadProject {
+            path: cwd,
+            extra_dirs: Vec::new(),
+            empty: false,
+            ..self.project.clone()
+        };
+        let thread = cx.new(|cx| {
+            let mut thread = ChatThread::draft(store, project, agent, cx);
+            thread.set_review(review_id);
+            thread
+        });
+        let connection = self.connection(agent, cx);
+        let blocks = vec![agent_client_protocol_schema::v1::ContentBlock::Text(
+            agent_client_protocol_schema::v1::TextContent::new(prompt),
+        )];
+        thread.update(cx, |thread, cx| {
+            thread.send(display, Vec::new(), title, blocks, connection, cx)
+        });
+        let session = thread.read(cx).session().map(|session| session.id)?;
+        // Kept by the workspace's chats: it works on off screen.
+        self.chats
+            .update(cx, |chats, cx| chats.keep(session, thread, cx));
+        cx.emit(ChatPanelEvent::SessionsChanged);
+        cx.notify();
+        Some(session)
+    }
+
     /// Starts a new chat named `title` with `prompt`, letting the agent use
     /// PilotHouse's browser, device and test tools without asking during
     /// that turn (recording a UI test).

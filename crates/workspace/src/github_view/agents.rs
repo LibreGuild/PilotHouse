@@ -132,7 +132,26 @@ impl GithubView {
                 cx,
             )
         });
+        // The queue shows it among the agents at work.
+        let key = (id.host.clone(), id.owner.clone(), id.name.clone(), number);
+        self.set_starting(
+            &key,
+            Some(super::queue::Starting {
+                label: if first {
+                    format!("Cloning {}", id.full_name())
+                } else {
+                    format!("Checking out #{number}")
+                }
+                .into(),
+                since: std::time::Instant::now(),
+                title: format!("{what} #{number} {}", pull.title).into(),
+                // The chat beside the pull request says so itself.
+                behind: None,
+            }),
+            cx,
+        );
         let store = self.store.clone();
+        let space = project.id;
         let work = cx.background_spawn(async move {
             crate::review::prepare(
                 &store, project.id, &hosting, &pull, &template, kind, agent.name,
@@ -142,7 +161,9 @@ impl GithubView {
             &mut self._work,
             cx.spawn_in(window, async move |this, cx| {
                 let result = work.await;
-                _ = this.update_in(cx, |_, window, cx| {
+                _ = this.update_in(cx, |this, window, cx| {
+                    this.set_starting(&key, None, cx);
+                    let started = result.is_ok();
                     chat.update(cx, |chat, cx| match result {
                         Ok(prepared) => chat.start_review_turn(
                             Some(prepared.review_id),
@@ -159,6 +180,9 @@ impl GithubView {
                             chat.set_failed(format!("Could not start the review: {err:#}"), cx)
                         }
                     });
+                    if started && let Some(session) = chat.read(cx).active_session_id(cx) {
+                        this.set_running(key, space, session, cx);
+                    }
                     cx.notify();
                 });
             }),

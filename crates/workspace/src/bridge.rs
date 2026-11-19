@@ -64,8 +64,10 @@ pub(crate) enum Target {
     Chat(SessionId),
     /// An agent CLI in a terminal (its pane id).
     Terminal(String),
-    /// A chat about to start, while what it needs is readied (a clone).
-    Preparing,
+    /// A review about to start, while what it needs is readied (a clone):
+    /// of the pull request with this number, or (0) the one beside the
+    /// repository's chat.
+    Preparing(u64),
 }
 
 /// One task on the Bridge.
@@ -194,7 +196,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                 cards.push(Card {
                     project: *project,
                     github: true,
-                    target: Target::Preparing,
+                    target: Target::Preparing(0),
                     title: preparing.title.to_string(),
                     place: place.clone(),
                     color: None,
@@ -207,6 +209,33 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                             "{} {}s",
                             preparing.label,
                             preparing.since.elapsed().as_secs()
+                        )),
+                    },
+                    session: None,
+                    pinned: false,
+                    settled: false,
+                    has_folders: false,
+                });
+            }
+            // Those started from the queue, several at once, each have
+            // their own.
+            for (number, starting) in github.read(cx).starting_behind(*project) {
+                cards.push(Card {
+                    project: *project,
+                    github: true,
+                    target: Target::Preparing(number),
+                    title: starting.title.to_string(),
+                    place: place.clone(),
+                    color: None,
+                    updated_at: i64::MAX,
+                    summary: ChatSummary {
+                        state: ChatState::Working,
+                        title: starting.title.clone(),
+                        agent: ph_agent::chats::default_agent(store),
+                        line: Some(format!(
+                            "{} {}s",
+                            starting.label,
+                            starting.since.elapsed().as_secs()
                         )),
                     },
                     session: None,
@@ -710,7 +739,7 @@ fn card_view(
     let key = match &card.target {
         Target::Chat(session) => format!("{session}"),
         Target::Terminal(pane) => pane.clone(),
-        Target::Preparing => format!("preparing-{}", card.project),
+        Target::Preparing(number) => format!("preparing-{}-{number}", card.project),
     };
     let group = SharedString::from(format!("bridge-card-{key}"));
     let edge = match state {

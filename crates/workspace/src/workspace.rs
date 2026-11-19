@@ -317,7 +317,7 @@ impl Workspace {
             Target::Chat(session) => self.open_chat(project, *session, window, cx),
             Target::Terminal(pane) => self.open_terminal_agent(project, pane, false, window, cx),
             // Its chat is beside the pull request.
-            Target::Preparing => self.set_view(View::GitHub, window, cx),
+            Target::Preparing(_) => self.set_view(View::GitHub, window, cx),
         }
         self.focus_front(window, cx);
     }
@@ -1447,15 +1447,22 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Runs `update` on the workspace last in front, bringing its screen
+    /// forward first: what a command does there is not done unseen behind
+    /// the Bridge or Reviews.
     fn with_active_space(
-        &self,
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         update: impl FnOnce(&mut WorkspaceScreen, &mut Window, &mut Context<WorkspaceScreen>),
     ) {
-        if let Some(space) = self.active_space() {
-            space.update(cx, |space, cx| update(space, window, cx));
+        let Some(space) = self.active_space().cloned() else {
+            return;
+        };
+        if self.view != View::Workspaces {
+            self.set_view(View::Workspaces, window, cx);
         }
+        space.update(cx, |space, cx| update(space, window, cx));
     }
 
     // ---- Action handlers -------------------------------------------------
@@ -1501,6 +1508,13 @@ impl Workspace {
                 github.update(cx, |github, cx| github.new_chat(window, cx));
             }
             return;
+        }
+        // From the Bridge: in the workspace it is narrowed to, else the
+        // one last in front (its *New task* asks which).
+        if self.view == View::Bridge
+            && let Some(id) = self.bridge.filter.filter(|id| self.has_place(*id))
+        {
+            return self.new_chat_in(id, window, cx);
         }
         self.with_active_space(window, cx, |space, window, cx| {
             space.new_session(window, cx)

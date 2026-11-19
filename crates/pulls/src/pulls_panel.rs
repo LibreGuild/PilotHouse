@@ -83,6 +83,8 @@ pub struct PullsPanel {
     open: Option<(Entity<PullView>, Subscription)>,
     /// A pull request to show once the repository is read.
     pending_open: Option<u64>,
+    /// The pull request asked for opens on its findings.
+    pending_findings: bool,
     create: Option<CreateForm>,
     writer: Option<Writer>,
     _load: Option<Task<()>>,
@@ -124,6 +126,7 @@ impl PullsPanel {
             error: None,
             open: None,
             pending_open: None,
+            pending_findings: false,
             create: None,
             writer: None,
             _load: None,
@@ -221,10 +224,14 @@ impl PullsPanel {
         }
     }
 
-    /// Shows the Findings tab of the pull request in view.
+    /// Shows the Findings tab of the pull request in view; of the one
+    /// asked for, once the repository is read and it opens.
     pub fn show_findings(&mut self, cx: &mut Context<Self>) {
-        if let Some((view, _)) = &self.open {
-            view.update(cx, |view, cx| view.show_findings(cx));
+        match &self.open {
+            Some((view, _)) if self.pending_open.is_none() => {
+                view.update(cx, |view, cx| view.show_findings(cx))
+            }
+            _ => self.pending_findings = self.pending_open.is_some(),
         }
     }
 
@@ -245,6 +252,7 @@ impl PullsPanel {
     pub fn open_pull(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(hosting) = self.hosting().cloned() else {
             self.pending_open = Some(number);
+            self.pending_findings = false;
             return;
         };
         self.pending_open = None;
@@ -839,6 +847,9 @@ impl Render for PullsPanel {
             && let Some(number) = self.pending_open.take()
         {
             self.open_pull(number, window, cx);
+            if std::mem::take(&mut self.pending_findings) {
+                self.show_findings(cx);
+            }
             // Said again once this frame is drawn: what changes while the
             // panel draws is not heard by those watching it, and the GitHub
             // view puts the pull request's chat beside it when it opens.

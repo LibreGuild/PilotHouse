@@ -4,6 +4,8 @@
 //! and the repositories you follow: those your workspaces' folders come
 //! from, and any you add. The middle shows a list or a repository's pull
 //! requests and one PR in full; the chat on the right is the repository's.
+//! An inbox list is a reviewer's queue ([`queue`]): grouped by what an
+//! agent made of each pull request, with reviews of several at once.
 //!
 //! Agent reviews run here, in the view's own clone of the repository
 //! ([`ph_pulls::clones`]); the user's checkouts are never touched. Each
@@ -12,7 +14,7 @@
 //!
 //! `render` draws it.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gpui_kit::component::{
     WindowExt as _,
@@ -35,6 +37,7 @@ use crate::app_state::AppState;
 use crate::workspace::Workspace;
 
 mod agents;
+mod queue;
 mod render;
 
 /// The repositories the user added (`host/owner/name` each).
@@ -103,6 +106,20 @@ pub struct GithubView {
     pub(crate) triage: HashMap<PullKey, (String, ph_review::triage::Triage)>,
     /// The inbox sorted for review, not by date.
     pub(crate) review_first: bool,
+    /// What agents found on the inbox's pull requests, as last read.
+    reviews: HashMap<PullKey, queue::Reviewed>,
+    /// Reviews being readied, and those running: each one's space and chat.
+    starting: HashMap<PullKey, queue::Starting>,
+    running: HashMap<PullKey, (ph_store::projects::ProjectId, SessionId)>,
+    /// The pull requests ticked for a review.
+    selected: BTreeSet<PullKey>,
+    /// The agent and template a review from the queue runs with.
+    reviewer: queue::Reviewer,
+    /// The spaces whose chats the queue follows.
+    watched_spaces: HashSet<ph_store::projects::ProjectId>,
+    _watches: Vec<Subscription>,
+    _seconds: Option<Task<()>>,
+    _reviews: Option<Task<()>>,
     /// Each repository space with a chat open, and its name (for the
     /// Agents board: reviews show there).
     spaces: Vec<(ph_store::projects::ProjectId, String)>,
@@ -145,6 +162,15 @@ impl GithubView {
             spaces: Vec::new(),
             triage: HashMap::new(),
             review_first: store_flag(AppState::store(cx), REVIEW_FIRST_KEY),
+            reviews: HashMap::new(),
+            starting: HashMap::new(),
+            running: HashMap::new(),
+            selected: BTreeSet::new(),
+            reviewer: queue::Reviewer::default(),
+            watched_spaces: HashSet::new(),
+            _watches: Vec::new(),
+            _seconds: None,
+            _reviews: None,
             adding: None,
             sidebar_shown: true,
             clones_size: None,
@@ -160,6 +186,8 @@ impl GithubView {
                     for (panel, ..) in this.panels.values() {
                         panel.update(cx, |panel, cx| panel.review_changed(cx));
                     }
+                    // And the queue moves it to the findings to read.
+                    this.read_reviews(cx);
                 },
             ),
         };
@@ -434,6 +462,7 @@ impl GithubView {
                 this.from_workspaces = repos;
                 this.loading = false;
                 this.loaded_at = Some(std::time::Instant::now());
+                this.read_reviews(cx);
                 cx.notify();
             });
         }));
