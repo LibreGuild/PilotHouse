@@ -589,16 +589,27 @@ pub(crate) fn render(
             .into_any_element()
     };
 
-    v_flex()
-        .id("bridge")
+    // An island of the frame, as a workspace's screen, Reviews and an
+    // organisation's view are: the frame is what stays around, and what is
+    // in front sits on it as a rounded panel. (The Bridge was drawn
+    // straight on the frame: the one view without the panel, its title and
+    // first column hard against the column of icons.)
+    let panel = v_flex()
         .relative()
         .size_full()
-        .pr_3()
-        .pb(crate::frame::gap())
+        .px_4()
+        .pt_3()
+        .pb_4()
         .gap_3()
         .child(probe)
         .child(header(workspace, filter, &entity, cx))
-        .child(body)
+        .child(body);
+    div()
+        .id("bridge")
+        .size_full()
+        .pr_2()
+        .pb(crate::frame::gap())
+        .child(crate::frame::island(window, cx).child(panel))
         .test_support()
         .into_any_element()
 }
@@ -1068,10 +1079,13 @@ fn card_view(
         .rounded(theme.radius_lg)
         .border_1()
         .border_color(edge)
+        // A step off the panel they lie on (which has the theme's
+        // background), so a card reads as a thing of its own; those put
+        // away, fainter.
         .bg(if column == Column::Done {
-            theme.background.opacity(0.6)
+            theme.secondary.opacity(0.45)
         } else {
-            theme.background
+            theme.secondary
         })
         .cursor_pointer()
         .hover(|style| style.border_color(theme.muted_foreground.opacity(0.5)))
@@ -1326,7 +1340,7 @@ fn reviews_card(
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.border)
-            .bg(theme.background)
+            .bg(theme.secondary)
             .cursor_pointer()
             .hover(|style| style.border_color(theme.muted_foreground.opacity(0.5)))
             .child(
