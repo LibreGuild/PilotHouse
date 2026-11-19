@@ -781,7 +781,7 @@ impl Render for StudioWindow {
                         .top_0()
                         .left_0()
                         .h_full()
-                        .w(px(5.))
+                        .w(ph_ui::rems_from_px(5.))
                         .cursor_col_resize()
                         .on_drag(ChatEdge, |edge, _, _, cx| cx.new(|_| edge.clone())),
                 )
@@ -826,7 +826,7 @@ impl Render for StudioWindow {
                             this.child(
                                 div()
                                     .flex_none()
-                                    .size(px(7.))
+                                    .size(ph_ui::rems_from_px(7.))
                                     .rounded_full()
                                     .bg(theme.muted_foreground),
                             )

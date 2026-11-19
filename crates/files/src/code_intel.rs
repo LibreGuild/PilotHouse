@@ -16,7 +16,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 use lsp_types::{DocumentSymbolResponse, Location, SymbolKind, TextEdit, WorkspaceEdit};
 
@@ -69,7 +69,7 @@ pub fn open_places(
     cx: &mut App,
 ) {
     let root = root.to_path_buf();
-    window.open_dialog(cx, move |dialog, _, cx| {
+    window.open_dialog(cx, move |dialog, window, cx| {
         let rows: Vec<AnyElement> = places
             .iter()
             .enumerate()
@@ -111,22 +111,25 @@ pub fn open_places(
             })
             .collect();
         let empty = rows.is_empty();
-        dialog.title(title.clone()).w(px(720.)).child(
-            v_flex()
-                .id("places")
-                .max_h(px(520.))
-                .overflow_y_scroll()
-                .gap_0p5()
-                .when(empty, |this| {
-                    this.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Nothing found."),
-                    )
-                })
-                .children(rows),
-        )
+        dialog
+            .title(title.clone())
+            .w(ph_ui::scaled_px(720., window))
+            .child(
+                v_flex()
+                    .id("places")
+                    .max_h(ph_ui::rems_from_px(520.))
+                    .overflow_y_scroll()
+                    .gap_0p5()
+                    .when(empty, |this| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Nothing found."),
+                        )
+                    })
+                    .children(rows),
+            )
     });
 }
 
@@ -196,7 +199,7 @@ pub fn open_outline(
     window: &mut Window,
     cx: &mut App,
 ) {
-    window.open_dialog(cx, move |dialog, _, cx| {
+    window.open_dialog(cx, move |dialog, window, cx| {
         let rows: Vec<AnyElement> = symbols
             .iter()
             .enumerate()
@@ -205,7 +208,7 @@ pub fn open_outline(
                 h_flex()
                     .id(("symbol", ix))
                     .gap_2()
-                    .pl(px(8. + 14. * symbol.depth as f32))
+                    .pl(ph_ui::rems_from_px(8. + 14. * symbol.depth as f32))
                     .pr_2()
                     .py_0p5()
                     .rounded(cx.theme().radius)
@@ -217,7 +220,7 @@ pub fn open_outline(
                     })
                     .child(
                         div()
-                            .w(px(36.))
+                            .w(ph_ui::rems_from_px(36.))
                             .flex_none()
                             .text_xs()
                             .text_color(cx.theme().info)
@@ -243,13 +246,16 @@ pub fn open_outline(
                     .into_any_element()
             })
             .collect();
-        dialog.title("Outline").w(px(600.)).child(
-            v_flex()
-                .id("outline")
-                .max_h(px(520.))
-                .overflow_y_scroll()
-                .children(rows),
-        )
+        dialog
+            .title("Outline")
+            .w(ph_ui::scaled_px(600., window))
+            .child(
+                v_flex()
+                    .id("outline")
+                    .max_h(ph_ui::rems_from_px(520.))
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
     });
 }
 
@@ -267,26 +273,29 @@ pub fn ask_new_name(current: String, rename: OnRename, window: &mut Window, cx: 
     window.defer(cx, move |window, cx| {
         focus.update(cx, |input, cx| input.focus(window, cx))
     });
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let (input, rename) = (input.clone(), rename.clone());
-        dialog.title("Rename symbol").w(px(420.)).child(
-            v_flex().gap_2().child(Input::new(&input)).child(
-                h_flex().justify_end().child(
-                    Button::new("rename-confirm")
-                        .small()
-                        .primary()
-                        .icon(IconName::Check)
-                        .label("Rename")
-                        .on_click(move |_, window, cx| {
-                            let name = input.read(cx).value().trim().to_string();
-                            window.close_dialog(cx);
-                            if !name.is_empty() {
-                                rename(name, window, cx);
-                            }
-                        }),
+        dialog
+            .title("Rename symbol")
+            .w(ph_ui::scaled_px(420., window))
+            .child(
+                v_flex().gap_2().child(Input::new(&input)).child(
+                    h_flex().justify_end().child(
+                        Button::new("rename-confirm")
+                            .small()
+                            .primary()
+                            .icon(IconName::Check)
+                            .label("Rename")
+                            .on_click(move |_, window, cx| {
+                                let name = input.read(cx).value().trim().to_string();
+                                window.close_dialog(cx);
+                                if !name.is_empty() {
+                                    rename(name, window, cx);
+                                }
+                            }),
+                    ),
                 ),
-            ),
-        )
+            )
     });
 }
 

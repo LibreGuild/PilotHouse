@@ -3,12 +3,11 @@
 
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::Input,
     resizable::{h_resizable, resizable_panel},
-    spinner::Spinner,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -19,7 +18,7 @@ use gpui_kit::{
 use ph_github::search::Inbox;
 use ph_pulls::clones::RepoId;
 use ph_theme::layout;
-use ph_ui::{EmptyState, Icons, MenuButton as _, Surface};
+use ph_ui::{EmptyState, Icons, MenuButton as _};
 
 use super::{GithubView, Page};
 
@@ -104,12 +103,9 @@ impl GithubView {
         });
         v_flex()
             .id("github-sidebar")
-            .flex_none()
-            .w(crate::sidebar::width(cx))
-            .h_full()
-            .pl_2()
+            .size_full()
+            .px_1()
             .pb_2()
-            .pr_1()
             .overflow_y_scroll()
             .child(
                 section("Inbox", cx).child(
@@ -117,7 +113,8 @@ impl GithubView {
                         .ghost()
                         .xsmall()
                         .icon(IconName::RefreshCw)
-                        .loading(self.loading)
+                        // The page's header shows that it is being read.
+                        .disabled(self.loading)
                         .tooltip("Read again")
                         .accessibility_label("Refresh")
                         .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
@@ -294,7 +291,7 @@ impl GithubView {
                             .child(kind.label()),
                     )
                     .child(div().flex_1())
-                    .when(self.loading, |this| this.child(Spinner::new().xsmall()))
+                    .when(self.loading, |this| this.child(ph_ui::Loader::new().xsmall()))
                     .child(
                         Button::new("inbox-sort")
                             .xsmall()
@@ -390,22 +387,31 @@ impl Render for GithubView {
         } else {
             px(0.)
         };
-        let available = window.viewport_size().width - sidebar - px(16.);
+        // What the page and the chat share: the window less the column of
+        // icons, the list and the gaps.
+        let rail = ph_ui::scaled_px(crate::rail::width_px(crate::rail::labels(cx)), window);
+        let available = (window.viewport_size().width - rail - sidebar - px(16.)).max(px(0.));
         let chat_width = (available * 0.45).max(layout::CHAT_MIN);
-        let page = Surface::new().child(self.render_page(cx));
+        let page = crate::frame::island(window, cx).child(self.render_page(cx));
+        let gap = crate::frame::gap();
         // The chat is the pull request's: it shows while one is open.
         let body = match self.current_chat().cloned() {
             Some(chat) => h_resizable("github-split")
                 .child(
                     resizable_panel()
                         .size_range(layout::CONTEXT_PANEL_MIN..gpui_kit::Pixels::MAX)
-                        .child(div().size_full().pr_1().child(page)),
+                        .child(div().size_full().pr(gap / 2.).child(page)),
                 )
                 .child(
                     resizable_panel()
                         .size(chat_width)
                         .size_range(layout::CHAT_MIN..gpui_kit::Pixels::MAX)
-                        .child(div().size_full().pl_1().child(Surface::new().child(chat))),
+                        .child(
+                            div()
+                                .size_full()
+                                .pl(gap / 2.)
+                                .child(crate::frame::island(window, cx).child(chat)),
+                        ),
                 )
                 .into_any_element(),
             None => page.into_any_element(),
@@ -416,16 +422,10 @@ impl Render for GithubView {
             .items_stretch()
             // The workspace window resizes it as it does its own sidebar.
             .when(self.sidebar_shown, |this| {
-                this.child(
-                    div()
-                        .relative()
-                        .flex_none()
-                        .h_full()
-                        .child(self.render_sidebar(cx))
-                        .child(crate::sidebar::resize_edge(cx)),
-                )
+                let list = self.render_sidebar(cx);
+                this.child(crate::frame::list_island(list, window, cx))
             })
-            .child(div().flex_1().min_w_0().h_full().pr_2().pb_2().child(body))
+            .child(div().flex_1().min_w_0().h_full().pr_2().pb(gap).child(body))
     }
 }
 
@@ -503,8 +503,9 @@ fn row(
             this.hover(|style| style.bg(cx.theme().sidebar_accent.opacity(0.6)))
         })
         .child(
+            // As large as the row's text, like the rows of the other lists.
             Icon::new(icon)
-                .xsmall()
+                .small()
                 .text_color(cx.theme().muted_foreground),
         )
         .child(div().flex_1().min_w_0().truncate().child(label))
@@ -512,7 +513,7 @@ fn row(
             this.child(
                 div()
                     .flex_shrink_0()
-                    .max_w(px(96.))
+                    .max_w(ph_ui::rems_from_px(96.))
                     .truncate()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)

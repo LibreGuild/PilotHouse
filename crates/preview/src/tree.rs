@@ -14,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
-    UniformListScrollHandle, Window, div, px, uniform_list,
+    UniformListScrollHandle, Window, div, uniform_list,
 };
 
 use crate::Kind;
@@ -424,12 +424,12 @@ fn render_row(
         .text_color(theme.muted_foreground)
         .into_any_element()
     } else {
-        div().w(px(12.)).into_any_element()
+        div().w(ph_ui::rems_from_px(12.)).into_any_element()
     };
     h_flex()
         .id(("tree-row", ix))
-        .h(px(ROW_HEIGHT))
-        .pl(px(8. + INDENT * row.depth as f32))
+        .h(ph_ui::rems_from_px(ROW_HEIGHT))
+        .pl(ph_ui::rems_from_px(8. + INDENT * row.depth as f32))
         .pr_2()
         .gap_1()
         .text_sm()

@@ -14,7 +14,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, IntoElement, ParentElement as _, Styled as _, Window, div, px,
+    AnyElement, App, Context, Entity, IntoElement, ParentElement as _, Styled as _, Window, div,
 };
 use ph_ui::{Icons, MenuButton as _};
 
@@ -36,13 +36,13 @@ impl ImageEditor {
             move |cx: &mut App| doc.update(cx, |doc, cx| doc.set_estimating(false, cx))
         };
         let (on_close, on_cancel) = (stop.clone(), stop.clone());
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let (on_close, on_cancel) = (on_close.clone(), on_cancel.clone());
             let save = editor.clone();
             let stop = stop.clone();
             dialog
                 .title("Export")
-                .w(px(420.))
+                .w(ph_ui::scaled_px(420., window))
                 .child(body(&editor, cx))
                 .footer(
                     DialogFooter::new()
@@ -64,7 +64,7 @@ impl ImageEditor {
                             Button::new("studio-export-save")
                                 .primary()
                                 .icon(Icons::Download)
-                                .label("Save a copy…")
+                                .label("Save a copy")
                                 .on_click(move |_, window, cx| {
                                     stop(cx);
                                     window.close_dialog(cx);
@@ -129,7 +129,7 @@ fn body(editor: &Entity<ImageEditor>, cx: &mut App) -> AnyElement {
         Some(Estimate::Failed(error)) => (error.clone(), true),
         _ => ("Working out the size…".to_string(), false),
     };
-    let label = |text: &'static str| div().w(px(72.)).text_sm().child(text);
+    let label = |text: &'static str| div().w(ph_ui::rems_from_px(72.)).text_sm().child(text);
     let palette_doc = doc_entity.clone();
     v_flex()
         .gap_3()
@@ -140,7 +140,12 @@ fn body(editor: &Entity<ImageEditor>, cx: &mut App) -> AnyElement {
                     .gap_2()
                     .child(label("Quality"))
                     .child(div().flex_1().child(Slider::new(&quality)))
-                    .child(div().w(px(28.)).text_sm().child(export.quality.to_string())),
+                    .child(
+                        div()
+                            .w(ph_ui::rems_from_px(28.))
+                            .text_sm()
+                            .child(export.quality.to_string()),
+                    ),
             )
         })
         .when(export.format == Format::Png, |this| {
@@ -161,7 +166,11 @@ fn body(editor: &Entity<ImageEditor>, cx: &mut App) -> AnyElement {
             h_flex()
                 .gap_2()
                 .child(label("At most"))
-                .child(div().w(px(110.)).child(Input::new(&limit).small()))
+                .child(
+                    div()
+                        .w(ph_ui::rems_from_px(110.))
+                        .child(Input::new(&limit).small()),
+                )
                 .child(
                     div()
                         .text_sm()

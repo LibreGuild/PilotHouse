@@ -13,7 +13,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Window, div, px,
+    Styled as _, Window, div,
 };
 
 use crate::avd::{Profile, SystemImage};
@@ -127,11 +127,11 @@ pub fn open_new(manager: Entity<DeviceManager>, window: &mut Window, cx: &mut Ap
         profile: Profile::Phone,
         error: None,
     });
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let (form, manager) = (form.clone(), manager.clone());
         dialog
             .title("New emulator")
-            .w(px(460.))
+            .w(ph_ui::scaled_px(460., window))
             .child(form.clone())
             .footer(ph_ui::dialog_buttons(
                 if has_images {

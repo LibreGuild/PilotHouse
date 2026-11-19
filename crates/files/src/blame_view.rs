@@ -41,13 +41,13 @@ pub fn render(blamed: Rc<Blamed>, cx: &App) -> AnyElement {
                     .unwrap_or(accent.opacity(0.));
                 div()
                     .flex()
-                    .h(px(20.))
+                    .h(ph_ui::rems_from_px(20.))
                     .text_xs()
                     .font_family(cx.theme().mono_font_family.clone())
                     .child(div().w(px(3.)).h_full().bg(age))
                     .child(
                         div()
-                            .w(px(150.))
+                            .w(ph_ui::rems_from_px(150.))
                             .flex_none()
                             .px_2()
                             .truncate()
@@ -68,11 +68,11 @@ pub fn render(blamed: Rc<Blamed>, cx: &App) -> AnyElement {
                     )
                     .child(
                         div()
-                            .w(px(44.))
+                            .w(ph_ui::rems_from_px(44.))
                             .flex_none()
                             .pr_2()
                             .text_right()
-                            .text_color(cx.theme().muted_foreground.opacity(0.7))
+                            .text_color(cx.theme().muted_foreground)
                             .child((ix + 1).to_string()),
                     )
                     .child(

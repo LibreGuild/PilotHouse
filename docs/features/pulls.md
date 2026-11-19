@@ -49,6 +49,7 @@ What agents are asked to do with a pull request (`ph_review::templates`). Shippe
 - **Walkthrough**: a briefing on the change for whoever reviews it (see [Walkthrough](#walkthrough)).
 - **Files**: each file's diff with its line comment threads; Reply in a thread. Only the files in sight are drawn (patches are parsed once), and a diff over 400 lines is folded behind *Show diff*. **Ask about lines** under a file asks an agent about some of its lines (type `start-end: question`).
 - **Commits**, **Checks** (click to open a check's page).
+- **The header** has one button, **Review with agent**, and a **⋯** menu with the rest (*Watch*, *Check out this branch*, *Address the reviewers' comments*, *Refresh*); **Watching** shows beside it while it is on. The tabs fold to icons in a narrow pane.
 - **Watch**: PilotHouse looks at the pull request every three minutes and tells you (a system notification) when the author pushes or answers a finding; answers are applied. Merged or closed pull requests stop being watched.
 - **Address comments** (your own pull requests): a [task](#fix-in-a-task) on the branch whose agent works through the reviewers' comments not yet resolved, changes what is right and drafts a reply for each.
 - **Check out** (in a workspace's PRs tool): fetches the PR head and switches to a local `pr/<number>` branch.
@@ -58,6 +59,8 @@ What agents are asked to do with a pull request (`ph_review::templates`). Shippe
 The *Review requested*, *My pull requests* and *Assigned to me* lists show, for the first 15 pull requests of each: the size (small, medium, large, and lines changed), CI (green, failing, running), what the change touches that deserves care (auth, security, migrations, payments, CI, dependencies) and whether you reviewed it and the author pushed since. **Review first** (the default; **Newest first** sorts by date) puts first the reviews the author answered with commits, then pull requests whose CI is not failing, risky before plain, small before large (`ph_review::triage`).
 
 ## Review with agent
+
+The chat beside the pull request shows the review as begun the moment it is asked for: the request as its first message and, under the agent's name, *Cloning owner/repo…* (the first time) or *Checking out #n…* with the time it has taken ([a chat being readied](chat.md#a-chat-being-readied)). The Agents pop-up lists it as work. A clone that fails says why over the composer. (A pull request opened from the inbox before its repository was read had no chat beside it, so a review started there showed nothing until the agent spoke; its chat is now attached when it opens.)
 
 1. PilotHouse brings the repository's [managed clone](#where-it-works-the-managed-clones) up to date, fetches the PR head (`pull/<n>/head`) and checks it out in `pr-<n>` beside the clone. Your checkout is not touched. The reviewed commit is kept (`refs/pilothouse/reviewed/<n>/<sha>`) so the next round can see how lines moved, even after a force-push.
 2. **A clean checkout.** What a pull request carries that would act on the agent instead of being read is taken out of the checkout before the agent starts: agent settings with hooks (`.claude/settings*.json`, `.claude/hooks`), MCP servers (`.mcp.json`, `.vscode/mcp.json`), other agents' folders (`.gemini`, `.codex`, `.cursor`, `.agents`, `.clinerules`) and the root's `.env` files. The chat's first message lists what was taken out. Findings are still checked against the commit itself.
@@ -80,8 +83,8 @@ The Findings tab (Open, Done, All), each finding with its severity and why (*Cra
 
 - **Fixed**, **Not a problem…**, **Won't fix…** (with why), **Reopen**.
 - **Is the author right?** (after the author answered): an agent reads the code again and says whether the answer holds, with a drafted reply to **Post** or **Edit first**.
-- **Fix in a task**, **Reply…** (on its thread on GitHub), **Open issue** (labelled `pilothouse`, with the place at the reviewed commit, the code, what is wrong and the fix; a security finding in a public repository first suggests a private security advisory instead).
-- **Remember why…** (findings that were not a problem): a rule every later review of the repository is told, kept on this computer (`review.learned.<repository>`, listed and forgettable under the toolbar), or **Propose to the repository**: a pull request adding it to `.pilothouse/review.md`, for everyone's reviews.
+- **Fix in a task**, **Reply** (on its thread on GitHub), **Open issue** (labelled `pilothouse`, with the place at the reviewed commit, the code, what is wrong and the fix; a security finding in a public repository first suggests a private security advisory instead).
+- **Remember why** (findings that were not a problem): a rule every later review of the repository is told, kept on this computer (`review.learned.<repository>`, listed and forgettable under the toolbar), or **Propose to the repository**: a pull request adding it to `.pilothouse/review.md`, for everyone's reviews.
 
 And for all: **Post to GitHub** / **Update on GitHub**, **Summary only**, **Read replies**, **Fix N in a task**, **Copy as Markdown**, and **Stats** (for the repository: pull requests reviewed, findings and what came of them, rounds per pull request, findings missed by a round, the share of decided findings that were not a problem, and per agent how many it found and how many were not a problem).
 

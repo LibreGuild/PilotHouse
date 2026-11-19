@@ -8,7 +8,6 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{PopupMenu, PopupMenuItem},
-    spinner::Spinner,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -721,12 +720,12 @@ impl DevicesPanel {
                         gpui_kit::Anchor::TopLeft,
                         {
                             let packages = self.packages.clone();
-                            move |menu, _, _| {
+                            move |menu, window, _| {
                                 if packages.is_empty() {
                                     return menu.label("No apps installed");
                                 }
                                 packages.iter().fold(
-                                    menu.scrollable(true).max_h(gpui_kit::px(360.)),
+                                    menu.scrollable(true).max_h(ph_ui::scaled_px(360., window)),
                                     |menu, package| {
                                         let panel = panel.clone();
                                         let package = package.clone();
@@ -858,7 +857,7 @@ impl DevicesPanel {
                     .when(avds.is_empty(), |this| this.primary())
                     .when(!avds.is_empty(), |this| this.ghost())
                     .icon(Icons::Plus)
-                    .label("New emulator…")
+                    .label("New emulator")
                     .on_click(move |_, window, cx| {
                         crate::avd_dialog::open_new(manager.clone(), window, cx)
                     })
@@ -940,10 +939,10 @@ impl DevicesPanel {
                     div()
                         .id("drawer-resize")
                         .absolute()
-                        .top(px(-3.))
+                        .top(ph_ui::rems_from_px(-3.))
                         .left_0()
                         .right_0()
-                        .h(px(6.))
+                        .h(ph_ui::rems_from_px(6.))
                         .cursor_row_resize()
                         .on_drag(ResizeDrawer, |_, _, _, cx| cx.new(|_| NoGhost)),
                 )
@@ -1219,9 +1218,15 @@ impl DevicesPanel {
                                     .rounded(cx.theme().radius)
                                     .hover(|style| style.bg(cx.theme().list_hover))
                                     .child(if file.is_dir {
-                                        ph_ui::folder_icon_element(&file.name, px(16.))
+                                        ph_ui::folder_icon_element(
+                                            &file.name,
+                                            ph_ui::rems_from_px(16.),
+                                        )
                                     } else {
-                                        ph_ui::file_icon_element(&file.name, px(16.))
+                                        ph_ui::file_icon_element(
+                                            &file.name,
+                                            ph_ui::rems_from_px(16.),
+                                        )
                                     })
                                     .child(
                                         div()
@@ -1351,7 +1356,7 @@ pub fn device_menu(
     }
     let connector = manager.clone();
     menu = menu.separator().item(
-        PopupMenuItem::new("Connect a device…")
+        PopupMenuItem::new("Connect a device")
             .icon(Icons::Smartphone)
             .on_click(move |_, window, cx| {
                 crate::connect_dialog::open(connector.clone(), window, cx)
@@ -1372,7 +1377,7 @@ pub fn device_menu(
     }
     let maker = manager.clone();
     menu = menu.item(
-        PopupMenuItem::new("New emulator…")
+        PopupMenuItem::new("New emulator")
             .icon(Icons::Plus)
             .on_click(move |_, window, cx| crate::avd_dialog::open_new(maker.clone(), window, cx)),
     );
@@ -1382,36 +1387,22 @@ pub fn device_menu(
         menu = menu.submenu("Wipe data", window, cx, move |menu, _, _| {
             wipe_list.iter().fold(menu, |menu, avd| {
                 let (manager, avd) = (wiper.clone(), avd.clone());
-                menu.item(
-                    PopupMenuItem::new(format!("{}…", avd.replace('_', " "))).on_click(
-                        move |_, window, cx| {
-                            crate::avd_dialog::confirm_wipe(
-                                manager.clone(),
-                                avd.clone(),
-                                window,
-                                cx,
-                            )
-                        },
-                    ),
-                )
+                menu.item(PopupMenuItem::new(avd.replace('_', " ")).on_click(
+                    move |_, window, cx| {
+                        crate::avd_dialog::confirm_wipe(manager.clone(), avd.clone(), window, cx)
+                    },
+                ))
             })
         });
         let deleter = manager.clone();
         menu = menu.submenu("Delete emulator", window, cx, move |menu, _, _| {
             stopped.iter().fold(menu, |menu, avd| {
                 let (manager, avd) = (deleter.clone(), avd.clone());
-                menu.item(
-                    PopupMenuItem::new(format!("{}…", avd.replace('_', " "))).on_click(
-                        move |_, window, cx| {
-                            crate::avd_dialog::confirm_delete(
-                                manager.clone(),
-                                avd.clone(),
-                                window,
-                                cx,
-                            )
-                        },
-                    ),
-                )
+                menu.item(PopupMenuItem::new(avd.replace('_', " ")).on_click(
+                    move |_, window, cx| {
+                        crate::avd_dialog::confirm_delete(manager.clone(), avd.clone(), window, cx)
+                    },
+                ))
             })
         });
     }
@@ -1423,7 +1414,7 @@ fn loading(text: String, cx: &App) -> AnyElement {
         .gap_2()
         .text_sm()
         .text_color(cx.theme().muted_foreground)
-        .child(Spinner::new().small())
+        .child(ph_ui::Loader::new().small())
         .child(text)
         .into_any_element()
 }

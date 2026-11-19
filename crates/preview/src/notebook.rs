@@ -259,7 +259,7 @@ impl Render for NotebookPreview {
             .child(
                 v_flex()
                     .w_full()
-                    .max_w(px(READING_WIDTH + 80.))
+                    .max_w(ph_ui::rems_from_px(READING_WIDTH + 80.))
                     .mx_auto()
                     .px_6()
                     .py_5()
@@ -281,7 +281,7 @@ fn render_cell(
     let theme = cx.theme();
     let gutter = |label: Option<String>| {
         div()
-            .w(px(56.))
+            .w(ph_ui::rems_from_px(56.))
             .flex_none()
             .pt_2()
             .text_xs()

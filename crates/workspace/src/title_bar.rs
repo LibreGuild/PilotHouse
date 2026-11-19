@@ -1,14 +1,14 @@
-//! Contents of the window title bar: the app's mark, the two views
-//! (Workspaces and GitHub), the command palette trigger in the middle, and
-//! window-level buttons (inbox, agents, appearance, settings, the side
-//! panels). The bar is quiet chrome: plain, so attention stays on the work.
-//! Workspaces are picked in the sidebar.
+//! Contents of the window title bar: the app's mark and the name of what is
+//! in front (a workspace with its colour, *Chats*, *GitHub*), the command
+//! palette trigger in the middle, and window-level buttons (inbox, agents,
+//! appearance, settings, the side panels). The bar is part of the window's
+//! frame (`frame`): it has no fill of its own. What the window shows is
+//! picked in the column of icons at its left edge (`rail`).
 //!
 //! On Windows the whole bar is a caption (drag) area for the system, so a
 //! click on it moves the window and a double click maximises it. Every
 //! control here is `occlude`d so its clicks reach the app instead.
 
-use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -25,7 +25,7 @@ use ph_ui::Icons;
 use ph_ui::MenuButton as _;
 
 use crate::actions::*;
-use crate::workspace::{View, Workspace};
+use crate::workspace::{Section, View, Workspace};
 
 pub(crate) fn render(
     workspace: &Workspace,
@@ -50,9 +50,7 @@ pub(crate) fn render(
                 .flex_basis(left_bias)
                 .gap_1()
                 .child(app_icon(cx))
-                // Workspaces | GitHub | the organisation's: none when there
-                // is only Workspaces.
-                .when(has_views(), |this| this.child(view_toggle(workspace, cx))),
+                .children(front_name(workspace, cx)),
         )
         .child(
             h_flex()
@@ -60,8 +58,12 @@ pub(crate) fn render(
                 .role(gpui_kit::accesskit::Role::Button)
                 .aria_label("Search or run a command")
                 .occlude()
-                .w_96()
-                .min_w(px(160.))
+                // A basis, not a width: with less room (a narrow window, a
+                // large interface size) the search box gives way, and the
+                // buttons on the right stay on screen. A fixed width counts
+                // as the least the bar can be, and pushed them off it.
+                .flex_basis(gpui_kit::rems(24.))
+                .min_w_0()
                 .h_7()
                 .mx_2()
                 .px_2p5()
@@ -122,8 +124,11 @@ pub(crate) fn render(
                         } else {
                             IconName::PanelLeftClose
                         })
-                        .tooltip("Toggle sidebar (⌘B)")
-                        .accessibility_label("Toggle sidebar")
+                        .tooltip(format!(
+                            "Show or hide the list ({})",
+                            ph_ui::platform::shortcut("secondary-b")
+                        ))
+                        .accessibility_label("Show or hide the list")
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(ToggleSidebar), cx)
                         }),
@@ -134,8 +139,11 @@ pub(crate) fn render(
                         .ghost()
                         .small()
                         .icon(IconName::PanelBottom)
-                        .tooltip("Toggle bottom panel (⌘J)")
-                        .accessibility_label("Toggle bottom panel")
+                        .tooltip(format!(
+                            "Show or hide the bottom panel ({})",
+                            ph_ui::platform::shortcut("secondary-j")
+                        ))
+                        .accessibility_label("Show or hide the bottom panel")
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(ToggleBottomPanel), cx)
                         }),
@@ -146,8 +154,11 @@ pub(crate) fn render(
                         .ghost()
                         .small()
                         .icon(IconName::PanelRight)
-                        .tooltip("Toggle tools (⌥⌘B)")
-                        .accessibility_label("Toggle panel")
+                        .tooltip(format!(
+                            "Show or hide the tools ({})",
+                            ph_ui::platform::shortcut("secondary-alt-b")
+                        ))
+                        .accessibility_label("Show or hide the tools")
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(ToggleContextPanel), cx)
                         }),
@@ -188,10 +199,10 @@ fn more_button() -> impl IntoElement {
             if ph_brand::enabled(ph_brand::Feature::Presentations) {
                 menu = menu
                     .label("Create")
-                    .item(item("New presentation…", Icons::Presentation, || {
+                    .item(item("New presentation", Icons::Presentation, || {
                         Box::new(NewPresentation)
                     }))
-                    .item(item("Open presentation…", Icons::FolderOpen, || {
+                    .item(item("Open a presentation", Icons::FolderOpen, || {
                         Box::new(OpenPresentation)
                     }));
                 for listed in crate::presentations::listed(cx).iter().take(5) {
@@ -207,24 +218,24 @@ fn more_button() -> impl IntoElement {
                 menu = menu.separator();
             }
             let tools: [MenuEntry; 8] = [
-                ("Utilities…", Icons::Wrench, || Box::new(ShowUtilities)),
-                ("Architecture map…", Icons::Network, || {
+                ("Utilities", Icons::Wrench, || Box::new(ShowUtilities)),
+                ("Architecture map", Icons::Network, || {
                     Box::new(ShowArchitecture)
                 }),
-                ("Parallel runs…", Icons::Columns2, || {
+                ("Parallel runs", Icons::Columns2, || {
                     Box::new(ShowParallelRuns)
                 }),
-                ("Schedules…", Icons::CalendarClock, || {
+                ("Schedules", Icons::CalendarClock, || {
                     Box::new(ShowSchedules)
                 }),
-                ("Usage…", Icons::ChartPie, || Box::new(ShowUsage)),
-                ("Network drives…", Icons::HardDrive, || {
+                ("Usage", Icons::ChartPie, || Box::new(ShowUsage)),
+                ("Network drives", Icons::HardDrive, || {
                     Box::new(ShowNetworkDrives)
                 }),
-                ("Agent instructions…", Icons::BookOpen, || {
+                ("Agent instructions", Icons::BookOpen, || {
                     Box::new(ShowInstructions)
                 }),
-                ("Search chats…", Icons::Search, || Box::new(SearchChats)),
+                ("Search chats", Icons::Search, || Box::new(SearchChats)),
             ];
             menu = menu.label("Tools");
             for (label, icon, action) in tools {
@@ -294,17 +305,13 @@ fn agents_button(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl Int
             )
         })
         .when(needs_you == 0 && working > 0, |this| {
-            this.child(
-                gpui_kit::component::spinner::Spinner::new()
-                    .xsmall()
-                    .color(cx.theme().info),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(working.to_string()),
-            )
+            this.child(ph_ui::Loader::new().xsmall().color(cx.theme().info))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(working.to_string()),
+                )
         });
     let this = cx.entity().downgrade();
     Popover::new("agents-popover")
@@ -331,7 +338,7 @@ fn agents_button(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl Int
 /// downloaded, or (for an install PilotHouse cannot update) on GitHub.
 fn update_item(cx: &App) -> Option<AnyElement> {
     use crate::updates::{self, Status};
-    let dot = |color| div().size(px(6.)).rounded_full().bg(color);
+    let dot = |color| div().size(ph_ui::rems_from_px(6.)).rounded_full().bg(color);
     let button =
         |id: &'static str, label: String| Button::new(id).occlude().ghost().small().label(label);
     let item = match updates::Updater::status(cx) {
@@ -356,7 +363,9 @@ fn update_item(cx: &App) -> Option<AnyElement> {
 /// The app's mark, its icon in small. Off macOS, where there is no menu
 /// bar, it opens the app's menu.
 fn app_icon(_: &App) -> AnyElement {
-    let mark = div().mx_1().child(ph_ui::logo_mark(px(20.)));
+    let mark = div()
+        .mx_1()
+        .child(ph_ui::logo_mark(ph_ui::rems_from_px(20.)));
     if cfg!(target_os = "macos") {
         return mark.into_any_element();
     }
@@ -373,172 +382,62 @@ fn app_icon(_: &App) -> AnyElement {
                     .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
             };
             menu.item(item("New workspace", || Box::new(NewWorkspace)))
-                .item(item("Open folder…", || Box::new(AddProject)))
-                .item(item("Add folder to this workspace…", || {
+                .item(item("Open folder", || Box::new(AddProject)))
+                .item(item("Add folder to this workspace", || {
                     Box::new(AddFolderToWorkspace)
                 }))
                 .separator()
                 .item(item("New chat", || Box::new(NewSession)))
                 .item(item("Command palette", || Box::new(ToggleCommandPalette)))
-                .item(item("Settings…", || Box::new(OpenSettings)))
+                .item(item("Settings", || Box::new(OpenSettings)))
                 .separator()
                 .item(item(concat!("Quit ", ph_brand::name!()), || Box::new(Quit)))
         })
         .into_any_element()
 }
 
-/// The views, side by side: Workspaces, GitHub (how many pull requests
-/// wait for the user's review) unless the brand leaves it out, and the
-/// organisation's own (`ph_custom::views`).
-fn view_toggle(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let current = workspace.view();
-    let waiting = workspace
-        .github_view()
-        .map_or(0, |github| github.read(cx).waiting_for_review());
-    // Other workspaces with something for the user: amber when an agent
-    // waits for an answer, green when there is only news.
-    let others: Vec<crate::status::WorkspaceStatus> = workspace
-        .projects()
-        .iter()
-        .map(|project| project.id)
-        .chain(workspace.chats_space().map(|chats| chats.id))
-        .filter(|id| Some(*id) != workspace.active_project_id() || current != View::Workspaces)
-        .map(|id| workspace.status(id))
-        .collect();
-    let news_color = if others.iter().any(|status| status.waiting > 0) {
-        Some(cx.theme().warning)
-    } else if others.iter().any(|status| status.unseen > 0) {
-        Some(cx.theme().success)
-    } else {
-        None
+/// What is in front, said beside the app's mark: the workspace's name (or
+/// *Chats*, *GitHub*, an organisation's view). The left column of icons
+/// switches between them; this only names where the user is.
+fn front_name(workspace: &Workspace, cx: &App) -> Option<AnyElement> {
+    let name: gpui_kit::SharedString = match workspace.view() {
+        View::GitHub => "GitHub".into(),
+        View::Custom(id) => ph_custom::views()
+            .into_iter()
+            .find(|custom| custom.id == id)?
+            .label
+            .into(),
+        View::Workspaces => match workspace.section() {
+            Section::Chats => "Chats".into(),
+            Section::Workspaces => {
+                let id = workspace.active_project_id()?;
+                workspace
+                    .projects()
+                    .iter()
+                    .find(|project| project.id == id)?
+                    .name
+                    .clone()
+                    .into()
+            }
+        },
     };
-    let this = cx.entity().downgrade();
-    let item = |view: View,
-                id: &'static str,
-                label: &'static str,
-                icon: Icon,
-                hint: &'static str,
-                badge: Option<AnyElement>,
-                cx: &App| {
-        let selected = view == current;
+    Some(
         h_flex()
-            .id(id)
-            // Blocks the title bar behind it: pressing here must not start a
-            // window move (which swallows the click if the mouse moves).
-            .occlude()
-            .relative()
-            .h_6()
-            .px_2p5()
+            .min_w_0()
             .gap_1p5()
-            .rounded(cx.theme().radius)
-            .cursor_pointer()
             .text_sm()
-            .role(gpui_kit::accesskit::Role::Tab)
-            .aria_label(label)
-            .text_color(if selected {
-                cx.theme().foreground
-            } else {
-                cx.theme().muted_foreground
-            })
-            .when(selected, |this| {
-                this.bg(cx.theme().background)
-                    .shadow_xs()
-                    .font_weight(gpui_kit::FontWeight::MEDIUM)
-            })
-            .when(!selected, |this| {
-                this.hover(|style| style.text_color(cx.theme().foreground))
-            })
-            .tooltip(move |window, cx| {
-                let tip = if hint.is_empty() {
-                    label.to_string()
-                } else {
-                    format!("{label} ({hint})")
-                };
-                gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
-            })
-            // On press, like a tab: nothing can come between press and
-            // release to lose it (the mouse moving, a slow frame). Straight
-            // to the workspace, not as an action: an action goes where the
-            // keyboard is, and that can be a view no longer shown.
-            .on_mouse_down(gpui_kit::MouseButton::Left, {
-                let this = this.clone();
-                move |_, window, cx| {
-                    cx.stop_propagation();
-                    _ = this.update(cx, |workspace, cx| workspace.set_view(view, window, cx));
-                }
-            })
-            .child(icon.small())
-            .child(label)
-            .children(badge)
-            .test_support()
-    };
-    let (workspaces_hint, github_hint) = if cfg!(target_os = "macos") {
-        ("⌘⇧E", "⌘⇧G")
-    } else {
-        ("Ctrl+Shift+E", "Ctrl+Shift+G")
-    };
-    let dot = news_color.map(|color| {
-        div()
-            .absolute()
-            .top(px(2.))
-            .right(px(2.))
-            .size(px(7.))
-            .rounded_full()
-            .bg(color)
-            .into_any_element()
-    });
-    let count = (waiting > 0).then(|| {
-        div()
-            .px_1p5()
-            .rounded_full()
-            .bg(cx.theme().warning.opacity(0.2))
-            .text_color(cx.theme().warning)
-            .text_xs()
-            .child(waiting.to_string())
-            .into_any_element()
-    });
-    h_flex()
-        .id("view-toggle")
-        .occlude()
-        .role(gpui_kit::accesskit::Role::TabList)
-        .p_0p5()
-        .gap_0p5()
-        .rounded(cx.theme().radius)
-        .bg(cx.theme().muted)
-        .child(item(
-            View::Workspaces,
-            "view-workspaces",
-            "Workspaces",
-            Icon::new(Icons::LayoutGrid),
-            workspaces_hint,
-            dot,
-            cx,
-        ))
-        .when(ph_brand::enabled(ph_brand::Feature::GitHub), |this| {
-            this.child(item(
-                View::GitHub,
-                "view-github",
-                "GitHub",
-                Icon::new(Icons::Github),
-                github_hint,
-                count,
-                cx,
-            ))
-        })
-        .children(ph_custom::views().into_iter().map(|custom| {
-            item(
-                View::Custom(custom.id),
-                custom.id,
-                custom.label,
-                (custom.icon)(),
-                "",
-                None,
-                cx,
-            )
-        }))
-}
-
-/// Whether the window has more than one view to switch between.
-pub(crate) fn has_views() -> bool {
-    ph_brand::enabled(ph_brand::Feature::GitHub) || !ph_custom::views().is_empty()
+            .font_weight(gpui_kit::FontWeight::MEDIUM)
+            .text_color(cx.theme().muted_foreground)
+            // A workspace's colour, as on its row in the list and in the
+            // frame's light: the three say the same thing.
+            .children(crate::frame::tint(workspace, cx).map(|color| {
+                div()
+                    .flex_none()
+                    .size(ph_ui::rems_from_px(8.))
+                    .rounded_full()
+                    .bg(color)
+            }))
+            .child(div().min_w_0().truncate().child(name))
+            .into_any_element(),
+    )
 }

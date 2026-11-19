@@ -14,13 +14,12 @@ use gpui_kit::component::{
     clipboard::Clipboard,
     h_flex,
     shimmer::ShimmerText,
-    spinner::Spinner,
     text::TextView,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    AnyElement, App, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use ph_ui::Icons;
@@ -149,7 +148,7 @@ pub fn render_entry(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> 
     let last = ix + 1 == entries.len();
     let working = last.then(|| thread.activity()).flatten();
     let space = if hidden {
-        px(0.)
+        0.
     } else {
         space_before(ix.checked_sub(1).map(|prev| &entries[prev]), entry) * ph_theme::density(cx)
     };
@@ -173,7 +172,7 @@ pub fn render_entry(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> 
         .when(starts_turn, |this| {
             this.pt_4().child(turn_header(thread.agent(), cx))
         })
-        .child(div().pt(space).child(body))
+        .child(div().pt(ph_ui::rems_from_px(space)).child(body))
         .children(footer)
         .when_some(working, |this, (elapsed, step)| {
             let waiting = thread.pending_question(cx).is_some();
@@ -208,7 +207,7 @@ fn run_line(
     let (summary, failed) = transcript::run_summary(&tools);
     let (icon, title): (AnyElement, SharedString) = match running {
         Some(tool) => (
-            Spinner::new()
+            ph_ui::Loader::new()
                 .xsmall()
                 .color(cx.theme().info)
                 .into_any_element(),
@@ -235,7 +234,7 @@ fn run_line(
 /// A row of an open run, indented under its summary line.
 fn run_member(body: AnyElement, cx: &App) -> AnyElement {
     div()
-        .ml(px(5.))
+        .ml(ph_ui::rems_from_px(5.))
         .pl_3()
         .border_l_1()
         .border_color(cx.theme().border)
@@ -274,8 +273,11 @@ fn turn_footer(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> Optio
             let files = transcript::turn_changes(&thread.read(cx).entries()[start..=ix]);
             let view = gpui_kit::AppContext::new(cx, |_| TurnChanges::new(files));
             let title = title.clone();
-            window.open_dialog(cx, move |dialog, _, _| {
-                dialog.title(title.clone()).w(px(860.)).child(view.clone())
+            window.open_dialog(cx, move |dialog, window, _| {
+                dialog
+                    .title(title.clone())
+                    .w(ph_ui::scaled_px(860., window))
+                    .child(view.clone())
             });
         }
     };
@@ -354,7 +356,7 @@ impl gpui_kit::Render for TurnChanges {
         div()
             .id("turn-changes")
             .relative()
-            .h(px(600.))
+            .h(ph_ui::rems_from_px(600.))
             .child(
                 gpui_kit::list(self.list.clone(), move |ix, _, cx| {
                     let Some(file) = files.get(ix) else {
@@ -368,7 +370,7 @@ impl gpui_kit::Render for TurnChanges {
                                 .border_1()
                                 .border_color(cx.theme().border)
                                 .overflow_hidden()
-                                .child(render_diff(file, cx)),
+                                .child(render_diff(file, "turn", cx)),
                         )
                         .into_any_element()
                 })
@@ -379,21 +381,22 @@ impl gpui_kit::Render for TurnChanges {
 }
 
 /// Room above an entry, from what is above it: a new message stands apart,
-/// steps of one run sit close together.
-fn space_before(previous: Option<&Entry>, entry: &Entry) -> Pixels {
+/// steps of one run sit close together. In pixels at the default interface
+/// size.
+fn space_before(previous: Option<&Entry>, entry: &Entry) -> f32 {
     let step = |entry: &Entry| matches!(entry, Entry::Tool(_) | Entry::Thought { .. });
     let blank =
         |entry: &Entry| matches!(entry, Entry::Agent { text, .. } if text.trim().is_empty());
     match (previous, entry) {
-        (None, _) => px(0.),
-        (_, entry) if blank(entry) => px(0.),
-        (_, Entry::User { .. }) => px(20.),
+        (None, _) => 0.,
+        (_, entry) if blank(entry) => 0.,
+        (_, Entry::User { .. }) => 20.,
         // The turn header already makes room.
-        (Some(Entry::User { .. }), _) => px(4.),
-        (Some(previous), entry) if step(previous) && step(entry) => px(1.),
-        (Some(previous), entry) if blank(previous) && step(entry) => px(1.),
-        (Some(previous), _) if step(previous) || step(entry) => px(8.),
-        _ => px(10.),
+        (Some(Entry::User { .. }), _) => 4.,
+        (Some(previous), entry) if step(previous) && step(entry) => 1.,
+        (Some(previous), entry) if blank(previous) && step(entry) => 1.,
+        (Some(previous), _) if step(previous) || step(entry) => 8.,
+        _ => 10.,
     }
 }
 
@@ -433,7 +436,7 @@ fn working_row(
         .gap_2()
         .text_xs()
         .text_color(cx.theme().muted_foreground)
-        .child(Spinner::new().xsmall().color(cx.theme().info))
+        .child(ph_ui::Loader::new().xsmall().color(cx.theme().info))
         .child(
             div()
                 .min_w_0()
@@ -458,7 +461,7 @@ fn turn_header(agent: &'static crate::agents::AgentSpec, cx: &App) -> impl IntoE
     h_flex()
         .gap_2()
         .pb_1()
-        .child(agent.mark(gpui_kit::px(18.)))
+        .child(agent.mark(ph_ui::rems_from_px(18.)))
         .child(
             div()
                 .text_xs()
@@ -725,7 +728,7 @@ fn step_line(
 /// What an opened step shows, indented under its line.
 fn step_details(cx: &App) -> gpui_kit::Div {
     v_flex()
-        .ml(px(5.))
+        .ml(ph_ui::rems_from_px(5.))
         .mt_1()
         .mb_1()
         .pl_3()
@@ -745,7 +748,7 @@ fn tool_status_icon(tool: &ToolEntry, cx: &App) -> AnyElement {
         }
     };
     match tool.status {
-        ToolStatus::Pending | ToolStatus::Running => Spinner::new()
+        ToolStatus::Pending | ToolStatus::Running => ph_ui::Loader::new()
             .xsmall()
             .color(cx.theme().info)
             .into_any_element(),
@@ -769,7 +772,7 @@ fn render_tool(thread: &Entity<ChatThread>, ix: usize, tool: &ToolEntry, cx: &Ap
         && *thread.read(cx).status() == crate::thread::ThreadStatus::Working
         && tool.is_busy();
     let icon = if busy {
-        Spinner::new()
+        ph_ui::Loader::new()
             .xsmall()
             .color(cx.theme().info)
             .into_any_element()
@@ -841,7 +844,11 @@ fn render_tool(thread: &Entity<ChatThread>, ix: usize, tool: &ToolEntry, cx: &Ap
                                 .border_color(cx.theme().border)
                                 .bg(cx.theme().background)
                                 .overflow_hidden()
-                                .children(tool.diffs.iter().map(|diff| render_diff(diff, cx))),
+                                .children(
+                                    tool.diffs
+                                        .iter()
+                                        .map(|diff| render_diff(diff, &tool.id, cx)),
+                                ),
                         )
                     })
                     .when(!tool.output.trim().is_empty(), |this| {
@@ -864,42 +871,35 @@ fn render_tool(thread: &Entity<ChatThread>, ix: usize, tool: &ToolEntry, cx: &Ap
         .into_any_element()
 }
 
-fn render_diff(diff: &FileDiff, cx: &App) -> AnyElement {
-    let added_bg = cx.theme().success.opacity(0.12);
-    let removed_bg = cx.theme().danger.opacity(0.12);
-    let mono = cx.theme().mono_font_family.clone();
+/// An edit an agent made, as the Git tab draws a diff: the words that
+/// changed marked, long lines scrolling sideways. `owner` is whose edit it
+/// is (a step's id): two steps that changed one file each scroll alone.
+fn render_diff(diff: &FileDiff, owner: &str, cx: &App) -> AnyElement {
+    use ph_preview::diff as diff_view;
+    let lines = diff_view::unnumbered_lines(&diff.lines);
+    let mut rows: Vec<AnyElement> = lines
+        .iter()
+        .map(|line| diff_view::line_row(line, 0, cx).into_any_element())
+        .collect();
+    if diff.hidden_lines > 0 {
+        rows.push(diff_view::more_lines(diff.hidden_lines, cx));
+    }
     v_flex()
-        .py_1()
+        .pb_1()
         .text_xs()
         .child(
-            div()
+            h_flex()
                 .px_3()
                 .py_1()
+                .gap_2()
                 .text_color(cx.theme().muted_foreground)
-                .child(format!("{}  +{} −{}", diff.path, diff.added, diff.removed)),
+                .child(div().flex_1().min_w_0().truncate().child(diff.path.clone()))
+                .child(diff_view::change_counts(diff.added, diff.removed, cx)),
         )
-        .children(diff.lines.iter().map(|line| {
-            let row = div()
-                .px_3()
-                .font_family(mono.clone())
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .child(line.clone());
-            match line.chars().next() {
-                Some('+') => row.bg(added_bg),
-                Some('-') => row.bg(removed_bg),
-                _ => row.text_color(cx.theme().muted_foreground),
-            }
-        }))
-        .when(diff.hidden_lines > 0, |this| {
-            this.child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("… {} more lines", diff.hidden_lines)),
-            )
-        })
+        .child(diff_view::scroller(
+            SharedString::from(format!("chat-diff-{owner}-{}", diff.path)),
+            rows,
+        ))
         .into_any_element()
 }
 
@@ -1118,8 +1118,8 @@ pub fn form_answers(
                 let handle = handle.clone();
                 let glyph = div()
                     .flex_none()
-                    .mt(px(3.))
-                    .size(px(12.))
+                    .mt(ph_ui::rems_from_px(3.))
+                    .size(ph_ui::rems_from_px(12.))
                     .border_1()
                     .border_color(if picked {
                         theme.foreground
@@ -1137,13 +1137,18 @@ pub fn form_answers(
                     .items_center()
                     .justify_center()
                     .when(picked, |this| {
-                        this.child(div().size(px(6.)).bg(theme.foreground).map(|dot| {
-                            if many {
-                                dot.rounded(px(1.))
-                            } else {
-                                dot.rounded_full()
-                            }
-                        }))
+                        this.child(
+                            div()
+                                .size(ph_ui::rems_from_px(6.))
+                                .bg(theme.foreground)
+                                .map(|dot| {
+                                    if many {
+                                        dot.rounded(px(1.))
+                                    } else {
+                                        dot.rounded_full()
+                                    }
+                                }),
+                        )
                     });
                 h_flex()
                     .id((
@@ -1182,9 +1187,9 @@ pub fn form_answers(
                     })
             });
         let text_label = if field.choices().is_empty() {
-            "Type an answer…"
+            "Type an answer"
         } else {
-            "Other…"
+            "Other"
         };
         v_flex()
             .gap_1()
@@ -1279,11 +1284,11 @@ fn ask_text(
         input
     });
     let focus = input.clone();
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let (input, handle) = (input.clone(), handle.clone());
         dialog
             .title("Your answer")
-            .w(px(460.))
+            .w(ph_ui::scaled_px(460., window))
             .child(Input::new(&input))
             .footer(ph_ui::dialog_buttons("OK", true))
             .on_ok(move |_, _, cx| {

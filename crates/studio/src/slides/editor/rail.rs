@@ -324,12 +324,9 @@ impl SlidesEditor {
                         );
                     },
                 ))
-                .item(action(
-                    "Start a section here…",
-                    |this, index, window, cx| {
-                        this.open_section(index, window, cx);
-                    },
-                ))
+                .item(action("Start a section here", |this, index, window, cx| {
+                    this.open_section(index, window, cx);
+                }))
                 .item(action("Present from here", |this, index, window, cx| {
                     this.present_from(index, window, cx)
                 }))

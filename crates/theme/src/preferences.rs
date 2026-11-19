@@ -51,19 +51,27 @@ pub struct Preferences {
     pub other: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Default interface and code sizes. A Windows pixel reads smaller than a
-/// macOS point, so the same numbers look cramped there.
-const DEFAULT_SIZES: (f32, f32) = if cfg!(windows) {
-    (18.0, 15.0)
-} else {
-    (15.0, 14.0)
-};
+/// Default interface and code sizes, the same on every system. The
+/// interface size is the rem: at 16, every step of the spacing and type
+/// scales is a whole pixel (14 and 12 for text, 28 for a row, 4 for a gap),
+/// also on a screen at 150 % or 200 %. Other sizes land between pixels, which
+/// a screen at 100 % shows as rows and paddings a pixel off.
+const DEFAULT_SIZES: (f32, f32) = (16.0, 14.0);
 
-/// The default sizes before version 1 (PilotHouse 0.2), on every system.
-const OLD_SIZES: (f32, f32) = (14.0, 13.0);
+/// The default sizes of each earlier [`Preferences::sizes_version`], oldest
+/// first: 14 and 13 before PilotHouse 0.2, then sizes of their own for
+/// Windows (its fonts read smaller than macOS's at the same size).
+const EARLIER_SIZES: [(f32, f32); 2] = [
+    (14.0, 13.0),
+    if cfg!(windows) {
+        (18.0, 15.0)
+    } else {
+        (15.0, 14.0)
+    },
+];
 
 /// The version of [`DEFAULT_SIZES`].
-const SIZES_VERSION: u32 = 1;
+const SIZES_VERSION: u32 = EARLIER_SIZES.len() as u32;
 
 /// The largest interface size (the whole UI scales with it).
 pub const MAX_UI_FONT_SIZE: f32 = 24.0;
@@ -119,11 +127,10 @@ impl Preferences {
     /// Brings sizes saved with older defaults to the current ones; a size
     /// the user chose stays. True when something changed (save it).
     pub fn migrate_sizes(&mut self) -> bool {
-        if self.sizes_version >= SIZES_VERSION {
+        let Some(&(old_ui, old_code)) = EARLIER_SIZES.get(self.sizes_version as usize) else {
             return false;
-        }
+        };
         let (ui, code) = DEFAULT_SIZES;
-        let (old_ui, old_code) = OLD_SIZES;
         if self.ui_font_size == old_ui {
             self.ui_font_size = ui;
         }
@@ -148,6 +155,36 @@ pub struct EditorPreferences {
     pub line_numbers: bool,
     pub indent_guides: bool,
     pub folding: bool,
+    /// Whether a file's changes are written without ⌘S.
+    pub auto_save: AutoSave,
+}
+
+/// When a file with unsaved changes is written by itself.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoSave {
+    /// A moment after typing stops.
+    AfterPause,
+    /// When the keyboard leaves the editor (another pane, another app).
+    OnFocusLoss,
+    /// Only on ⌘S. Also what a value this build does not know reads as (a
+    /// newer build's, an organisation's): one unknown word must not cost
+    /// the user every other preference. Last, as `serde(other)` asks.
+    #[default]
+    #[serde(other)]
+    Off,
+}
+
+impl AutoSave {
+    pub const ALL: [AutoSave; 3] = [AutoSave::Off, AutoSave::AfterPause, AutoSave::OnFocusLoss];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AutoSave::Off => "Off",
+            AutoSave::AfterPause => "After a pause",
+            AutoSave::OnFocusLoss => "When leaving the editor",
+        }
+    }
 }
 
 impl Default for EditorPreferences {
@@ -158,6 +195,7 @@ impl Default for EditorPreferences {
             line_numbers: true,
             indent_guides: true,
             folding: true,
+            auto_save: AutoSave::Off,
         }
     }
 }
@@ -432,40 +470,34 @@ impl ChatWidth {
         }
     }
 
-    /// Widest the chat's reading column gets.
-    pub fn max_width(self) -> gpui_kit::Pixels {
-        px(match self {
-            ChatWidth::Narrow => 640.0,
-            ChatWidth::Comfortable => 760.0,
-            ChatWidth::Wide => 1000.0,
+    /// Widest the chat's reading column gets: in rems, so a line holds as
+    /// many words at every interface size (640, 760 and 1000 pixels at the
+    /// default one).
+    pub fn max_width(self) -> gpui_kit::Rems {
+        gpui_kit::rems(match self {
+            ChatWidth::Narrow => 40.0,
+            ChatWidth::Comfortable => 47.5,
+            ChatWidth::Wide => 62.5,
         })
     }
 }
 
-/// Font families tried in order when the user picked none: each platform's
-/// most readable interface and code fonts.
+/// Font families tried in order when the user picked none: the ones
+/// PilotHouse carries, the same on every system, then each platform's own in
+/// case those could not be loaded.
 fn default_fonts() -> (&'static [&'static str], &'static [&'static str]) {
+    use crate::fonts::{CODE, INTERFACE, SYSTEM_INTERFACE};
     if cfg!(target_os = "macos") {
-        (&[".SystemUIFont"], &["SF Mono", "JetBrains Mono", "Menlo"])
+        (&[INTERFACE, SYSTEM_INTERFACE], &[CODE, "SF Mono", "Menlo"])
     } else if cfg!(windows) {
         (
-            &["Segoe UI Variable Text", "Segoe UI"],
-            &[
-                "Cascadia Code",
-                "Cascadia Mono",
-                "JetBrains Mono",
-                "Consolas",
-            ],
+            &[INTERFACE, "Segoe UI Variable Text", "Segoe UI"],
+            &[CODE, "Cascadia Code", "Cascadia Mono", "Consolas"],
         )
     } else {
         (
-            &["Inter", "Noto Sans", "Ubuntu", "Cantarell", "DejaVu Sans"],
-            &[
-                "JetBrains Mono",
-                "Fira Code",
-                "Ubuntu Mono",
-                "DejaVu Sans Mono",
-            ],
+            &[INTERFACE, "Noto Sans", "Ubuntu", "Cantarell", "DejaVu Sans"],
+            &[CODE, "Fira Code", "Ubuntu Mono", "DejaVu Sans Mono"],
         )
     }
 }
@@ -776,6 +808,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_unknown_auto_save_reads_as_off_and_costs_nothing_else() {
+        let saved: Preferences = serde_json::from_str(
+            r#"{"ui_font_size":20.0,"editor":{"tab_size":2,"auto_save":"on_window_change"}}"#,
+        )
+        .unwrap();
+        assert_eq!(saved.editor.auto_save, AutoSave::Off);
+        assert_eq!((saved.ui_font_size, saved.editor.tab_size), (20.0, 2));
+        let saved: Preferences =
+            serde_json::from_str(r#"{"editor":{"auto_save":"on_focus_loss"}}"#).unwrap();
+        assert_eq!(saved.editor.auto_save, AutoSave::OnFocusLoss);
+    }
+
+    #[test]
     fn old_default_sizes_move_to_the_new_ones() {
         let mut saved: Preferences = serde_json::from_str(
             r#"{"ui_font_size":14.0,"code_font_size":16.0,"terminal_font_size":13.0}"#,
@@ -794,6 +839,25 @@ mod tests {
         assert_eq!(zoomed, Preferences::default());
         assert!(!saved.migrate_sizes(), "once");
         assert!(!Preferences::default().clone().migrate_sizes());
+    }
+
+    #[test]
+    fn the_sizes_each_system_had_move_to_the_shared_ones() {
+        let (ui, code) = EARLIER_SIZES[1];
+        let mut saved = Preferences {
+            ui_font_size: ui,
+            code_font_size: code,
+            terminal_font_size: 12.0,
+            sizes_version: 1,
+            ..Preferences::default()
+        };
+        assert!(saved.migrate_sizes());
+        assert_eq!((saved.ui_font_size, saved.code_font_size), DEFAULT_SIZES);
+        assert_eq!(
+            saved.terminal_font_size, 12.0,
+            "a size the user chose stays"
+        );
+        assert!(!saved.migrate_sizes(), "once");
     }
 
     #[test]

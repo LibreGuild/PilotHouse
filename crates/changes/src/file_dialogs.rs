@@ -10,7 +10,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div, px,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div,
 };
 use ph_git::FileChange;
 use ph_git::log::Commit;
@@ -30,15 +30,18 @@ pub fn open_diff(
         return;
     }
     let changes = Rc::new(changes);
-    window.open_dialog(cx, move |dialog, _, cx| {
-        dialog.title(title.clone()).w(px(860.)).child(
-            v_flex()
-                .id("file-diff")
-                .max_h(px(600.))
-                .overflow_y_scroll()
-                .gap_2()
-                .children(changes.iter().map(|change| file_diff(change, cx))),
-        )
+    window.open_dialog(cx, move |dialog, window, cx| {
+        dialog
+            .title(title.clone())
+            .w(ph_ui::scaled_px(860., window))
+            .child(
+                v_flex()
+                    .id("file-diff")
+                    .max_h(ph_ui::rems_from_px(600.))
+                    .overflow_y_scroll()
+                    .gap_2()
+                    .children(changes.iter().map(|change| file_diff(change, cx))),
+            )
     });
 }
 
@@ -69,10 +72,10 @@ pub fn load_diff(
 pub fn open_history(root: PathBuf, path: String, window: &mut Window, cx: &mut App) {
     let view = cx.new(|cx| FileHistory::new(root, path.clone(), cx));
     let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         dialog
             .title(format!("History of {name}"))
-            .w(px(900.))
+            .w(ph_ui::scaled_px(900., window))
             .child(view.clone())
     });
 }
@@ -199,13 +202,13 @@ impl Render for FileHistory {
                 .into_any_element(),
         };
         h_flex()
-            .h(px(560.))
+            .h(ph_ui::rems_from_px(560.))
             .items_start()
             .gap_3()
             .child(
                 div()
                     .id("history-commits")
-                    .w(px(280.))
+                    .w(ph_ui::rems_from_px(280.))
                     .flex_none()
                     .h_full()
                     .overflow_y_scroll()

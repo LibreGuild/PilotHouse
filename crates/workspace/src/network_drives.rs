@@ -20,7 +20,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _,
-    PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task, Window, div, px,
+    PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task, Window, div,
 };
 use ph_remote::Mapping;
 use ph_remote::check::{self, Access, HostKey};
@@ -73,10 +73,10 @@ pub fn open(drive: Option<NetworkDrive>, window: &mut Window, cx: &mut App) {
         }
         view
     });
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         dialog
             .title("Network drives")
-            .w(px(680.))
+            .w(ph_ui::scaled_px(680., window))
             .child(view.clone())
     });
 }
@@ -597,7 +597,7 @@ impl NetworkDrivesView {
                         .gap_2()
                         .text_xs()
                         .font_family(theme.mono_font_family.clone())
-                        .child(div().w(px(150.)).truncate().child(key.kind.clone()))
+                        .child(div().w(ph_ui::rems_from_px(150.)).truncate().child(key.kind.clone()))
                         .child(key.fingerprint.clone())
                 }))
                 .child(
@@ -750,7 +750,7 @@ impl Render for NetworkDrivesView {
                                     .small()
                                     .ghost()
                                     .icon(Icons::FolderOpen)
-                                    .label("Choose…")
+                                    .label("Choose")
                                     .on_click(cx.listener(|this, _, window, cx| this.browse(window, cx))),
                             ),
                     )
@@ -758,7 +758,7 @@ impl Render for NetworkDrivesView {
                         h_flex()
                             .gap_2()
                             .child(div().flex_1().child(Input::new(&self.host).small()))
-                            .child(div().w(px(110.)).child(Input::new(&self.port).small())),
+                            .child(div().w(ph_ui::rems_from_px(110.)).child(Input::new(&self.port).small())),
                     )
                     .child(Input::new(&self.remote).small())
                     .child(
@@ -785,7 +785,7 @@ impl Render for NetworkDrivesView {
                     .when_some(self.terminal.as_ref(), |this, (view, _)| {
                         this.child(
                             div()
-                                .h(px(220.))
+                                .h(ph_ui::rems_from_px(220.))
                                 .rounded(theme.radius)
                                 .overflow_hidden()
                                 .border_1()

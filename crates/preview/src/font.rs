@@ -132,7 +132,7 @@ impl Render for FontPreview {
                 .items_baseline()
                 .child(
                     div()
-                        .w(px(36.))
+                        .w(ph_ui::rems_from_px(36.))
                         .flex_none()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)

@@ -2,7 +2,7 @@
 
 Crate: `ph-browser`. One browser pane per workspace, backed by your installed Chrome (or Chromium, Edge, Brave). There are no tabs; links that would open a new tab open in the pane.
 
-Which browser: the one chosen in the pane (setting `browser.chrome_path`), else `PILOTHOUSE_CHROME`, else the first one installed. With none found, the pane says so and offers **Choose a browser…** (any Chromium-family program, or a macOS `.app`) and **Get Chrome**, which opens Chrome's download page in your default browser. PilotHouse never downloads a browser itself, so it stays on-device. Agents asking for the browser get the same message.
+Which browser: the one chosen in the pane (setting `browser.chrome_path`), else `PILOTHOUSE_CHROME`, else the first one installed. With none found, the pane says so and offers **Choose a browser** (any Chromium-family program, or a macOS `.app`) and **Get Chrome**, which opens Chrome's download page in your default browser. PilotHouse never downloads a browser itself, so it stays on-device. Agents asking for the browser get the same message.
 
 ## How it works
 
@@ -92,7 +92,7 @@ Settings shows *Connected to Chrome 131* once the extension reached the app. One
 
 **Emulation and mocks change your own tab**, so they last only while the agent works there: they end when the debugger lets go of the idle tab (two minutes after the agent's last emulation or mock at the least), when you press **Stop** (your tab is back to normal at once), or on `reset`/`clear`; the agent is told when they ended. Heap snapshots are not among what Chrome lets extensions do (DevTools' Memory panel takes them), so `chrome_memory` measures and compares instead.
 
-**Workflows** (`workflows.rs`) are steps you recorded in Chrome (below), kept in PilotHouse's settings (`chrome.workflows`). An agent runs one with its own actions, so you see them with the glow and **Stop**: it opens the first page, clicks (by selector, then by the words on the element when the page changed), types, chooses and presses as recorded. It stops where a person is needed (a password: agents never type one; files to choose) or a step fails, and says which `from_step` to go on with. **Settings → Chrome extension → Workflows** lists them: their steps, **Make a test** (a chat drafts a Playwright test of it, for you to send), **Schedule…** (the Schedules dialog opens with a schedule that runs it filled in, for you to choose when and save), rename, and delete (after a yes).
+**Workflows** (`workflows.rs`) are steps you recorded in Chrome (below), kept in PilotHouse's settings (`chrome.workflows`). An agent runs one with its own actions, so you see them with the glow and **Stop**: it opens the first page, clicks (by selector, then by the words on the element when the page changed), types, chooses and presses as recorded. It stops where a person is needed (a password: agents never type one; files to choose) or a step fails, and says which `from_step` to go on with. **Settings → Chrome extension → Workflows** lists them: their steps, **Make a test** (a chat drafts a Playwright test of it, for you to send), **Schedule** (the Schedules dialog opens with a schedule that runs it filled in, for you to choose when and save), rename, and delete (after a yes).
 
 ## From Chrome to PilotHouse
 

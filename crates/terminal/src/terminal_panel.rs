@@ -80,11 +80,11 @@ impl TerminalPanel {
         }
         let name = terminal.read(cx).title().clone();
         let terminals = self.terminals.downgrade();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let (terminals, terminal) = (terminals.clone(), terminal.clone());
             dialog
                 .title("Close the terminal?")
-                .w(gpui_kit::px(440.))
+                .w(ph_ui::scaled_px(440., window))
                 .child(format!(
                     "The agent in “{name}” is still at work or waiting for you. Closing the terminal stops it; what it did so far stays."
                 ))
@@ -471,7 +471,7 @@ impl TerminalPanel {
                         })
                     })
                 };
-                menu.item(PopupMenuItem::submenu("Resume a session…", resume))
+                menu.item(PopupMenuItem::submenu("Resume a session", resume))
             })
             .into_any_element()
     }
@@ -695,7 +695,7 @@ fn badge_glyph(badge: crate::AgentBadge, cx: &App) -> AnyElement {
     let dot = |color| {
         div()
             .ml_1()
-            .size(px(7.))
+            .size(ph_ui::rems_from_px(7.))
             .rounded_full()
             .bg(color)
             .into_any_element()
@@ -703,11 +703,7 @@ fn badge_glyph(badge: crate::AgentBadge, cx: &App) -> AnyElement {
     match badge {
         crate::AgentBadge::Working => div()
             .ml_1()
-            .child(
-                gpui_kit::component::spinner::Spinner::new()
-                    .xsmall()
-                    .color(cx.theme().info),
-            )
+            .child(ph_ui::Loader::new().xsmall().color(cx.theme().info))
             .into_any_element(),
         crate::AgentBadge::NeedsYou => dot(cx.theme().warning),
         crate::AgentBadge::Done => dot(cx.theme().success),

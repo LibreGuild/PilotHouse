@@ -38,7 +38,7 @@ pub fn card(
             h_flex()
                 .gap_2()
                 .pb_1()
-                .child(spec.mark(gpui_kit::px(16.)))
+                .child(spec.mark(ph_ui::rems_from_px(16.)))
                 .child(
                     div()
                         .flex_1()
@@ -96,7 +96,7 @@ pub fn welcome(
             v_flex()
                 .items_center()
                 .gap_2()
-                .child(ph_ui::logo_mark(gpui_kit::px(36.)))
+                .child(ph_ui::logo_mark(ph_ui::rems_from_px(36.)))
                 .child(
                     div()
                         .text_xl()
@@ -105,7 +105,7 @@ pub fn welcome(
                 )
                 .child(
                     div()
-                        .max_w(gpui_kit::px(460.))
+                        .max_w(ph_ui::rems_from_px(460.))
                         .text_sm()
                         .text_center()
                         .text_color(cx.theme().muted_foreground)
@@ -176,7 +176,7 @@ fn agent_entry(spec: &AgentSpec, checks: &[Check], divided: bool, cx: &App) -> A
         .child(
             h_flex()
                 .gap_2()
-                .child(spec.mark(gpui_kit::px(18.)))
+                .child(spec.mark(ph_ui::rems_from_px(18.)))
                 .child(
                     div()
                         .text_sm()
@@ -219,7 +219,7 @@ fn agent_entry(spec: &AgentSpec, checks: &[Check], divided: bool, cx: &App) -> A
                     };
                     Some(
                         h_flex()
-                            .pl(gpui_kit::px(26.))
+                            .pl(ph_ui::rems_from_px(26.))
                             .gap_2()
                             .child(
                                 div()

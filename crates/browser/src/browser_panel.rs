@@ -6,7 +6,6 @@ use gpui_kit::component::{
     h_flex,
     input::{Input, InputEvent, InputState},
     menu::PopupMenuItem,
-    spinner::Spinner,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -359,7 +358,7 @@ impl BrowserPanel {
                                 .xsmall()
                                 .text_color(cx.theme().muted_foreground),
                         )
-                        .when(loading, |this| this.suffix(Spinner::new().xsmall())),
+                        .when(loading, |this| this.suffix(ph_ui::Loader::new().xsmall())),
                 ),
             )
             .child(
@@ -403,7 +402,7 @@ impl BrowserPanel {
                                 ph_brand::enabled(ph_brand::Feature::ChromeExtension),
                                 |menu| {
                                     menu.item(
-                                        PopupMenuItem::new("Let agents use your Chrome…")
+                                        PopupMenuItem::new("Let agents use your Chrome")
                                             .icon(IconName::Globe)
                                             .on_click(|_, window, cx| {
                                                 window.dispatch_action(
@@ -521,7 +520,7 @@ impl BrowserPanel {
                 .gap_2()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child(Spinner::new().small())
+                .child(ph_ui::Loader::new().small())
                 .child("Starting the browser…")
                 .into_any_element(),
             // Stopped is not starting: it said so, with a spinner that
@@ -547,7 +546,7 @@ impl BrowserPanel {
                             Button::new("browser-choose")
                                 .small()
                                 .primary()
-                                .label("Choose a browser…")
+                                .label("Choose a browser")
                                 .on_click(cx.listener(|this, _, window, cx| this.choose_browser(window, cx))),
                         )
                         .child(

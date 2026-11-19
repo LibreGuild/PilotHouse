@@ -21,6 +21,7 @@ ph-env.workspace = true
 ph-files.workspace = true
 ph-store.workspace = true
 ph-git.workspace = true
+ph-preview.workspace = true
 ph-theme.workspace = true
 toml.workspace = true
 ph-review.workspace = true

@@ -180,7 +180,7 @@ impl TerminalView {
                 .border_color(theme.border)
                 .bg(theme.popover)
                 .shadow_md()
-                .text_size(px(12.))
+                .text_size(ph_ui::rems_from_px(12.))
                 .font_family(theme.font_family.clone())
                 .capture_action(cx.listener(
                     |this, _: &gpui_kit::component::input::Escape, window, cx| {
@@ -188,7 +188,11 @@ impl TerminalView {
                         cx.stop_propagation();
                     },
                 ))
-                .child(div().w(px(200.)).child(Input::new(&find.input).small()))
+                .child(
+                    div()
+                        .w(ph_ui::rems_from_px(200.))
+                        .child(Input::new(&find.input).small()),
+                )
                 .when(find.search.missing(), |this| {
                     this.child(
                         div()
@@ -469,7 +473,7 @@ impl TerminalView {
             .menu("Paste", Box::new(TerminalPaste))
             .menu("Select All", Box::new(TerminalSelectAll))
             .separator()
-            .menu("Find…", Box::new(TerminalFind))
+            .menu("Find", Box::new(TerminalFind))
             .menu(
                 if has_selection {
                     "Ask in Chat About the Selection"

@@ -11,9 +11,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
-use gpui_kit::component::{Icon, Sizable as _};
+use gpui_kit::component::Icon;
 use gpui_kit::{
-    AnyElement, Hsla, Image, ImageFormat, IntoElement as _, Pixels, Styled as _, img, rgb,
+    AnyElement, Hsla, Image, ImageFormat, IntoElement as _, Length, Styled as _, img, rgb,
 };
 
 use crate::Icons;
@@ -306,13 +306,13 @@ pub fn folder_svg_name(name: &str) -> &'static str {
 }
 
 /// A file's icon `size` across: its kind's colour icon, else the outline one.
-pub fn file_icon_element(name: &str, size: Pixels) -> AnyElement {
+pub fn file_icon_element(name: &str, size: impl Clone + Into<Length>) -> AnyElement {
     match file_svg_name(name).and_then(|svg| IMAGES.get(svg)) {
         Some(image) => img(image.clone()).flex_none().size(size).into_any_element(),
         None => {
             let (icon, tint) = file_icon(name);
             Icon::new(icon)
-                .with_size(size)
+                .size(size)
                 .text_color(tint)
                 .into_any_element()
         }
@@ -320,7 +320,7 @@ pub fn file_icon_element(name: &str, size: Pixels) -> AnyElement {
 }
 
 /// A folder's icon `size` across.
-pub fn folder_icon_element(name: &str, size: Pixels) -> AnyElement {
+pub fn folder_icon_element(name: &str, size: impl Clone + Into<Length>) -> AnyElement {
     let image = IMAGES
         .get(folder_svg_name(name))
         .cloned()

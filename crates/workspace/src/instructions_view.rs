@@ -11,17 +11,17 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Window, div, px,
+    Styled as _, Window, div,
 };
 use ph_agent::instructions::{self, Change, InstructionFile};
 use ph_ui::Icons;
 
 pub fn open(root: PathBuf, window: &mut Window, cx: &mut App) {
     let view = cx.new(|_| InstructionsView::new(root));
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         dialog
             .title("Agent instructions")
-            .w(px(560.))
+            .w(ph_ui::scaled_px(560., window))
             .child(view.clone())
     });
 }

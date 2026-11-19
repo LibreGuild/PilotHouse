@@ -463,7 +463,7 @@ impl Render for AudioPlayer {
             .child(
                 v_flex()
                     .w_full()
-                    .max_w(px(720.))
+                    .max_w(ph_ui::rems_from_px(720.))
                     .gap_4()
                     .p_6()
                     .rounded(theme.radius_lg)
@@ -489,7 +489,7 @@ impl Render for AudioPlayer {
                     .child(
                         div()
                             .id("audio-wave")
-                            .h(px(88.))
+                            .h(ph_ui::rems_from_px(88.))
                             .w_full()
                             .cursor_pointer()
                             .child(bars)

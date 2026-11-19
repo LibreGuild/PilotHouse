@@ -22,7 +22,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, WeakEntity, Window, div, px,
+    Styled as _, Subscription, Task, WeakEntity, Window, div,
 };
 use ph_ui::{EmptyState, Icons};
 
@@ -36,9 +36,10 @@ use crate::{CloseFile, quick_open};
 
 pub const FILES_PANEL_CONTEXT: &str = "FilesPanel";
 
-/// A tree row's height, and how far each level is indented.
-const TREE_ROW_HEIGHT: gpui_kit::Pixels = px(24.);
-const TREE_INDENT: gpui_kit::Pixels = px(14.);
+/// A tree row's height, and how far each level is indented, in pixels at
+/// the default interface size.
+const TREE_ROW_HEIGHT: f32 = 24.;
+const TREE_INDENT: f32 = 14.;
 
 /// Changed paths, and the folders holding them.
 #[derive(Default)]
@@ -562,6 +563,36 @@ impl FilesPanel {
             .filter(|file| file.read(cx).is_dirty())
             .cloned()
             .collect();
+        // With auto save on there is nothing to ask about a file it would
+        // write on being left anyway (and did, once the question took the
+        // keyboard: "Don't Save" then discarded nothing). Such files are
+        // written and closed. What auto save leaves alone (text brought
+        // back after a crash, a file changed on disk) is asked about.
+        let (quiet, unsaved): (Vec<_>, Vec<_>) = unsaved
+            .into_iter()
+            .partition(|file| file.read(cx).saves_by_itself(cx));
+        let files: Vec<Entity<FileView>> = files
+            .into_iter()
+            .filter(|file| !quiet.contains(file))
+            .collect();
+        if !quiet.is_empty() {
+            let saves: Vec<Task<bool>> = quiet
+                .iter()
+                .map(|file| file.update(cx, |file, cx| file.save_unasked(window, cx)))
+                .collect();
+            cx.spawn(async move |panel, cx| {
+                let mut saved = Vec::with_capacity(saves.len());
+                for (file, save) in quiet.into_iter().zip(saves) {
+                    // One that could not be written stays open, its footer
+                    // saying why.
+                    if save.await {
+                        saved.push(file);
+                    }
+                }
+                _ = panel.update(cx, |panel, cx| panel.close_views(&saved, cx));
+            })
+            .detach();
+        }
         if unsaved.is_empty() {
             self.close_views(&files, cx);
             return;
@@ -574,7 +605,7 @@ impl FilesPanel {
             _ => format!("Save the changes to {} files?", unsaved.len()),
         };
         let panel = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, window, _| {
             let save = {
                 let (panel, files, unsaved) = (panel.clone(), files.clone(), unsaved.clone());
                 move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
@@ -619,7 +650,7 @@ impl FilesPanel {
             };
             dialog
                 .title(question.clone())
-                .w(px(440.))
+                .w(ph_ui::scaled_px(440., window))
                 .child(
                     div()
                         .text_sm()
@@ -1340,21 +1371,27 @@ impl FilesPanel {
             // "Loading…" or "Empty" under a folder: words, not a file.
             let placeholder = DirTree::is_placeholder(&path);
             let icon = if placeholder {
-                div().flex_none().w(px(16.)).into_any_element()
+                div()
+                    .flex_none()
+                    .w(ph_ui::rems_from_px(16.))
+                    .into_any_element()
             } else if is_file {
-                ph_ui::file_icon_element(&item.label, px(16.))
+                ph_ui::file_icon_element(&item.label, ph_ui::rems_from_px(16.))
             } else {
-                ph_ui::folder_icon_element(&item.label, px(16.))
+                ph_ui::folder_icon_element(&item.label, ph_ui::rems_from_px(16.))
             };
             let chevron = if is_file {
-                div().flex_none().w(px(12.)).into_any_element()
+                div()
+                    .flex_none()
+                    .w(ph_ui::rems_from_px(12.))
+                    .into_any_element()
             } else {
                 Icon::new(if entry.is_expanded() {
                     IconName::ChevronDown
                 } else {
                     IconName::ChevronRight
                 })
-                .with_size(px(12.))
+                .size(ph_ui::rems_from_px(12.))
                 .text_color(theme.muted_foreground)
                 .into_any_element()
             };
@@ -1428,15 +1465,15 @@ impl FilesPanel {
                         .border_color(cx.theme().list_active_border)
                 })
                 .py_0()
-                .pl(px(6.))
+                .pl(ph_ui::rems_from_px(6.))
                 .pr_2()
                 .child(
                     h_flex()
                         .relative()
-                        .h(TREE_ROW_HEIGHT * ph_theme::density(cx))
+                        .h(ph_ui::rems_from_px(TREE_ROW_HEIGHT * ph_theme::density(cx)))
                         .min_w_0()
                         .gap_1()
-                        .pl(TREE_INDENT * depth)
+                        .pl(ph_ui::rems_from_px(TREE_INDENT * depth as f32))
                         .text_sm()
                         .when(is_ignored, |this| this.opacity(0.5))
                         .when(placeholder, |this| {
@@ -1449,7 +1486,7 @@ impl FilesPanel {
                                 .absolute()
                                 .top_0()
                                 .bottom_0()
-                                .left(TREE_INDENT * level + px(5.5))
+                                .left(ph_ui::rems_from_px(TREE_INDENT * level as f32 + 5.5))
                                 .w_px()
                                 .bg(guide)
                         }))
@@ -1496,7 +1533,7 @@ impl FilesPanel {
                 .when(holds_changes, |this| {
                     this.suffix(|_, cx| {
                         div()
-                            .size(px(6.))
+                            .size(ph_ui::rems_from_px(6.))
                             .rounded_full()
                             .bg(cx.theme().warning.opacity(0.8))
                     })
@@ -1583,7 +1620,7 @@ impl FilesPanel {
                     .text_xs()
                     .cursor_pointer()
                     .hover(|style| style.bg(cx.theme().list_hover))
-                    .child(ph_ui::file_icon_element(name, px(14.)))
+                    .child(ph_ui::file_icon_element(name, ph_ui::rems_from_px(14.)))
                     .child(div().flex_none().child(name.to_string()))
                     .child(
                         div()
@@ -1622,7 +1659,7 @@ impl FilesPanel {
                         .text_xs()
                         .cursor_pointer()
                         .hover(|style| style.bg(cx.theme().list_hover))
-                        .child(ph_ui::file_icon_element(name, px(14.)))
+                        .child(ph_ui::file_icon_element(name, ph_ui::rems_from_px(14.)))
                         .child(
                             div()
                                 .flex_none()
@@ -1837,7 +1874,7 @@ impl FilesPanel {
                 .next()
                 .unwrap_or_default()
                 .to_string();
-            let icon = ph_ui::file_icon_element(&name, px(14.));
+            let icon = ph_ui::file_icon_element(&name, ph_ui::rems_from_px(14.));
             let dirty = file.is_dirty();
             let panel = cx.weak_entity();
             let group = SharedString::from(format!("open-file-{ix}"));
@@ -1870,7 +1907,7 @@ impl FilesPanel {
                             .group_hover(group.clone(), |style| style.invisible())
                             .child(
                                 div()
-                                    .size(px(7.))
+                                    .size(ph_ui::rems_from_px(7.))
                                     .rounded_full()
                                     .bg(cx.theme().foreground.opacity(0.75)),
                             ),

@@ -72,8 +72,11 @@ pub fn open(window: &mut Window, cx: &mut App) {
         return;
     }
     let view = cx.new(UsageView::new);
-    window.open_dialog(cx, move |dialog, _, _| {
-        dialog.title("Usage").w(px(600.)).child(view.clone())
+    window.open_dialog(cx, move |dialog, window, _| {
+        dialog
+            .title("Usage")
+            .w(ph_ui::scaled_px(600., window))
+            .child(view.clone())
     });
 }
 
@@ -321,7 +324,7 @@ impl UsageView {
             .gap_3()
             .items_center()
             .child(div().text_sm().child("Reading the agents' session files…"))
-            .child(div().w(px(240.)).child(bar_track(
+            .child(div().w(ph_ui::rems_from_px(240.)).child(bar_track(
                 if files > 0 {
                     done as f32 / files as f32
                 } else {
@@ -532,7 +535,7 @@ impl UsageView {
                     .gap(px(if summary.bars.len() > 40 { 1. } else { 3. }))
                     .children(bars),
             )
-            .child(div().h(px(20.)).child(readout))
+            .child(div().h(ph_ui::rems_from_px(20.)).child(readout))
     }
 
     /// The list, busiest first.
@@ -557,7 +560,11 @@ impl UsageView {
         };
         let hidden = summary.lines.len().saturating_sub(shown);
         let header = |text: &'static str, width: f32| {
-            div().w(px(width)).flex_none().text_right().child(text)
+            div()
+                .w(ph_ui::rems_from_px(width))
+                .flex_none()
+                .text_right()
+                .child(text)
         };
         v_flex()
             .gap_1()
@@ -578,7 +585,7 @@ impl UsageView {
                     .child(header("Tokens", TOKENS_W))
                     .child(header("Sessions", SESSIONS_W))
                     .child(header("At API prices", COST_W))
-                    .child(div().w(px(14.)).flex_none()),
+                    .child(div().w(ph_ui::rems_from_px(14.)).flex_none()),
             )
             .children(
                 summary
@@ -618,12 +625,12 @@ impl UsageView {
         let (mark, name, tip): (AnyElement, String, Option<String>) = match &line.key {
             Key::Agent(id) => {
                 let spec = ph_agent::agents::find(id).unwrap_or(&AGENTS[0]);
-                (spec.mark(px(18.)), spec.name.to_string(), None)
+                (spec.mark(ph_ui::rems_from_px(18.)), spec.name.to_string(), None)
             }
             Key::Model(agent, model) => {
                 let spec = ph_agent::agents::find(agent).unwrap_or(&AGENTS[0]);
                 (
-                    spec.mark(px(14.)),
+                    spec.mark(ph_ui::rems_from_px(14.)),
                     if model.is_empty() {
                         format!("{} (model not recorded)", spec.short_name())
                     } else {
@@ -690,7 +697,7 @@ impl UsageView {
         };
         let column = |width: f32, text: String, strong: bool| {
             div()
-                .w(px(width))
+                .w(ph_ui::rems_from_px(width))
                 .flex_none()
                 .text_right()
                 .text_sm()
@@ -748,7 +755,7 @@ impl UsageView {
                                     .gap_1p5()
                                     .text_xs()
                                     .child(muted(window_name(&limit.window), cx).text_xs())
-                                    .child(div().w(px(36.)).child(bar_track(
+                                    .child(div().w(ph_ui::rems_from_px(36.)).child(bar_track(
                                         used,
                                         state_color(limit.state, cx),
                                         cx,
@@ -782,7 +789,11 @@ impl UsageView {
             .id(SharedString::from(format!("usage-line-{key:?}")))
             .gap_1p5()
             .px_2()
-            .py(px(if agent_id.is_some() { 8. } else { 6. }))
+            .py(ph_ui::rems_from_px(if agent_id.is_some() {
+                8.
+            } else {
+                6.
+            }))
             .rounded(theme.radius)
             .when(open, |this| this.bg(theme.secondary))
             .when(agent_id.is_some(), |this| {
@@ -805,7 +816,13 @@ impl UsageView {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().w(px(18.)).flex().justify_center().child(mark))
+                    .child(
+                        div()
+                            .w(ph_ui::rems_from_px(18.))
+                            .flex()
+                            .justify_center()
+                            .child(mark),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -819,13 +836,13 @@ impl UsageView {
                     .when(agent_id.is_none(), |this| {
                         this.child(
                             div()
-                                .w(px(SHARE_W))
+                                .w(ph_ui::rems_from_px(SHARE_W))
                                 .flex_none()
                                 .child(share_bar(line, most, cx)),
                         )
                         .child(
                             div()
-                                .w(px(PERCENT_W))
+                                .w(ph_ui::rems_from_px(PERCENT_W))
                                 .flex_none()
                                 .text_right()
                                 .text_xs()
@@ -834,32 +851,30 @@ impl UsageView {
                         )
                     })
                     .children(columns)
-                    .child(
-                        div()
-                            .w(px(14.))
-                            .flex_none()
-                            .when(agent_id.is_some(), |this| {
-                                this.child(
-                                    Icon::new(if open {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    })
-                                    .xsmall()
-                                    .text_color(theme.muted_foreground),
-                                )
-                            }),
-                    ),
+                    .child(div().w(ph_ui::rems_from_px(14.)).flex_none().when(
+                        agent_id.is_some(),
+                        |this| {
+                            this.child(
+                                Icon::new(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .xsmall()
+                                .text_color(theme.muted_foreground),
+                            )
+                        },
+                    )),
             )
             // An agent: its share, and its limits.
             .when(agent_id.is_some(), |this| {
                 this.child(
                     h_flex()
-                        .pl(px(26.))
+                        .pl(ph_ui::rems_from_px(26.))
                         .gap_3()
                         .child(
                             div()
-                                .w(px(120.))
+                                .w(ph_ui::rems_from_px(120.))
                                 .flex_none()
                                 .child(share_bar(line, most, cx)),
                         )
@@ -922,7 +937,7 @@ impl UsageView {
             _ => concat!("Not reported to ", ph_brand::name!(), "."),
         };
         v_flex()
-            .ml(px(26.))
+            .ml(ph_ui::rems_from_px(26.))
             .mt_1()
             .mb_2()
             .pl_3()
@@ -939,15 +954,19 @@ impl UsageView {
                         h_flex()
                             .gap_3()
                             .text_sm()
-                            .child(div().w(px(130.)).child(window_name(&limit.window)))
-                            .child(div().w(px(90.)).child(bar_track(
+                            .child(
+                                div()
+                                    .w(ph_ui::rems_from_px(130.))
+                                    .child(window_name(&limit.window)),
+                            )
+                            .child(div().w(ph_ui::rems_from_px(90.)).child(bar_track(
                                 used,
                                 state_color(limit.state, cx),
                                 cx,
                             )))
                             .child(
                                 div()
-                                    .w(px(44.))
+                                    .w(ph_ui::rems_from_px(44.))
                                     .text_color(state_color(limit.state, cx))
                                     .child(match limit.used {
                                         Some(used) => format!("{:.0}%", used * 100.),
@@ -983,7 +1002,7 @@ impl UsageView {
                                     .child(muted(share(tally.tokens(), total), cx))
                                     .child(
                                         div()
-                                            .w(px(64.))
+                                            .w(ph_ui::rems_from_px(64.))
                                             .text_right()
                                             .child(compact(tally.tokens())),
                                     )
@@ -1200,7 +1219,7 @@ fn share_bar(line: &Line, most: u64, cx: &App) -> impl IntoElement {
     };
     h_flex()
         .w_full()
-        .h(px(5.))
+        .h(ph_ui::rems_from_px(5.))
         .rounded_full()
         .bg(cx.theme().muted)
         .child(
@@ -1227,7 +1246,7 @@ fn share_bar(line: &Line, most: u64, cx: &App) -> impl IntoElement {
 fn bar_track(used: f32, color: Hsla, cx: &App) -> impl IntoElement {
     div()
         .w_full()
-        .h(px(5.))
+        .h(ph_ui::rems_from_px(5.))
         .rounded_full()
         .bg(cx.theme().muted)
         .child(
@@ -1240,7 +1259,10 @@ fn bar_track(used: f32, color: Hsla, cx: &App) -> impl IntoElement {
 }
 
 fn swatch(color: Hsla) -> impl IntoElement {
-    div().size(px(10.)).rounded(px(3.)).bg(color)
+    div()
+        .size(ph_ui::rems_from_px(10.))
+        .rounded(px(3.))
+        .bg(color)
 }
 
 fn state_color(state: LimitState, cx: &App) -> Hsla {

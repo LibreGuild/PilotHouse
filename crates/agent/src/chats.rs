@@ -129,6 +129,19 @@ pub enum WorkspaceChatsEvent {
     },
 }
 
+/// Work under way before a chat's turn can start: a repository cloned and a
+/// pull request checked out for a review. It is part of the run to whoever
+/// asked for it, so the workspace's status counts it as work and the Agents
+/// board lists it, though no agent has started yet.
+#[derive(Debug, Clone)]
+pub struct Preparing {
+    /// What it is for: `Review of #42`.
+    pub title: gpui_kit::SharedString,
+    /// What is happening: `Cloning acme/shop…`.
+    pub label: gpui_kit::SharedString,
+    pub since: std::time::Instant,
+}
+
 /// What a workspace's chats are doing, for its status.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChatsActivity {
@@ -193,6 +206,8 @@ pub struct WorkspaceChats {
     viewing: Option<SessionId>,
     /// Chats with a finished turn not looked at yet.
     unread: HashSet<SessionId>,
+    /// What is being readied for a chat about to start.
+    preparing: Option<Preparing>,
 }
 
 impl EventEmitter<WorkspaceChatsEvent> for WorkspaceChats {}
@@ -219,6 +234,7 @@ impl WorkspaceChats {
             unseen: Vec::new(),
             viewing: None,
             unread: HashSet::new(),
+            preparing: None,
         }
     }
 
@@ -514,9 +530,21 @@ impl WorkspaceChats {
     }
 
     /// What the chats are doing now.
+    /// Says what is being readied for a chat about to start (`None` once
+    /// it has started, or could not).
+    pub fn set_preparing(&mut self, preparing: Option<Preparing>, cx: &mut Context<Self>) {
+        self.preparing = preparing;
+        cx.notify();
+    }
+
+    pub fn preparing(&self) -> Option<&Preparing> {
+        self.preparing.as_ref()
+    }
+
     pub fn activity(&self, cx: &App) -> ChatsActivity {
         let mut activity = ChatsActivity {
             unseen: self.unseen.len(),
+            working: usize::from(self.preparing.is_some()),
             ..Default::default()
         };
         for kept in self.threads.values() {

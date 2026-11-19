@@ -244,7 +244,7 @@ impl LogcatView {
             }))
             .dropdown_caret(true)
             .tooltip("Only one app's lines")
-            .menu(gpui_kit::Anchor::TopLeft, move |menu, _, _| {
+            .menu(gpui_kit::Anchor::TopLeft, move |menu, window, _| {
                 let pick = |name: Option<String>| {
                     let view = view.clone();
                     move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut App| {
@@ -265,15 +265,16 @@ impl LogcatView {
                             .on_click(pick(None)),
                     )
                     .separator();
-                packages
-                    .iter()
-                    .fold(menu.scrollable(true).max_h(px(360.)), |menu, name| {
+                packages.iter().fold(
+                    menu.scrollable(true).max_h(ph_ui::scaled_px(360., window)),
+                    |menu, name| {
                         menu.item(
                             PopupMenuItem::new(name.clone())
                                 .checked(package.as_deref() == Some(name.as_str()))
                                 .on_click(pick(Some(name.clone()))),
                         )
-                    })
+                    },
+                )
             });
         h_flex()
             .flex_none()
@@ -423,7 +424,7 @@ impl LogcatView {
                     .child(
                         div()
                             .id("logcat-detail")
-                            .max_h(px(160.))
+                            .max_h(ph_ui::rems_from_px(160.))
                             .overflow_y_scroll()
                             .font_family(cx.theme().mono_font_family.clone())
                             .text_xs()
@@ -591,7 +592,7 @@ fn log_row(
     };
     h_flex()
         .id(("logcat-row", ix))
-        .h(px(ROW_HEIGHT))
+        .h(ph_ui::rems_from_px(ROW_HEIGHT))
         .px_2()
         .gap_2()
         .cursor_pointer()
@@ -606,7 +607,7 @@ fn log_row(
         .child(
             div()
                 .flex_none()
-                .w(px(86.))
+                .w(ph_ui::rems_from_px(86.))
                 .text_color(theme.muted_foreground)
                 .child(line.time.clone()),
         )
@@ -614,7 +615,7 @@ fn log_row(
         .child(
             div()
                 .flex_none()
-                .w(px(140.))
+                .w(ph_ui::rems_from_px(140.))
                 .truncate()
                 .text_color(tag_color(&line.tag, cx))
                 .child(line.tag.clone()),
@@ -638,7 +639,7 @@ fn level_badge(priority: Priority, cx: &App) -> impl IntoElement {
     let color = level_color(priority, cx);
     div()
         .flex_none()
-        .w(px(16.))
+        .w(ph_ui::rems_from_px(16.))
         .rounded(px(3.))
         .bg(color.opacity(0.18))
         .text_color(color)

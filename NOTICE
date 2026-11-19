@@ -16,6 +16,12 @@ This product bundles third-party works under their own licences:
 - Interface icons: from Lucide, ISC licence, embedded through the gpui-kit
   crates.
 
+- Fonts, crates/theme/fonts/: Inter by The Inter Project Authors
+  (crates/theme/fonts/inter/LICENSE.txt) and JetBrains Mono by The JetBrains
+  Mono Project Authors (its "NL" cut, without ligatures;
+  crates/theme/fonts/jetbrains-mono/OFL.txt), both under the SIL Open Font
+  License 1.1. The files are unchanged.
+
 - crates/ui/src/menu.rs is adapted from gpui-component's
   menu/dropdown_menu.rs, Apache License 2.0.
 

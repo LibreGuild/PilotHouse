@@ -479,10 +479,24 @@ impl Panes {
         let tool = Pane::Tool(column);
         let center = if open && tool.in_column() && tool.in_build() {
             let width = column_width(window, cx);
-            DockLayout::h_split().child(main, None).child(
-                DockLayout::tabs().panel_view(self.handle(tool), cx),
-                Some(width),
-            )
+            // Both sizes are given: with the chat's left open, the dock
+            // library keeps sizes of its own for the pair (a guess of 100
+            // for the open one) that differ from what it draws, and those
+            // are what a saved layout holds. After a restart the chat came
+            // back a sliver and the tool wide.
+            let area = self.area.read(cx).bounds().size.width;
+            let area = if area > width {
+                area
+            } else {
+                // Not laid out yet (a new screen).
+                main_width(window, cx)
+            };
+            DockLayout::h_split()
+                .child(main, Some((area - width).max(ph_theme::layout::CHAT_MIN)))
+                .child(
+                    DockLayout::tabs().panel_view(self.handle(tool), cx),
+                    Some(width),
+                )
         } else {
             main
         };
@@ -516,11 +530,12 @@ impl Panes {
         window: &mut Window,
         cx: &mut App,
     ) -> bool {
-        let Some(state) = saved.filter(|state| {
+        let Some(mut state) = saved.filter(|state| {
             matches!(state.version, Some(version) if version == 1 || version == LAYOUT_VERSION)
         }) else {
             return false;
         };
+        give_chat_room(&mut state.center);
         let from_v1 = state.version == Some(1);
         // Every pane the layout names must be one this build has.
         let known = |state: &PanelState| known_names(state);
@@ -853,32 +868,143 @@ fn bottom_height(window: &Window) -> gpui_kit::Pixels {
 /// width). Dragged wider or narrower, the column keeps that.
 const COLUMN_SHARE: f32 = 0.28;
 
+/// The room the panes share: the window less the sidebar and the two
+/// columns of icons (about; the sidebar may be hidden).
+fn main_width(window: &Window, cx: &gpui_kit::App) -> gpui_kit::Pixels {
+    let rails = ph_ui::scaled_px(
+        2. * crate::rail::width_px(crate::rail::labels(cx)) + 6.,
+        window,
+    );
+    (window.viewport_size().width - crate::sidebar::width(cx) - rails).max(gpui_kit::px(0.))
+}
+
 /// The tools column's width when it is made.
 fn column_width(window: &Window, cx: &gpui_kit::App) -> gpui_kit::Pixels {
-    let rail = gpui_kit::px(58.);
-    let main = window.viewport_size().width - crate::sidebar::width(cx) - rail;
-    (main * COLUMN_SHARE).clamp(gpui_kit::px(280.), gpui_kit::px(520.))
+    let main = main_width(window, cx);
+    // Never more than leaves the chat its least width; in a small window
+    // the tool gets what is left, down to a width its header still fits.
+    let most = (main - ph_theme::layout::CHAT_MIN).max(gpui_kit::px(240.));
+    (main * COLUMN_SHARE)
+        .clamp(gpui_kit::px(280.), gpui_kit::px(520.))
+        .min(most)
 }
 
 /// A new dock's width: the usual tool width, less when the window leaves
 /// the chat too little room.
 fn dock_size(window: &Window, cx: &gpui_kit::App) -> gpui_kit::Pixels {
     use ph_theme::layout;
-    let rail = gpui_kit::px(58.);
-    let available = window.viewport_size().width - crate::sidebar::width(cx) - rail;
+    let available = main_width(window, cx);
     (available - layout::CHAT_MIN)
         .min(layout::CONTEXT_PANEL_DEFAULT)
         .max(layout::CONTEXT_PANEL_MIN)
 }
 
-/// Whether every panel `state` names is a pane of this build (splits and
-/// tab groups hold panels; only a panel names one). A tool the brand leaves
-/// out is not one: a layout saved with it starts over.
+/// Whether `state` holds the chat's pane, however deep.
+fn holds_chat(state: &PanelState) -> bool {
+    state.panel_name == Pane::Chat.name() || state.children.iter().any(holds_chat)
+}
+
+/// Gives the pane with the chat its least width back in a saved layout
+/// that left it a sliver, taking the room from the panes beside it in
+/// proportion. Layouts saved before both sizes of the starting split were
+/// given (see [`Panes::set_default`]) held the chat at about a quarter of
+/// the width, and the dock keeps a pane at 100 pixels or more, so a drag
+/// can leave it too narrow to use as well.
+fn give_chat_room(state: &mut PanelState) {
+    use gpui_kit::base::dock::PanelInfo;
+    for child in &mut state.children {
+        give_chat_room(child);
+    }
+    let PanelInfo::Stack { sizes, axis: 0 } = &mut state.info else {
+        return;
+    };
+    let Some(chat) = state.children.iter().position(holds_chat) else {
+        return;
+    };
+    if sizes.len() != state.children.len() || sizes.len() < 2 {
+        return;
+    }
+    let least = f32::from(ph_theme::layout::CHAT_MIN);
+    let total: f32 = sizes.iter().map(|size| f32::from(*size)).sum();
+    let has = f32::from(sizes[chat]);
+    // Room for the others too, or the saved sizes stay (a small window).
+    let others_least = 160. * (sizes.len() - 1) as f32;
+    if has >= least || total < least + others_least {
+        return;
+    }
+    let others = total - has;
+    let scale = (total - least) / others;
+    for (ix, size) in sizes.iter_mut().enumerate() {
+        *size = gpui_kit::px(if ix == chat {
+            least
+        } else {
+            f32::from(*size) * scale
+        });
+    }
+}
+
 fn known_names(state: &PanelState) -> bool {
     match state.info {
         PanelInfo::Panel(_) => Pane::all()
             .filter(|pane| pane.in_build())
             .any(|pane| pane.name() == state.panel_name),
         PanelInfo::Stack { .. } | PanelInfo::Tabs { .. } => state.children.iter().all(known_names),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::base::dock::PanelInfo;
+    use gpui_kit::px;
+
+    fn tabs(names: &[&str]) -> PanelState {
+        PanelState {
+            panel_name: "TabPanel".into(),
+            children: names
+                .iter()
+                .map(|name| PanelState {
+                    panel_name: name.to_string(),
+                    children: Vec::new(),
+                    info: PanelInfo::Panel(serde_json::Value::Null),
+                })
+                .collect(),
+            info: PanelInfo::Tabs { active_index: 0 },
+        }
+    }
+
+    fn split(sizes: &[f32]) -> PanelState {
+        PanelState {
+            panel_name: "StackPanel".into(),
+            children: vec![
+                tabs(&[Pane::Chat.name(), Pane::Editor.name()]),
+                tabs(&["pilothouse.files"]),
+            ],
+            info: PanelInfo::Stack {
+                sizes: sizes.iter().map(|size| px(*size)).collect(),
+                axis: 0,
+            },
+        }
+    }
+
+    fn sizes(state: &PanelState) -> Vec<f32> {
+        match &state.info {
+            PanelInfo::Stack { sizes, .. } => sizes.iter().map(|size| f32::from(*size)).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_saved_sliver_of_a_chat_gets_its_room_back() {
+        // What a layout saved after "Reset layout" held.
+        let mut saved = split(&[212.9, 596.1]);
+        give_chat_room(&mut saved);
+        assert_eq!(sizes(&saved), vec![380., 429.]);
+        // A chat with room, and a window too small to help, stay as saved.
+        for kept in [[500., 309.], [200., 250.]] {
+            let mut saved = split(&kept);
+            give_chat_room(&mut saved);
+            assert_eq!(sizes(&saved), kept.to_vec());
+        }
     }
 }

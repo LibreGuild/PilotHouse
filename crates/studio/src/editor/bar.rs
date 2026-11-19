@@ -526,7 +526,7 @@ impl ImageEditor {
         h_flex()
             .flex_none()
             // Always two rows high, so the picture above never moves.
-            .h(px(92.))
+            .h(ph_ui::rems_from_px(92.))
             .content_center()
             .px_3()
             .py_2()
@@ -544,7 +544,7 @@ impl ImageEditor {
     fn knob(&self, knob: Knob, value: String, cx: &App) -> AnyElement {
         let theme = cx.theme();
         v_flex()
-            .w(px(140.))
+            .w(ph_ui::rems_from_px(140.))
             .gap_0p5()
             .child(
                 h_flex()
@@ -598,7 +598,7 @@ impl ImageEditor {
                 let alignment = align_buttons(*align, Rc::new(pick));
                 items.push(
                     div()
-                        .w(px(220.))
+                        .w(ph_ui::rems_from_px(220.))
                         .child(Textarea::new(&self.controls.text).small())
                         .into_any_element(),
                 );
@@ -899,7 +899,7 @@ impl ImageEditor {
                 .items_center()
                 .child(
                     div()
-                        .w(px(84.))
+                        .w(ph_ui::rems_from_px(84.))
                         .child(Input::new(&self.controls.width).small()),
                 )
                 .child(
@@ -919,7 +919,7 @@ impl ImageEditor {
                 )
                 .child(
                     div()
-                        .w(px(84.))
+                        .w(ph_ui::rems_from_px(84.))
                         .child(Input::new(&self.controls.height).small()),
                 )
                 .child(
@@ -999,7 +999,7 @@ impl ImageEditor {
                     };
                     div()
                         .id(("studio-background", ix))
-                        .size(px(22.))
+                        .size(ph_ui::rems_from_px(22.))
                         .rounded(px(6.))
                         .p(px(2.))
                         .border_2()
@@ -1109,7 +1109,7 @@ pub(crate) fn swatches(chosen: Color, pick: Pick) -> AnyElement {
             let (color, pick) = (*color, pick.clone());
             div()
                 .id(("studio-swatch", ix))
-                .size(px(22.))
+                .size(ph_ui::rems_from_px(22.))
                 .rounded_full()
                 .p(px(2.))
                 .border_2()

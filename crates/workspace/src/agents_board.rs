@@ -6,7 +6,7 @@
 //! It reads the chats each workspace keeps loaded ([`ph_agent::ChatHub`]),
 //! so it shows what is live in this run of PilotHouse, not old history.
 
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, spinner::Spinner, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
@@ -17,7 +17,7 @@ use ph_store::projects::ProjectId;
 use ph_store::sessions::SessionId;
 use ph_ui::{EmptyState, Icons};
 
-use crate::workspace::Workspace;
+use crate::workspace::{View, Workspace};
 
 /// Most cards in the quiet *Recent* column.
 const RECENT: usize = 8;
@@ -28,6 +28,8 @@ pub(crate) enum Target {
     Chat(SessionId),
     /// An agent CLI in a terminal (its pane id).
     Terminal(String),
+    /// A chat about to start, while what it needs is readied (a clone).
+    Preparing,
 }
 
 /// One chat, or agent in a terminal, on the board.
@@ -102,6 +104,29 @@ pub(crate) fn cards(workspace: &Workspace, cx: &App) -> Vec<Card> {
             let Some(chats) = ph_agent::ChatHub::existing(*project, cx) else {
                 continue;
             };
+            // A review whose repository is still being cloned is at work
+            // already, to whoever asked for it.
+            if let Some(preparing) = chats.read(cx).preparing() {
+                cards.push(Card {
+                    project: *project,
+                    github: true,
+                    target: Target::Preparing,
+                    title: preparing.title.to_string(),
+                    place: format!("GitHub · {name}"),
+                    color: None,
+                    updated_at: i64::MAX,
+                    summary: ChatSummary {
+                        state: ChatState::Working,
+                        title: preparing.title.clone(),
+                        agent: ph_agent::chats::default_agent(store),
+                        line: Some(format!(
+                            "{} {}s",
+                            preparing.label,
+                            preparing.since.elapsed().as_secs()
+                        )),
+                    },
+                });
+            }
             for (session, summary) in chats.read(cx).live(cx) {
                 let Some(stored) = store.session(session).ok().flatten() else {
                     continue;
@@ -235,7 +260,7 @@ pub(crate) fn popup(
         .any(|card| card.summary.state != ChatState::Idle);
     let body = if cards.is_empty() || !busy && cards.len() < 2 {
         div()
-            .h(px(200.))
+            .h(ph_ui::rems_from_px(200.))
             .child(
                 EmptyState::new("No agents at work")
                     .icon(Icons::Bot)
@@ -285,6 +310,10 @@ pub(crate) fn popup(
                                     }
                                     Target::Terminal(pane) => workspace
                                         .open_terminal_agent(project, pane, false, window, cx),
+                                    // Its chat is beside the pull request.
+                                    Target::Preparing => {
+                                        workspace.set_view(View::GitHub, window, cx)
+                                    }
                                 }
                             });
                         })
@@ -304,7 +333,7 @@ pub(crate) fn popup(
     };
     v_flex()
         .id("agents-popup")
-        .w(px(400.))
+        .w(ph_ui::rems_from_px(400.))
         .gap_3()
         .child(
             div()
@@ -324,14 +353,17 @@ fn card_view(card: &Card, cx: &App) -> gpui_kit::Stateful<gpui_kit::Div> {
     let (glyph, edge): (AnyElement, Hsla) = match state {
         ChatState::NeedsYou => (question_mark(cx), theme.warning.opacity(0.45)),
         ChatState::Working => (
-            Spinner::new().xsmall().color(theme.info).into_any_element(),
+            ph_ui::Loader::new()
+                .xsmall()
+                .color(theme.info)
+                .into_any_element(),
             theme.border,
         ),
         ChatState::Failed => (dot(theme.danger), theme.border),
         ChatState::Done => (dot(theme.success), theme.border),
         ChatState::Idle => (
             Icon::new(Icons::MessageSquare)
-                .size(px(14.))
+                .size(ph_ui::rems_from_px(14.))
                 .text_color(theme.muted_foreground)
                 .into_any_element(),
             theme.border,
@@ -346,6 +378,7 @@ fn card_view(card: &Card, cx: &App) -> gpui_kit::Stateful<gpui_kit::Div> {
         .id(SharedString::from(match &card.target {
             Target::Chat(session) => format!("agents-card-{session}"),
             Target::Terminal(pane) => format!("agents-card-{pane}"),
+            Target::Preparing => format!("agents-card-preparing-{}", card.project),
         }))
         .p_3()
         .gap_1p5()
@@ -362,7 +395,7 @@ fn card_view(card: &Card, cx: &App) -> gpui_kit::Stateful<gpui_kit::Div> {
                 .child(
                     div()
                         .flex_none()
-                        .size(px(14.))
+                        .size(ph_ui::rems_from_px(14.))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -389,13 +422,16 @@ fn card_view(card: &Card, cx: &App) -> gpui_kit::Stateful<gpui_kit::Div> {
                 .gap_1p5()
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .children(
-                    card.color
-                        .map(|color| div().flex_none().size(px(7.)).rounded_full().bg(color)),
-                )
+                .children(card.color.map(|color| {
+                    div()
+                        .flex_none()
+                        .size(ph_ui::rems_from_px(7.))
+                        .rounded_full()
+                        .bg(color)
+                }))
                 .child(div().truncate().child(card.place.clone()))
                 .child("·")
-                .child(card.summary.agent.mark(px(12.)))
+                .child(card.summary.agent.mark(ph_ui::rems_from_px(12.)))
                 .child(div().truncate().child(card.summary.agent.name)),
         )
         .when_some(
@@ -415,11 +451,11 @@ fn card_view(card: &Card, cx: &App) -> gpui_kit::Stateful<gpui_kit::Div> {
 /// Amber, with a question mark: the agent waits for an answer.
 pub(crate) fn question_mark(cx: &App) -> AnyElement {
     div()
-        .size(px(12.))
+        .size(ph_ui::rems_from_px(12.))
         .rounded_full()
         .bg(cx.theme().warning)
         .text_color(cx.theme().warning_foreground)
-        .text_size(px(9.))
+        .text_size(ph_ui::rems_from_px(9.))
         .font_weight(gpui_kit::FontWeight::BOLD)
         .flex()
         .items_center()
@@ -430,7 +466,7 @@ pub(crate) fn question_mark(cx: &App) -> AnyElement {
 
 fn dot(color: Hsla) -> AnyElement {
     div()
-        .size(px(8.))
+        .size(ph_ui::rems_from_px(8.))
         .rounded_full()
         .bg(color)
         .into_any_element()

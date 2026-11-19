@@ -257,6 +257,16 @@ pub struct ChatPanel {
     terminal_session: Option<terminal_session::TerminalSession>,
     /// Something readying the chat (a clone), or why it failed.
     busy: Option<SharedString>,
+    /// What the chat being readied is for, and since when it is.
+    busy_title: Option<SharedString>,
+    busy_since: Option<std::time::Instant>,
+    _busy_tick: Option<Task<()>>,
+    /// The pane is narrow: the empty chat's starters stack in one column.
+    narrow: bool,
+    /// Whoever shows this panel can run an agent's CLI in a terminal (a
+    /// workspace's screen; not the quick chat or a Studio window), so the
+    /// offer to do so is worth making.
+    runs_terminals: bool,
     /// The shared Chrome tabs are being read (`@tabs`): the message waits
     /// for them, so it does not go without them.
     reading_tabs: bool,
@@ -353,6 +363,11 @@ impl ChatPanel {
             terminal_session: None,
             context: None,
             busy: None,
+            busy_title: None,
+            busy_since: None,
+            _busy_tick: None,
+            narrow: false,
+            runs_terminals: false,
             reading_tabs: false,
             tabs_attached: false,
             subagents_open: false,
@@ -375,6 +390,15 @@ impl ChatPanel {
             _active_subscriptions: Vec::new(),
         };
         panel.watch_active(cx);
+        // Closed while a chat is being readied (its window, during a
+        // clone): the workspace must not count that as work for good.
+        cx.on_release(|this, cx| {
+            if this.busy.is_some() {
+                this.chats
+                    .update(cx, |chats, cx| chats.set_preparing(None, cx));
+            }
+        })
+        .detach();
         panel
     }
 
@@ -491,6 +515,11 @@ impl ChatPanel {
         }
     }
 
+    /// Says that [`ChatPanelEvent::ResumeInTerminal`] is acted on here.
+    pub fn set_runs_terminals(&mut self, on: bool) {
+        self.runs_terminals = on;
+    }
+
     /// Makes this panel the chat about something (`None`: a plain chat).
     /// A draft in view moves to the context's folder.
     pub fn set_context(
@@ -507,9 +536,15 @@ impl ChatPanel {
             composer.set_placeholder(placeholder, window, cx)
         });
         self.context = context;
-        self.busy = None;
+        // What the panel itself was readying for the old context ends with
+        // it. What its owner readies goes on, and the owner says when it is
+        // done (`start_review_turn`, `set_failed`): a review asked for a
+        // pull request not yet open here sets its "Cloning…" first and has
+        // the pull request attached (this call) after.
+        if self._prepare.take().is_some() {
+            self.clear_busy(cx);
+        }
         self.failed = None;
-        self._prepare = None;
         if !self.active.read(cx).has_started() {
             self.set_session(None, cx);
         }
@@ -519,14 +554,66 @@ impl ChatPanel {
     /// Shows `label` over the composer while the owner readies something
     /// for this chat (`None` when done).
     pub fn set_busy(&mut self, label: Option<String>, cx: &mut Context<Self>) {
-        self.busy = label.map(Into::into);
+        match label {
+            Some(label) => self.mark_busy(None, label, cx),
+            None => self.clear_busy(cx),
+        }
         self.failed = None;
         cx.notify();
     }
 
+    /// As [`Self::set_busy`], naming what the chat about to start is for
+    /// (`Review of #42`): the chat shows it as a run that has begun, its
+    /// first step the readying, and the workspace counts it as work.
+    pub fn set_preparing(&mut self, title: String, label: String, cx: &mut Context<Self>) {
+        self.mark_busy(Some(title), label, cx);
+        self.failed = None;
+        cx.notify();
+    }
+
+    fn mark_busy(&mut self, title: Option<String>, label: String, cx: &mut Context<Self>) {
+        let label: SharedString = label.into();
+        let since = std::time::Instant::now();
+        self.busy = Some(label.clone());
+        self.busy_title = title.map(Into::into);
+        self.busy_since = Some(since);
+        let preparing = crate::chats::Preparing {
+            title: self
+                .busy_title
+                .clone()
+                .unwrap_or_else(|| "Getting a chat ready".into()),
+            label,
+            since,
+        };
+        self.chats
+            .update(cx, |chats, cx| chats.set_preparing(Some(preparing), cx));
+        // The time it has taken shows, counted each second.
+        self._busy_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+
+    fn clear_busy(&mut self, cx: &mut Context<Self>) {
+        if self.busy.take().is_none() {
+            return;
+        }
+        self.busy_title = None;
+        self.busy_since = None;
+        self._busy_tick = None;
+        self.chats
+            .update(cx, |chats, cx| chats.set_preparing(None, cx));
+    }
+
     /// Says why readying the chat failed.
     pub fn set_failed(&mut self, reason: String, cx: &mut Context<Self>) {
-        self.busy = None;
+        self.clear_busy(cx);
         self.failed = Some(reason.into());
         cx.notify();
     }
@@ -592,7 +679,7 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.busy = None;
+        self.clear_busy(cx);
         self.failed = None;
         self.set_session(None, cx);
         let agent = self.active.read(cx).agent();
@@ -670,7 +757,7 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.busy = None;
+        self.clear_busy(cx);
         self.failed = None;
         let agent = agent.unwrap_or_else(|| default_agent(&self.store));
         let store = self.store.clone();
@@ -1069,13 +1156,14 @@ impl ChatPanel {
                 .as_ref()
                 .and_then(|context| context.prepare.clone())
         {
-            self.busy = Some(prepare.label.clone().into());
+            let title = self.context.as_ref().map(|context| context.title.clone());
+            self.mark_busy(title, prepare.label.clone(), cx);
             self.failed = None;
             let task = (prepare.run)(cx);
             self._prepare = Some(cx.spawn_in(window, async move |this, cx| {
                 let result = task.await;
                 _ = this.update_in(cx, |this, window, cx| {
-                    this.busy = None;
+                    this.clear_busy(cx);
                     match result {
                         Ok(()) => {
                             // A fresh draft: one warmed up before the folder

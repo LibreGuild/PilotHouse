@@ -1622,7 +1622,7 @@ impl VideoEditor {
                     }),
                 )
                 .item(
-                    PopupMenuItem::new("Save this frame…").on_click(move |_, window, cx| {
+                    PopupMenuItem::new("Save this frame").on_click(move |_, window, cx| {
                         _ = save.update(cx, |this, cx| this.save_frame(window, cx));
                     }),
                 )
@@ -1650,8 +1650,8 @@ impl VideoEditor {
                     .gap_1()
                     .child(
                         div()
-                            .w(px(120.))
-                            .h(px(6.))
+                            .w(ph_ui::rems_from_px(120.))
+                            .h(ph_ui::rems_from_px(6.))
                             .rounded_full()
                             .bg(cx.theme().muted)
                             .child(
@@ -1659,10 +1659,15 @@ impl VideoEditor {
                                     .h_full()
                                     .rounded_full()
                                     .bg(cx.theme().primary)
-                                    .w(px(120. * job.progress.fraction())),
+                                    .w(ph_ui::rems_from_px(120. * job.progress.fraction())),
                             ),
                     )
-                    .child(div().text_xs().w(px(34.)).child(format!("{percent}%")))
+                    .child(
+                        div()
+                            .text_xs()
+                            .w(ph_ui::rems_from_px(34.))
+                            .child(format!("{percent}%")),
+                    )
                     .child(
                         Button::new("video-export-cancel")
                             .ghost()
@@ -1678,7 +1683,7 @@ impl VideoEditor {
                 .primary()
                 .small()
                 .icon(Icons::Download)
-                .label("Export…")
+                .label("Export")
                 .disabled(!ready)
                 .tooltip(if cfg!(target_os = "macos") {
                     "Write the result as a new file (⌘S)"
@@ -1722,7 +1727,7 @@ impl VideoEditor {
         let current = self.tool;
         v_flex()
             .flex_none()
-            .w(px(44.))
+            .w(ph_ui::rems_from_px(44.))
             .h_full()
             .py_2()
             .gap_0p5()
@@ -1734,7 +1739,7 @@ impl VideoEditor {
                 match tool {
                     None => div()
                         .my_1()
-                        .w(px(20.))
+                        .w(ph_ui::rems_from_px(20.))
                         .h(px(1.))
                         .bg(theme.border)
                         .into_any_element(),

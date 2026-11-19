@@ -17,13 +17,12 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::PopupMenuItem,
-    spinner::Spinner,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Task, Window, div, px,
+    SharedString, Styled as _, Task, Window, div,
 };
 use ph_ui::Icons;
 use ph_ui::MenuButton as _;
@@ -487,7 +486,7 @@ impl AndroidRun {
             .gap_1p5()
             .text_xs()
             .text_color(color)
-            .when(spinning, |this| this.child(Spinner::new().xsmall()))
+            .when(spinning, |this| this.child(ph_ui::Loader::new().xsmall()))
             .child(div().min_w_0().truncate().child(text))
     }
 
@@ -538,10 +537,10 @@ impl AndroidRun {
                 .label(chosen_label)
                 .dropdown_caret(true)
                 .tooltip("Build variant")
-                .menu(gpui_kit::Anchor::TopLeft, move |menu, _, _| {
-                    variants
-                        .iter()
-                        .fold(menu.scrollable(true).max_h(px(360.)), |menu, name| {
+                .menu(gpui_kit::Anchor::TopLeft, move |menu, window, _| {
+                    variants.iter().fold(
+                        menu.scrollable(true).max_h(ph_ui::scaled_px(360., window)),
+                        |menu, name| {
                             let this = this.clone();
                             let picked = name.clone();
                             menu.item(
@@ -556,7 +555,8 @@ impl AndroidRun {
                                         });
                                     }),
                             )
-                        })
+                        },
+                    )
                 })
         };
         let manager = self.manager.read(cx);

@@ -28,7 +28,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, WeakEntity, Window, div, px,
+    Subscription, WeakEntity, Window, div,
 };
 use jiff::{ToSpan as _, Zoned};
 use ph_store::projects::ProjectId;
@@ -538,7 +538,7 @@ impl InboxView {
                 .fold(menu, |menu, remind| {
                     pick(menu, remind.label(), Some(remind))
                 });
-                let menu = pick(menu.separator(), "Pick a time…", None);
+                let menu = pick(menu.separator(), "Pick a time", None);
                 pick(menu, "No reminder", Some(Remind::Never))
             });
         let can_add = !self.new_todo.read(cx).value().trim().is_empty();
@@ -628,7 +628,7 @@ impl InboxView {
             .child(
                 v_flex()
                     .id("todos-list")
-                    .max_h(px(320.))
+                    .max_h(ph_ui::rems_from_px(320.))
                     .overflow_y_scroll()
                     .children(rows),
             )
@@ -694,7 +694,7 @@ impl Render for InboxView {
                 .test_support()
         };
         v_flex()
-            .w(px(400.))
+            .w(ph_ui::rems_from_px(400.))
             .gap_3()
             .p_2()
             .child(

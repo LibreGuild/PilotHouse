@@ -385,7 +385,7 @@ impl VideoEditor {
                         )),
                 )
             })
-            .child(div().w(px(8.)))
+            .child(div().w(ph_ui::rems_from_px(8.)))
             .child(
                 Button::new("video-split")
                     .ghost()
@@ -963,7 +963,7 @@ impl VideoEditor {
     fn knob(&self, knob: Knob, value: String, cx: &App) -> AnyElement {
         let theme = cx.theme();
         v_flex()
-            .w(px(140.))
+            .w(ph_ui::rems_from_px(140.))
             .gap_0p5()
             .child(
                 h_flex()
@@ -1025,7 +1025,7 @@ impl VideoEditor {
         h_flex()
             .flex_none()
             // Always two rows high, so the picture above never moves.
-            .h(px(BAR_HEIGHT))
+            .h(ph_ui::rems_from_px(BAR_HEIGHT))
             .content_center()
             .px_3()
             .py_2()
@@ -1126,7 +1126,7 @@ impl VideoEditor {
         {
             items.push(
                 div()
-                    .w(px(200.))
+                    .w(ph_ui::rems_from_px(200.))
                     .child(Textarea::new(&self.controls.text).small())
                     .into_any_element(),
             );
@@ -1416,11 +1416,11 @@ impl VideoEditor {
             return;
         }
         let editor = cx.entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let start = editor.clone();
             dialog
                 .title("Export")
-                .w(px(440.))
+                .w(ph_ui::scaled_px(440., window))
                 .child(export_body(&editor, cx))
                 .footer(
                     DialogFooter::new()
@@ -1436,7 +1436,7 @@ impl VideoEditor {
                             Button::new("video-export-go")
                                 .primary()
                                 .icon(Icons::Download)
-                                .label("Export…")
+                                .label("Export")
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
                                     start.update(cx, |editor, cx| editor.export_to(window, cx));
@@ -1506,7 +1506,7 @@ fn export_body(editor: &Entity<VideoEditor>, cx: &mut App) -> AnyElement {
                     })
             }))
     };
-    let label = |text: &'static str| div().w(px(80.)).text_sm().child(text);
+    let label = |text: &'static str| div().w(ph_ui::rems_from_px(80.)).text_sm().child(text);
     let gif = export.format == VideoFormat::Gif;
     let estimate = match plan.estimate(export.format) {
         Some(bytes) => format!(
@@ -1542,7 +1542,11 @@ fn export_body(editor: &Entity<VideoEditor>, cx: &mut App) -> AnyElement {
             h_flex()
                 .gap_2()
                 .child(label("At most"))
-                .child(div().w(px(80.)).child(Input::new(&limit).small()))
+                .child(
+                    div()
+                        .w(ph_ui::rems_from_px(80.))
+                        .child(Input::new(&limit).small()),
+                )
                 .child(
                     div()
                         .text_sm()

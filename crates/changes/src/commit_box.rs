@@ -11,7 +11,6 @@ use gpui_kit::component::{
     h_flex,
     input::{Textarea, TextareaState},
     notification::Notification,
-    spinner::Spinner,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -244,17 +243,22 @@ impl Render for CommitBox {
             .border_color(cx.theme().border)
             .child(Textarea::new(&self.message).small())
             .child(
+                // In a narrow column the buttons go to a line of their own,
+                // still at the right, rather than past the panel's edge.
                 h_flex()
+                    .flex_wrap()
+                    .justify_end()
                     .gap_2()
                     .child(
-                        Checkbox::new("commit-amend")
-                            .label("Amend")
-                            .checked(self.amend)
-                            .on_click(cx.listener(|this, checked: &bool, window, cx| {
-                                this.toggle_amend(*checked, window, cx)
-                            })),
+                        div().mr_auto().child(
+                            Checkbox::new("commit-amend")
+                                .label("Amend")
+                                .checked(self.amend)
+                                .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                                    this.toggle_amend(*checked, window, cx)
+                                })),
+                        ),
                     )
-                    .child(div().flex_1())
                     .when(self.writer.is_some(), |this| {
                         this.child(
                             Button::new("write-commit-message")
@@ -281,7 +285,15 @@ impl Render for CommitBox {
                         Button::new("commit")
                             .small()
                             .primary()
-                            .when(self.committing, |this| this.child(Spinner::new().xsmall()))
+                            // In the label's colour: the mark's own (the accent) is the
+                            // button's fill.
+                            .when(self.committing, |this| {
+                                this.child(
+                                    ph_ui::Loader::new()
+                                        .xsmall()
+                                        .color(cx.theme().primary_foreground),
+                                )
+                            })
                             .label(if self.amend {
                                 "Amend commit"
                             } else if commit_all {
@@ -314,7 +326,7 @@ impl Render for CommitBox {
                             }),
                     )
                     .children(staged.into_iter().enumerate().map(|(ix, path)| {
-                        let icon = ph_ui::file_icon_element(&path, gpui_kit::px(14.));
+                        let icon = ph_ui::file_icon_element(&path, ph_ui::rems_from_px(14.));
                         let unstage = path.clone();
                         h_flex()
                             .id(("staged", ix))

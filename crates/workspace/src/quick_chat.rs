@@ -239,7 +239,7 @@ impl gpui_kit::RenderOnce for ShortcutRecorder {
         let field = div()
             .id("quick-chat-shortcut")
             .track_focus(&focus)
-            .min_w(px(140.))
+            .min_w(ph_ui::rems_from_px(140.))
             .px_3()
             .py_1()
             .rounded(theme.radius)
@@ -339,7 +339,7 @@ impl gpui_kit::RenderOnce for ShortcutRecorder {
             )
             .children(error.or(problem.as_deref().map(|_| "")).map(|_| {
                 div()
-                    .max_w(px(360.))
+                    .max_w(ph_ui::rems_from_px(360.))
                     .text_xs()
                     .text_color(theme.warning)
                     .child(

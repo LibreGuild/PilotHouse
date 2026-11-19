@@ -10,7 +10,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,7 +108,7 @@ impl Render for EnvPreview {
                     .text_sm()
                     .child(
                         div()
-                            .w(px(220.))
+                            .w(ph_ui::rems_from_px(220.))
                             .flex_none()
                             .truncate()
                             .text_color(theme.foreground)

@@ -125,9 +125,7 @@ impl WorkspaceScreen {
     /// tooltips (or under them, in Settings).
     pub(super) fn render_tool_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let space = cx.entity();
-        let labels = cx
-            .try_global::<ph_theme::Preferences>()
-            .is_some_and(|preferences| preferences.tool_labels);
+        let labels = crate::rail::labels(cx);
         let changes = self
             .changes
             .get(&self.git_folder)
@@ -158,105 +156,36 @@ impl WorkspaceScreen {
                 })
         });
         let first_bottom_seen = std::cell::Cell::new(false);
-        v_flex()
-            .id("context-tabs")
-            .flex_none()
-            .w(tool_rail_width(labels))
-            .h_full()
-            .py_1()
-            .gap_0p5()
-            .items_center()
-            .children(shown_tabs.into_iter().enumerate().flat_map(|(ix, tab)| {
-                // A line between the column's tools and the bottom panel's.
-                let divider = (tab.in_bottom_panel() && ix > 0 && !first_bottom_seen.replace(true))
-                    .then(|| {
-                        div()
-                            .flex_none()
-                            .w(px(20.))
-                            .h_px()
-                            .my_1()
-                            .bg(cx.theme().border)
-                            .into_any_element()
-                    });
-                let selected = self.shown.contains(&Pane::Tool(tab));
-                let space = space.clone();
-                let badge = (tab == ContextTab::Changes && changes > 0).then(|| {
+        let items = shown_tabs.into_iter().enumerate().flat_map(|(ix, tab)| {
+            // A line between the column's tools and the bottom panel's.
+            let divider = (tab.in_bottom_panel() && ix > 0 && !first_bottom_seen.replace(true))
+                .then(|| {
                     div()
-                        .absolute()
-                        .top(px(3.))
-                        .right(px(3.))
-                        .min_w(px(14.))
-                        .h(px(14.))
-                        .px(px(3.))
-                        .rounded_full()
-                        .bg(cx.theme().secondary_active)
-                        .text_color(cx.theme().foreground)
-                        .text_size(px(9.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(if changes > 99 {
-                            "99+".to_string()
-                        } else {
-                            changes.to_string()
-                        })
+                        .flex_none()
+                        .w(ph_ui::rems_from_px(20.))
+                        .h_px()
+                        .my_1()
+                        .bg(cx.theme().border)
+                        .into_any_element()
                 });
-                let hint = tab_shortcut(tab);
-                let item = v_flex()
-                    .id(SharedString::from(format!("context-tab-{}", tab.key())))
-                    .role(gpui_kit::accesskit::Role::Tab)
-                    .aria_label(tab.label())
-                    .relative()
-                    .w(tool_rail_width(labels) - px(6.))
-                    .when(labels, |this| this.py_1p5().gap_1())
-                    .when(!labels, |this| this.h(px(34.)))
-                    .items_center()
-                    .justify_center()
-                    .rounded(cx.theme().radius)
-                    .cursor_pointer()
-                    .text_color(if selected {
-                        cx.theme().foreground
-                    } else {
-                        cx.theme().muted_foreground
-                    })
-                    .when(selected, |this| this.bg(cx.theme().secondary_hover))
-                    .when(!selected, |this| {
-                        this.hover(|style| {
-                            style
-                                .bg(cx.theme().secondary_hover)
-                                .text_color(cx.theme().foreground)
-                        })
-                    })
-                    .when(!labels, |this| {
-                        let label = match &hint {
-                            Some(hint) => format!("{} ({hint})", tab.label()),
-                            None => tab.label().to_string(),
-                        };
-                        this.tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(label.clone())
-                                .build(window, cx)
-                        })
-                    })
-                    .on_click(move |_, window, cx| {
-                        space.update(cx, |space, cx| space.show_tab(tab, window, cx))
-                    })
-                    .child(Icon::new(tab.icon()).size(px(18.)))
-                    .when(labels, |this| {
-                        this.child(
-                            div()
-                                .text_size(px(10.))
-                                .when(selected, |this| {
-                                    this.font_weight(gpui_kit::FontWeight::MEDIUM)
-                                })
-                                .child(tab.label()),
-                        )
-                    })
-                    .children(badge)
-                    // Findable by label in UI tests and automation.
-                    .test_support()
-                    .into_any_element();
-                divider.into_iter().chain(std::iter::once(item))
-            }))
+            let space = space.clone();
+            let item = crate::rail::Item {
+                id: SharedString::from(format!("context-tab-{}", tab.key())),
+                label: tab.label().into(),
+                icon: Icon::new(tab.icon()),
+                hint: tab_shortcut(tab),
+                selected: self.shown.contains(&Pane::Tool(tab)),
+                badge: (tab == ContextTab::Changes && changes > 0)
+                    .then(|| crate::rail::count_badge(changes, None, cx)),
+            }
+            .render(
+                labels,
+                move |window, cx| space.update(cx, |space, cx| space.show_tab(tab, window, cx)),
+                cx,
+            );
+            divider.into_iter().chain(std::iter::once(item))
+        });
+        crate::rail::column("context-tabs", labels, items.collect::<Vec<_>>())
             .children(more_menu)
             .into_any_element()
     }
@@ -386,27 +315,21 @@ impl Render for WorkspaceScreen {
         if std::mem::take(&mut self.reveal_pending) {
             self.panes.show(Pane::Chat, window, cx);
         }
-        // The panes sit on a rounded card between the sidebar and the tool
-        // rail, set off from the window's chrome.
+        // The panes are an island between the list and the tools' column,
+        // which is part of the window's frame (`frame`).
         h_flex()
             .size_full()
-            .pr_1()
-            .pb_2()
             .items_stretch()
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .child(ph_ui::Surface::new().child(self.panes.area.clone())),
+                    .pb(crate::frame::gap())
+                    .child(crate::frame::island(window, cx).child(self.panes.area.clone())),
             )
             .child(self.render_tool_rail(cx))
     }
-}
-
-/// The tool icons' column: icons alone, or wider with their names.
-pub(super) fn tool_rail_width(labels: bool) -> gpui_kit::Pixels {
-    if labels { px(64.) } else { px(42.) }
 }
 
 /// The shortcut that shows `tab` (see `actions::bind_keys`), if it has one.

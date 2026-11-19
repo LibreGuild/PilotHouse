@@ -245,7 +245,7 @@ impl ChromeExtensionView {
                             Button::new(("workflow-schedule", id))
                                 .small()
                                 .ghost()
-                                .label("Schedule…")
+                                .label("Schedule")
                                 .tooltip("A schedule runs it with an agent and reports what it saw")
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.use_workflow(&schedule, WorkflowUse::Schedule, window, cx)

@@ -7,9 +7,7 @@ use gpui_kit::component::{
     input::{Textarea, TextareaState},
     v_flex,
 };
-use gpui_kit::{
-    App, AppContext as _, ParentElement as _, Styled as _, WeakEntity, Window, div, px,
-};
+use gpui_kit::{App, AppContext as _, ParentElement as _, Styled as _, WeakEntity, Window, div};
 
 use crate::BoardPanel;
 
@@ -25,12 +23,12 @@ pub(crate) fn open(board: WeakEntity<BoardPanel>, window: &mut Window, cx: &mut 
         focus.update(cx, |goal, cx| goal.focus(window, cx))
     });
 
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let send_goal = goal.clone();
         let board = board.clone();
         dialog
             .title("Plan with agent")
-            .w(px(560.))
+            .w(ph_ui::scaled_px(560., window))
             .child(
                 v_flex()
                     .gap_2()

@@ -167,7 +167,7 @@ pub(crate) fn new_dialog(window: &mut Window, cx: &mut App) {
             let choice = choice.clone();
             v_flex()
                 .id(SharedString::from(format!("new-theme-{id}")))
-                .w(px(150.))
+                .w(ph_ui::rems_from_px(150.))
                 .gap_1()
                 .cursor_pointer()
                 .on_click(move |_, window, _| {
@@ -176,8 +176,8 @@ pub(crate) fn new_dialog(window: &mut Window, cx: &mut App) {
                 })
                 .child(
                     div()
-                        .w(px(150.))
-                        .h(px(150. * 9. / 16.))
+                        .w(ph_ui::rems_from_px(150.))
+                        .h(ph_ui::rems_from_px(150. * 9. / 16.))
                         .rounded(px(4.))
                         .overflow_hidden()
                         .border_2()
@@ -231,7 +231,7 @@ pub(crate) fn new_dialog(window: &mut Window, cx: &mut App) {
         };
         dialog
             .title("New presentation")
-            .w(px(720.))
+            .w(ph_ui::scaled_px(720., window))
             .child(
                 v_flex()
                     .gap_3()
@@ -242,7 +242,7 @@ pub(crate) fn new_dialog(window: &mut Window, cx: &mut App) {
                     .child(
                         div()
                             .id("new-themes")
-                            .max_h(px(300.))
+                            .max_h(ph_ui::rems_from_px(300.))
                             .overflow_y_scroll()
                             .child(div().flex().flex_wrap().gap_3().children(cards)),
                     )
@@ -375,7 +375,7 @@ pub(crate) fn open_dialog(window: &mut Window, cx: &mut App) {
                 }
             }),
         );
-    window.open_dialog(cx, move |dialog, _, cx| {
+    window.open_dialog(cx, move |dialog, window, cx| {
         let _keep = &watch;
         let theme = cx.theme().clone();
         let query = search.read(cx).value().trim().to_lowercase();
@@ -398,7 +398,7 @@ pub(crate) fn open_dialog(window: &mut Window, cx: &mut App) {
                     .unwrap_or_default();
                 v_flex()
                     .id(("open-presentation", ix))
-                    .w(px(176.))
+                    .w(ph_ui::rems_from_px(176.))
                     .gap_1()
                     .p_1()
                     .rounded(px(6.))
@@ -410,8 +410,8 @@ pub(crate) fn open_dialog(window: &mut Window, cx: &mut App) {
                     })
                     .child(
                         div()
-                            .w(px(168.))
-                            .h(px(168. * 9. / 16.))
+                            .w(ph_ui::rems_from_px(168.))
+                            .h(ph_ui::rems_from_px(168. * 9. / 16.))
                             .rounded(px(4.))
                             .overflow_hidden()
                             .border_1()
@@ -440,12 +440,12 @@ pub(crate) fn open_dialog(window: &mut Window, cx: &mut App) {
         let empty = all.is_empty();
         dialog
             .title("Open presentation")
-            .w(px(780.))
+            .w(ph_ui::scaled_px(780., window))
             .child(
                 v_flex().gap_3().child(Input::new(&search)).child(
                     div()
                         .id("open-presentations")
-                        .max_h(px(440.))
+                        .max_h(ph_ui::rems_from_px(440.))
                         .overflow_y_scroll()
                         .when(empty, |this| {
                             this.child(
@@ -466,7 +466,7 @@ pub(crate) fn open_dialog(window: &mut Window, cx: &mut App) {
                         Button::new("open-pptx")
                             .ghost()
                             .icon(Icons::FolderOpen)
-                            .label("Open a PowerPoint file…")
+                            .label("Open a PowerPoint file")
                             .on_click(|_, window, cx| {
                                 window.close_dialog(cx);
                                 pick_pptx(window, cx);

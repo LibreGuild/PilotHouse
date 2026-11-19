@@ -4,14 +4,13 @@
 
 use std::collections::HashMap;
 
-use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
+    WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState, Textarea, TextareaState},
     notification::Notification,
-    spinner::Spinner,
     text::{TextView, TextViewState},
     v_flex,
 };
@@ -26,7 +25,7 @@ use ph_github::models::{
     Check, Commit, IssueComment, PullFile, PullRequest, Review, ReviewComment,
 };
 use ph_github::pulls::{self, MergeMethod, ReviewEvent};
-use ph_ui::Icons;
+use ph_ui::{Icons, MenuButton as _};
 
 use crate::findings_view::{FindingsEvent, FindingsView};
 use crate::hosting::{self, Hosting};
@@ -564,7 +563,8 @@ impl PullView {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(pill(state, color))
-                    .child(format!(
+                    // Gives way in a narrow pane; the counts stay whole.
+                    .child(div().min_w_0().truncate().child(format!(
                         "{} {} {} into {}",
                         pull.user.login,
                         if pull.merged {
@@ -576,8 +576,12 @@ impl PullView {
                         },
                         pull.head.name,
                         pull.base.name
-                    ))
-                    .child(format!("+{} −{}", pull.additions, pull.deletions)),
+                    )))
+                    .child(
+                        div()
+                            .flex_none()
+                            .child(format!("+{} −{}", pull.additions, pull.deletions)),
+                    ),
             )
             .child(
                 h_flex()
@@ -598,60 +602,94 @@ impl PullView {
                                 }))
                             })),
                     )
-                    .when(
-                        pull.user.login.eq_ignore_ascii_case(&self.hosting.account.login)
-                            && pull.state == "open",
-                        |this| {
-                            let mine = pull.clone();
-                            this.child(
-                                Button::new("pull-address")
-                                    .small()
-                                    .outline()
-                                    .icon(Icons::GitBranch)
-                                    .label("Address comments")
-                                    .tooltip("A task on this branch whose agent works through the reviewers' comments and drafts replies")
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.emit(PullViewEvent::Agent(crate::AgentRequest::Address {
-                                            pull: Box::new(mine.clone()),
-                                        }))
-                                    })),
-                            )
-                        },
-                    )
-                    .child({
-                        let watched = self.watched;
-                        Button::new("pull-watch")
-                            .small()
-                            .ghost()
-                            .icon(if watched { IconName::Eye } else { IconName::EyeOff })
-                            .label(if watched { "Watching" } else { "Watch" })
-                            .tooltip("Tell me when the author pushes or answers a finding")
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_watch(cx)))
-                    })
-                    .when(self.local.is_some(), |this| {
+                    // Watching shows while it is on, and turns off here.
+                    .when(self.watched, |this| {
                         this.child(
-                            Button::new("pull-check-out")
+                            Button::new("pull-watching")
                                 .small()
-                                .outline()
-                                .icon(Icons::GitBranch)
-                                .label("Check out")
-                                .on_click(cx.listener(|this, _, _, cx| this.check_out(cx))),
+                                .ghost()
+                                .icon(IconName::Eye)
+                                .label("Watching")
+                                .selected(true)
+                                .tooltip("You are told when the author pushes or answers a finding. Click to stop.")
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_watch(cx))),
                         )
                     })
-                    .child(
-                        Button::new("pull-refresh")
+                    // The rest, used now and then, behind one button.
+                    .child({
+                        let view = cx.weak_entity();
+                        let mine = (pull.user.login.eq_ignore_ascii_case(&self.hosting.account.login)
+                            && pull.state == "open")
+                            .then(|| pull.clone());
+                        let (watched, local) = (self.watched, self.local.is_some());
+                        Button::new("pull-more")
                             .small()
                             .ghost()
-                            .icon(IconName::RefreshCw)
-                            .accessibility_label("Refresh")
-                            .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
-                    )
+                            .icon(IconName::Ellipsis)
+                            .accessibility_label("More for this pull request")
+                            .tooltip("Watch, check out, address comments, refresh")
+                            .menu(gpui_kit::Anchor::TopLeft, move |menu, _, _| {
+                                use gpui_kit::component::menu::PopupMenuItem;
+                                let mut menu = menu;
+                                if let Some(mine) = mine.clone() {
+                                    let view = view.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new("Address the reviewers' comments")
+                                            .icon(Icons::GitBranch)
+                                            .on_click(move |_, _, cx| {
+                                                let mine = mine.clone();
+                                                _ = view.update(cx, |_, cx| {
+                                                    cx.emit(PullViewEvent::Agent(
+                                                        crate::AgentRequest::Address {
+                                                            pull: Box::new(mine),
+                                                        },
+                                                    ))
+                                                });
+                                            }),
+                                    );
+                                }
+                                let watch = view.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(if watched {
+                                        "Stop watching"
+                                    } else {
+                                        "Watch: tell me when the author pushes or answers"
+                                    })
+                                    .icon(if watched {
+                                        IconName::EyeOff
+                                    } else {
+                                        IconName::Eye
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        _ = watch.update(cx, |this, cx| this.toggle_watch(cx));
+                                    }),
+                                );
+                                if local {
+                                    let view = view.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new("Check out this branch")
+                                            .icon(Icons::GitBranch)
+                                            .on_click(move |_, _, cx| {
+                                                _ = view.update(cx, |this, cx| this.check_out(cx));
+                                            }),
+                                    );
+                                }
+                                let view = view.clone();
+                                menu.separator().item(
+                                    PopupMenuItem::new("Refresh")
+                                        .icon(IconName::RefreshCw)
+                                        .on_click(move |_, _, cx| {
+                                            _ = view.update(cx, |this, cx| this.reload(cx));
+                                        }),
+                                )
+                            })
+                    })
                     .when_some(self.busy, |this, busy| {
                         this.child(
                             h_flex()
                                 .gap_1()
                                 .text_xs()
-                                .child(Spinner::new().xsmall())
+                                .child(ph_ui::Loader::new().xsmall())
                                 .child(busy),
                         )
                     }),
@@ -665,7 +703,9 @@ impl PullView {
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(Icon::new(Icons::Sparkles).xsmall())
-                            .child(format!("Agent review at {at}: {open} open, {fixed} fixed"))
+                            .child(div().min_w_0().truncate().child(format!(
+                                "Agent review at {at}: {open} open, {fixed} fixed"
+                            )))
                             .when_some(session, |this, session| {
                                 this.child(
                                     Button::new("pull-open-review")
@@ -710,51 +750,42 @@ impl PullView {
                 },
             ),
         ];
-        h_flex()
-            .gap_1()
-            .pt_1()
-            .children(tabs.into_iter().map(|(tab, label)| {
-                let selected = self.tab == tab;
-                let name = match tab {
-                    Tab::Overview => "Overview",
-                    Tab::Findings => "Findings",
-                    Tab::Walkthrough => "Walkthrough",
-                    Tab::Files => "Files",
-                    Tab::Commits => "Commits",
-                    Tab::Checks => "Checks",
-                };
-                div()
-                    .id(SharedString::from(format!(
-                        "pull-tab-{}",
-                        name.to_lowercase()
-                    )))
-                    .role(gpui_kit::accesskit::Role::Tab)
-                    .aria_label(name)
-                    .px_2p5()
-                    .py_1()
-                    .rounded(cx.theme().radius)
-                    .text_sm()
-                    .cursor_pointer()
-                    .text_color(if selected {
-                        cx.theme().foreground
-                    } else {
-                        cx.theme().muted_foreground
-                    })
-                    .when(selected, |this| {
-                        this.bg(cx.theme().secondary)
-                            .font_weight(gpui_kit::FontWeight::MEDIUM)
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.tab = tab;
-                        if tab == Tab::Findings {
-                            this.findings
-                                .update(cx, |findings, cx| findings.sync(window, cx));
-                        }
-                        cx.notify();
-                    }))
-                    .child(label)
-                    .test_support()
-            }))
+        let view = cx.entity().downgrade();
+        // In a narrow pane (a workspace's tool, or beside its chat) the
+        // tabs not in front fold to their icons: six names do not fit.
+        div().pt_1().child(ph_ui::PillTabs::new(
+            "pull-tabs",
+            tabs.into_iter()
+                .map(|(tab, label)| {
+                    let (name, icon) = match tab {
+                        Tab::Overview => ("Overview", Icons::ScrollText),
+                        Tab::Findings => ("Findings", Icons::ShieldCheck),
+                        Tab::Walkthrough => ("Walkthrough", Icons::ListOrdered),
+                        Tab::Files => ("Files", Icons::Files),
+                        Tab::Commits => ("Commits", Icons::GitCompareArrows),
+                        Tab::Checks => ("Checks", Icons::Check),
+                    };
+                    let view = view.clone();
+                    ph_ui::PillTab::new(
+                        format!("pull-tab-{}", name.to_lowercase()),
+                        label,
+                        move |window, cx| {
+                            _ = view.update(cx, |this, cx| {
+                                this.tab = tab;
+                                if tab == Tab::Findings {
+                                    this.findings
+                                        .update(cx, |findings, cx| findings.sync(window, cx));
+                                }
+                                cx.notify();
+                            });
+                        },
+                    )
+                    .name(name)
+                    .icon(icon)
+                    .selected(self.tab == tab)
+                })
+                .collect(),
+        ))
     }
 
     fn render_overview(&self, data: &Loaded, cx: &mut Context<Self>) -> AnyElement {
@@ -1280,7 +1311,7 @@ impl Render for PullView {
                             .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
                     ),
                     None => this
-                        .child(Spinner::new())
+                        .child(ph_ui::Loader::new())
                         .child(format!("Loading #{}…", self.number)),
                 })
                 .into_any_element();

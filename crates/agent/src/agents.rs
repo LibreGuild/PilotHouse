@@ -99,12 +99,11 @@ impl AgentSpec {
 
     /// The agent's own mark (`ph_ui::agent_logo`), or its glyph in its
     /// colour, `size` across.
-    pub fn mark(&self, size: gpui_kit::Pixels) -> gpui_kit::AnyElement {
-        use gpui_kit::component::Sizable as _;
+    pub fn mark(&self, size: impl Clone + Into<gpui_kit::Length>) -> gpui_kit::AnyElement {
         use gpui_kit::{IntoElement as _, Styled as _};
-        ph_ui::agent_logo(self.id, size).unwrap_or_else(|| {
+        ph_ui::agent_logo(self.id, size.clone()).unwrap_or_else(|| {
             gpui_kit::component::Icon::new(self.icon())
-                .with_size(size)
+                .size(size)
                 .text_color(self.tint())
                 .into_any_element()
         })
@@ -263,6 +262,73 @@ pub fn find(id: &str) -> Option<&'static AgentSpec> {
 /// until it first ran (it waits for the login shell's environment).
 static INSTALLED: std::sync::RwLock<Option<Vec<&'static str>>> = std::sync::RwLock::new(None);
 
+/// Agents whose CLI on this computer has no editor mode: starting one for a
+/// chat failed on the very flag that asks for it (an organisation's own
+/// build of Cline with ACP left out, an old version). Known until
+/// PilotHouse quits; a chat with one offers its terminal instead.
+static NO_CHAT_MODE: std::sync::RwLock<Vec<&'static str>> = std::sync::RwLock::new(Vec::new());
+
+/// Whether agent `id`'s CLI here cannot run in a chat (it can in a
+/// terminal).
+pub fn chat_unsupported(id: &str) -> bool {
+    NO_CHAT_MODE.read().is_ok_and(|ids| ids.contains(&id))
+}
+
+pub(crate) fn note_chat_unsupported(spec: &'static AgentSpec) {
+    if let Ok(mut ids) = NO_CHAT_MODE.write()
+        && !ids.contains(&spec.id)
+    {
+        ids.push(spec.id);
+    }
+}
+
+/// The agent started in a chat after all (another build of it was
+/// installed, or the note was a mistake): it is offered a chat again.
+pub(crate) fn note_chat_supported(spec: &'static AgentSpec) {
+    if let Ok(mut ids) = NO_CHAT_MODE.write() {
+        ids.retain(|id| *id != spec.id);
+    }
+}
+
+impl AgentSpec {
+    /// The flag that starts this agent's editor mode, if what it printed
+    /// as it failed to start (`output`) says it does not know that flag.
+    pub(crate) fn refused_flag(&self, output: &str) -> Option<&'static str> {
+        const REFUSALS: [&str; 9] = [
+            "unknown option",
+            "unknown argument",
+            "unknown flag",
+            "unknown command",
+            "unrecognized option",
+            "unrecognised option",
+            "unexpected argument",
+            "invalid option",
+            "flag provided but not defined",
+        ];
+        let Launch::Native { args, .. } = self.launch else {
+            return None;
+        };
+        // The refusal and the flag's name on one line, the name a word of
+        // its own (CLIs print `'--acp'`, `-acp`, `acp`): "unknown option"
+        // about another flag, beside a path with `acp` in it, is not this.
+        let names = |line: &str, name: &str| {
+            line.match_indices(name).any(|(at, _)| {
+                let word = |c: char| c.is_ascii_alphanumeric();
+                !line[..at].ends_with(word) && !line[at + name.len()..].starts_with(word)
+            })
+        };
+        let output = output.to_lowercase();
+        output
+            .lines()
+            .filter(|line| REFUSALS.iter().any(|refusal| line.contains(refusal)))
+            .find_map(|line| {
+                args.iter()
+                    .copied()
+                    .find(|arg| arg.starts_with('-') && names(line, arg.trim_start_matches('-')))
+            })
+    }
+}
+
 /// Finds which agents can start on this machine (their CLI, and what their
 /// launch needs, on the login shell's `PATH`), in [`AGENTS`] order, and
 /// remembers it for [`installed`]. Blocking: it may wait seconds for the
@@ -353,6 +419,43 @@ impl AgentSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cli_without_its_editor_mode_is_recognised() {
+        let cline = find("cline").unwrap();
+        // What a build of Cline without ACP prints (commander's wording).
+        assert_eq!(
+            cline.refused_flag("the agent process exited\nerror: unknown option '--acp'"),
+            Some("--acp")
+        );
+        assert_eq!(
+            cline.refused_flag("error: unexpected argument '--acp' found"),
+            Some("--acp")
+        );
+        // Another failure is not that one.
+        assert_eq!(cline.refused_flag("Error: not signed in"), None);
+        assert_eq!(cline.refused_flag("unknown option '--verbose'"), None);
+        // Another flag refused, beside a line that only mentions `acp`.
+        assert_eq!(
+            cline.refused_flag("unknown option '--foo'\nat /opt/cline-acp/bin/cline"),
+            None
+        );
+        assert_eq!(cline.refused_flag("unknown option '--acpx'"), None);
+        // However the CLI writes the flag.
+        assert_eq!(cline.refused_flag("Unknown option -acp"), Some("--acp"));
+        // An adapter run with npx has no flag of its own to refuse.
+        assert_eq!(
+            find("claude")
+                .unwrap()
+                .refused_flag("unknown option '--acp'"),
+            None
+        );
+        assert!(!chat_unsupported("cline"));
+        note_chat_unsupported(cline);
+        assert!(chat_unsupported("cline") && !chat_unsupported("gemini"));
+        // Not left set for other tests in this process.
+        NO_CHAT_MODE.write().unwrap().clear();
+    }
 
     #[test]
     fn new_chats_start_with_an_installed_agent() {

@@ -304,9 +304,7 @@ fn health_mark(health: Option<&Health>, cx: &gpui_kit::App) -> gpui_kit::AnyElem
             .small()
             .text_color(cx.theme().danger)
             .into_any_element(),
-        Some(Health::Checking) => gpui_kit::component::spinner::Spinner::new()
-            .xsmall()
-            .into_any_element(),
+        Some(Health::Checking) => ph_ui::Loader::new().xsmall().into_any_element(),
         None => div().into_any_element(),
     }
 }

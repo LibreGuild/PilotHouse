@@ -43,11 +43,12 @@ impl Appearance {
     }
 }
 
-/// Loads PilotHouse's themes and shows Modern Dark until the user's choice
-/// is applied.
+/// Loads PilotHouse's fonts and themes, and shows Modern Dark until the
+/// user's choice is applied.
 ///
 /// Must run after `gpui_kit::init`, which creates the theme.
 pub fn init(cx: &mut App) {
+    crate::fonts::register(cx);
     themes::init(cx);
     let dark = themes::select(DEFAULT_DARK, true, cx);
     let light = themes::find(DEFAULT_LIGHT, cx);

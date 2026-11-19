@@ -413,7 +413,13 @@ impl MarkdownPreview {
                         .w_full()
                         .flex()
                         .justify_center()
-                        .child(div().w_full().max_w(px(READING_WIDTH)).px_8().child(view))
+                        .child(
+                            div()
+                                .w_full()
+                                .max_w(ph_ui::rems_from_px(READING_WIDTH))
+                                .px_8()
+                                .child(view),
+                        )
                         .into_any_element()
                 }),
             )
@@ -466,7 +472,7 @@ impl Render for MarkdownPreview {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(READING_WIDTH))
+                    .max_w(ph_ui::rems_from_px(READING_WIDTH))
                     .mx_auto()
                     .px_8()
                     .py_6()

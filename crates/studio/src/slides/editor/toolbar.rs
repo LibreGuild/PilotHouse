@@ -318,7 +318,7 @@ impl SlidesEditor {
             )
             .icon(Icons::Shapes)
             .dropdown_caret(true)
-            .menu(gpui_kit::Anchor::TopLeft, move |menu, _, _| {
+            .menu(gpui_kit::Anchor::TopLeft, move |menu, window, _| {
                 let item = |label: &'static str, geometry: &'static str| {
                     let editor = editor.clone();
                     PopupMenuItem::new(label).on_click(move |_, window, cx| {
@@ -334,7 +334,7 @@ impl SlidesEditor {
                     .fold(menu, |menu, (geometry, label)| {
                         menu.item(item(label, geometry))
                     })
-                    .max_h(px(420.))
+                    .max_h(ph_ui::scaled_px(420., window))
                     .scrollable(true)
             })
         };
@@ -409,7 +409,7 @@ impl SlidesEditor {
             named(Button::new("slides-theme").ghost().small(), "Theme", !tight)
                 .icon(Icons::Palette)
                 .dropdown_caret(true)
-                .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                .menu(gpui_kit::Anchor::TopRight, move |menu, window, _| {
                     let mut menu = menu.label("Built in");
                     for (id, name) in crate::slides::theme::builtins() {
                         let editor = editor.clone();
@@ -442,18 +442,18 @@ impl SlidesEditor {
                     }
                     let (colors, save) = (editor.clone(), editor.clone());
                     menu.separator()
-                        .item(PopupMenuItem::new("Colours and fonts…").on_click(
+                        .item(PopupMenuItem::new("Colours and fonts").on_click(
                             move |_, window, cx| {
                                 _ = colors
                                     .update(cx, |this, cx| this.open_theme_editor(window, cx));
                             },
                         ))
-                        .item(PopupMenuItem::new("Save this theme…").on_click(
+                        .item(PopupMenuItem::new("Save this theme").on_click(
                             move |_, window, cx| {
                                 _ = save.update(cx, |this, cx| this.open_save_theme(window, cx));
                             },
                         ))
-                        .max_h(px(480.))
+                        .max_h(ph_ui::scaled_px(480., window))
                         .scrollable(true)
                 })
         };
@@ -486,7 +486,7 @@ impl SlidesEditor {
                         })
                         .separator()
                         .item(
-                            PopupMenuItem::new("Custom size…").on_click(move |_, window, cx| {
+                            PopupMenuItem::new("Custom size").on_click(move |_, window, cx| {
                                 _ = custom.update(cx, |this, cx| this.open_custom_size(window, cx));
                             }),
                         )
@@ -498,13 +498,19 @@ impl SlidesEditor {
             .unwrap_or(100);
         h_flex()
             .flex_none()
-            .h(px(40.))
+            .h(ph_ui::rems_from_px(40.))
             .px_2()
             .gap_0p5()
             .border_b_1()
             .border_color(theme.border)
             .child(new_slide)
-            .child(div().w(px(1.)).h(px(18.)).mx_1().bg(theme.border))
+            .child(
+                div()
+                    .w(px(1.))
+                    .h(ph_ui::rems_from_px(18.))
+                    .mx_1()
+                    .bg(theme.border),
+            )
             .child(
                 tool("slides-text", Icons::Type, "Text", "A text box")
                     .on_click(cx.listener(|this, _, window, cx| this.insert_text(window, cx))),
@@ -552,7 +558,13 @@ impl SlidesEditor {
             .child(layout)
             .child(theme_menu)
             .child(size)
-            .child(div().w(px(1.)).h(px(18.)).mx_1().bg(theme.border))
+            .child(
+                div()
+                    .w(px(1.))
+                    .h(ph_ui::rems_from_px(18.))
+                    .mx_1()
+                    .bg(theme.border),
+            )
             .child(
                 Button::new("slides-zoom-out")
                     .ghost()

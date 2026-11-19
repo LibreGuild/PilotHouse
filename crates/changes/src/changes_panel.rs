@@ -123,6 +123,9 @@ pub struct ChangesPanel {
     list_rows: Vec<Row>,
     /// View as Tree's folders and files, for the rows that point into it.
     tree: Vec<TreeRow>,
+    /// The pane is too narrow for the list header's button names: icons
+    /// only.
+    narrow: bool,
     /// Folders folded in View as Tree (new files' with a `new:` prefix).
     folded: HashSet<String>,
     /// The branch against its base, once looked at (`None` inside: there
@@ -200,6 +203,7 @@ impl ChangesPanel {
             list: gpui_kit::ListState::new(0, gpui_kit::ListAlignment::Top, gpui_kit::px(800.)),
             list_rows: Vec::new(),
             tree: Vec::new(),
+            narrow: false,
             folded: HashSet::new(),
             branch: None,
             _branch_task: None,
@@ -577,50 +581,31 @@ impl ChangesPanel {
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let count = self.change_count();
-        let tab = |view: GitView, label: String, cx: &mut Context<Self>| {
-            let selected = self.view == view;
-            div()
-                .id(SharedString::from(format!("git-view-{label}")))
-                .px_2p5()
-                .py_1()
-                .rounded(cx.theme().radius)
-                .text_sm()
-                .cursor_pointer()
-                .text_color(if selected {
-                    cx.theme().foreground
-                } else {
-                    cx.theme().muted_foreground
-                })
-                .when(selected, |this| {
-                    this.bg(cx.theme().secondary)
-                        .font_weight(gpui_kit::FontWeight::MEDIUM)
-                })
-                .when(!selected, |this| {
-                    this.hover(|style| style.text_color(cx.theme().foreground))
-                })
-                .on_click(cx.listener(move |this, _, window, cx| this.show_view(view, window, cx)))
-                .role(gpui_kit::accesskit::Role::Tab)
-                .aria_label(view.label())
-                .child(label)
-                .test_support()
+        let panel = cx.entity().downgrade();
+        let tab = |view: GitView, icon: Icons| {
+            let panel = panel.clone();
+            let label = match view {
+                GitView::Changes if count > 0 => format!("Changes {count}"),
+                view => view.label().to_string(),
+            };
+            // The id as before (automation and tests find the tabs by it).
+            ph_ui::PillTab::new(format!("git-view-{label}"), label, move |window, cx| {
+                _ = panel.update(cx, |this, cx| this.show_view(view, window, cx));
+            })
+            .name(view.label())
+            .icon(icon)
+            .selected(self.view == view)
         };
-        h_flex()
-            .flex_none()
-            .px_2()
-            .pt_2()
-            .gap_1()
-            .child(tab(
-                GitView::Changes,
-                if count > 0 {
-                    format!("Changes {count}")
-                } else {
-                    "Changes".into()
-                },
-                cx,
-            ))
-            .child(tab(GitView::Branch, "Branch".into(), cx))
-            .child(tab(GitView::History, "History".into(), cx))
-            .child(tab(GitView::Stashes, "Stashes".into(), cx))
+        // In a narrow column the tabs not in front fold to their icons.
+        div().flex_none().px_2().pt_2().child(ph_ui::PillTabs::new(
+            "git-views",
+            vec![
+                tab(GitView::Changes, Icons::GitCompare),
+                tab(GitView::Branch, Icons::GitBranch),
+                tab(GitView::History, Icons::Clock),
+                tab(GitView::Stashes, Icons::Layers),
+            ],
+        ))
     }
 
     /// Conflicted files and the operation in progress (merge, rebase…).
@@ -701,7 +686,7 @@ impl ChangesPanel {
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.open_conflict(open.clone(), cx)),
                         )
-                        .child(ph_ui::file_icon_element(&path, gpui_kit::px(14.)))
+                        .child(ph_ui::file_icon_element(&path, ph_ui::rems_from_px(14.)))
                         .child(div().flex_1().truncate().child(path))
                         .child(div().text_xs().text_color(cx.theme().info).child("Resolve"))
                 }))
@@ -723,6 +708,7 @@ impl ChangesPanel {
             }
             _ => String::new(),
         };
+        let narrow = self.narrow;
         h_flex()
             .flex_none()
             .px_3()
@@ -730,15 +716,20 @@ impl ChangesPanel {
             .gap_2()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
-            .child(div().flex_1().truncate().child(summary))
+            .child(div().flex_1().min_w_0().truncate().child(summary))
             .when(matches!(&self.state, State::Loaded(changes) if !changes.files.is_empty()), |this| {
                 this.child(
                     Button::new("all-changes")
                         .ghost()
                         .xsmall()
                         .icon(ph_ui::Icons::GitCompare)
-                        .label("All changes")
-                        .tooltip("Every changed file in one diff, in the editor")
+                        .when(!narrow, |this| this.label("All changes"))
+                        .accessibility_label("All changes")
+                        .tooltip(if narrow {
+                            "All changes: every changed file in one diff, in the editor"
+                        } else {
+                            "Every changed file in one diff, in the editor"
+                        })
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesPanelEvent::OpenDiff(None)))),
                 )
             })
@@ -748,8 +739,13 @@ impl ChangesPanel {
                         .ghost()
                         .xsmall()
                         .icon(ph_ui::Icons::Sparkles)
-                        .label("Review")
-                        .tooltip("An agent reviews these changes before you push; its findings land on the lines as notes")
+                        .when(!narrow, |this| this.label("Review"))
+                        .accessibility_label("Review")
+                        .tooltip(if narrow {
+                            "Review: an agent reviews these changes before you push; its findings land on the lines as notes"
+                        } else {
+                            "An agent reviews these changes before you push; its findings land on the lines as notes"
+                        })
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesPanelEvent::ReviewChanges))),
                 )
             })
@@ -759,7 +755,9 @@ impl ChangesPanel {
                         .ghost()
                         .xsmall()
                         .icon(IconName::Undo2)
-                        .label("Undo discard")
+                        .when(!narrow, |this| this.label("Undo discard"))
+                        .when(narrow, |this| this.tooltip("Undo discard"))
+                        .accessibility_label("Undo discard")
                         .on_click(cx.listener(|this, _, window, cx| this.undo_discard(window, cx))),
                 )
             })
@@ -809,7 +807,11 @@ impl ChangesPanel {
             .flex_none()
             .child(
                 h_flex()
-                    .id(("change-file", ix))
+                    // By its path: a list position would name another file
+                    // once the list changes.
+                    .id(SharedString::from(format!("change-file-{}", file.path)))
+                    .aria_label(file.path.clone())
+                    .test_support()
                     .group(group.clone())
                     .h(ph_theme::dense(1.75, cx))
                     .px_1p5()
@@ -825,7 +827,14 @@ impl ChangesPanel {
                     }))
                     .child(
                         div()
-                            .id(("fold-file", ix))
+                            .id(SharedString::from(format!("fold-file-{}", file.path)))
+                            .role(gpui_kit::accesskit::Role::Button)
+                            .aria_label(if collapsed {
+                                "Show the changes here"
+                            } else {
+                                "Hide the changes"
+                            })
+                            .test_support()
                             .flex_none()
                             .p_0p5()
                             .rounded(cx.theme().radius)
@@ -854,7 +863,7 @@ impl ChangesPanel {
                             .min_w_0()
                             .gap_1p5()
                             .text_sm()
-                            .child(ph_ui::file_icon_element(&name, gpui_kit::px(14.)))
+                            .child(ph_ui::file_icon_element(&name, ph_ui::rems_from_px(14.)))
                             .child(
                                 div()
                                     .flex_none()
@@ -944,7 +953,18 @@ impl ChangesPanel {
                             ),
                     ),
             )
-            .children(self.hunk_rows(file_ix, hunk_ix, hunk, cx))
+            // Long lines scroll sideways, the hunk's own bar staying put.
+            // Kept by the file's path, not its place in the list: a file
+            // that moves up when another is committed keeps its own scroll.
+            .child(diff_view::scroller(
+                SharedString::from(format!(
+                    "change-hunk-lines-{}-{hunk_ix}",
+                    self.file(file_ix)
+                        .map(|file| file.path.as_str())
+                        .unwrap_or_default()
+                )),
+                self.hunk_rows(file_ix, hunk_ix, hunk, cx),
+            ))
             .into_any_element()
     }
 
@@ -960,47 +980,36 @@ impl ChangesPanel {
         let Some(path) = self.file(file_ix).map(|file| file.path.clone()) else {
             return diff_view::hunk_lines(hunk, cx);
         };
-        let numbers = crate::notes::new_line_numbers(&hunk.header, &hunk.lines);
-        let added_bg = cx.theme().success.opacity(0.12);
-        let removed_bg = cx.theme().danger.opacity(0.12);
-        let mono = cx.theme().mono_font_family.clone();
+        let lines = diff_view::lines(hunk);
+        let digits = diff_view::number_digits(&lines);
         let mut rows = Vec::new();
-        for (line_ix, (line, number)) in hunk
-            .lines
+        for (line_ix, (line, raw)) in lines
             .iter()
-            .zip(numbers)
+            .zip(&hunk.lines)
             .take(diff_view::MAX_HUNK_LINES)
             .enumerate()
         {
             let id = ((file_ix * 10_000 + hunk_ix) * 1_000 + line_ix) as u64;
             let group = SharedString::from(format!("diff-line-{id}"));
-            let row = h_flex()
+            // A line of the new file takes a review note: its button shows
+            // over the line numbers while the pointer is on the line (at the
+            // left, so it is in reach however far the line runs).
+            let row = diff_view::line_row(line, digits, cx)
                 .id(("diff-line", id))
                 .group(group.clone())
                 .relative()
-                .pl_3()
-                .font_family(mono.clone())
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(line.clone()),
-                )
-                .when_some(number, |this, number| {
-                    let (path, code) = (path.clone(), line.clone());
+                .when_some(line.new, |this, number| {
+                    let (path, code) = (path.clone(), raw.clone());
                     this.child(
                         div()
                             .absolute()
-                            .right_1()
+                            .left_0()
                             .top_0()
                             .invisible()
                             .group_hover(group, |style| style.visible())
                             .child(
                                 Button::new(("note-line", id))
-                                    .ghost()
+                                    .primary()
                                     .xsmall()
                                     .icon(IconName::Plus)
                                     .tooltip("Add a review note")
@@ -1011,13 +1020,8 @@ impl ChangesPanel {
                             ),
                     )
                 });
-            let row = match line.chars().next() {
-                Some('+') => row.bg(added_bg),
-                Some('-') => row.bg(removed_bg),
-                _ => row.text_color(cx.theme().muted_foreground),
-            };
             rows.push(row.into_any_element());
-            if let Some(number) = number {
+            if let Some(number) = line.new {
                 for (note_ix, note) in self
                     .notes
                     .iter()
@@ -1029,17 +1033,10 @@ impl ChangesPanel {
             }
         }
         if hunk.lines.len() > diff_view::MAX_HUNK_LINES {
-            rows.push(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!(
-                        "… {} more lines",
-                        hunk.lines.len() - diff_view::MAX_HUNK_LINES
-                    ))
-                    .into_any_element(),
-            );
+            rows.push(diff_view::more_lines(
+                hunk.lines.len() - diff_view::MAX_HUNK_LINES,
+                cx,
+            ));
         }
         rows
     }
@@ -1423,7 +1420,7 @@ impl ChangesPanel {
                     .text_color(cx.theme().success)
                     .child("A"),
             )
-            .child(ph_ui::file_icon_element(&name, gpui_kit::px(14.)))
+            .child(ph_ui::file_icon_element(&name, ph_ui::rems_from_px(14.)))
             .child(div().flex_none().child(name))
             .when(depth.is_none(), |this| {
                 this.child(
@@ -1516,7 +1513,7 @@ impl ChangesPanel {
                 .xsmall()
                 .text_color(cx.theme().muted_foreground),
             )
-            .child(ph_ui::folder_icon_element(&label, gpui_kit::px(14.)))
+            .child(ph_ui::folder_icon_element(&label, ph_ui::rems_from_px(14.)))
             .child(div().flex_1().min_w_0().truncate().child(label))
             .when_some(counts, |this, (added, removed)| {
                 // The width of a file's kind letter, so counts line up.
@@ -1560,7 +1557,11 @@ fn change_counts(added: usize, removed: usize, cx: &gpui_kit::App) -> impl IntoE
 }
 
 impl Render for ChangesPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The summary, two named buttons and two icons need about this
+        // much room.
+        let (narrow, probe) = ph_ui::measure::narrower_than("git-width", 400., window, cx);
+        self.narrow = narrow;
         let body: AnyElement = match self.view {
             GitView::History => self
                 .history
@@ -1579,7 +1580,9 @@ impl Render for ChangesPanel {
             },
         };
         v_flex()
+            .relative()
             .size_full()
+            .child(probe)
             .child(self.render_tabs(cx))
             .child(div().flex_1().min_h_0().child(body))
     }
@@ -1661,11 +1664,11 @@ fn ask_note(
     let panel = cx.entity().downgrade();
     let focus = input.clone();
     let title = format!("Note on {path}:{line}");
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let (input, panel, path, code) = (input.clone(), panel.clone(), path.clone(), code.clone());
         dialog
             .title(title.clone())
-            .w(gpui_kit::px(520.))
+            .w(ph_ui::scaled_px(520., window))
             .child(Input::new(&input))
             .footer(ph_ui::dialog_buttons("Add note", true))
             .on_ok(move |_, _, cx| {
@@ -1817,8 +1820,8 @@ fn folder_menu(
 }
 
 /// How far a View as Tree row at `depth` is indented.
-fn tree_indent(depth: usize) -> gpui_kit::Pixels {
-    gpui_kit::px(6. + 14. * depth as f32)
+fn tree_indent(depth: usize) -> gpui_kit::Rems {
+    ph_ui::rems_from_px(6. + 14. * depth as f32)
 }
 
 /// Whether the Git tab shows changes as a tree of folders (View as Tree),

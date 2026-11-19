@@ -22,7 +22,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
-    WeakEntity, Window, div, px,
+    WeakEntity, Window, div,
 };
 use ph_agent::agents::{AGENTS, AgentSpec, Availability};
 use ph_git::parallel::{Applied, DiffStat};
@@ -73,10 +73,10 @@ pub fn open_start(
         return;
     }
     let view = cx.new(|cx| StartView::new(space, root, prompt, window, cx));
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         dialog
             .title("Run with several agents")
-            .w(px(560.))
+            .w(ph_ui::scaled_px(560., window))
             .child(view.clone())
     });
 }
@@ -270,10 +270,10 @@ pub fn open_runs(
         return;
     }
     let view = cx.new(|cx| RunsView::new(space, project, root, cx));
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         dialog
             .title("Parallel runs")
-            .w(px(640.))
+            .w(ph_ui::scaled_px(640., window))
             .child(view.clone())
     });
 }
@@ -523,7 +523,7 @@ impl Render for RunsView {
         v_flex()
             .id("parallel-runs")
             .gap_3()
-            .max_h(px(520.))
+            .max_h(ph_ui::rems_from_px(520.))
             .overflow_y_scroll()
             .children(rows)
             .when(self.runs.is_empty(), |this| {
