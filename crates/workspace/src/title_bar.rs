@@ -1,8 +1,12 @@
 //! Contents of the window title bar: the app's mark and the name of what is
-//! in front (a workspace with its colour and, after it, the task in its
-//! chat with where that stands and its branch; *Chats*; *Reviews*), the
-//! command palette trigger in the middle, the task's next step, and
-//! window-level buttons (inbox, the side panels). The bar is part of the window's
+//! in front (a workspace with its colour, *Bridge*, *Reviews*), the command
+//! palette trigger in the middle, the next step of the task in front, and
+//! window-level buttons (inbox, the side panels).
+//!
+//! The task in front is not named here: its title and where it stands
+//! (in colour) stood after the workspace's name for a while, which crowded
+//! the corner and drew the eye from the work. The chat's own header says
+//! both. The bar is part of the window's
 //! frame (`frame`): it has no fill of its own. What the window shows is
 //! picked in the column of icons at its left edge (`rail`).
 //!
@@ -10,7 +14,6 @@
 //! click on it moves the window and a double click maximises it. Every
 //! control here is `occlude`d so its clicks reach the app instead.
 
-use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -53,8 +56,7 @@ pub(crate) fn render(
                 .gap_1()
                 .min_w_0()
                 .child(app_icon(cx))
-                .children(front_name(workspace, cx))
-                .children(front_task(workspace, cx)),
+                .children(front_name(workspace, cx)),
         )
         .child(
             h_flex()
@@ -155,46 +157,6 @@ fn task_folder(
         })
 }
 
-/// After the workspace's name: the task in its chat (the title) and where
-/// it stands (as its column on the Bridge). With several chats a
-/// workspace's name alone does not say which is in front. (Its branch is
-/// in the status bar.)
-fn front_task(workspace: &Workspace, cx: &App) -> Option<AnyElement> {
-    let task = task_in_front(workspace, cx)?;
-    let theme = cx.theme();
-    let color = task.column.color(cx);
-    Some(
-        h_flex()
-            .id("front-task")
-            .min_w_0()
-            .gap_1p5()
-            .text_sm()
-            .text_color(theme.muted_foreground)
-            .child(div().flex_none().child("/"))
-            .child(
-                div()
-                    .min_w_0()
-                    .max_w(ph_ui::rems_from_px(280.))
-                    .truncate()
-                    .text_color(theme.foreground)
-                    .child(task.summary.title.clone()),
-            )
-            .child(
-                h_flex()
-                    .flex_none()
-                    .h_5()
-                    .px_1p5()
-                    .rounded(theme.radius)
-                    .bg(color.opacity(0.14))
-                    .text_xs()
-                    .text_color(color)
-                    .child(task.column.title()),
-            )
-            .test_support()
-            .into_any_element(),
-    )
-}
-
 /// What the task in front waits for next, one press away: its changes to
 /// review (while another tool is in front), or its pull request.
 fn next_step(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
@@ -223,7 +185,7 @@ fn next_step(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyEl
                 .occlude()
                 .child(
                     Button::new("task-review")
-                        .primary()
+                        .outline()
                         .small()
                         .label("Review changes")
                         .tooltip("Read what this task changed, in the Git tool")
@@ -502,10 +464,7 @@ fn front_name(workspace: &Workspace, cx: &App) -> Option<AnyElement> {
     };
     Some(
         h_flex()
-            // It keeps its room (up to a point): the task's title after
-            // it is what gives way in a narrow window.
-            .flex_none()
-            .max_w(ph_ui::rems_from_px(180.))
+            .min_w_0()
             .gap_1p5()
             .text_sm()
             .font_weight(gpui_kit::FontWeight::MEDIUM)
