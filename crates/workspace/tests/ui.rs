@@ -570,6 +570,66 @@ fn badges_open_workspaces_and_cards_open_their_chats(cx: &mut TestAppContext) {
     });
 }
 
+/// Someone who comes from a version without the Bridge finds their last
+/// week of chats waiting for a look: the column's menu puts them away at
+/// once.
+#[gpui_kit::test]
+fn what_waits_for_a_look_is_put_away_at_once(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let (alpha, _beta) = two_workspaces("settle", window, &workspace, cx);
+    let sessions = cx.update(|cx| {
+        let store = AppState::store(cx);
+        ["Sort the arrivals", "Name the berths"]
+            .map(|title| store.create_session(alpha, title, "claude").unwrap().id)
+    });
+    // Alpha's screen closes (hidden, idle): the Bridge reads its chats from
+    // the store.
+    workspace.update(cx, |workspace, cx| {
+        workspace.unload_idle(std::time::Duration::ZERO, cx)
+    });
+    press(window, "secondary-shift-e", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        for session in sessions {
+            assert!(
+                window
+                    .try_find(gpui_kit::SharedString::from(format!(
+                        "bridge-done-{session}"
+                    )))
+                    .is_some(),
+                "each waits for a look, with Done on its card"
+            );
+        }
+    })
+    .unwrap();
+    click(window, "bridge-review-menu", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let at = window.find_by_label("Mark all 2 as done").bounds().center();
+        gpui_kit::test::TestEventExt::pointer_down(window, at, gpui_kit::MouseButton::Left, cx);
+        gpui_kit::test::TestEventExt::pointer_up(window, at, gpui_kit::MouseButton::Left, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let done: Vec<i64> = AppState::store(cx).setting("workspace.sidebar_settled");
+        for session in sessions {
+            assert!(done.contains(&session), "kept as done");
+            assert!(
+                window
+                    .try_find(gpui_kit::SharedString::from(format!(
+                        "bridge-done-{session}"
+                    )))
+                    .is_none(),
+                "and out of the column"
+            );
+        }
+        assert!(window.try_find("bridge-review-menu").is_none());
+    })
+    .unwrap();
+}
+
 /// Reviews is one click away; without an account it asks for one. The
 /// Bridge and the chats that need no folder each have their key.
 #[gpui_kit::test]

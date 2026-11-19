@@ -377,6 +377,10 @@ pub(crate) fn counts(workspace: &Workspace, cx: &App) -> (usize, usize) {
             counts.1 += activity.working;
         }
     }
+    // Reviews started from the queue, while their repository is cloned.
+    if let Some(github) = workspace.github_view() {
+        counts.1 += github.read(cx).starting_behind_count();
+    }
     for agent in crate::terminal_agents::TerminalAgents::all(cx) {
         match agent.state {
             ChatState::NeedsYou => counts.0 += 1,
@@ -654,6 +658,35 @@ fn column_view(
     let count = cards.len();
     let hidden = if all { 0 } else { count.saturating_sub(SHOWN) };
     let key = column.key();
+    // What waits for a look can be put away in one go: someone who comes
+    // from a version without the Bridge finds a week of chats here.
+    let settle: Vec<(ProjectId, SessionId)> = if column == Column::Review {
+        cards
+            .iter()
+            .filter_map(|card| Some((card.project, card.session.as_ref()?.id)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let settle_all = (settle.len() > 1).then(|| {
+        let entity = entity.clone();
+        Button::new("bridge-review-menu")
+            .ghost()
+            .xsmall()
+            .icon(IconName::Ellipsis)
+            .accessibility_label("Ready for review menu")
+            .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                let (entity, settle) = (entity.clone(), settle.clone());
+                menu.item(
+                    PopupMenuItem::new(format!("Mark all {} as done", settle.len())).on_click(
+                        move |_, _, cx| {
+                            _ = entity
+                                .update(cx, |workspace, cx| workspace.settle_all(&settle, cx));
+                        },
+                    ),
+                )
+            })
+    });
     let more = (count > SHOWN).then(|| {
         let entity = entity.clone();
         Button::new(SharedString::from(format!("bridge-more-{key}")))
@@ -709,7 +742,9 @@ fn column_view(
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(count.to_string()),
-                ),
+                )
+                .child(div().flex_1())
+                .children(settle_all),
         )
         .child(
             v_flex()

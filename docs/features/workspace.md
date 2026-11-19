@@ -56,7 +56,7 @@ Names show in tooltips, or under the icons with *Settings → Appearance → Nam
 
 - A card shows the workspace (its colour dot) and the agent, the title, how long ago, and what the agent is doing, asks, or said last. A click opens the workspace at that chat. *Answer* does the same for one that waits; **Review changes** opens it with the Changes of its workspace beside the chat; **Done** marks it done (`workspace.sidebar_settled`). One that works or asks again comes back on its own. The ⋯ on hover pins it to the top of its column, renames it, or deletes it with its transcript after asking (not while its agent works or waits).
 - **Chips** over the columns narrow the Bridge to one workspace, or to the chats that need no folder. **New task** starts a chat: in the workspace the Bridge is narrowed to or that was last in front, in another one, or without a folder; it also opens a folder or makes a workspace.
-- *Ready for review* starts with a link to Reviews when pull requests wait for your review.
+- *Ready for review* starts with a link to Reviews when pull requests wait for your review. Its ⋯ (with two or more waiting) marks them all done at once: someone who comes from a version without the Bridge finds their last week of chats there.
 - A column lists twelve cards, then *Show N more*. In a narrow window the columns become two rows of two, then one column.
 - With nothing under way the Bridge says how to begin: open a folder, or start a chat without one.
 - The status bar's *N need you · N working · N to look at* counts the same cards from anywhere, and a click on it shows the Bridge.

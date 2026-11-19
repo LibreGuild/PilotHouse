@@ -243,6 +243,14 @@ impl GithubView {
             .map(|(key, starting)| (key.3, starting))
     }
 
+    /// How many reviews started from the queue are still being readied.
+    pub(crate) fn starting_behind_count(&self) -> usize {
+        self.starting
+            .values()
+            .filter(|starting| starting.behind.is_some())
+            .count()
+    }
+
     /// Notes that a review of `key` is being readied (`None`: it is not any
     /// more).
     pub(super) fn set_starting(

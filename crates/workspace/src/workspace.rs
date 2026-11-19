@@ -708,6 +708,23 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Marks every one of `chats` (each with its workspace) done at once.
+    pub(crate) fn settle_all(
+        &mut self,
+        chats: &[(ProjectId, ph_store::sessions::SessionId)],
+        cx: &mut Context<Self>,
+    ) {
+        for (project, id) in chats {
+            if self.settled.insert(*id)
+                && let Some(chats) = ph_agent::ChatHub::existing(*project, cx)
+            {
+                chats.update(cx, |chats, cx| chats.mark_read(*id, cx));
+            }
+        }
+        self.save_settled(cx);
+        cx.notify();
+    }
+
     fn save_settled(&self, cx: &gpui_kit::App) {
         let mut ids: Vec<_> = self.settled.iter().copied().collect();
         ids.sort();
