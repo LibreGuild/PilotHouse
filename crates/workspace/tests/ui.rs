@@ -78,6 +78,27 @@ fn a_first_start_opens_into_a_chat(cx: &mut TestAppContext) {
         assert!(window.try_find("context-tab-files").is_none());
     })
     .unwrap();
+    // Also with the result pane open (on the board: the browser, which it
+    // would start on, cannot run in a test): Files has no name there, and
+    // its key does nothing.
+    cx.update_window(window, |_, window, cx| {
+        let space = workspace.read(cx).active_space().unwrap().read(cx);
+        assert_ne!(space.context_tab(), ContextTab::Files);
+        window.dispatch_action(Box::new(ph_workspace::ShowBoard), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    press(window, "secondary-1", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let space = workspace.read(cx).active_space().unwrap().read(cx);
+        assert!(space.is_context_open());
+        assert_eq!(space.context_tab(), ContextTab::Board);
+        assert!(window.try_find("context-tab-files").is_none());
+        assert!(window.try_find("context-tab-terminal").is_some());
+    })
+    .unwrap();
+    press(window, "secondary-alt-b", cx);
 
     // The Bridge: nothing is under way yet, so it says how to begin.
     click(window, "view-bridge", cx);

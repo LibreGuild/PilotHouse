@@ -320,7 +320,10 @@ impl WorkspaceScreen {
             .as_deref()
             .and_then(ContextTab::from_key)
             .filter(|tab| tab.in_build())
-            .or_else(|| first_tool(cx))
+            // The Chats space has no folder for Files to show (0.6.4 kept
+            // Files as its tool all the same, in a column that was shut).
+            .filter(|tab| *tab != ContextTab::Files || project.is_workspace())
+            .or_else(|| first_tool(&project, cx))
             .unwrap_or_default();
         let mut layout = Layout::new(tool, saved.context_panel_open.unwrap_or(!project.empty));
         layout.chat_folded = saved.chat_folded.unwrap_or(false) && layout.result_open;
@@ -631,6 +634,11 @@ impl WorkspaceScreen {
         if !AppState::enabled_tabs(cx).contains(&tab) {
             return;
         }
+        // The Chats space has no folder: Files has nothing to show there
+        // but a file opened from a chat.
+        if tab == ContextTab::Files && !self.project.is_workspace() && !self.has_open_files(cx) {
+            return;
+        }
         self.show_tool(tab, window, cx);
     }
 
@@ -826,7 +834,7 @@ impl WorkspaceScreen {
             // A tool the brand leaves out gives way to the first one
             // switched on.
             if !self.layout.tool.in_build() {
-                let Some(tool) = first_tool(cx) else {
+                let Some(tool) = first_tool(&self.project, cx) else {
                     self.layout.result_open = false;
                     return;
                 };
@@ -887,7 +895,19 @@ impl WorkspaceScreen {
             &files,
             window,
             |this, _, event: &FilesPanelEvent, window, cx| match event {
-                FilesPanelEvent::OpenFilesChanged => this.save_layout(cx),
+                FilesPanelEvent::OpenFilesChanged => {
+                    // The last file closed where there is no folder tree to
+                    // fall back on (the Chats space): the pane would be
+                    // blank under the name Files.
+                    if this.layout.tool == ContextTab::Files
+                        && !this.project.is_workspace()
+                        && !this.has_open_files(cx)
+                        && let Some(tool) = first_tool(&this.project, cx)
+                    {
+                        return this.show_tool(tool, window, cx);
+                    }
+                    this.save_layout(cx)
+                }
                 FilesPanelEvent::Opened => this.show_tool(ContextTab::Files, window, cx),
                 FilesPanelEvent::Ask(ask) => this.ask_about_code(ask.clone(), window, cx),
                 FilesPanelEvent::MakePrimary(path) => {
@@ -1296,10 +1316,23 @@ impl WorkspaceScreen {
     }
 }
 
-/// The first tool this build and the user's settings show: what the result
-/// pane falls back to.
-fn first_tool(cx: &App) -> Option<ContextTab> {
-    AppState::enabled_tabs(cx).into_iter().next()
+/// The first tool this build and the user's settings show for `project`:
+/// what the result pane falls back to. In the Chats space, which has no
+/// folder, that is the first of the tools that need none.
+fn first_tool(project: &Project, cx: &App) -> Option<ContextTab> {
+    let enabled = AppState::enabled_tabs(cx);
+    if project.is_workspace() {
+        return enabled.into_iter().next();
+    }
+    [
+        ContextTab::Browser,
+        ContextTab::Terminal,
+        ContextTab::Board,
+        ContextTab::Devices,
+        ContextTab::Tests,
+    ]
+    .into_iter()
+    .find(|tab| enabled.contains(tab))
 }
 
 /// `@tabs`: the text of the Chrome tabs the user shared with PilotHouse,
