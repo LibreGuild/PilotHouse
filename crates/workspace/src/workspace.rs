@@ -119,17 +119,17 @@ impl Workspace {
         if let Err(err) = store.heal_scratch_folders(&ph_store::paths::scratch_root()) {
             tracing::warn!("checking scratch folders failed: {err:#}");
         }
-        let mut projects = workspaces(store);
-        // A first start (or one after every workspace was removed) opens
-        // straight into a chat: in the workspace for chats that need no
-        // folder, made now.
-        let first_start = projects.is_empty();
-        if first_start {
-            match store.scratch_workspace(&ph_store::paths::scratch_root()) {
-                Ok(_) => projects = workspaces(store),
-                Err(err) => tracing::error!("making the Scratch workspace failed: {err:#}"),
-            }
-        }
+        // The workspace for chats that need no folder is always there
+        // (made now when there is none): a quick chat's home, and where a
+        // first start opens straight into a chat.
+        let scratch = store
+            .scratch_workspace(&ph_store::paths::scratch_root())
+            .inspect_err(|err| tracing::error!("making the Scratch workspace failed: {err:#}"))
+            .ok()
+            .map(|scratch| scratch.id);
+        let projects = workspaces(store);
+        // No workspace of the user's own yet.
+        let first_start = projects.iter().all(|project| Some(project.id) == scratch);
         let last_project: Option<ProjectId> = store.setting(keys::LAST_PROJECT);
         let sidebar_collapsed: bool = store.setting(keys::SIDEBAR_COLLAPSED);
         let front: String = store.setting(keys::FRONT_VIEW);
@@ -369,8 +369,14 @@ impl Workspace {
         }
     }
 
-    /// The workspace for chats that need no folder ("Scratch"), made when
-    /// there is none (it was removed, or given folders).
+    /// Whether `id` is the workspace for chats that need no folder: it is
+    /// not removed and takes no folders (see `Store::scratch_workspace`).
+    pub(crate) fn is_scratch(&self, id: ProjectId, cx: &gpui_kit::App) -> bool {
+        AppState::store(cx).is_scratch(id)
+    }
+
+    /// The workspace for chats that need no folder ("Scratch"); this
+    /// window's list takes it up when it was made elsewhere.
     pub(crate) fn scratch(&mut self, cx: &mut Context<Self>) -> Option<ProjectId> {
         let store = AppState::store(cx).clone();
         let project = store
@@ -518,6 +524,26 @@ impl Workspace {
         {
             return self.open_terminal_agent(project, &pane, true, window, cx);
         }
+        // A workspace made since this window last read them (by the quick
+        // chat, by another window): it is read now, not found missing.
+        if !self.has_project(project) {
+            self.reload_projects(cx);
+        }
+        // Shown in another window: the chat opens there, in the window
+        // that comes forward (not only the workspace, with whatever chat
+        // it had in front).
+        if let Some((handle, other)) = crate::windows::shown_elsewhere(project, self.handle, cx) {
+            // Deferred: that window may be this one's caller.
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    window.activate_window();
+                    other.update(cx, |other, cx| {
+                        other.open_chat(project, session, window, cx)
+                    });
+                });
+            });
+            return;
+        }
         self.open_project(project, window, cx);
         if let Some(space) = self.spaces.get(&project) {
             space.update(cx, |space, cx| space.select_session(session, cx));
@@ -655,6 +681,11 @@ impl Workspace {
     }
 
     pub fn new_chat_in(&mut self, project: ProjectId, window: &mut Window, cx: &mut Context<Self>) {
+        // A workspace made since this window last read them (by the quick
+        // chat): read now.
+        if !self.has_project(project) {
+            self.reload_projects(cx);
+        }
         self.open_project(project, window, cx);
         if let Some(space) = self.spaces.get(&project) {
             space.update(cx, |space, cx| space.new_session(window, cx));
@@ -1389,7 +1420,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(id) = self.active_project else {
+        // From the workspace for chats that need no folder, a folder
+        // opens as a workspace of its own: that one stays without.
+        let Some(id) = self.active_project.filter(|id| !self.is_scratch(*id, cx)) else {
             return window.dispatch_action(Box::new(AddProject), cx);
         };
         self.bring_forward(window, cx);
@@ -1521,9 +1554,21 @@ impl Workspace {
         );
     }
 
-    /// Removes a project from PilotHouse (the folder on disk is untouched).
+    /// Removes a project from PilotHouse (the folder on disk is untouched;
+    /// its chats go with it).
     pub fn remove_project(&mut self, id: ProjectId, window: &mut Window, cx: &mut Context<Self>) {
         if !self.has_project(id) {
+            return;
+        }
+        // Its chats would have nowhere to be found.
+        if self.is_scratch(id, cx) {
+            window.push_notification(
+                Notification::info(
+                    "This workspace holds the chats that need no folder, so it stays. \
+                     Delete its chats one by one from their menus.",
+                ),
+                cx,
+            );
             return;
         }
         if let Err(err) = AppState::store(cx).remove_project(id) {
@@ -2064,9 +2109,41 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.active_project {
-            self.remove_project(id, window, cx);
+        let Some(id) = self.active_project else {
+            return;
+        };
+        // Its chats go with it: said first, and asked, when it has any.
+        let chats = self.sessions_of(id, cx).len();
+        if chats == 0 || self.is_scratch(id, cx) {
+            return self.remove_project(id, window, cx);
         }
+        let name = self
+            .projects
+            .iter()
+            .find(|project| project.id == id)
+            .map(|project| project.name.clone())
+            .unwrap_or_default();
+        let workspace = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, _| {
+            let workspace = workspace.clone();
+            dialog
+                .title(format!("Remove {name}?"))
+                .w(ph_ui::scaled_px(460., window))
+                .child(format!(
+                    "Its {} deleted with it. The folders on disk are not touched.",
+                    if chats == 1 {
+                        "chat is".to_string()
+                    } else {
+                        format!("{chats} chats are")
+                    }
+                ))
+                .footer(ph_ui::dialog_buttons("Remove", true))
+                .on_ok(move |_, window, cx| {
+                    _ = workspace
+                        .update(cx, |workspace, cx| workspace.remove_project(id, window, cx));
+                    true
+                })
+        });
     }
 
     /// ⌘B: folds what is at the left of the view in front away, or brings

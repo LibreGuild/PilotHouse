@@ -1149,11 +1149,25 @@ impl WorkspaceScreen {
         if self.active_session == Some(id) {
             return;
         }
-        let session = self
+        // A chat made a moment ago away from this screen (the quick chat's,
+        // a terminal agent's) is not in its list until the next look: read
+        // now, or the chat asked for would show as a new, empty one.
+        if !self.sessions.iter().any(|session| session.id == id) {
+            self.sessions = AppState::store(cx)
+                .sessions(self.project.id)
+                .unwrap_or_default()
+                .into();
+        }
+        let Some(session) = self
             .sessions
             .iter()
             .find(|session| session.id == id)
-            .cloned();
+            .cloned()
+        else {
+            // Deleted since: there is nothing to show.
+            return;
+        };
+        let session = Some(session);
         self.active_session = Some(id);
         self.chat
             .update(cx, |chat, cx| chat.set_session(session, cx));

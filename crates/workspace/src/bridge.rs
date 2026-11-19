@@ -1446,6 +1446,9 @@ pub(crate) fn workspace_menu_items(
         })
     };
     let task = crate::tasks::of(crate::AppState::store(cx), id);
+    // The workspace for chats that need no folder has no folder to branch
+    // from, takes none, and stays: its menu leaves those out.
+    let scratch = crate::AppState::store(cx).is_scratch(id);
     let new_chat = workspace.clone();
     let menu = menu
         .item(
@@ -1455,29 +1458,36 @@ pub(crate) fn workspace_menu_items(
                     _ = new_chat.update(cx, |workspace, cx| workspace.new_chat_in(id, window, cx));
                 }),
         )
-        .item(item("New task in a worktree", Icons::GitBranch, || {
-            Box::new(NewTask)
-        }))
+        .when(!scratch, |menu| {
+            menu.item(item("New task in a worktree", Icons::GitBranch, || {
+                Box::new(NewTask)
+            }))
+        })
         .when(task.is_some(), |menu| {
             menu.item(item("Finish this task", Icons::Check, || {
                 Box::new(FinishTask)
             }))
         })
         .separator()
-        .item(item("Add a folder", Icons::FolderPlus, || {
-            Box::new(AddFolderToWorkspace)
-        }));
-    menu.item(item("Rename", Icons::Pencil, || Box::new(RenameWorkspace)))
+        .when(!scratch, |menu| {
+            menu.item(item("Add a folder", Icons::FolderPlus, || {
+                Box::new(AddFolderToWorkspace)
+            }))
+        });
+    let menu = menu
+        .item(item("Rename", Icons::Pencil, || Box::new(RenameWorkspace)))
         .item(item("Open in a new window", Icons::ExternalLink, || {
             Box::new(OpenInNewWindow)
         }))
-        .item(PopupMenuItem::submenu("Colour", colours))
-        .separator()
-        .item(item(
-            concat!("Remove from ", ph_brand::name!()),
-            Icons::Trash,
-            || Box::new(RemoveWorkspace),
-        ))
+        .item(PopupMenuItem::submenu("Colour", colours));
+    if scratch {
+        return menu;
+    }
+    menu.separator().item(item(
+        concat!("Remove from ", ph_brand::name!()),
+        Icons::Trash,
+        || Box::new(RemoveWorkspace),
+    ))
 }
 
 /// A task's menu: pin it, mark it done, rename or delete it.

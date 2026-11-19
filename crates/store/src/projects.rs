@@ -208,6 +208,13 @@ impl Store {
         if !project.is_workspace() {
             bail!("folders are added to workspaces only");
         }
+        // It stays the place for chats that need no folder.
+        if self.is_scratch(id) {
+            bail!(
+                "{} is for chats that need no folder: open the folder as a workspace of its own",
+                project.name
+            );
+        }
         if project.roots().contains(&path) {
             return Ok(project);
         }
@@ -452,25 +459,42 @@ impl Store {
     }
 
     /// The workspace for chats that need no folder ("Scratch"): the one
-    /// noted as that while it is still a workspace without folders, else a
-    /// new one. It is a workspace like any other (renamed, given folders,
-    /// removed); this only says where a chat with no place of its own goes
-    /// (a quick chat, the first chat of a first start).
+    /// noted as that, made when there is none yet. It is always there: it
+    /// is where a chat with no place of its own goes (a quick chat, the
+    /// first chat of a first start, a new task without a folder), and what
+    /// such chats are found under afterwards. So it is not removed
+    /// ([`Self::remove_project`] refuses) and takes no folders
+    /// ([`Self::add_workspace_folder`] refuses): its chats would lose their
+    /// place, or it would stop being the place without one. It is renamed
+    /// and coloured like any workspace.
     ///
     /// It was a space of its own kind beside the workspaces ("Chats"),
     /// which made two sorts of place to learn for one sort of thing.
     pub fn scratch_workspace(&self, scratch_root: &Path) -> Result<Project> {
-        let noted: ProjectId = self.setting(SCRATCH);
-        if noted != 0
-            && let Some(project) = self.project(noted)?
-            && project.empty
-            && project.extra_folders.is_empty()
-        {
+        if let Some(project) = self.scratch()? {
             return Ok(project);
         }
         let project = self.create_empty_workspace("Scratch", scratch_root)?;
         self.set_setting(SCRATCH, &project.id)?;
         Ok(project)
+    }
+
+    /// The workspace noted as the one for chats that need no folder, while
+    /// it is one without folders (one given folders by an earlier version
+    /// is an ordinary workspace now).
+    fn scratch(&self) -> Result<Option<Project>> {
+        let noted: ProjectId = self.setting(SCRATCH);
+        if noted == 0 {
+            return Ok(None);
+        }
+        Ok(self
+            .project(noted)?
+            .filter(|project| project.empty && project.extra_folders.is_empty()))
+    }
+
+    /// Whether `id` is the workspace for chats that need no folder.
+    pub fn is_scratch(&self, id: ProjectId) -> bool {
+        matches!(self.scratch(), Ok(Some(project)) if project.id == id)
     }
 
     /// The space of the GitHub repository whose managed clone is `clone`
@@ -632,6 +656,11 @@ impl Store {
     /// Removes the project from PilotHouse. The folder on disk is untouched.
     /// Its id is never given to another (see [`next_project_id`]).
     pub fn remove_project(&self, id: ProjectId) -> Result<()> {
+        // Its chats would have nowhere to be found (and removing a
+        // workspace removes its chats).
+        if self.is_scratch(id) {
+            bail!("the workspace for chats that need no folder stays: delete its chats one by one");
+        }
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute(
@@ -908,16 +937,20 @@ mod tests {
         assert!(scratch.empty && scratch.is_workspace());
         // Asked again, the same one.
         assert_eq!(store.scratch_workspace(&root).unwrap().id, scratch.id);
-        // Given a folder it is a workspace of that folder: chats that need
-        // none get a new place.
-        store
-            .add_workspace_folder(scratch.id, &temp_folder("kinds-x"))
-            .unwrap();
-        let next = store.scratch_workspace(&root).unwrap();
-        assert_ne!(next.id, scratch.id);
-        // Removed, likewise.
-        store.remove_project(next.id).unwrap();
-        assert_ne!(store.scratch_workspace(&root).unwrap().id, next.id);
+        // It takes no folders and is not removed: the chats that need no
+        // folder keep their place.
+        assert!(store.is_scratch(scratch.id));
+        assert!(
+            store
+                .add_workspace_folder(scratch.id, &temp_folder("kinds-x"))
+                .is_err()
+        );
+        assert!(store.remove_project(scratch.id).is_err());
+        assert_eq!(store.scratch_workspace(&root).unwrap().id, scratch.id);
+        // Any other workspace without folders is none of that.
+        let other = store.create_empty_workspace("Notes", &root).unwrap();
+        assert!(!store.is_scratch(other.id));
+        store.remove_project(other.id).unwrap();
 
         let clone = temp_folder("kinds-clone");
         let repo = store.github_space("acme/app", &clone).unwrap();

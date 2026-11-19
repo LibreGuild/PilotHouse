@@ -880,6 +880,144 @@ fn changes_are_reviewed_beside_their_list(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+/// Chats that need no folder (the quick chat's) always have their place,
+/// the Scratch workspace, and are found there: it is not removed, takes no
+/// folder, and a chat made away from the window (as the quick chat makes
+/// one) opens as itself, not as a new, empty chat.
+#[gpui_kit::test]
+fn standalone_chats_keep_their_place(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let scratch = cx.update(|cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.projects().len(), 1);
+        workspace.projects()[0].id
+    });
+    // Asked to remove it: it stays, with a word why.
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.remove_project(scratch, window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.projects().len(), 1, "Scratch is still there");
+        assert!(AppState::store(cx).project(scratch).unwrap().is_some());
+    });
+    // A folder added while it is in front opens as a workspace of its own.
+    let folder = temp_project("standalone");
+    cx.update(|cx| {
+        assert!(
+            AppState::store(cx)
+                .add_workspace_folder(scratch, &folder)
+                .is_err(),
+            "it takes no folder"
+        );
+    });
+
+    // The quick chat makes a chat there while the window has Scratch's
+    // screen open, and asks the window to show it.
+    let session = cx.update(|cx| {
+        AppState::store(cx)
+            .create_session(scratch, "Asked from the quick window", "claude")
+            .unwrap()
+            .id
+    });
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_chat(scratch, session, window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.active_project_id(), Some(scratch));
+        let space = workspace.active_space().unwrap().read(cx);
+        assert_eq!(
+            space.active_session(),
+            Some(session),
+            "that chat is in front"
+        );
+        assert!(
+            space.sessions().iter().any(|known| known.id == session),
+            "and among the workspace's chats"
+        );
+    });
+
+    // A workspace made away from the window (another window, an earlier
+    // quick chat) is read when a chat of it is asked for.
+    let (other, chat) = cx.update(|cx| {
+        let store = AppState::store(cx);
+        let other = store
+            .create_empty_workspace("Notes", &temp_project("standalone-notes"))
+            .unwrap()
+            .id;
+        let chat = store.create_session(other, "A note", "claude").unwrap().id;
+        (other, chat)
+    });
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_chat(other, chat, window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.active_project_id(), Some(other));
+        let space = workspace.active_space().unwrap().read(cx);
+        assert_eq!(space.active_session(), Some(chat));
+    });
+}
+
+/// Removing a workspace removes its chats: with any, it says so and asks
+/// first. (It went at once before, chats and all.)
+#[gpui_kit::test]
+fn removing_a_workspace_with_chats_asks_first(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let (alpha, _beta) = two_workspaces("remove-asks", window, &workspace, cx);
+    cx.update(|cx| {
+        AppState::store(cx)
+            .create_session(alpha, "Sort the arrivals", "claude")
+            .unwrap();
+    });
+    // Alpha in front, its screen made anew with the chat now stored.
+    workspace.update(cx, |workspace, cx| {
+        workspace.unload_idle(std::time::Duration::ZERO, cx)
+    });
+    click_id(window, ("rail-workspace", alpha as u64), cx);
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_action(Box::new(ph_workspace::RemoveWorkspace), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("dialog-ok").is_some(), "it asks");
+        assert!(
+            workspace
+                .read(cx)
+                .projects()
+                .iter()
+                .any(|project| project.id == alpha),
+            "and nothing went yet"
+        );
+    })
+    .unwrap();
+    click(window, "dialog-ok", cx);
+    cx.update(|cx| {
+        assert!(
+            !workspace
+                .read(cx)
+                .projects()
+                .iter()
+                .any(|project| project.id == alpha)
+        );
+    });
+}
+
 /// Reviews is one click away; without an account it asks for one. The
 /// Bridge and the chats that need no folder each have their key.
 #[gpui_kit::test]

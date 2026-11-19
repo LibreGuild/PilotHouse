@@ -94,7 +94,14 @@ When an agent reports how much of its subscription window is used, the status ba
 
 ## Scratch: chats that need no folder
 
-A workspace like any other, without folders, named *Scratch*: agents there work in a private scratch folder. `Store::scratch_workspace` returns the one noted in the setting `workspace.scratch` while it is still a workspace without folders, else makes a new one. It is where a chat with no place of its own goes: a quick chat, *New task → Without a folder*, ⌘⇧D (*Show Scratch*), and the first chat of a first start, which makes it. Renamed, given folders or removed, it is just that workspace; the next chat that needs no folder gets a new Scratch.
+A workspace without folders, named *Scratch*, where agents work in a private scratch folder. It is where a chat with no place of its own goes, and where such chats are found afterwards: a quick chat, *New task → Without a folder*, ⌘⇧D (*Show Scratch*), and the first chat of a first start. `Store::scratch_workspace` returns the one noted in the setting `workspace.scratch`, making it when there is none; every window makes sure of it as it opens.
+
+It has a badge, a colour and a name of your choosing like any workspace, and can move to a window of its own. Two things it does not do, so that these chats always have their place:
+
+- **It is not removed.** Its menu has no *Remove*, the command says why, and `Store::remove_project` refuses. Its chats are deleted one by one, from a card's or a tab's menu.
+- **It takes no folder.** *Add a folder* while it is in front opens the folder as a workspace of its own (`Store::add_workspace_folder` refuses); its menu has no *Add a folder* or *New task in a worktree*.
+
+A chat made there away from the window (the quick chat's, as it is sent) opens as itself when asked for: the window reads the workspace's chats again for a chat it does not know (`WorkspaceScreen::select_session`), and its workspaces again for a workspace it does not know (`Workspace::open_chat`). A chat of a workspace shown in another window opens in that window.
 
 It was a space of a kind of its own (*Chats*, a row of kind `chats`) with its own icon under the workspaces, no colour or menu, and exceptions wherever workspaces were handled. Migration 17 turned that row into this workspace; its chats stayed.
 
@@ -115,6 +122,7 @@ It was a space of a kind of its own (*Chats*, a row of kind `chats`) with its ow
 - Switch with the badges in the column of icons, with ⌃1–⌃9 (macOS) or Alt+1–9 (elsewhere) for the first nine, or Ctrl+Tab for the one before.
 - Coming back to a workspace shows **While you were away**: the chats that finished and a test run that ended, one click each.
 - Clicking a schedule's or reminder's system notification opens its workspace (and the chat it ran).
+- **Removing a workspace** (*Remove from PilotHouse*, its menu) removes its chats with it and leaves its folders alone. With any chats it says how many and asks first.
 - **Open in new window** moves a workspace to its own window (`windows.rs`). A workspace shows in one window at a time: picking it in another window brings its window forward. Files with unsaved changes must be saved first.
 - A workspace hidden for 30 minutes with nothing going on and nothing unsaved has its screen closed to keep memory flat; opening it rebuilds the screen, and its chats and shells were running all along.
 
