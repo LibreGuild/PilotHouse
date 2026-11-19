@@ -8,7 +8,7 @@
 //! [`ph_agent::chats`], [`ph_terminal::TerminalHub`],
 //! [`ph_uitest::runner`]), so a space can be rebuilt without stopping any.
 //!
-//! Tool panels (board, terminal, ...) are created the first time their tool
+//! Tool panels (Git, terminal, ...) are created the first time their tool
 //! is shown. A workspace that never opens the terminal never starts a shell.
 //!
 //! The code is split by concern: `panels` makes the tool panels, `to_chat`
@@ -32,7 +32,6 @@ use gpui_kit::{
     Styled as _, Subscription, Window, div,
 };
 use ph_agent::{Attachment, ChatPanel, ChatPanelEvent, LiveSources, WorkspaceChatsEvent};
-use ph_board::{BoardPanel, BoardPanelEvent};
 use ph_browser::BrowserPanel;
 use ph_changes::{BranchPicker, ChangesPanel, ChangesPanelEvent, Repo, RepoEvent};
 use ph_devices::DevicesPanel;
@@ -147,7 +146,6 @@ pub struct WorkspaceScreen {
     /// The Files tool's tree over `files`.
     file_tree: Option<Entity<FileTree>>,
     changes: HashMap<usize, Entity<ChangesPanel>>,
-    board: Option<Entity<BoardPanel>>,
     terminal: Option<Entity<TerminalPanel>>,
     browser: Option<Entity<BrowserPanel>>,
     devices: Option<Entity<DevicesPanel>>,
@@ -383,7 +381,6 @@ impl WorkspaceScreen {
             files: None,
             file_tree: None,
             changes: HashMap::new(),
-            board: None,
             terminal: None,
             browser: None,
             devices: None,
@@ -493,7 +490,7 @@ impl WorkspaceScreen {
             ContextTab::Files => true,
             ContextTab::Changes => traits.git,
             ContextTab::Pulls => traits.remote,
-            ContextTab::Board | ContextTab::Terminal => true,
+            ContextTab::Terminal => true,
             ContextTab::Browser => empty || web,
             ContextTab::Devices | ContextTab::Logcat => empty || has(Stack::Android),
             ContextTab::Runs => !traits.stacks.is_empty(),

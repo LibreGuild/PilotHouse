@@ -29,7 +29,6 @@ pub enum Feature {
     Files,
     Changes,
     Pulls,
-    Board,
     Browser,
     Devices,
     Runs,
@@ -49,11 +48,10 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Feature; 19] = [
+    pub const ALL: [Feature; 18] = [
         Feature::Files,
         Feature::Changes,
         Feature::Pulls,
-        Feature::Board,
         Feature::Browser,
         Feature::Devices,
         Feature::Runs,
@@ -77,7 +75,6 @@ impl Feature {
             Feature::Files => "files",
             Feature::Changes => "changes",
             Feature::Pulls => "pulls",
-            Feature::Board => "board",
             Feature::Browser => "browser",
             Feature::Devices => "devices",
             Feature::Runs => "runs",

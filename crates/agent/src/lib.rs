@@ -13,7 +13,7 @@
 //! - [`ApprovalInbox`]: permission requests from every agent, in one place.
 //!
 //! Every new agent session is given the PilotHouse MCP server, so agents can
-//! read and update the project board.
+//! use the app's browser, devices and tests.
 
 pub mod agents;
 pub mod approvals;

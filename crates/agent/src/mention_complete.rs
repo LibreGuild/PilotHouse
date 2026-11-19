@@ -1,6 +1,6 @@
 //! Completing mentions in the composer: `@` offers the live sources
 //! (`@screenshot`, `@log`, `@test-run`), definitions (`@path:line`), pull
-//! requests (`@pr:12`), files and folders; `#` offers board cards; `/` at the start
+//! requests (`@pr:12`), files and folders; `/` at the start
 //! of a message offers the agent's commands (`/review`, `/compact`…). What is
 //! inserted is the plain text the composer and the agent already understand
 //! (see [`crate::attachments::mentions`]).
@@ -13,7 +13,7 @@ pub const LIMIT: usize = 8;
 /// The mention being typed at the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Typing {
-    /// `@`, `#` or `/`.
+    /// `@` or `/`.
     pub trigger: char,
     /// What follows the trigger, up to the cursor.
     pub query: String,
@@ -38,12 +38,12 @@ pub fn typing_at(text: &str, cursor: usize) -> Option<Typing> {
     let word = &before[start..];
     let trigger = word.chars().next()?;
     // A command only opens a message.
-    if !(matches!(trigger, '@' | '#') || (trigger == '/' && before[..start].trim().is_empty())) {
+    if !(trigger == '@' || (trigger == '/' && before[..start].trim().is_empty())) {
         return None;
     }
     let query = word[trigger.len_utf8()..].to_string();
-    // `#` takes a card number or words of a title; never another trigger.
-    if query.contains(['@', '#']) {
+    // Never another trigger inside one.
+    if query.contains('@') {
         return None;
     }
     Some(Typing {
@@ -62,9 +62,6 @@ pub struct Suggestion {
     pub insert: String,
 }
 
-/// Board cards as `(number, title)`.
-pub type CardList<'a> = &'a [(i64, String)];
-
 /// What else `@` can offer besides files.
 #[derive(Default)]
 pub struct Extra<'a> {
@@ -78,12 +75,7 @@ pub struct Extra<'a> {
 }
 
 /// What to offer for `typing`, best first.
-pub fn suggestions(
-    typing: &Typing,
-    files: &[impl AsRef<str>],
-    cards: CardList,
-    extra: &Extra,
-) -> Vec<Suggestion> {
+pub fn suggestions(typing: &Typing, files: &[impl AsRef<str>], extra: &Extra) -> Vec<Suggestion> {
     let query = typing.query.as_str();
     match typing.trigger {
         '/' => {
@@ -111,33 +103,6 @@ pub fn suggestions(
                     label: format!("/{name}"),
                     detail: description.clone(),
                     insert: format!("/{name} "),
-                })
-                .collect()
-        }
-        '#' => {
-            let lower = query.to_lowercase();
-            let mut matched: Vec<(i32, &(i64, String))> = cards
-                .iter()
-                .filter_map(|card| {
-                    let number = card.0.to_string();
-                    if query.is_empty() {
-                        Some((0, card))
-                    } else if number.starts_with(query) {
-                        Some((1_000 - number.len() as i32, card))
-                    } else {
-                        ph_files::fuzzy::fuzzy_match(&lower, &card.1.to_lowercase())
-                            .map(|found| (found.score, card))
-                    }
-                })
-                .collect();
-            matched.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.0.cmp(&a.1.0)));
-            matched
-                .into_iter()
-                .take(LIMIT)
-                .map(|(_, (number, title))| Suggestion {
-                    label: format!("#{number}"),
-                    detail: title.clone(),
-                    insert: format!("#{number} "),
                 })
                 .collect()
         }
@@ -252,7 +217,7 @@ mod tests {
             (typing.trigger, typing.query.as_str(), typing.range),
             ('@', "src/ma", 8..15)
         );
-        assert_eq!(typing_at("#1", 2).unwrap().query, "1");
+        assert_eq!(typing_at("#1", 2), None, "a # starts nothing");
         assert_eq!(typing_at("@", 1).unwrap().query, "");
         assert_eq!(typing_at("mail me@home", 12), None, "not after a word");
         assert_eq!(typing_at("@src ", 5), None, "finished with a space");
@@ -268,7 +233,7 @@ mod tests {
     fn folders_are_offered_with_a_slash() {
         let entries = ["src/", "src/app/", "src/app/mod.rs"];
         let typing = typing_at("@app", 4).unwrap();
-        let found = suggestions(&typing, &entries, &[], &Extra::default());
+        let found = suggestions(&typing, &entries, &Extra::default());
         let folder = found
             .iter()
             .find(|item| item.insert == "@src/app/ ")
@@ -288,48 +253,16 @@ mod tests {
             "docs/screens.md",
         ];
         let typing = typing_at("@scr", 4).unwrap();
-        let found = suggestions(&typing, &files, &[], &Extra::default());
+        let found = suggestions(&typing, &files, &Extra::default());
         assert_eq!(found[0].insert, "@screenshot ", "the live source first");
         assert!(found.iter().any(|s| s.insert == "@docs/screens.md "));
 
-        let found = suggestions(
-            &typing_at("@main", 5).unwrap(),
-            &files,
-            &[],
-            &Extra::default(),
-        );
+        let found = suggestions(&typing_at("@main", 5).unwrap(), &files, &Extra::default());
         assert_eq!(
             (found[0].label.as_str(), found[0].detail.as_str()),
             ("main.rs", "src")
         );
-        assert!(
-            suggestions(&typing_at("@", 1).unwrap(), &files, &[], &Extra::default()).len() <= LIMIT
-        );
-    }
-
-    #[test]
-    fn cards_by_number_or_title_for_hash() {
-        let cards = vec![
-            (3, "Fix login retry".to_string()),
-            (12, "Add dark mode".to_string()),
-            (31, "Login page copy".to_string()),
-        ];
-        let by_number = suggestions(
-            &typing_at("#3", 2).unwrap(),
-            &[] as &[&str],
-            &cards,
-            &Extra::default(),
-        );
-        assert_eq!(by_number[0].insert, "#3 ", "an exact number first");
-        assert_eq!(by_number[1].insert, "#31 ");
-        let by_title = suggestions(
-            &typing_at("#login", 6).unwrap(),
-            &[] as &[&str],
-            &cards,
-            &Extra::default(),
-        );
-        let numbers: Vec<_> = by_title.iter().map(|s| s.label.as_str()).collect();
-        assert!(numbers.contains(&"#3") && numbers.contains(&"#31") && !numbers.contains(&"#12"));
+        assert!(suggestions(&typing_at("@", 1).unwrap(), &files, &Extra::default()).len() <= LIMIT);
     }
 
     #[test]
@@ -344,7 +277,7 @@ mod tests {
             ..Extra::default()
         };
         let typing = typing_at("/rev", 4).unwrap();
-        let found = suggestions(&typing, &[] as &[&str], &[], &extra);
+        let found = suggestions(&typing, &[] as &[&str], &extra);
         assert_eq!(found[0].insert, "/review ");
         assert!(typing_at("fix a/b", 7).is_none());
         assert!(typing_at("see /rev", 8).is_none());
@@ -365,19 +298,9 @@ mod tests {
             pulls: &pulls,
             ..Extra::default()
         };
-        let found = suggestions(
-            &typing_at("@parse", 6).unwrap(),
-            &[] as &[&str],
-            &[],
-            &extra,
-        );
+        let found = suggestions(&typing_at("@parse", 6).unwrap(), &[] as &[&str], &extra);
         assert_eq!(found[0].insert, "@src/data.rs:42 ");
-        let prs = suggestions(
-            &typing_at("@pr:log", 7).unwrap(),
-            &[] as &[&str],
-            &[],
-            &extra,
-        );
+        let prs = suggestions(&typing_at("@pr:log", 7).unwrap(), &[] as &[&str], &extra);
         assert_eq!(prs.len(), 1);
         assert_eq!(prs[0].insert, "@pr:12 ");
     }

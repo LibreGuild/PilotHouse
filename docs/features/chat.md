@@ -17,7 +17,7 @@ Agents and terminals use your **login shell's** environment (`ph-env`), so tools
 ## Flow
 
 1. **First message** creates a session (named after the message) and starts the agent process for this project. The process is reused by later chats with the same agent.
-2. `initialize`, then `session/new` with the project folder as cwd, plus the [PilotHouse MCP server](board.md#agent-tools).
+2. `initialize`, then `session/new` with the project folder as cwd, plus the [PilotHouse MCP server](#pilothouses-own-tools).
 3. `session/prompt`. Streamed `session/update`s become transcript entries: replies (markdown), thoughts, tool calls and plans. Thoughts and tool calls read as one line of muted text each (a spinner while running, red when failed, the size of an edit), and open on click to show diffs and output; steps of one run sit close together, a new message stands apart.
    - **Subagents.** Claude Code marks what its subagents say and do (`_meta.claudeCode.parentToolUseId`). Those steps go under the tool call that started the subagent (shown with a bot and "N steps") instead of between the main agent's own.
    - **Working.** Under the newest entry, a line says the agent is working, for how long, and the step under way (the running tool, or the subagent's). Claude Code also carries on by itself after background commands or subagents finish, without a prompt: such updates show the line too ("carrying on by itself") until it has been quiet for a few seconds with no tool running.
@@ -62,12 +62,11 @@ Some chats need something made before their agent can start: a review needs the 
 
 - `@src/main.rs` attaches that file as a resource link the agent can read.
 - `@src/` (a folder, offered with a trailing slash) attaches what the folder holds, folders first, up to 200 entries, so the agent sees its shape and reads what it needs.
-- `#12` attaches board card 12 (title, description, acceptance criteria).
 - `@screenshot` and `@log` attach the browser or device screen and recent logs ([live-panes.md](live-panes.md)); `@test-run` (or `@tests`) attaches how each UI test last went, with the first failing step's screen ([tests.md](tests.md)). With PilotHouse's Chrome extension, `@tabs` (picked or typed, or *Tabs you shared in Chrome* in the **+** menu) attaches the text of the Chrome tabs you shared with agents, marked as page text; sending waits until they are read, and a typed `@tabs` sends once they are ([browser.md](browser.md)).
 - Typing `@` and a name offers definitions (functions, types, classes in Rust, TypeScript/JavaScript, Python, Go, Kotlin/Java/Swift/C#, C/C++; found by reading the files, `ph_files::symbols`); one inserts `@path:line`, which attaches the code from that line to the end of the definition. Any `@path:line` works the same.
 - `@pr:12` attaches a pull request of the workspace's GitHub repository (title, author, branches, description, and how to get its diff); typing `@pr` lists the open ones.
 
-Typing `@` or `#` opens suggestions above the composer (`mention_complete.rs`): files of the project (fuzzy, listed in the background and refreshed every minute) and the live sources for `@`, cards by number or title for `#`. ↑↓ pick, Enter or Tab inserts the mention, Esc closes; Enter does not send while suggestions show.
+Typing `@` opens suggestions above the composer (`mention_complete.rs`): files of the project (fuzzy, listed in the background and refreshed every minute) and the live sources. ↑↓ pick, Enter or Tab inserts the mention, Esc closes; Enter does not send while suggestions show.
 
 ## Links
 
@@ -120,9 +119,35 @@ Where the numbers come from (`ph_agent::usage_logs`): where an agent keeps its o
 
 *Settings → MCP & skills*:
 
-- **MCP servers for every agent**: local (stdio) servers PilotHouse passes to each new agent session, next to its own `pilothouse` server (board, browser, devices). Set one up once instead of in each agent; switch it off or remove it here. The command line splits like a shell's; environment is one `KEY=value` per line. Stored in PilotHouse's database (`mcp_config.rs`).
+- **MCP servers for every agent**: local (stdio) servers PilotHouse passes to each new agent session, next to its own `pilothouse` server (browser, devices, tests). Set one up once instead of in each agent; switch it off or remove it here. The command line splits like a shell's; environment is one `KEY=value` per line. Stored in PilotHouse's database (`mcp_config.rs`).
 - **In your agents' own settings**: the local servers found in `~/.claude.json` (global and this project), the project's `.mcp.json`, `~/.gemini/settings.json` and `.gemini/settings.json`, and `~/.codex/config.toml`. *Use for every agent* copies one over. Remote (URL) servers are not listed.
 - **Skills**: `SKILL.md` folders for Claude Code (the project's `.claude/skills`, `~/.claude/skills`) and Codex (`~/.codex/skills`), with their name and description; *Open* edits one, *New project skill* starts one from a template (`skills.rs`).
+
+### PilotHouse's own tools
+
+Every agent session gets the PilotHouse MCP server (`pilothouse mcp`, crate `ph-mcp`): this same program, which passes each tool call to the running app over the [control socket](../control-socket.md) and keeps no state of its own. Its tools are those of the features a build has:
+
+| Tools | For |
+|---|---|
+| `browser_*` | The built-in browser ([browser.md](browser.md)) |
+| `chrome_*` | The user's own Chrome, through the extension ([browser.md](browser.md)) |
+| `device_*` | Android emulators and phones ([devices.md](devices.md)) |
+| `test_list`, `test_run`, `test_expect` | The workspace's UI tests ([tests.md](tests.md)) |
+| `ports_list` | The ports the project's programs listen on ([runs.md](runs.md)) |
+| `todo_*` | Reminders for the user |
+| `theme_*`, `slides_*`, `studio_*`, `util_*` | Designing a theme, slide decks, pictures and video, and the small utilities |
+
+Which browser comes first is the user's choice (*Settings → Agents → Preferred browser*); the server says so in its instructions as a chat starts.
+
+To use them from an agent started outside PilotHouse (PilotHouse must be running):
+
+```sh
+claude mcp add pilothouse -- /path/to/pilothouse mcp --agent claude
+```
+
+The project is the agent's working directory, or `--project PATH`.
+
+(It also had tools for a board of cards in each workspace, `board_*`, until 0.7, when the board was removed.)
 
 ## Several agents at once
 
@@ -162,7 +187,7 @@ Transcripts are stored per session, with the agent's ACP session id. After a res
 - **Model, effort, mode** are agy flags. `agy models` lists each model once per effort; the picker shows each model once and effort separately. Changing one restarts agy on the same conversation before the next turn. Modes: Ask, Accept edits, Auto, Plan, Full access (`--dangerously-skip-permissions`).
 - **Permissions.** Headless agy cannot ask; it refuses the action and reports it. In Ask, Accept edits and Auto the bridge then asks you, and if you allow it continues the conversation once with permissions skipped.
 - **Cost.** An agy process holds about 200 MB, so it stops after 5 idle minutes and comes back on the next turn. agy takes about 5 s to start.
-- **Limits.** agy has no per-session MCP setting, so Antigravity chats do not get the PilotHouse board, browser and device tools. Images are not sent.
+- **Limits.** agy has no per-session MCP setting, so Antigravity chats do not get the PilotHouse browser, device and test tools. Images are not sent.
 
 ## Cline
 

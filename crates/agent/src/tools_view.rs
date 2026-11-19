@@ -341,7 +341,7 @@ impl Render for ToolsView {
                 "MCP servers for every agent",
                 concat!(
                     ph_brand::name!(),
-                    " starts these for each chat, along with its own (board, browser, devices). Local servers only."
+                    " starts these for each chat, along with its own (browser, devices, tests). Local servers only."
                 ),
                 cx,
             ))

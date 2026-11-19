@@ -245,14 +245,14 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&"board_next_card"));
+        assert!(names.contains(&"todo_add"));
     }
 
     #[test]
     fn tool_errors_are_reported_in_the_result() {
         let mut session = session();
         let call = session
-            .handle_line(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"board_list","arguments":{}}}"#)
+            .handle_line(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"test_list","arguments":{}}}"#)
             .unwrap();
         assert_eq!(call["result"]["isError"], true);
         let unknown = session

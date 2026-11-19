@@ -35,8 +35,8 @@ Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 
 `rail.rs`. From the top:
 
-- **Bridge** (⌘⇧E, also ⌘⇧A) and **Reviews** (⌘⇧G), which shows how many pull requests wait for your review, then an organisation's own views.
-- **One badge per workspace**, newest first (an order that stays put as they are used): its first letter on its colour, a ring when it is in front, and a dot for what goes on there (amber: an agent waits for an answer; red: a turn failed; green: news not seen; blue: working). The tooltip says the name, what it is doing and its shortcut (⌃1–⌃9, Alt+1–9 off macOS). A click opens the workspace; right-click is its menu: *New chat*, *New task*, *Add a folder*, *Rename*, *Open in new window*, *Colour*, *Finish task*, *Remove from PilotHouse*. The badges scroll when there are many.
+- **Bridge** (⌘⇧E, also ⌘⇧A), **Reviews** (⌘⇧G), which shows how many pull requests wait for your review, and **Chats** (⌘⇧D), the chats that need no folder (below); then an organisation's own views. These are always there, in these places. A line parts them from the user's workspaces.
+- **One badge per workspace of the user's**, newest first (an order that stays put as they are used): its first letter on its colour, a ring when it is in front, and a dot for what goes on there (amber: an agent waits for an answer; red: a turn failed; green: news not seen; blue: working). The tooltip says the name, what it is doing and its shortcut (⌃1–⌃9, Alt+1–9 off macOS). A click opens the workspace; right-click is its menu: *New chat*, *New task*, *Add a folder*, *Rename*, *Open in new window*, *Colour*, *Finish task*, *Remove from PilotHouse*. The badges scroll when there are many.
 - **+**: open a folder as a workspace, or make one without folders.
 - **Settings**, at the foot.
 
@@ -56,7 +56,7 @@ Names show under the icons; *Settings → Appearance → Names under the icons* 
 - A card shows the workspace (its colour dot) and the agent, the title, how long ago, and what the agent is doing, asks, or said last. A click opens the workspace at that chat. *Answer* does the same for one that waits; **Review changes** opens it with Git (the changes of its workspace) beside the chat; **Done** marks it done (`workspace.sidebar_settled`), its news seen. One that works or asks again comes back on its own. The ⋯ on hover pins it to the top of its column, renames it, or deletes it with its transcript after asking (not while its agent works or waits).
 - **What a task is besides its chat** shows in a row of its card (`task_facts.rs`, `ph_store::sessions::SessionFacts`): the branch its folder is on, what the chat changed (`+87 −12 6 files`), how it checked that (`14 tests passed`, `2 screenshots`), and the open pull request of the branch with a dot for its checks (green passed, red failed, amber running), which opens it in the browser. The chat's own numbers are read off its tool calls and kept with its stored row when a turn ends (`sessions.facts`), so no transcript is read for a card. Branch, pull request and checks are found in the background for the folders the window shows tasks of: the branch every 15 seconds, the pull request and checks every three minutes, and only where the repository is hosted and an account is connected.
 - **A question answered by picking an option** (a permission: *Allow once*, *Always allow*, *Deny*) shows the options on its card as the agent gave them, with *Open* to read the chat first. A question with a form, or a plan to approve, opens the chat (*Answer*).
-- **Chips** over the columns narrow the Bridge to one workspace. **New task** starts a chat: in a workspace (*In <name>*), without a folder (in the Scratch workspace), or **on a branch of its own** (*From <name>…*, for a workspace that is a Git repository: the task's branch and worktree are made and opened as a workspace, see Tasks below); it also opens a folder or makes a workspace.
+- **Chips** over the columns narrow the Bridge to one workspace. **New task** starts a chat: in a workspace (*In <name>*), without a folder (under Chats), or **on a branch of its own** (*From <name>…*, for a workspace that is a Git repository: the task's branch and worktree are made and opened as a workspace, see Tasks below); it also opens a folder or makes a workspace.
 - *Ready for review* starts with a link to Reviews when pull requests wait for your review. Its ⋯ (with two or more waiting) marks them all done at once: someone who comes from a version without the Bridge finds their last week of chats there.
 - A column lists twelve cards, then *Show N more*. In a narrow window the columns become two rows of two, then one column.
 - With nothing under way the Bridge says how to begin: open a folder, or start a chat without one.
@@ -92,25 +92,30 @@ Left: the branch (ahead/behind, an operation under way; opens the branch picker)
 
 When an agent reports how much of its subscription window is used, the status bar shows a small meter per window, amber near the limit and red at it, with the reset time in the tooltip (`ph_agent::rate_limits`). Claude Code reports its 5-hour and weekly windows in chat as a limit comes close; Codex writes its windows into its own session files (`$CODEX_HOME/sessions`), which PilotHouse reads once a minute, whatever ran Codex. Nothing is fetched for this. Gemini CLI and Antigravity report none.
 
-## Scratch: chats that need no folder
+## Chats: the chats that need no folder
 
-A workspace without folders, named *Scratch*, where agents work in a private scratch folder. It is where a chat with no place of its own goes, and where such chats are found afterwards: a quick chat, *New task → Without a folder*, ⌘⇧D (*Show Scratch*), and the first chat of a first start. `Store::scratch_workspace` returns the one noted in the setting `workspace.scratch`, making it when there is none; every window makes sure of it as it opens.
+A chat with no project of its own goes under **Chats**, and is found there: a quick chat, *New task → Without a folder*, ⌘⇧D (*Show Chats*), and the first chat of a first start.
 
-It has a badge, a colour and a name of your choosing like any workspace, and can move to a window of its own. Two things it does not do, so that these chats always have their place:
+Underneath it is a workspace without folders, where agents work in a private scratch folder, so its screen is a workspace's: tabs for its chats, the terminal, the browser, the Bridge's cards. `Store::scratch_workspace` returns the one noted in the setting `workspace.scratch`, making it when there is none; every window makes sure of it as it opens (`Workspace::chats_place`).
 
+But it is not one of the user's projects, and does not look like one:
+
+- **It has a place of its own**, at the top of the column of icons under the Bridge and Reviews, with an icon. It is not a letter on a colour among the workspaces, moving down as they are added, and it is not counted in their numbers (⌃1–9 are the user's workspaces, `Workspace::listed`).
 - **It is not removed.** Its menu has no *Remove*, the command says why, and `Store::remove_project` refuses. Its chats are deleted one by one, from a card's or a tab's menu.
 - **It takes no folder.** *Add a folder* while it is in front opens the folder as a workspace of its own (`Store::add_workspace_folder` refuses); its menu has no *Add a folder* or *New task in a worktree*.
 
+It can be renamed and moved to a window of its own, from its right-click menu.
+
 A chat made there away from the window (the quick chat's, as it is sent) opens as itself when asked for: the window reads the workspace's chats again for a chat it does not know (`WorkspaceScreen::select_session`), and its workspaces again for a workspace it does not know (`Workspace::open_chat`). A chat of a workspace shown in another window opens in that window.
 
-It was a space of a kind of its own (*Chats*, a row of kind `chats`) with its own icon under the workspaces, no colour or menu, and exceptions wherever workspaces were handled. Migration 17 turned that row into this workspace; its chats stayed.
+Before 0.7 it was a space of a kind of its own (a row of kind `chats`), with exceptions wherever workspaces were handled and a lesser screen. Migration 17 turned that row into this workspace; its chats and its name stayed.
 
 ## A workspace's screen
 
 `workspace_screen/layout.rs`, `workspace_screen/render.rs`. Two islands side by side: the **chat**, and one **result pane** for what the task produced, under a row of names.
 
-- **Git**: the review of what changed, with the repository's branches, history and stashes; its list of changed files has one diff of them beside it ([Git](changes.md)). **Preview**: what the work looks like when it runs, the browser or a phone (a switch at the end of the row picks, and the name remembers which). **Terminal**. **Files**: the folder tree and the files open from it, side by side (the button at the end of the row hides the tree). The workspace's other tools (Board, Run, Tests, Pull requests, Logcat) are under **⋯**, and the one in use shows as a name of its own beside the four. A name shows only for a tool the workspace has a use for (*Git* with a Git repository; Git is under ⋯ where none was seen) and that is switched on; *Preview* stands for whichever of the browser and the phone is.
-- **One tool at a time**, with the whole pane: the browser, a phone and the board need the room. Each tool was a tab in a dock before, which could be dragged anywhere; few arranged it, an arrangement saved could come back wrong, every tool was named twice (its icon in a column and its tab), and the wide tools sat in a narrow column.
+- **Git**: the review of what changed, with the repository's branches, history and stashes; its list of changed files has one diff of them beside it ([Git](changes.md)). **Preview**: what the work looks like when it runs, the browser or a phone (a switch at the end of the row picks, and the name remembers which). **Terminal**. **Files**: the folder tree and the files open from it, side by side (the button at the end of the row hides the tree). The workspace's other tools (Run, Tests, Pull requests, Logcat) are under **⋯**, and the one in use shows as a name of its own beside the four. A name shows only for a tool the workspace has a use for (*Git* with a Git repository; Git is under ⋯ where none was seen) and that is switched on; *Preview* stands for whichever of the browser and the phone is.
+- **One tool at a time**, with the whole pane: the browser and a phone need the room. Each tool was a tab in a dock before, which could be dragged anywhere; few arranged it, an arrangement saved could come back wrong, every tool was named twice (its icon in a column and its tab), and the wide tools sat in a narrow column.
 - **Files** is the first tool (⌘1): the folder tree, each folder a root when there are several (the primary one says so), with an icon per file type, chevrons, indent guides and Git marks (**M** changed, **U** new, **D** deleted; a dot on a folder holding changes). Its header's search button (⌘⇧F) turns the tree into workspace search; the others make a file or a folder, fold every folder and add a folder to the workspace. Right-click any row for the file menu ([files](files.md)); a folder root's also makes it primary or takes it out. Picking a file (from the tree, ⌘P, search, a link in the chat) shows Files with that file in the editor.
 - **Sizes.** The chat starts at two fifths of the window (never under its least width, 380 px, unless the window is too small for both panes); drag the gap between the two to change it. Where it is left is kept per workspace, as a share of the window's width (`chat_share`), so it holds in a window of another size.
 - **Showing and hiding.** ⌘B (and the title bar's left switch) folds the chat to a strip at the pane's edge, so the result pane has the window; the strip says what the chat is doing and brings it back, as does anything sent to the chat. ⌥⌘B (the right switch) hides the result pane, and brings it back as it was. ⌘⇧J gives the result pane the window in one step. ⌘J and Ctrl+backtick show the terminal; pressed again they go back to what was there (the chat alone, when the result pane was shut). Something is always on screen: with the result pane hidden the chat cannot be folded. With the chat folded the keyboard goes to the file in front, else to the window (`WorkspaceScreen::focus_chat`), never to the composer that is not drawn: no shortcut would reach the window from there. A chat asked for (a card on the Bridge, ⌘N) unfolds it. *Reset the layout* (the palette) shows both again.
@@ -135,7 +140,7 @@ A **workspace** (a `Project` in the code, table `projects`) is a name and any nu
   - is a root of Files, its paths named with the folder first (`server/src/main.js`), in ⌘P, search and `@` mentions too (`ph_files::roots`);
   - is given to agents as an extra root (ACP `additionalDirectories`), and a chat's first message tells the agent the folders and how paths name them;
   - has its own Git and PRs tools: a **Folder** picker on top of those tools switches between them, and the status bar's branch names the folder (`server · main`).
-- **No folders**: for planning on the board or driving the browser and devices with a workspace of its own (plain chats go in the Scratch workspace, which is one of these). Agents work in a private scratch folder (`<data dir>/workspaces/…`); Files, Git and PRs say a folder is needed and offer to add one. The first folder added becomes the primary one, and a workspace still called *Workspace N* takes its name.
+- **No folders**: for driving the browser and devices, or thinking something through, with a workspace of its own (plain chats go under Chats, which is one of these underneath). Agents work in a private scratch folder (`<data dir>/workspaces/…`); Files, Git and PRs say a folder is needed and offer to add one. The first folder added becomes the primary one, and a workspace still called *Workspace N* takes its name.
 - The **Run** tool finds each folder's run configurations and names them after their folder (`server: dev`). The Terminal's **+** asks which folder a new shell starts in.
 
 Removing a folder leaves it on disk; removing the primary folder makes the next one primary, and removing the last leaves the workspace without folders. Folders change live: Files, Git and the tools that read folders start again; chats and shells keep going, and new agent sessions get the new folders. *Open with PilotHouse* on a folder opens the workspace that has it among its folders; a file opens in the workspace whose folder holds it (the deepest one).
@@ -152,9 +157,9 @@ Removing a folder leaves it on disk; removing the primary folder makes the next 
 | ⌥⌘B | Show or hide the result pane |
 | ⌘J / ⌃` | The terminal, and back to what was there |
 | ⌘⇧J | The result pane fills the window |
-| ⌘⇧E / ⌘⇧D / ⌘⇧G | The Bridge / Scratch (chats that need no folder) / Reviews |
+| ⌘⇧E / ⌘⇧D / ⌘⇧G | The Bridge / Chats (the chats that need no folder) / Reviews |
 | ⌘1 | Files |
-| ⌘2–9 | Git, Board, Terminal, Browser, Devices, Run, PRs, Tests |
+| ⌘2, ⌘4–9 | Git, Terminal, Browser, Devices, Run, PRs, Tests (⌘3 was the board's, and is free) |
 | ⌃1–⌃9 (Alt+1–9 off macOS) | Workspace 1–9 in the column of icons |
 | Ctrl+Tab | The workspace shown before |
 | ⌘P / ⌘⇧F | Go to file / search in workspace |

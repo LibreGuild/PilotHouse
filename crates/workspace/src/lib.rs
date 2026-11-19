@@ -6,7 +6,7 @@
 //! workspace), what is in front (the Bridge with every task, a workspace's
 //! screen, or Reviews) and the status bar. The [`GithubView`] shows pull
 //! requests across repositories and their reviews. Feature crates (files,
-//! board, terminal, agents...) plug their views into a `WorkspaceScreen`;
+//! terminal, agents...) plug their views into a `WorkspaceScreen`;
 //! the shell itself holds no feature logic.
 //!
 //! See `docs/architecture.md` for how the pieces fit together.

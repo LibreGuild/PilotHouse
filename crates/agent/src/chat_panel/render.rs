@@ -877,9 +877,8 @@ impl ChatPanel {
             };
             let preview: attachment_view::PreviewSource = {
                 let attachment = attachment.clone();
-                let (roots, id, store) =
-                    (self.project.roots(), self.project.id, self.store.clone());
-                Rc::new(move |_| attachment.preview(&roots, id, &store))
+                let roots = self.project.roots();
+                Rc::new(move |_| attachment.preview(&roots))
             };
             let remove = Button::new(("remove-attachment", ix))
                 .ghost()

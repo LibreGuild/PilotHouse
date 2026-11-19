@@ -65,7 +65,6 @@ actions!(
         ResetLayout,
         ShowFiles,
         ShowChanges,
-        ShowBoard,
         ShowTerminal,
         ShowBrowser,
         ShowDevices,
@@ -100,7 +99,7 @@ actions!(
         /// The Bridge: every task of every workspace (⌘⇧E, ⌘⇧A). (Named
         /// for the list of workspaces that was in its place.)
         ShowWorkspacesView,
-        /// The workspace for chats that need no folder ("Scratch"), made
+        /// The workspace for chats that need no folder ("Chats"), made
         /// when there is none (⌘⇧D). Named for what it showed before that
         /// was a workspace: keymaps and menus refer to it by this name.
         ShowChatsView,
@@ -149,7 +148,6 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new(ph_ui::keys("secondary-shift-j"), ToggleZoom, context),
         KeyBinding::new(ph_ui::keys("secondary-1"), ShowFiles, context),
         KeyBinding::new(ph_ui::keys("secondary-2"), ShowChanges, context),
-        KeyBinding::new(ph_ui::keys("secondary-3"), ShowBoard, context),
         KeyBinding::new(ph_ui::keys("secondary-4"), ShowTerminal, context),
         KeyBinding::new(ph_ui::keys("secondary-5"), ShowBrowser, context),
         KeyBinding::new(ph_ui::keys("secondary-6"), ShowDevices, context),

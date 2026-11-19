@@ -398,7 +398,7 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
                 ],
             ),
             Entry::action(
-                "Show Scratch (chats that need no folder)",
+                "Show Chats (the chats that need no folder)",
                 ph_ui::Icons::MessagesSquare,
                 ShowChatsView,
                 &["view", "chat", "chats", "no folder", "loose", "scratch"],

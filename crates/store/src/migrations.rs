@@ -310,14 +310,14 @@ const MIGRATIONS: &[&str] = &[
     // card can say so without reading the transcript.
     "ALTER TABLE sessions ADD COLUMN facts TEXT;",
     // 17: the space for chats outside any workspace ("Chats", a kind of
-    // its own) becomes an ordinary workspace without folders, "Scratch",
-    // noted as the place for chats that need no folder. Its chats stay.
+    // its own) becomes an ordinary workspace without folders, noted as the
+    // place for chats that need no folder. Its chats and its name stay.
     r#"
     INSERT INTO settings (key, value)
         SELECT 'workspace.scratch', CAST(id AS TEXT) FROM projects
         WHERE kind = 'chats' ORDER BY id LIMIT 1
         ON CONFLICT(key) DO UPDATE SET value = excluded.value;
-    UPDATE projects SET kind = 'empty', name = 'Scratch' WHERE kind = 'chats';
+    UPDATE projects SET kind = 'empty', name = 'Chats' WHERE kind = 'chats';
     "#,
 ];
 
@@ -668,7 +668,7 @@ mod tests {
                 Ok((row.get(0)?, row.get(1)?))
             })
             .unwrap();
-        assert_eq!((name.as_str(), kind.as_str()), ("Scratch", "empty"));
+        assert_eq!((name.as_str(), kind.as_str()), ("Chats", "empty"));
         let noted: String = connection
             .query_row(
                 "SELECT value FROM settings WHERE key = 'workspace.scratch'",

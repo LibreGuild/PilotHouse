@@ -61,9 +61,10 @@ fn temp_project(name: &str) -> std::path::PathBuf {
 }
 
 /// A first start opens straight into a chat, in the workspace for chats
-/// that need no folder ("Scratch", made for it: a workspace like any
-/// other); the Bridge lists it; a folder added becomes a workspace with a
-/// badge in the column of icons, and Files as its first tool.
+/// that need no folder ("Chats", made for it: a workspace underneath, with
+/// a place of its own in the column of icons); the Bridge lists it; a
+/// folder added becomes a workspace with a badge in that column, and
+/// Files as its first tool.
 #[gpui_kit::test]
 fn a_first_start_opens_into_a_chat(cx: &mut TestAppContext) {
     let (window, workspace) = open_workspace(cx);
@@ -74,19 +75,23 @@ fn a_first_start_opens_into_a_chat(cx: &mut TestAppContext) {
             let [scratch] = workspace.projects() else {
                 panic!("one workspace, made for the first chat");
             };
-            assert_eq!(scratch.name, "Scratch");
+            assert_eq!(scratch.name, "Chats");
             assert!(scratch.folders().is_empty());
             assert_eq!(workspace.active_project_id(), Some(scratch.id));
             assert_eq!(workspace.view(), ph_workspace::View::Workspaces);
             assert!(window.try_find("bridge").is_none(), "the chat is in front");
+            assert!(
+                window.try_find("view-chats").is_some(),
+                "it has its place over the workspaces"
+            );
             assert!(
                 window
                     .try_find(gpui_kit::ElementId::from((
                         "rail-workspace",
                         scratch.id as u64
                     )))
-                    .is_some(),
-                "it has a badge, as every workspace"
+                    .is_none(),
+                "and is not a badge among them"
             );
             scratch.id
         })
@@ -197,16 +202,16 @@ fn switching_tabs_and_hiding_the_panel(cx: &mut TestAppContext) {
             workspace.add_project_path(&folder, window, cx)
         });
         window.render_frame(cx);
-        assert!(window.try_find("context-tab-board").is_none(), "under More");
-        window.dispatch_action(Box::new(ph_workspace::ShowBoard), cx);
+        assert!(window.try_find("context-tab-tests").is_none(), "under More");
+        window.dispatch_action(Box::new(ph_workspace::ShowTests), cx);
     })
     .unwrap();
     cx.run_until_parked();
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
-        assert!(window.try_find("context-tab-board").is_some());
+        assert!(window.try_find("context-tab-tests").is_some());
         let space = workspace.read(cx).active_space().unwrap().read(cx);
-        assert_eq!(space.context_tab(), ContextTab::Board);
+        assert_eq!(space.context_tab(), ContextTab::Tests);
         assert!(space.is_context_open());
     })
     .unwrap();
@@ -222,19 +227,19 @@ fn switching_tabs_and_hiding_the_panel(cx: &mut TestAppContext) {
         let project = space.project().id;
         let saved = AppState::store(cx).project_ui_state(project).unwrap();
         assert_eq!(saved.context_panel_open, Some(false));
-        assert_eq!(saved.context_tab.as_deref(), Some("board"));
+        assert_eq!(saved.context_tab.as_deref(), Some("tests"));
     });
 
     // (⌘J, the terminal, is left out: its first terminal starts a real
     // shell, whose reader thread makes the test scheduler fail.)
 
-    // ⌥⌘B brings the pane back as it was: the board in front.
+    // ⌥⌘B brings the pane back as it was: the tool that was in front.
     cx.update_window(window, |_, window, cx| window.press("secondary-alt-b", cx))
         .unwrap();
     cx.run_until_parked();
     cx.update(|cx| {
         let space = workspace.read(cx).active_space().unwrap().read(cx);
-        assert_eq!(space.context_tab(), ContextTab::Board);
+        assert_eq!(space.context_tab(), ContextTab::Tests);
         assert!(space.is_context_open());
     });
 }
@@ -289,7 +294,7 @@ fn files_open_beside_the_chat(cx: &mut TestAppContext) {
             workspace.add_project_path(&folder, window, cx)
         });
         // Another tool in front, so the file has to bring Files forward.
-        window.dispatch_action(Box::new(ph_workspace::ShowBoard), cx);
+        window.dispatch_action(Box::new(ph_workspace::ShowTests), cx);
         window.render_frame(cx);
         assert!(
             window.try_find_by_label("Close file").is_none(),
@@ -599,7 +604,7 @@ fn keys_work_with_the_chat_folded(cx: &mut TestAppContext) {
             workspace.add_project_path(&folder, window, cx)
         });
         // A tool with no text to take the keyboard, and the chat typed in.
-        window.dispatch_action(Box::new(ph_workspace::ShowBoard), cx);
+        window.dispatch_action(Box::new(ph_workspace::ShowTests), cx);
         let space = workspace.read(cx).active_space().unwrap().clone();
         space.update(cx, |space, cx| space.focus_chat(window, cx));
     })
@@ -1085,7 +1090,7 @@ fn reviews_ask_for_an_account(cx: &mut TestAppContext) {
         let scratch = workspace
             .projects()
             .iter()
-            .find(|project| project.name == "Scratch")
+            .find(|project| project.name == "Chats")
             .map(|project| project.id);
         assert!(scratch.is_some());
         assert_eq!(workspace.active_project_id(), scratch);

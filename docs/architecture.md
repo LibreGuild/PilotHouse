@@ -13,7 +13,6 @@ crates/
               (chat | result pane), palette, settings, schedules and triggers, inbox and
               to-dos, utilities dialog
   agent/      chat with coding agents over ACP, approval inbox
-  board/      Kanban board + its control methods (used by MCP)
   files/      file tree and its menu (file operations), editor, ⌘P, search, project watcher
   preview/    viewers: rich Markdown editor, Mermaid, images, data trees, tables, notebooks,
               audio, video (the system's media framework), PDF, SQLite, spreadsheets, archives,
@@ -38,7 +37,7 @@ crates/
   mcp/        `pilothouse mcp`: stdio MCP server for agents
   agy/        `pilothouse agy-acp`: Google Antigravity (`agy`) as an ACP agent
   control/    local control socket (+ dev UI automation)
-  store/      SQLite persistence (workspaces, chats, board, schedules, to-dos, usage…)
+  store/      SQLite persistence (workspaces, chats, schedules, to-dos, usage…)
   theme/      light, dark and warm-dark themes, user preferences, layout tokens
   ui/         icon assets, small shared components
   brand/      the app's name, ids, icons, features on or off and update sources, read from
@@ -51,10 +50,10 @@ crates/
 Dependency direction (arrows point at dependencies):
 
 ```
-app ──► workspace ──► agent, board, files, changes, terminal, browser, devices, runs ──► store, ui, theme, env
+app ──► workspace ──► agent, files, changes, terminal, browser, devices, runs ──► store, ui, theme, env
  │                                        browser, devices ──► media
  │                                         files, changes ──► preview
- │                          board, browser, devices, runs ──► control
+ │                          browser, devices, runs ──► control
  ├──► mcp ──► control
  └──► agy ──► env
 ```
@@ -67,7 +66,7 @@ app ──► workspace ──► agent, board, files, changes, terminal, browse
 │   ├ ChatPanel ─────────┐   ├ FilesPanel / FileTree          │
 │   ├ TerminalPanel ───┐ │   ├ ChangesPanel ─ Repo            │
 │   ├ TestsPanel ────┐ │ │   ├ BrowserPanel / DevicesPanel    │
-│                    │ │ │   └ BoardPanel ◄ BoardHub ◄ control ┼◄ pilothouse mcp
+│                    │ │ │   └ their control methods ◄ control ┼◄ pilothouse mcp
 │ Per workspace, no window (globals):                        │
 │   ChatHub ─ WorkspaceChats ─ ChatThread ─ AgentConnection ─┼──► agent (ACP, stdio)
 │   TerminalHub ─ WorkspaceTerminals ─ Terminal ─ PTY ───────┼──► login shell
@@ -90,7 +89,7 @@ Agents run as child processes speaking the [Agent Client Protocol](https://agent
 
 ## Agents → PilotHouse (MCP)
 
-Every new agent session is given one MCP server: this same binary in `pilothouse mcp` mode. The helper processes the app starts (this one, and the `agy-acp` bridge) run under a name of their own, `pilothouse-mcp` and `pilothouse-agy-acp`, so Task Manager and Activity Monitor tell them from the app: a hard link to the program in `<data dir>/helpers/<build>/` (`ph_store::paths::helper_program`), made by the app only and tried once (`--version`), or the program itself where a link cannot be made or does not start (another disk, a policy on where programs may run). It speaks MCP on stdio and forwards tool calls to the running app over the [control socket](control-socket.md). The app owns all state; the bridge holds none. Tools: board, browser, devices and ports (see each feature page). Screenshots come back as MCP image content.
+Every new agent session is given one MCP server: this same binary in `pilothouse mcp` mode. The helper processes the app starts (this one, and the `agy-acp` bridge) run under a name of their own, `pilothouse-mcp` and `pilothouse-agy-acp`, so Task Manager and Activity Monitor tell them from the app: a hard link to the program in `<data dir>/helpers/<build>/` (`ph_store::paths::helper_program`), made by the app only and tried once (`--version`), or the program itself where a link cannot be made or does not start (another disk, a policy on where programs may run). It speaks MCP on stdio and forwards tool calls to the running app over the [control socket](control-socket.md). The app owns all state; the bridge holds none. Tools: the browser, the user's Chrome, devices, ports and UI tests, among others (see [chat.md](features/chat.md#pilothouses-own-tools) and each feature page). Screenshots come back as MCP image content.
 
 Slow tools (a page load, an adb call) use async control handlers, so the UI never waits on them.
 

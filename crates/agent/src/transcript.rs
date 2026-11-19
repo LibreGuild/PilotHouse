@@ -939,7 +939,7 @@ mod tests {
     fn tool_entries_round_trip_through_the_store() {
         let tool = ToolEntry {
             id: "t1".into(),
-            title: "mcp__pilothouse__board_list".into(),
+            title: "mcp__pilothouse__test_list".into(),
             kind: ToolKindLabel::Other,
             status: ToolStatus::Done,
             output: "ok".into(),
@@ -950,7 +950,7 @@ mod tests {
             started: None,
             touched: None,
         };
-        assert_eq!(tool.display_title(), "board list · pilothouse");
+        assert_eq!(tool.display_title(), "test list · pilothouse");
         let body = serde_json::to_string(&StoredEntry::Tool(tool.clone())).unwrap();
         match serde_json::from_str::<StoredEntry>(&body).unwrap() {
             StoredEntry::Tool(restored) => assert_eq!(restored, tool),

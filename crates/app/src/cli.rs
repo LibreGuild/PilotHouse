@@ -16,7 +16,7 @@ usage:
                                      app if needed; for a shortcut in your system's
                                      keyboard settings
   pilothouse mcp [--project PATH] [--agent NAME] [--workspace ID]
-                                     run the MCP server agents use for board tools
+                                     run the MCP server agents use for its tools
   pilothouse agy-acp                 run Google Antigravity (agy) as an ACP agent
   pilothouse agent-hook --socket PATH --pane ID
                                      pass a terminal agent's hook event (stdin) to the app

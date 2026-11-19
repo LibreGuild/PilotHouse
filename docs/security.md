@@ -24,7 +24,7 @@ PilotHouse runs on your machine with your permissions and has no server. The thi
 
 ## Agent boundaries
 
-- **One workspace's tools.** The MCP bridge PilotHouse starts is given its workspace (a review or a parallel lane works in a copy no workspace folder holds); one you set up yourself resolves it from the agent's folder (any of its folders). The bridge adds it to every call, overriding anything the agent passes. Board calls that take a card id check the card belongs to it; to-dos and tests are its own.
+- **One workspace's tools.** The MCP bridge PilotHouse starts is given its workspace (a review or a parallel lane works in a copy no workspace folder holds); one you set up yourself resolves it from the agent's folder (any of its folders). The bridge adds it to every call, overriding anything the agent passes. To-dos and tests are its own.
 - **Mentions stay in the workspace.** `@path` and `@path:line` attach only files inside the workspace's folders (symlinks resolved), and `#12` only its cards.
 - **Utilities.** An agent's `util_run sqlite` opens only SQLite files inside its workspace's folders, read-only; the Utilities dialog (you) can open any. Either way only statements that read are run, no other database can be attached (`SQLITE_LIMIT_ATTACHED` 0, no URI file names), the file's schema is not trusted, and a query is stopped after 3 seconds; utilities run off the UI thread.
 - **Text from others is data.** A pull request's title, author and description reach agents (reviews, `@pr:`, schedules started by a pull request or failing checks) marked as material to work on, never instructions; reviews report such text as a finding.

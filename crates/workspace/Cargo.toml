@@ -14,7 +14,6 @@ anyhow.workspace = true
 dirs.workspace = true
 gpui-kit.workspace = true
 ph-agent.workspace = true
-ph-board.workspace = true
 ph-browser.workspace = true
 ph-changes.workspace = true
 ph-github.workspace = true

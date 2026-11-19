@@ -90,7 +90,6 @@ icon_assets!(
         MessageSquare,
         SendHorizontal,
         Sparkles,
-        SquareKanban,
         SquarePen,
         Terminal,
         Trash,

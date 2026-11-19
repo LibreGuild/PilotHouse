@@ -6,7 +6,7 @@ use gpui_kit::Action;
 use ph_ui::Icons;
 
 use crate::actions::{
-    ShowBoard, ShowBrowser, ShowChanges, ShowDevices, ShowFiles, ShowLogcat, ShowPulls, ShowRuns,
+    ShowBrowser, ShowChanges, ShowDevices, ShowFiles, ShowLogcat, ShowPulls, ShowRuns,
     ShowTerminal, ShowTests,
 };
 
@@ -17,7 +17,6 @@ pub enum ContextTab {
     Files,
     Changes,
     Pulls,
-    Board,
     Terminal,
     Browser,
     Devices,
@@ -30,11 +29,10 @@ pub enum ContextTab {
 impl ContextTab {
     /// In the icon bar's order: the column's tools, then the bottom
     /// panel's.
-    pub const ALL: [ContextTab; 10] = [
+    pub const ALL: [ContextTab; 9] = [
         ContextTab::Files,
         ContextTab::Changes,
         ContextTab::Pulls,
-        ContextTab::Board,
         ContextTab::Browser,
         ContextTab::Devices,
         ContextTab::Runs,
@@ -48,7 +46,6 @@ impl ContextTab {
             ContextTab::Files => "Files",
             ContextTab::Changes => "Git",
             ContextTab::Pulls => "PRs",
-            ContextTab::Board => "Board",
             ContextTab::Terminal => "Terminal",
             ContextTab::Browser => "Browser",
             ContextTab::Devices => "Devices",
@@ -64,7 +61,6 @@ impl ContextTab {
             ContextTab::Files => "The folder tree and the editor.",
             ContextTab::Changes => "Changes to review, branches, history and stashes.",
             ContextTab::Pulls => "The repository's pull requests.",
-            ContextTab::Board => "Cards of work to do, for you and for agents.",
             ContextTab::Terminal => "Terminals in the workspace's folder.",
             ContextTab::Browser => "A browser agents can drive, in Preview.",
             ContextTab::Devices => "Android emulators and phones, in Preview.",
@@ -79,7 +75,6 @@ impl ContextTab {
             ContextTab::Files => Icons::Files,
             ContextTab::Changes => Icons::GitBranch,
             ContextTab::Pulls => Icons::GitPullRequest,
-            ContextTab::Board => Icons::SquareKanban,
             ContextTab::Terminal => Icons::Terminal,
             ContextTab::Browser => Icons::Globe,
             ContextTab::Devices => Icons::TabletSmartphone,
@@ -95,7 +90,6 @@ impl ContextTab {
             ContextTab::Files => "files",
             ContextTab::Changes => "changes",
             ContextTab::Pulls => "pulls",
-            ContextTab::Board => "board",
             ContextTab::Terminal => "terminal",
             ContextTab::Browser => "browser",
             ContextTab::Devices => "devices",
@@ -115,7 +109,6 @@ impl ContextTab {
             ContextTab::Files => Box::new(ShowFiles),
             ContextTab::Changes => Box::new(ShowChanges),
             ContextTab::Pulls => Box::new(ShowPulls),
-            ContextTab::Board => Box::new(ShowBoard),
             ContextTab::Terminal => Box::new(ShowTerminal),
             ContextTab::Browser => Box::new(ShowBrowser),
             ContextTab::Devices => Box::new(ShowDevices),
@@ -133,7 +126,6 @@ impl ContextTab {
             ContextTab::Files => Feature::Files,
             ContextTab::Changes => Feature::Changes,
             ContextTab::Pulls => Feature::Pulls,
-            ContextTab::Board => Feature::Board,
             ContextTab::Terminal => Feature::Terminal,
             ContextTab::Browser => Feature::Browser,
             ContextTab::Devices => Feature::Devices,

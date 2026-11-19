@@ -1,9 +1,14 @@
 //! The column of icons at the window's left edge: where the window can go.
-//! First the places that are of no one workspace (the Bridge, Reviews, an
-//! organisation's own views), then every workspace as a badge in its
-//! colour, the Chats space among them, then a way to add one, and Settings
-//! at the foot. An entry shows its name in a tooltip, or under it when the
-//! user asked for names (Settings → Appearance).
+//! First the places that are always there (the Bridge, Reviews, *Chats* for
+//! the chats that need no folder, an organisation's own views), then, under
+//! a line, the user's workspaces, each a badge in its colour, then a way to
+//! add one, and Settings at the foot. An entry shows its name under it, or
+//! in a tooltip when the names are switched off (Settings → Appearance).
+//!
+//! *Chats* is a workspace like the others underneath, but it is not one of
+//! the user's projects: it cannot be removed and has no folder. So it does
+//! not sit among them as a letter on a colour, moving down as they are
+//! added; it has a fixed place and an icon, like the Bridge.
 
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
@@ -42,6 +47,8 @@ pub(crate) struct Item {
     pub icon: Icon,
     /// Its shortcut, said in the tooltip.
     pub hint: Option<String>,
+    /// What the tooltip says of it, where its name is not enough.
+    pub about: Option<&'static str>,
     pub selected: bool,
     /// A count or a dot at its top right corner.
     pub badge: Option<AnyElement>,
@@ -55,10 +62,24 @@ impl Item {
         on_click: impl Fn(&mut Window, &mut App) + 'static,
         cx: &App,
     ) -> AnyElement {
+        self.element(labels, on_click, cx)
+            // Findable by label in UI tests and automation.
+            .test_support()
+            .into_any_element()
+    }
+
+    /// The entry, for one that takes more (a menu on a right click).
+    pub(crate) fn element(
+        self,
+        labels: bool,
+        on_click: impl Fn(&mut Window, &mut App) + 'static,
+        cx: &App,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
         let theme = cx.theme();
+        let said = self.about.map_or(self.label.to_string(), str::to_string);
         let tip = match &self.hint {
-            Some(hint) => format!("{} ({hint})", self.label),
-            None => self.label.to_string(),
+            Some(hint) => format!("{said} ({hint})"),
+            None => said,
         };
         v_flex()
             .id(self.id)
@@ -83,11 +104,14 @@ impl Item {
                 this.hover(|style| style.bg(theme.secondary_hover).text_color(theme.foreground))
             })
             // With names shown the tooltip would only repeat them.
-            .when(!labels || self.hint.is_some(), |this| {
-                this.tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                })
-            })
+            .when(
+                !labels || self.hint.is_some() || self.about.is_some(),
+                |this| {
+                    this.tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    })
+                },
+            )
             .on_click(move |_, window, cx| on_click(window, cx))
             .child(self.icon.size(ph_ui::rems_from_px(18.)))
             .when(labels, |this| {
@@ -103,9 +127,6 @@ impl Item {
                 )
             })
             .children(self.badge)
-            // Findable by label in UI tests and automation.
-            .test_support()
-            .into_any_element()
     }
 }
 
@@ -194,6 +215,7 @@ pub(crate) fn render_places(
             label: "Bridge".into(),
             icon: Icon::new(Icons::ShipWheel),
             hint: hint("⌘⇧E", "Ctrl+Shift+E"),
+            about: None,
             selected: view == View::Bridge,
             badge: (needs_you > 0 && view != View::Bridge)
                 .then(|| count_badge(needs_you, Some(cx.theme().warning), cx)),
@@ -207,10 +229,44 @@ pub(crate) fn render_places(
                 label: "Reviews".into(),
                 icon: Icon::new(Icons::GitPullRequest),
                 hint: hint("⌘⇧G", "Ctrl+Shift+G"),
+                about: None,
                 selected: view == View::GitHub,
                 badge: (waiting > 0).then(|| count_badge(waiting, Some(cx.theme().warning), cx)),
             }
             .render(labels, show(View::GitHub), cx),
+        );
+    }
+    // The workspace in front, when a workspace's screen is.
+    let in_front = (view == View::Workspaces)
+        .then(|| workspace.active_project_id())
+        .flatten();
+    // Chats: the chats that need no folder. Always here, in this place.
+    if let Some(chats) = workspace.chats_place() {
+        let id = chats.id;
+        let (open, menu_owner) = (this.clone(), this.clone());
+        places.push(
+            Item {
+                id: "view-chats".into(),
+                // Its name is the user's to change, like a workspace's.
+                label: chats.name.clone().into(),
+                icon: Icon::new(Icons::MessagesSquare),
+                hint: hint("⌘⇧D", "Ctrl+Shift+D"),
+                about: Some("Chats that need no folder"),
+                selected: in_front == Some(id),
+                badge: status_dot(&workspace.status(id), cx),
+            }
+            .element(
+                labels,
+                move |window, cx| {
+                    _ = open.update(cx, |workspace, cx| workspace.open_project(id, window, cx));
+                },
+                cx,
+            )
+            .test_support()
+            .context_menu(move |menu, window, cx| {
+                crate::bridge::workspace_menu_items(menu, menu_owner.clone(), id, window, cx)
+            })
+            .into_any_element(),
         );
     }
     for custom in ph_custom::views() {
@@ -220,6 +276,7 @@ pub(crate) fn render_places(
                 label: custom.label.into(),
                 icon: (custom.icon)(),
                 hint: None,
+                about: None,
                 selected: view == View::Custom(custom.id),
                 badge: None,
             }
@@ -227,13 +284,9 @@ pub(crate) fn render_places(
         );
     }
 
-    // The workspaces, each a badge; the Chats space last, as an icon (it
-    // has no folder to take a letter from).
-    let in_front = (view == View::Workspaces)
-        .then(|| workspace.active_project_id())
-        .flatten();
-    let badges: Vec<AnyElement> = workspace
-        .projects()
+    // The user's workspaces, each a badge, numbered as their keys are.
+    let listed: Vec<Project> = workspace.listed().cloned().collect();
+    let badges: Vec<AnyElement> = listed
         .iter()
         .enumerate()
         .map(|(ix, project)| workspace_badge(workspace, project, ix, in_front, labels, cx))
@@ -289,6 +342,7 @@ pub(crate) fn render_places(
                 label: "Settings".into(),
                 icon: Icon::new(IconName::Settings),
                 hint: hint("⌘,", "Ctrl+,"),
+                about: None,
                 selected: false,
                 badge: None,
             }

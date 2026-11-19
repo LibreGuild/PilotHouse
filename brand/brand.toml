@@ -29,7 +29,7 @@ keychain = "PilotHouse"
 # feature arrives on in a merged build until it is listed here as false.
 #
 # The tools beside the chat:
-#   files, changes (Git), pulls (pull requests), board, browser, devices
+#   files, changes (Git), pulls (pull requests), browser, devices
 #   (Android), runs (run configurations and ports), tests (UI tests),
 #   terminal, logcat
 # Elsewhere:

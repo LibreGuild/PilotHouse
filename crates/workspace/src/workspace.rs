@@ -56,6 +56,10 @@ pub struct Workspace {
     handle: gpui_kit::AnyWindowHandle,
     /// The workspaces, newest first (the sidebar's order, and ⌃1–⌃9's).
     projects: Vec<Project>,
+    /// The workspace for chats that need no folder, as this window knows
+    /// it: it has a place of its own in the column of icons, over the
+    /// user's workspaces (kept here, not asked of the store while drawing).
+    chats: Option<ProjectId>,
     view: View,
     /// What the Bridge shows.
     bridge: crate::bridge::BridgeState,
@@ -124,7 +128,7 @@ impl Workspace {
         // first start opens straight into a chat.
         let scratch = store
             .scratch_workspace(&ph_store::paths::scratch_root())
-            .inspect_err(|err| tracing::error!("making the Scratch workspace failed: {err:#}"))
+            .inspect_err(|err| tracing::error!("making the Chats workspace failed: {err:#}"))
             .ok()
             .map(|scratch| scratch.id);
         let projects = workspaces(store);
@@ -162,6 +166,7 @@ impl Workspace {
             focus_handle,
             handle: window.window_handle(),
             projects,
+            chats: scratch,
             view: View::Bridge,
             bridge: Default::default(),
             github: None,
@@ -375,14 +380,30 @@ impl Workspace {
         AppState::store(cx).is_scratch(id)
     }
 
-    /// The workspace for chats that need no folder ("Scratch"); this
+    /// The workspace for chats that need no folder, shown as *Chats* over
+    /// the user's workspaces in the column of icons.
+    pub(crate) fn chats_place(&self) -> Option<&Project> {
+        let chats = self.chats?;
+        self.projects.iter().find(|project| project.id == chats)
+    }
+
+    /// The user's workspaces, in the order the column of icons shows them:
+    /// all but the one for chats that need no folder.
+    pub(crate) fn listed(&self) -> impl Iterator<Item = &Project> {
+        self.projects
+            .iter()
+            .filter(|project| Some(project.id) != self.chats)
+    }
+
+    /// The workspace for chats that need no folder ("Chats"); this
     /// window's list takes it up when it was made elsewhere.
     pub(crate) fn scratch(&mut self, cx: &mut Context<Self>) -> Option<ProjectId> {
         let store = AppState::store(cx).clone();
         let project = store
             .scratch_workspace(&ph_store::paths::scratch_root())
-            .inspect_err(|err| tracing::error!("making the Scratch workspace failed: {err:#}"))
+            .inspect_err(|err| tracing::error!("making the Chats workspace failed: {err:#}"))
             .ok()?;
+        self.chats = Some(project.id);
         if !self.has_project(project.id) {
             self.projects = workspaces(&store);
             self.projects_changed(cx);
@@ -1084,10 +1105,15 @@ impl Workspace {
     /// Reads the workspace list again (another window changed it).
     pub(crate) fn reload_projects(&mut self, cx: &mut Context<Self>) {
         crate::attention::forget_names(cx);
-        let projects = workspaces(AppState::store(cx));
+        let store = AppState::store(cx);
+        let projects = workspaces(store);
         let kept = |id: &ProjectId| projects.iter().any(|project| project.id == *id);
         self.spaces.retain(|id, _| kept(id));
         self.hidden_since.retain(|id, _| kept(id));
+        self.chats = projects
+            .iter()
+            .map(|project| project.id)
+            .find(|id| store.is_scratch(*id));
         self.projects = projects;
         cx.notify();
     }
@@ -1564,7 +1590,7 @@ impl Workspace {
         if self.is_scratch(id, cx) {
             window.push_notification(
                 Notification::info(
-                    "This workspace holds the chats that need no folder, so it stays. \
+                    "Chats holds the chats that need no folder, so it stays. \
                      Delete its chats one by one from their menus.",
                 ),
                 cx,
@@ -2079,7 +2105,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.projects.get(action.index).map(|project| project.id) {
+        // By its place among the user's workspaces, as the column of
+        // icons numbers them (Chats has a key of its own).
+        let id = self.listed().nth(action.index).map(|project| project.id);
+        if let Some(id) = id {
             self.open_project(id, window, cx);
         }
     }
@@ -2435,9 +2464,6 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &ShowChanges, window, cx| {
                 this.show_tab(ContextTab::Changes, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ShowBoard, window, cx| {
-                this.show_tab(ContextTab::Board, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowTerminal, window, cx| {
                 this.show_tab(ContextTab::Terminal, window, cx)

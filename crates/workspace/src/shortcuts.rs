@@ -59,10 +59,7 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
             "Workspaces and layout",
             vec![
                 ("The Bridge", action(Box::new(ShowWorkspacesView))),
-                (
-                    "Scratch: chats that need no folder",
-                    action(Box::new(ShowChatsView)),
-                ),
+                ("Chats that need no folder", action(Box::new(ShowChatsView))),
                 ("Reviews", action(Box::new(ShowGitHubView))),
                 ("Workspace 1 to 9", Keys::Text(workspace_keys.into())),
                 ("Previous workspace", action(Box::new(PreviousWorkspace))),
@@ -102,7 +99,6 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
             vec![
                 ("Files", action(Box::new(ShowFiles))),
                 ("Git", action(Box::new(ShowChanges))),
-                ("Board", action(Box::new(ShowBoard))),
                 ("Terminal", action(Box::new(ShowTerminal))),
                 ("Browser", action(Box::new(ShowBrowser))),
                 ("Devices", action(Box::new(ShowDevices))),

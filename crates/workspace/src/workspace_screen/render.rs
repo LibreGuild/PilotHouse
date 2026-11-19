@@ -376,7 +376,7 @@ impl WorkspaceScreen {
             return ph_ui::EmptyState::new("No folders in this workspace")
                 .icon(Icons::FolderPlus)
                 .description(
-                    "Add a folder to see its files, Git changes, branches and pull requests. Chat, the board, the browser and devices work without one.",
+                    "Add a folder to see its files, Git changes, branches and pull requests. Chat, the browser and devices work without one.",
                 )
                 .action(
                     Button::new("empty-add-folder")
@@ -401,7 +401,6 @@ impl WorkspaceScreen {
             ContextTab::Changes => self.changes.get(&self.git_folder).cloned().map(|panel| {
                 self.with_folder_picker(panel.cached(filled()).into_any_element(), cx)
             }),
-            ContextTab::Board => cached(&self.board),
             ContextTab::Terminal => cached(&self.terminal),
             ContextTab::Browser => cached(&self.browser),
             ContextTab::Devices => cached(&self.devices),

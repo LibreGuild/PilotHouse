@@ -1,5 +1,5 @@
 //! MCP servers PilotHouse hands to every agent session, besides its own
-//! (board, browser, devices): set up once here instead of in each agent's
+//! (browser, devices, tests): set up once here instead of in each agent's
 //! settings. The servers agents already have in their own settings are
 //! found too, to see them and copy them over.
 //!

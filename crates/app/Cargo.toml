@@ -19,7 +19,6 @@ automation = ["ph-control/automation"]
 ph-brand.workspace = true
 anyhow.workspace = true
 gpui-kit.workspace = true
-ph-board.workspace = true
 ph-browser.workspace = true
 ph-devices.workspace = true
 ph-runs.workspace = true

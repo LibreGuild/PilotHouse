@@ -1,6 +1,5 @@
 //! The tools the server offers, and how each maps to a control method.
 
-mod board;
 mod browser;
 mod chrome;
 mod devices;
@@ -32,8 +31,7 @@ pub struct Tool {
 /// `[features]`; a group with no feature is always there).
 pub fn all() -> impl Iterator<Item = &'static Tool> {
     use ph_brand::Feature;
-    let groups: [(Option<Feature>, &'static [Tool]); 11] = [
-        (Some(Feature::Board), board::TOOLS),
+    let groups: [(Option<Feature>, &'static [Tool]); 10] = [
         (Some(Feature::Browser), browser::TOOLS),
         (Some(Feature::ChromeExtension), chrome::TOOLS),
         (Some(Feature::Devices), devices::TOOLS),

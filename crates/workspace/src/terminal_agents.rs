@@ -1,5 +1,5 @@
 //! Coding agents run as their own CLI in a workspace terminal, followed by
-//! PilotHouse. Their state shows on the terminal tab, on the Agents board
+//! PilotHouse. Their state shows on the terminal tab, on the Bridge
 //! and in notifications, like a chat's. How PilotHouse knows, best first:
 //!
 //! 1. **Hooks** (Claude Code started from PilotHouse): per-launch settings

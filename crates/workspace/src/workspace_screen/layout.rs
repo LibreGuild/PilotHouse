@@ -5,7 +5,7 @@
 //! The screen was a dock before: every tool a tab that could be dragged
 //! anywhere. Few arranged it, an arrangement saved could come back wrong,
 //! each tool was named twice (its icon in a column and its tab), and the
-//! tools that need room (the browser, a phone, the board) sat in a narrow
+//! tools that need room (the browser, a phone) sat in a narrow
 //! column. Two panes with fixed places do less and hold up, and either can
 //! be folded away to give the other the window.
 
@@ -25,7 +25,7 @@ pub(crate) enum Pane {
 }
 
 /// A name over the result pane. Four are always the same; a workspace's
-/// other tools (the board, run configurations, tests, pull requests, the
+/// other tools (run configurations, tests, pull requests, the
 /// phone's log) each stand for themselves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResultTab {

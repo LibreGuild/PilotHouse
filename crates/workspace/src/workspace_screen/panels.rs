@@ -1,4 +1,4 @@
-//! The tool panels of a workspace (Git, board, browser, devices, tests,
+//! The tool panels of a workspace (Git, browser, devices, tests,
 //! pull requests, runs, terminals): each made the first time it is shown,
 //! and how their events reach the rest of the screen.
 
@@ -81,30 +81,6 @@ impl WorkspaceScreen {
         for changes in self.changes.values() {
             changes.update(cx, |changes, cx| changes.set_evidence(evidence.clone(), cx));
         }
-    }
-
-    /// The board panel, created on first use.
-    pub fn board(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<BoardPanel> {
-        if let Some(board) = &self.board {
-            return board.clone();
-        }
-        let store = AppState::store(cx).clone();
-        let project_id = self.project.id;
-        let board = cx.new(|cx| BoardPanel::new(store, project_id, cx));
-        self._subscriptions.push(cx.subscribe_in(
-            &board,
-            window,
-            |this, _, event: &BoardPanelEvent, window, cx| match event {
-                BoardPanelEvent::SendToAgent { prompt, title } => {
-                    let (prompt, title) = (prompt.clone(), title.clone());
-                    this.chat.update(cx, |chat, cx| {
-                        chat.send_text(prompt, Some(title), window, cx)
-                    });
-                }
-            },
-        ));
-        self.board = Some(board.clone());
-        board
     }
 
     /// The browser pane, created on first use (Chrome starts when it is shown).
@@ -210,34 +186,6 @@ impl WorkspaceScreen {
                     this.chat.update(cx, |chat, cx| {
                         chat.start_tool_task(title, prompt, window, cx)
                     });
-                }
-                ph_uitest::TestsPanelEvent::Card {
-                    title,
-                    description,
-                    test,
-                } => {
-                    let card = ph_store::board::NewCard {
-                        title: title.clone(),
-                        description: description.clone(),
-                        acceptance: "The UI test passes again.".into(),
-                    };
-                    let store = AppState::store(cx).clone();
-                    // The card can only be Done once the test passes again.
-                    let added = store.add_cards(this.project.id, &[card]).and_then(|cards| {
-                        cards
-                            .first()
-                            .map_or(Ok(()), |card| store.link_card_test(card.id, test, true))
-                    });
-                    let note = match added {
-                        Ok(()) => {
-                            ph_board::BoardHub::notify(this.project.id, cx);
-                            Notification::success(
-                                "Added a card to the board; it is Done once the test passes.",
-                            )
-                        }
-                        Err(err) => Notification::error(format!("Could not add the card: {err:#}")),
-                    };
-                    window.push_notification(note, cx);
                 }
                 ph_uitest::TestsPanelEvent::OpenFile(path) => {
                     if let Ok(relative) = path.strip_prefix(&this.project.path) {
@@ -464,9 +412,6 @@ impl WorkspaceScreen {
                 if !self.project.empty {
                     self.files(window, cx);
                 }
-            }
-            ContextTab::Board => {
-                self.board(window, cx);
             }
             ContextTab::Terminal => {
                 if self.terminal.is_none() {

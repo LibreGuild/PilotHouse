@@ -166,12 +166,8 @@ const SUGGESTIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "Plan a feature",
-        "Break work into board cards",
-        concat!(
-            "Help me plan a feature. Ask me what it should do, then break it into small cards on the ",
-            ph_brand::name!(),
-            " board."
-        ),
+        "The steps, and what to build first",
+        "Help me plan a feature. Ask me what it should do, then write a short plan: the steps in order, the files each one touches, and how to check each before the next.",
     ),
     (
         "Write tests",
@@ -194,15 +190,6 @@ const FOLDERLESS_SUGGESTIONS: &[(&str, &str, &str)] = &[
             "Open a website I name in the ",
             ph_brand::name!(),
             " browser and tell me what you find: what works, what looks broken, and anything slow. Ask me which site first."
-        ),
-    ),
-    (
-        "Plan work",
-        "Break it into board cards",
-        concat!(
-            "Help me plan some work. Ask me what it is, then break it into small cards on the ",
-            ph_brand::name!(),
-            " board."
         ),
     ),
     (
@@ -938,7 +925,7 @@ impl ChatPanel {
         cx.notify();
     }
 
-    /// Sends `prompt` as if the user typed it (used by the board). A new chat
+    /// Sends `prompt` as if the user typed it (a tool's task). A new chat
     /// is named `title` rather than after the prompt text.
     pub fn send_text(
         &mut self,
@@ -1278,16 +1265,11 @@ impl ChatPanel {
             ));
         }
         for attachment in &attached {
-            blocks.extend(attachment.to_blocks(
-                &roots,
-                self.project.id,
-                &self.store,
-                accepts_images,
-            ));
+            blocks.extend(attachment.to_blocks(&roots, accepts_images));
         }
         let summaries = attached
             .iter()
-            .map(|attachment| attachment.summary(&roots, self.project.id, &self.store))
+            .map(|attachment| attachment.summary(&roots))
             .collect();
 
         let spec = self.active.read(cx).agent();

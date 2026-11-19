@@ -43,7 +43,6 @@ ph-ui = { path = "crates/ui" }
 ph-workspace = { path = "crates/workspace" }
 ph-control = { path = "crates/control" }
 ph-files = { path = "crates/files" }
-ph-board = { path = "crates/board" }
 ph-mcp = { path = "crates/mcp" }
 ph-env = { path = "crates/env" }
 ph-agent = { path = "crates/agent" }

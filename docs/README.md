@@ -17,7 +17,6 @@ Short, practical notes on how PilotHouse is built. Start with **architecture**, 
 | **Features** | |
 | [features/workspace.md](features/workspace.md) | Window shell: the frame and its islands, the column of icons (Workspaces, Chats, GitHub), workspaces and their folders, the lists, windows, command palette, settings, opening from outside |
 | [features/chat.md](features/chat.md) | Agent chat over ACP, permissions, the approval inbox, mentions |
-| [features/board.md](features/board.md) | Kanban board and the MCP tools agents use |
 | [features/files.md](features/files.md) | File tree, editor, ⌘P finder, project search |
 | [features/previews.md](features/previews.md) | Viewers: rich Markdown and Mermaid, images, data trees, tables, notebooks, audio, video, PDF, databases, archives, fonts |
 | [features/pulls.md](features/pulls.md) | GitHub PRs, accounts, agent reviews with findings and re-review |

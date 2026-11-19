@@ -37,7 +37,7 @@ These follow the gpui-kit coding guide:
 - **One crate per feature.** Put a feature's model, views and commands in its crate. The shell (`workspace`) composes features; features never depend on it.
 - **Colors from the theme only**, read via `cx.theme()`. Raw colors belong in `theme/themes/pilothouse.json` (and the terminal's xterm palette).
 - **Layout uses rem helpers** (`p_2()`, `gap_3()`), and `ph_ui::rems_from_px(14.)` for a size off that scale, so the whole interface follows the interface size setting. `px(…)` is for hairlines, strokes and radii; the few pane widths live in `theme/src/layout.rs`. See [styleguide.md](styleguide.md).
-- **Stable element ids** come from domain ids (`("board-card", card.id)`), never list positions for reorderable rows.
+- **Stable element ids** come from domain ids (`("chat-tab", session.id)`), never list positions for reorderable rows.
 - **No blocking work in `render`.** Disk, git and processes run on background tasks.
 - **Every icon-only button gets an `accessibility_label`**. Screen readers and the automation harness both depend on it.
 - Comments say why, not what. Every module starts with a `//!` summary.

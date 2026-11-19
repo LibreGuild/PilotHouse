@@ -1,7 +1,6 @@
-//! Tests as a gate: a board card that lists UI tests can only be Done once
-//! each one's newest run passed, and agents can run tests themselves to get
-//! there (`test.list`, `test.run`, behind the `test_list` and `test_run`
-//! tools).
+//! Tests for agents: they list a workspace's UI tests with how each one's
+//! newest run went, and run one themselves to check a change (`test.list`,
+//! `test.run`, behind the `test_list` and `test_run` tools).
 
 use std::path::PathBuf;
 
@@ -31,28 +30,6 @@ pub fn status(project_id: i64, slug: &str) -> (bool, String) {
         return (false, format!("{different} steps look different"));
     }
     (true, "passed".into())
-}
-
-/// Why a card that needs `tests` may not be Done yet; `None` when every
-/// one's newest run passed.
-pub fn blocking(project_id: i64, tests: &[String]) -> Option<String> {
-    let open: Vec<String> = tests
-        .iter()
-        .filter_map(|slug| {
-            let (passed, status) = status(project_id, slug);
-            // The test's own name, from its last run, reads better.
-            let name = run::last_reports(project_id, slug)
-                .first()
-                .map_or_else(|| slug.clone(), |(_, report)| report.test.clone());
-            (!passed).then(|| format!("“{name}” ({status})"))
-        })
-        .collect();
-    (!open.is_empty()).then(|| {
-        format!(
-            "This card needs its tests to pass before it is Done: {}. Run them in the Tests tab (or with test_run), fix what fails, then try again.",
-            open.join(", ")
-        )
-    })
 }
 
 /// The workspace's tests folder root (its primary folder).
@@ -165,9 +142,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_test_that_never_ran_blocks() {
-        let why = blocking(-1, &["sign-in-works".into()]).unwrap();
-        assert!(why.contains("sign-in-works") && why.contains("not run yet"));
-        assert!(blocking(-1, &[]).is_none(), "no tests, no gate");
+    fn a_test_that_never_ran_says_so() {
+        assert_eq!(status(-1, "sign-in-works"), (false, "not run yet".into()));
     }
 }

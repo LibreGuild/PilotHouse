@@ -2479,7 +2479,7 @@ fn to_value(value: &impl serde::Serialize) -> Value {
 }
 
 /// The PilotHouse MCP server, offered to every new agent session so agents
-/// can use the board, the browser and devices. It is this binary in `mcp` mode.
+/// can use the browser, devices and tests. It is this binary in `mcp` mode.
 /// `project_id` names the workspace outright: the agent may work in a copy
 /// (a review, a parallel lane) that no workspace's folder holds.
 pub(crate) fn pilothouse_mcp_server(

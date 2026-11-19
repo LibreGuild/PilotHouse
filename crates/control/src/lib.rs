@@ -5,14 +5,14 @@
 //! request per line and get one JSON response per line:
 //!
 //! ```text
-//! → {"id":1,"method":"board.list","params":{"project_id":3}}
+//! → {"id":1,"method":"test.list","params":{"project_id":3}}
 //! ← {"id":1,"result":[...]}
 //! ```
 //!
 //! Two clients use it:
 //!
 //! - the **MCP bridge** (`pilothouse mcp`), which coding agents launch so they
-//!   can read and update the board;
+//!   can use the app's tools;
 //! - the **automation harness** (`pilothouse ctl`, `automation` feature only),
 //!   which drives the UI for end-to-end checks without touching the real mouse.
 //!

@@ -131,8 +131,8 @@ pub enum WorkspaceChatsEvent {
 
 /// Work under way before a chat's turn can start: a repository cloned and a
 /// pull request checked out for a review. It is part of the run to whoever
-/// asked for it, so the workspace's status counts it as work and the Agents
-/// board lists it, though no agent has started yet.
+/// asked for it, so the workspace's status counts it as work and the Bridge
+/// lists it, though no agent has started yet.
 #[derive(Debug, Clone)]
 pub struct Preparing {
     /// What it is for: `Review of #42`.
@@ -167,7 +167,7 @@ pub enum ChatState {
     Idle,
 }
 
-/// A chat in a few words, for lists and boards.
+/// A chat in a few words, for lists and the Bridge.
 #[derive(Debug, Clone)]
 pub struct ChatSummary {
     pub state: ChatState,

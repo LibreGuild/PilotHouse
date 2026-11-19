@@ -6149,20 +6149,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ph-board"
-version = "0.6.4"
-dependencies = [
- "anyhow",
- "gpui-kit",
- "ph-control",
- "ph-store",
- "ph-ui",
- "ph-uitest",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "ph-brand"
 version = "0.6.4"
 dependencies = [
@@ -6615,7 +6601,6 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "ph-agent",
- "ph-board",
  "ph-brand",
  "ph-browser",
  "ph-changes",
@@ -6755,7 +6740,6 @@ dependencies = [
  "embed-resource",
  "gpui-kit",
  "ph-agy",
- "ph-board",
  "ph-brand",
  "ph-browser",
  "ph-control",

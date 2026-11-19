@@ -1,6 +1,6 @@
 [package]
 name = "ph-mcp"
-description = "The PilotHouse MCP server (stdio): gives coding agents board tools backed by the running app."
+description = "The PilotHouse MCP server (stdio): gives coding agents tools backed by the running app (the browser, devices, tests and more)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

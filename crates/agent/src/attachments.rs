@@ -1,4 +1,4 @@
-//! Things attached to a message: files, board cards, screenshots, log lines.
+//! Things attached to a message: files, screenshots, log lines.
 //!
 //! The composer shows them as chips. On send, each becomes ACP content for
 //! the agent and a small summary for the transcript.
@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use ph_files::roots::Roots;
 
 use agent_client_protocol_schema::v1::{ContentBlock, ImageContent, ResourceLink, TextContent};
-use ph_store::Store;
 use ph_ui::Icons;
 
 use crate::attachment_view::Preview;
@@ -24,8 +23,6 @@ const MAX_IMAGE: u64 = 5 * 1024 * 1024;
 pub enum Attachment {
     /// A project file (relative path), sent as a link the agent can read.
     File(String),
-    /// A board card, sent as its title, description and acceptance criteria.
-    Card(i64),
     /// An image on disk (a capture, an annotation, a pasted or dropped
     /// image), sent as an image when it is PNG, JPEG, GIF or WebP.
     Image { label: String, path: PathBuf },
@@ -37,7 +34,6 @@ impl Attachment {
     pub fn label(&self) -> String {
         match self {
             Attachment::File(path) => path.rsplit('/').next().unwrap_or(path).to_string(),
-            Attachment::Card(id) => format!("Card #{id}"),
             Attachment::Image { label, .. } | Attachment::Text { label, .. } => label.clone(),
         }
     }
@@ -45,21 +41,20 @@ impl Attachment {
     pub fn icon(&self) -> Icons {
         match self {
             Attachment::File(path) => ph_ui::file_icon(path).0,
-            Attachment::Card(_) => Icons::SquareKanban,
             Attachment::Image { .. } => Icons::Image,
             Attachment::Text { .. } => Icons::ScrollText,
         }
     }
 
     /// How the attachment is kept with the sent message.
-    pub fn summary(&self, roots: &Roots, project_id: i64, store: &Store) -> AttachmentSummary {
+    pub fn summary(&self, roots: &Roots) -> AttachmentSummary {
         let mut summary = AttachmentSummary {
             label: self.label(),
             image: None,
             text: None,
             file: None,
         };
-        match self.preview(roots, project_id, store) {
+        match self.preview(roots) {
             Preview::Image(path) => summary.image = Some(path),
             Preview::Text(mut text) => {
                 if text.len() > SUMMARY_TEXT_LIMIT {
@@ -79,15 +74,12 @@ impl Attachment {
     }
 
     /// What looking inside the attachment shows.
-    pub fn preview(&self, roots: &Roots, project_id: i64, store: &Store) -> Preview {
+    pub fn preview(&self, roots: &Roots) -> Preview {
         match self {
             Attachment::File(path) => match roots.absolute(path) {
                 Some(path) => Preview::File(path),
                 None => Preview::None,
             },
-            Attachment::Card(id) => card_text(store, project_id, *id)
-                .map(Preview::Text)
-                .unwrap_or(Preview::None),
             Attachment::Image { path, .. } => Preview::Image(path.clone()),
             Attachment::Text { text, .. } => Preview::Text(text.clone()),
         }
@@ -97,13 +89,7 @@ impl Attachment {
     ///
     /// Images go as image content when the agent accepts them, otherwise as a
     /// link to the file so the agent can still open it.
-    pub fn to_blocks(
-        &self,
-        roots: &Roots,
-        project_id: i64,
-        store: &Store,
-        accepts_images: bool,
-    ) -> Vec<ContentBlock> {
+    pub fn to_blocks(&self, roots: &Roots, accepts_images: bool) -> Vec<ContentBlock> {
         match self {
             Attachment::File(path) => {
                 let Some(absolute) = roots.absolute(path) else {
@@ -114,9 +100,6 @@ impl Attachment {
                     ph_ui::platform::file_url(&absolute),
                 ))]
             }
-            Attachment::Card(id) => card_text(store, project_id, *id)
-                .map(|text| vec![ContentBlock::Text(TextContent::new(text))])
-                .unwrap_or_default(),
             Attachment::Image { label, path } => {
                 let link = ContentBlock::ResourceLink(ResourceLink::new(
                     label.clone(),
@@ -196,22 +179,6 @@ fn file_path(uri: &str) -> String {
         .replace("%23", "#")
         .replace("%3F", "?")
         .replace("%25", "%")
-}
-
-/// A card as text. Only this project's cards: `#12` must not read another
-/// board.
-fn card_text(store: &Store, project_id: i64, id: i64) -> Option<String> {
-    match store.card(id) {
-        Ok(Some(card)) if card.project_id == project_id => Some(format!(
-            "Board card #{} [{}]: {}\n{}\nAcceptance criteria:\n{}",
-            card.id,
-            card.status.key(),
-            card.title,
-            card.description,
-            card.acceptance
-        )),
-        _ => None,
-    }
 }
 
 /// Live context the workspace provides on demand, for `@screenshot`,
@@ -312,7 +279,7 @@ pub fn pull_mentions(text: &str, pulls: &[PullBrief]) -> Vec<Attachment> {
     found
 }
 
-/// Finds `@path` (files that exist) and `#12` (cards) mentions in a message.
+/// Finds `@path` mentions (files that exist) in a message.
 pub fn mentions(text: &str, roots: &Roots) -> Vec<Attachment> {
     let mut found = Vec::new();
     for token in text.split_whitespace() {
@@ -325,8 +292,6 @@ pub fn mentions(text: &str, roots: &Roots) -> Vec<Attachment> {
             } else if let Some(code) = code_at(roots, path) {
                 found.push(code);
             }
-        } else if let Some(id) = token.strip_prefix('#').and_then(|n| n.parse::<i64>().ok()) {
-            found.push(Attachment::Card(id));
         }
     }
     found.dedup();
@@ -537,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn finds_file_and_card_mentions() {
+    fn finds_file_mentions() {
         let root = std::env::temp_dir().join(format!("ph-mentions-{}", std::process::id()));
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/main.rs"), "").unwrap();
@@ -545,10 +510,8 @@ mod tests {
             "fix @src/main.rs and @nope.rs, see #12. @../outside @/etc/hosts",
             &Roots::single(root.clone()),
         );
-        assert_eq!(
-            found,
-            vec![Attachment::File("src/main.rs".into()), Attachment::Card(12)]
-        );
+        // `#12` named a board card before 0.7; it is plain text now.
+        assert_eq!(found, vec![Attachment::File("src/main.rs".into())]);
         let found = live_mentions("see @screenshot, and @logs. Why does @test-run fail?");
         assert!(found.screenshot && found.logs && found.tests && !found.tabs);
         assert!(live_mentions("what do @tabs say?").tabs);

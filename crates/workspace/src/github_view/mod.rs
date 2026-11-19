@@ -121,7 +121,7 @@ pub struct GithubView {
     _seconds: Option<Task<()>>,
     _reviews: Option<Task<()>>,
     /// Each repository space with a chat open, and its name (for the
-    /// Agents board: reviews show there).
+    /// Bridge: reviews show there).
     spaces: Vec<(ph_store::projects::ProjectId, String)>,
     /// The "add a repository" box, while open.
     pub(crate) adding: Option<(Entity<InputState>, Subscription)>,

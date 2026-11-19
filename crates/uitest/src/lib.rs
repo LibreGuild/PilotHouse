@@ -8,12 +8,12 @@
 //!   adds checks.
 //! - [`run`]: replays the steps without AI, with a screenshot per step and a
 //!   report, on one screen size or device or on several (a matrix). A
-//!   failure can go to an agent to repair, or to the board.
+//!   failure can go to an agent to repair.
 //! - [`runner`]: each workspace's runs from the Tests tab, kept outside it.
 //! - [`visual`]: each step's screen against the accepted baseline.
-//! - [`gate`]: tests a board card must pass to be Done; agents run tests.
+//! - [`control`]: what agents call to list and run tests.
 
-pub mod gate;
+pub mod control;
 pub mod model;
 mod panel;
 pub mod record;
@@ -26,5 +26,5 @@ pub use panel::{TestsPanel, TestsPanelEvent};
 /// Registers the `test.*` control methods (and so the agents' tools).
 pub fn init(store: ph_store::Store, cx: &mut gpui_kit::App) {
     record::register(cx);
-    gate::register(store, cx);
+    control::register(store, cx);
 }

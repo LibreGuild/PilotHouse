@@ -6,7 +6,7 @@
 
 <p align="center">
   One fast, native desktop app for working with coding agents.<br>
-  Chat with Claude Code, Codex, Gemini CLI, Antigravity or Cline, with your code, Git, a board, terminals, a browser and Android devices beside the chat, and let the agents use them too. Make the pictures, videos and slides that go with the work in the same app.
+  Chat with Claude Code, Codex, Gemini CLI, Antigravity or Cline, with your code, Git, terminals, a browser and Android devices beside the chat, and let the agents use them too. Make the pictures, videos and slides that go with the work in the same app.
 </p>
 
 <p align="center">
@@ -32,10 +32,9 @@ A day with coding agents usually means several agent CLIs in terminals, an edito
 - **Agent chat** over the [Agent Client Protocol](https://agentclientprotocol.com) with Claude Code, Codex, Gemini CLI, Antigravity and Cline: tool calls with diffs, plans, permissions, a model picker with effort and mode, `@` mentions of files, definitions, screenshots, logs, pull requests and test runs, checkpoints with restore, hand-off between agents, search across chats, usage, and parallel runs of one prompt in separate worktrees.
 - **Code**: a file tree with icons per file type and Git marks, an editor with language servers (diagnostics, hover, definition, references, rename, outline), workspace search, a viewer for multi-gigabyte logs, and *ask about this code*.
 - **Git and GitHub**: commit, branches, history graph, stashes, conflicts, blame, review of agent edits per hunk; pull requests in the app, and agent reviews whose findings you post as comments.
-- **Board**: a Kanban board agents plan on and work through card by card, through PilotHouse's MCP server.
 - **Browser and Android**: a browser pane and Android emulators or phones that you and the agents can see and drive; annotate a screen and send it to the chat.
 - **Chrome extension**: agents work in your own Chrome, with your sign-ins, in tabs you share, with tools for debugging pages (performance, audits, emulation, mocks, memory, mapped errors); you send pages, selections, screenshots, recorded bug reports and workflows from Chrome to a chat, and its toolbar button shows the chats waiting for you.
-- **UI tests** recorded from what an agent does, replayed without AI on several screen sizes or devices, compared with accepted screens, and repaired by an agent. A board card can require them to pass before it is Done.
+- **UI tests** recorded from what an agent does, replayed without AI on several screen sizes or devices, compared with accepted screens, and repaired by an agent.
 - **Automation**: agent prompts and test runs at set times, or when files change, a commit lands, a pull request opens or checks fail.
 - **Network drives**: for code on a server's share (a mapped drive), Git, terminals and run configurations work on the server over SSH, next to the files.
 - **Studio** for what goes with the work, by hand or by asking the agent in the chat beside it, with every step undoable:
@@ -43,7 +42,7 @@ A day with coding agents usually means several agent CLIs in terminals, an edito
   - **Video**: cut and speed up parts of a screen recording on a timeline, add labels and blurs that show at set times, and export MP4, HEVC, WebM or GIF.
   - **Slides**: decks drafted by an agent from a few lines, with charts, tables, diagrams, icons, themes and your PowerPoint templates; present with notes; open any `.pptx` and export editable PowerPoint, PDF or pictures.
 - **Themes and layout**: eight themes, or one you describe to an agent (or import from VS Code); an accent and density. The chat and the result pane each fold away to give the other the window, and terminals run side by side.
-- **Quick chat**: a small chat window over every app, from anywhere, with a global shortcut (⌥Space; Alt+Shift+Space on Windows and Linux) or `pilothouse quick-chat`. Its chats are in the Scratch workspace.
+- **Quick chat**: a small chat window over every app, from anywhere, with a global shortcut (⌥Space; Alt+Shift+Space on Windows and Linux) or `pilothouse quick-chat`. Its chats are under Chats.
 - **Agents in terminals**: Claude Code, Codex, Gemini CLI, Antigravity or Cline in a workspace terminal, followed (working, needs you, done) and kept in the chat list once closed, to read, search and go on with in the terminal or in a chat.
 - **Inbox and to-dos**, and an offline utilities toolbox (JSON, JWT, hashes, times, cron, regex, SQLite…) for people and agents.
 - **Your own build**: an organisation sets its name, icons and features in `brand/`, adds views of its own beside Workspaces and GitHub, and keeps merging PilotHouse releases ([docs/customizing.md](docs/customizing.md)).

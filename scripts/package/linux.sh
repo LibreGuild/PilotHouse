@@ -67,7 +67,7 @@ Homepage: $HOMEPAGE
 Depends: libc6 (>= 2.35), libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libvulkan1, libfontconfig1, libfreetype6, libx11-xcb1, libxcb1, libdbus-1-3, git
 Description: One desktop app for coding agents
  Chat with Claude Code, Codex, Gemini CLI, Antigravity or Cline beside your code,
- Git, a board, terminals, a browser and Android devices. On-device.
+ Git, terminals, a browser and Android devices. On-device.
 CONTROL
 dpkg-deb --root-owner-group --build "$DEB" "$DIST/$STEM-Linux-amd64.deb" >/dev/null
 

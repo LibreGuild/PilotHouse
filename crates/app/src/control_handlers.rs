@@ -40,7 +40,6 @@ pub fn register(cx: &mut App) {
         },
         cx,
     );
-    ph_board::register_control_methods(AppState::store(cx).clone(), cx);
     ph_workspace::theme_mods::register_control_methods(cx);
     ph_studio::register_control_methods(cx);
 

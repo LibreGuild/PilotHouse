@@ -74,7 +74,7 @@ pub struct Project {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectUiState {
-    /// The tool that was open (`changes`, `board`, `terminal`, …).
+    /// The tool that was open (`changes`, `terminal`, `browser`, …).
     pub context_tab: Option<String>,
     /// Whether the context panel was visible.
     pub context_panel_open: Option<bool>,
@@ -458,7 +458,7 @@ impl Store {
         Ok(healed)
     }
 
-    /// The workspace for chats that need no folder ("Scratch"): the one
+    /// The workspace for chats that need no folder ("Chats"): the one
     /// noted as that, made when there is none yet. It is always there: it
     /// is where a chat with no place of its own goes (a quick chat, the
     /// first chat of a first start, a new task without a folder), and what
@@ -474,7 +474,7 @@ impl Store {
         if let Some(project) = self.scratch()? {
             return Ok(project);
         }
-        let project = self.create_empty_workspace("Scratch", scratch_root)?;
+        let project = self.create_empty_workspace("Chats", scratch_root)?;
         self.set_setting(SCRATCH, &project.id)?;
         Ok(project)
     }
@@ -907,7 +907,7 @@ mod tests {
         );
 
         let state = ProjectUiState {
-            context_tab: Some("board".into()),
+            context_tab: Some("changes".into()),
             open_files: vec!["src/main.rs".into()],
             ..Default::default()
         };
@@ -933,7 +933,7 @@ mod tests {
         let root = temp_folder("kinds-scratch");
         let scratch = store.scratch_workspace(&root).unwrap();
         assert_eq!(scratch.kind, ProjectKind::Empty);
-        assert_eq!(scratch.name, "Scratch");
+        assert_eq!(scratch.name, "Chats");
         assert!(scratch.empty && scratch.is_workspace());
         // Asked again, the same one.
         assert_eq!(store.scratch_workspace(&root).unwrap().id, scratch.id);

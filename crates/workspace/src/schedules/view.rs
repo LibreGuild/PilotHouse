@@ -25,13 +25,9 @@ use crate::workspace::Workspace;
 const PRESETS: &[(&str, &str)] = &[
     (
         "Morning summary",
-        concat!(
-            "Summarize, in one screen, what changed in this workspace since yesterday: the commits in each Git folder \
-             (git log --since=yesterday), open pull requests, the ",
-            ph_brand::name!(),
-            " board's columns (board_list), and how the UI \
-             tests last went (test_list). End with what looks most important to do next."
-        ),
+        "Summarize, in one screen, what changed in this workspace since yesterday: the commits in each Git folder \
+         (git log --since=yesterday), open pull requests, and how the UI tests last went (test_list). End with \
+         what looks most important to do next.",
     ),
     (
         "Nightly check",

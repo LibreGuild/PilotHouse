@@ -39,9 +39,6 @@ fn view_items() -> Vec<MenuItem> {
     if enabled(Feature::Changes) {
         items.push(MenuItem::action("Changes", ShowChanges));
     }
-    if enabled(Feature::Board) {
-        items.push(MenuItem::action("Board", ShowBoard));
-    }
     if enabled(Feature::Terminal) {
         items.push(MenuItem::action("Terminal", ShowTerminal));
     }

@@ -54,7 +54,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "test_run",
-        description: "Run one of this workspace's UI tests (by name, see test_list) the way the Tests tab does, without AI: it replays the recorded steps in the browser pane or on the Android device and compares the screens with the accepted baseline. Use it to check your change before moving a board card to done. Takes up to a minute.",
+        description: "Run one of this workspace's UI tests (by name, see test_list) the way the Tests tab does, without AI: it replays the recorded steps in the browser pane or on the Android device and compares the screens with the accepted baseline. Use it to check your change before you call it done. Takes up to a minute.",
         schema: || {
             json!({ "type": "object", "required": ["name"], "properties": {
             "name": { "type": "string", "description": "The test's name." }

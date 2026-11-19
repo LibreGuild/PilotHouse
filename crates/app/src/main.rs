@@ -110,7 +110,7 @@ fn run_app(open: Vec<std::path::PathBuf>, quick_chat: bool) -> Result<()> {
         })
         .detach();
         if let Err(err) = ph_control::ControlServer::start(&paths::control_socket_path(), cx) {
-            // The app is fully usable without it; agents just can't reach the board.
+            // The app is fully usable without it; agents just can't reach its tools.
             tracing::warn!("control socket unavailable: {err:#}");
         }
         cx.activate(true);

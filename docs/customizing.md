@@ -72,7 +72,7 @@ A feature that is off is not in the app at all. It is not in the tools beside th
 
 | Key | What |
 |---|---|
-| `files`, `changes`, `pulls`, `board`, `browser`, `devices`, `runs`, `tests`, `terminal`, `logcat` | The tools beside the chat (`changes` is Git; `pulls` is pull requests; `devices` is Android; `runs` is run configurations and ports; `tests` is UI tests) |
+| `files`, `changes`, `pulls`, `browser`, `devices`, `runs`, `tests`, `terminal`, `logcat` | The tools beside the chat (`changes` is Git; `pulls` is pull requests; `devices` is Android; `runs` is run configurations and ports; `tests` is UI tests) |
 | `github` | Reviews, in the column of icons (agent reviews of pull requests run there) |
 | `schedules` | Schedules: agent prompts and test runs at set times or on events |
 | `utilities` | The offline utilities (formats, hashes, times…) and their agent tools |
@@ -178,7 +178,7 @@ Put SVG files in `brand/icons/custom/` (`reports.svg`; names in lowercase letter
 
 ### Deeper changes
 
-Some changes need PilotHouse's own code, such as a new tool beside the chat (like Board or Terminal) or a new Settings page. Make them, and list each file you changed in `CUSTOM.md`, so whoever merges the next release knows to keep them. A new tool beside the chat touches:
+Some changes need PilotHouse's own code, such as a new tool beside the chat (like Run or Terminal) or a new Settings page. Make them, and list each file you changed in `CUSTOM.md`, so whoever merges the next release knows to keep them. A new tool beside the chat touches:
 
 - `crates/workspace/src/context_panel.rs` (the `ContextTab` list)
 - `actions.rs` (a `Show…` action and its key)
@@ -186,7 +186,7 @@ Some changes need PilotHouse's own code, such as a new tool beside the chat (lik
 - `workspace_screen/panels.rs` and `render.rs` (making and drawing the panel)
 - `shortcuts.rs`
 
-Copy what `Board` does in each.
+Copy what `Runs` does in each.
 
 ## 5. Your rules: `CUSTOM.md`
 

@@ -54,16 +54,6 @@ impl ChatPanel {
             .as_ref()
             .map(|(_, files)| files)
             .unwrap_or(&empty);
-        let cards: Vec<(i64, String)> = if typing.trigger == '#' {
-            self.store
-                .cards(self.project.id)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|card| (card.id, card.title))
-                .collect()
-        } else {
-            Vec::new()
-        };
         if typing.trigger == '@' && typing.query.starts_with("pr") && !self.pulls_asked {
             self.pulls_asked = true;
             cx.emit(ChatPanelEvent::WantPulls);
@@ -80,7 +70,7 @@ impl ChatPanel {
             commands: &commands,
             tabs: self.live.as_ref().is_some_and(|live| live.tabs.is_some()),
         };
-        let items = mention_complete::suggestions(&typing, files, &cards, &extra);
+        let items = mention_complete::suggestions(&typing, files, &extra);
         let selected = self
             .mention
             .as_ref()

@@ -816,7 +816,7 @@ fn chat_page() -> SettingPage {
                         SettingField::render(|_, _, _| crate::quick_chat::ShortcutRecorder),
                     )
                     .description(format!(
-                        "Opens a small chat window over any app while {app} runs, and hides it again. Its chats are kept in the Scratch workspace.{wayland}",
+                        "Opens a small chat window over any app while {app} runs, and hides it again. Its chats are kept under Chats.{wayland}",
                         app = ph_brand::NAME,
                         // Only where it matters: a Wayland session gives
                         // an app no key of its own.

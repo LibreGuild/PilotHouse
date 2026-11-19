@@ -57,13 +57,6 @@ pub fn initialize_result(params: &Value, browsers: Browsers) -> Value {
 fn instructions(browsers: Browsers) -> String {
     use ph_brand::{Feature, enabled};
     let mut text = concat!(ph_brand::name!(), " tools for this project.").to_string();
-    if enabled(Feature::Board) {
-        text.push_str(
-            "\nBoard: the plan as cards in four columns (todo, in_progress, review, done). Use \
-            board_add_cards to plan, board_next_card to claim work, board_add_note to report \
-            progress and board_update_card to move a card when you finish it.",
-        );
-    }
     text.push_str(&web_pages(browsers));
     if enabled(Feature::Browser) {
         text.push_str(concat!(

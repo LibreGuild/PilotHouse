@@ -1,6 +1,6 @@
 [package]
 name = "ph-store"
-description = "PilotHouse local persistence: one SQLite database for projects, sessions, board and settings."
+description = "PilotHouse local persistence: one SQLite database for projects, sessions and settings."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

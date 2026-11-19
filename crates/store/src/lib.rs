@@ -6,14 +6,12 @@
 //!
 //! - [`projects`]: registered project folders and their saved UI layout.
 //! - [`sessions`]: chat sessions with an agent and their transcript.
-//! - [`board`]: Kanban cards and their activity log.
 //! - [`settings`]: app-wide preferences as JSON values.
 //!
 //! The store is synchronous: every query is a small indexed read or write that
 //! finishes in well under a millisecond, so callers may use it from the UI
 //! thread. Bulk work should still go through a background task.
 
-pub mod board;
 mod migrations;
 pub mod parallel;
 pub mod paths;
