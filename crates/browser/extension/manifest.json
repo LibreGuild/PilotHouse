@@ -14,13 +14,9 @@
     "scripting",
     "contextMenus",
     "notifications",
-    "sidePanel",
     "storage",
     "offscreen",
     "tabCapture"
-  ],
-  "optional_host_permissions": [
-    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js",
@@ -31,10 +27,8 @@
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png"
-    }
-  },
-  "side_panel": {
-    "default_path": "sidepanel.html"
+    },
+    "default_popup": "popup.html"
   },
   "commands": {
     "send-to-pilothouse": {
@@ -59,7 +53,7 @@
       "suggested_key": {
         "default": "Alt+Shift+O"
       },
-      "description": "Open the PilotHouse panel"
+      "description": "Open PilotHouse’s menu"
     }
   },
   "icons": {

@@ -2,16 +2,13 @@
 //! sends from Chrome goes into a composer (the chat on screen, a new chat,
 //! or quick chat; nothing is sent to an agent until the user sends it), and
 //! the extension hears which chats wait for the user or are at work (its
-//! toolbar badge and side panel) and their news (Chrome notifications, when
-//! the user chose those).
+//! toolbar badge and popup).
 
 use anyhow::{Context as _, Result};
 use gpui_kit::{AnyWindowHandle, App, Entity};
 use ph_agent::Attachment;
 use ph_browser::workflows::Workflow;
-use ph_browser::{
-    AgentChrome, BrowserHost, ChatNews, ChatNote, Delivery, SendTo, SiteAction, WorkflowUse,
-};
+use ph_browser::{AgentChrome, BrowserHost, ChatNote, Delivery, SendTo, WorkflowUse};
 use ph_media::ToChat;
 use std::rc::Rc;
 
@@ -35,28 +32,17 @@ pub(crate) fn install(cx: &mut App) {
             let from = cx.active_window();
             cx.defer(move |cx| use_workflow(workflow, using, from, cx))
         }),
-        site: Rc::new(site_action),
     };
     chrome.update(cx, |chrome, _| chrome.set_host(host));
 }
 
-/// The chats waiting for the user and at work, and news of them, for the
-/// extension (it hears only of changes).
-pub(crate) fn report(
-    waiting: Vec<ChatNote>,
-    working: Vec<ChatNote>,
-    news: Vec<ChatNews>,
-    cx: &mut App,
-) {
+/// The chats waiting for the user and at work, for the extension (it
+/// hears only of changes).
+pub(crate) fn report(waiting: Vec<ChatNote>, working: Vec<ChatNote>, cx: &mut App) {
     let Some(chrome) = AgentChrome::global(cx) else {
         return;
     };
-    chrome.update(cx, |chrome, _| {
-        chrome.set_chats(waiting, working);
-        for news in news {
-            chrome.news(news);
-        }
-    });
+    chrome.update(cx, |chrome, _| chrome.set_chats(waiting, working));
 }
 
 /// What the extension hands over from page `source`, as composer
@@ -210,85 +196,6 @@ fn use_workflow(
             }
         })
     });
-}
-
-/// A button of PilotHouse's on a GitHub, Jira or Linear page; says where
-/// it went.
-fn site_action(action: SiteAction, cx: &mut App) -> Result<String> {
-    let (handle, workspace) = frontmost_or_open(cx)?;
-    handle
-        .update(cx, |_, window, cx| -> Result<String> {
-            match action {
-                SiteAction::Chat {
-                    title,
-                    url,
-                    text,
-                    prompt,
-                } => {
-                    cx.activate(true);
-                    window.activate_window();
-                    let attachment = Attachment::Text {
-                        label: title.chars().take(60).collect(),
-                        text: from_web(&url, &format!("{title}\n\n{text}")),
-                    };
-                    workspace.update(cx, |workspace, cx| {
-                        workspace.draft_from_browser(attachment, &prompt, true, window, cx)
-                    })
-                }
-                SiteAction::Review {
-                    host,
-                    owner,
-                    repo,
-                    number,
-                } => {
-                    if !ph_brand::enabled(ph_brand::Feature::GitHub) {
-                        anyhow::bail!("This build of {} has no GitHub view.", ph_brand::NAME);
-                    }
-                    cx.activate(true);
-                    window.activate_window();
-                    workspace.update(cx, |workspace, cx| {
-                        workspace.set_view(crate::workspace::View::GitHub, window, cx);
-                        let github = workspace.github(cx);
-                        let id = ph_pulls::clones::RepoId {
-                            host,
-                            owner,
-                            name: repo,
-                        };
-                        github.update(cx, |github, cx| github.show_pull(id, number, window, cx));
-                    });
-                    Ok(format!("pull request #{number} in {}", ph_brand::NAME))
-                }
-                SiteAction::Card { title, url, text } => {
-                    if !ph_brand::enabled(ph_brand::Feature::Board) {
-                        anyhow::bail!("This build of {} has no board.", ph_brand::NAME);
-                    }
-                    let project = workspace.read(cx).active_project_id().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Open a workspace in {} first: the card goes on its board.",
-                            ph_brand::NAME
-                        )
-                    })?;
-                    let store = crate::AppState::store(cx).clone();
-                    let name = store
-                        .project(project)
-                        .ok()
-                        .flatten()
-                        .map(|project| project.name)
-                        .unwrap_or_default();
-                    // Agents read cards (`#12`, the board's runs), so the
-                    // page's text is marked as such there too.
-                    let card = ph_store::board::NewCard {
-                        description: from_web(&url, &text),
-                        title: if title.is_empty() { url } else { title },
-                        acceptance: String::new(),
-                    };
-                    store.add_cards(project, &[card])?;
-                    ph_board::BoardHub::notify(project, cx);
-                    Ok(format!("the board of “{name}”"))
-                }
-            }
-        })
-        .context("PilotHouse's window closed")?
 }
 
 /// Puts what the user sent from Chrome where they chose; says where.

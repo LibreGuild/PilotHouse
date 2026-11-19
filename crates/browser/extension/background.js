@@ -6,20 +6,20 @@
 //   chrome.debugger, attached only while an agent works in the tab, and only
 //   with the DevTools methods listed in ALLOWED.
 // - The user sends things to PilotHouse from any tab (`features/send.js`),
-//   only when they ask: the right-click menu, a shortcut or the side panel.
-// - The toolbar button opens the side panel: what agents do, what waits for
-//   the user, and the extension's choices.
+//   only when they ask: the toolbar button's popup, the page's right-click
+//   menu or a shortcut.
+// - The toolbar button opens the popup (`popup.html`): send, record, let
+//   agents use the tab, and what waits for the user.
+// - Nothing runs in a page by itself, and no site is reachable until the
+//   user points at a tab: the extension asks for no site at all.
 // - It talks only to the PilotHouse app, through Chrome's native messaging
 //   (`lib/link.js`). There is no network port and no remote code.
 
 import { connect, onConnection, post, send, setRequestHandler } from './lib/link.js';
 import { attached, allowed, allowedTabs, frontTab, inGroup, known, openTab, popups, setShared } from './lib/tabs.js';
-import { onSettings, settings, update } from './lib/settings.js';
-import { inPage } from './lib/page.js';
 import * as sending from './features/send.js';
 import * as statusFeature from './features/status.js';
 import * as recording from './features/record.js';
-import * as sites from './features/sites.js';
 
 const PROTOCOL = '1.3';
 
@@ -186,7 +186,6 @@ function opened(tab, opener) {
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
   connect();
   if ('groupId' in change) {
-    void refreshMenus(tab);
     if (popups.has(tabId)) return;
     const inside = await inGroup(tab);
     if (inside && !known.has(tabId)) {
@@ -214,18 +213,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   if (known.delete(tabId)) post({ method: 'PilotHouse.tabRemoved', params: { tabId } });
 });
 
-chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-  connect();
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (tab) void refreshMenus(tab);
-});
-
-// With several windows, the tab in front changes with no tab activated.
-chrome.windows.onFocusChanged.addListener(async (windowId) => {
-  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
-  const [tab] = await chrome.tabs.query({ active: true, windowId }).catch(() => []);
-  if (tab) void refreshMenus(tab);
-});
+// A tab coming forward is Chrome in use: the link to the app is kept up.
+chrome.tabs.onActivated.addListener(() => connect());
 
 // A group renamed away from "PilotHouse" takes its tabs out of reach.
 chrome.tabGroups.onUpdated.addListener(async (group) => {
@@ -243,8 +232,9 @@ function leave(tabId) {
 
 // ---- What the user does ---------------------------------------------------
 
-/** Runs one of the user's actions on `tab`, telling them how it went. */
-async function act(action, tab, info = {}, fromPanel = false) {
+/** Runs one of the user's actions on `tab`, telling them how it went.
+ * `shown`: the popup is open and says how it went itself. */
+async function act(action, tab, info = {}, shown = false) {
   try {
     switch (action) {
       case 'page':
@@ -269,86 +259,37 @@ async function act(action, tab, info = {}, fromPanel = false) {
         await recording.finish(false);
         return null;
       case 'share':
-        // What the checkbox now says (the menu's can be stale for this tab).
         await setShared(tab, typeof info.checked === 'boolean' ? info.checked : !(await inGroup(tab)));
-        await refreshMenus(await chrome.tabs.get(tab.id));
         return {};
       default:
         throw new Error(`unknown action ${action}`);
     }
   } catch (error) {
-    // The panel shows the error itself; elsewhere a notification says it.
-    if (fromPanel) void sending.flash(tab.id, false, String(error?.message ?? error));
+    // The popup shows the error itself; elsewhere a notification says it.
+    if (shown) void sending.flash(tab.id, false, String(error?.message ?? error));
     else await sending.failed(tab, error);
     throw error;
   }
 }
 
-const MENU = {
-  selection: 'Send the selection',
-  page: 'Send this page',
-  link: 'Send this link',
-  image: 'Send this image',
-  area: 'Screenshot an area…',
-  element: 'Pick an element…',
-  bug: 'Record a bug report…',
-  workflow: 'Record a workflow…',
-  stop: 'Stop recording and send',
-  share: 'Let agents use this tab',
-  panel: 'Open the PilotHouse panel',
-};
+// The page's menu holds what a right-click points at (the selection, a
+// link, an image, the page) and the two that go on in the page. Recording,
+// sharing the tab and where things go are in the popup, each in one place.
+const MENU = [
+  ['selection', 'Send the selection', ['selection']],
+  ['link', 'Send this link', ['link']],
+  ['image', 'Send this image', ['image']],
+  ['page', 'Send this page', ['page', 'frame']],
+  ['area', 'Screenshot an area…', ['page', 'frame', 'image', 'link', 'selection']],
+  ['element', 'Pick an element…', ['page', 'frame', 'image', 'link']],
+];
 
 async function createMenus() {
   await chrome.contextMenus.removeAll();
-  const add = (id, title, contexts, extra = {}) =>
-    chrome.contextMenus.create({ id, title, contexts, ...extra }, () => void chrome.runtime.lastError);
-  add('selection', MENU.selection, ['selection']);
-  add('link', MENU.link, ['link']);
-  add('image', MENU.image, ['image']);
-  add('page', MENU.page, ['page', 'frame']);
-  add('area', MENU.area, ['page', 'frame', 'image', 'link', 'selection']);
-  add('element', MENU.element, ['page', 'frame', 'image', 'link']);
-  add('sep-1', '', ['all'], { type: 'separator' });
-  add('bug', MENU.bug, ['page', 'frame']);
-  add('workflow', MENU.workflow, ['page', 'frame']);
-  add('stop', MENU.stop, ['all'], { visible: false });
-  add('sep-4', '', ['all'], { type: 'separator' });
-  add('share', MENU.share, ['page', 'frame'], { type: 'checkbox', checked: false });
-  add('sep-2', '', ['all'], { type: 'separator' });
-  const chosen = await settings();
-  for (const [id, where] of Object.entries(sending.DESTINATIONS)) {
-    add(`to-${id}`, `Send to ${where}`, ['all'], { type: 'radio', checked: chosen.destination === id });
+  for (const [id, title, contexts] of MENU) {
+    chrome.contextMenus.create({ id, title, contexts }, () => void chrome.runtime.lastError);
   }
-  add('sep-3', '', ['all'], { type: 'separator' });
-  add('panel', MENU.panel, ['all']);
 }
-
-/** The share checkbox follows the tab in front of the window in front. */
-async function refreshMenus(tab) {
-  if (!tab?.active) return;
-  const front = await chrome.windows.getLastFocused().catch(() => null);
-  if (front && front.id !== tab.windowId) return;
-  const shared = await inGroup(tab);
-  chrome.contextMenus.update('share', { checked: shared }, () => void chrome.runtime.lastError);
-}
-
-// The "Send to" choice made in the panel shows in the menu too.
-onSettings((chosen) => {
-  for (const id of Object.keys(sending.DESTINATIONS)) {
-    chrome.contextMenus.update(`to-${id}`, { checked: chosen.destination === id }, () => void chrome.runtime.lastError);
-  }
-});
-
-// While recording: Stop in the menu, not Record.
-function recordingMenus(now) {
-  const update = (id, props) => chrome.contextMenus.update(id, props, () => void chrome.runtime.lastError);
-  update('stop', { visible: !!now, title: now?.kind === 'workflow' ? 'Stop recording and save' : MENU.stop });
-  update('bug', { visible: !now });
-  update('workflow', { visible: !now });
-}
-recording.watch(recordingMenus);
-// Menus outlive this worker; a recording does not (see record.js).
-recordingMenus(recording.current());
 
 // The bar's Stop and Cancel in the page.
 recording.onBarFinish(async (keep) => {
@@ -363,21 +304,7 @@ recording.onBarFinish(async (keep) => {
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const id = String(info.menuItemId);
-  if (id.startsWith('to-')) {
-    await update({ destination: id.slice(3) });
-    return;
-  }
-  if (id === 'panel') {
-    if (tab?.windowId !== undefined) await chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
-    return;
-  }
-  if (id === 'stop') {
-    const now = recording.current();
-    const recorded = now ? await chrome.tabs.get(now.tabId).catch(() => null) : null;
-    await act('stop', recorded ?? tab).catch(() => {});
-    return;
-  }
-  if (!tab?.id) return;
+  if (!tab?.id || !MENU.some(([known]) => known === id)) return;
   connect();
   await act(id, tab, info).catch(() => {});
 });
@@ -400,36 +327,32 @@ chrome.commands.onCommand.addListener(async (command, tab) => {
   await act(action, target).catch(() => {});
 });
 
-// ---- The side panel -------------------------------------------------------
+// ---- The popup ------------------------------------------------------------
 
-// Messages from the side panel: what it shows, and the user's actions.
+// Messages from the popup (what it shows, and the user's actions) and from
+// the recorder in a page.
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return false;
-  // The recorder in a page (its steps, and the bar's buttons).
+  // The recorder in a page (its steps, and the bar's buttons): the only
+  // thing of the extension's that speaks from a page.
   if (sender.tab) {
     if (typeof message?.type === 'string' && message.type.startsWith('recorder-')) {
       recording.fromRecorder(message, sender);
-      return false;
-    }
-    // A button of PilotHouse's on GitHub, Jira or Linear.
-    if (message?.type === 'site-action') {
-      void sites.act(message.action, sender).then(
-        (result) => respond({ ok: true, result }),
-        (error) => respond({ ok: false, error: String(error?.message ?? error) }),
-      );
-      return true;
     }
     return false;
   }
   if (message?.target === 'offscreen') return false;
-  void panelRequest(message).then(
+  void popupRequest(message).then(
     (result) => respond({ ok: true, result }),
     (error) => respond({ ok: false, error: String(error?.message ?? error) }),
   );
   return true;
 });
 
-async function panelRequest(message) {
+/** What goes on in the page once the popup has closed. */
+const IN_PAGE = new Set(['area', 'element']);
+
+async function popupRequest(message) {
   switch (message?.type) {
     case 'status':
       return statusFeature.status();
@@ -437,17 +360,17 @@ async function panelRequest(message) {
       const tab = await chrome.tabs.get(message.tabId);
       return act(message.action, tab, { streamId: message.streamId, checked: message.checked }, true);
     }
+    // Started here, finished without the popup: it closes so that the user
+    // can drag over the page or click in it, and is not there to hear how
+    // it went (the toolbar icon says, and a notification if it failed).
+    case 'start': {
+      if (!IN_PAGE.has(message.action)) throw new Error('unknown request');
+      const tab = await chrome.tabs.get(message.tabId);
+      void act(message.action, tab).catch(() => {});
+      return {};
+    }
     case 'recording':
       return recording.current();
-    // The page's text, for a summary the panel makes on this computer.
-    case 'clip': {
-      const tab = await chrome.tabs.get(message.tabId);
-      return inPage(tab, 'clip.js', () => globalThis.__pilothouse.clip({}));
-    }
-    case 'deliver': {
-      const tab = await chrome.tabs.get(message.tabId);
-      return sending.deliver(tab, message.items, message.title);
-    }
     case 'agent':
       send('PilotHouse.agentControl', { owner: String(message.owner), paused: !!message.paused });
       return {};
@@ -461,8 +384,8 @@ async function panelRequest(message) {
 
 chrome.runtime.onConnect.addListener((port) => {
   // Content scripts are this extension too, but run in pages: only the
-  // panel (no tab) hears what agents do.
-  if (port.name !== 'panel' || port.sender?.id !== chrome.runtime.id || port.sender.tab) return;
+  // popup (no tab) hears what agents do.
+  if (port.name !== 'popup' || port.sender?.id !== chrome.runtime.id || port.sender.tab) return;
   connect();
   const stop = statusFeature.watch((status) => {
     try {
@@ -490,11 +413,16 @@ chrome.runtime.onConnect.addListener((port) => {
 
 statusFeature.install();
 recording.install();
-sites.install();
+
+/** What versions before 0.7 left in the browser: the buttons they put on
+ * GitHub, Jira and Linear pages, registered to outlive the worker. */
+async function forgetOldVersions() {
+  await chrome.scripting.unregisterContentScripts({ ids: ['pilothouse-site-buttons'] }).catch(() => {});
+}
 
 chrome.runtime.onInstalled.addListener(async () => {
   await createMenus();
-  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  await forgetOldVersions();
   connect();
 });
 chrome.runtime.onStartup.addListener(async () => {

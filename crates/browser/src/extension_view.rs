@@ -145,7 +145,7 @@ impl ChromeExtensionView {
         let mut list = v_flex().gap_2();
         if self.workflows.is_empty() {
             list = list.child(div().text_xs().text_color(muted).child(
-                "None yet. In Chrome, right-click a page → PilotHouse → Record a workflow, do the steps, then press Stop and save.",
+                "None yet. In Chrome, click PilotHouse in the toolbar, then Record → A workflow; do the steps and press Stop and save.",
             ));
         }
         for workflow in &self.workflows {
@@ -683,7 +683,7 @@ impl Render for ChromeExtensionView {
                 connected,
                 "Pin it",
                 guide_text(
-                    "Open the puzzle-piece menu beside the address and pin PilotHouse. Its button opens the PilotHouse panel: what waits for you, the agents' tabs, sending and recording.",
+                    "Open the puzzle-piece menu beside the address and pin PilotHouse, so that its button is always there.",
                     cx,
                 ),
                 crate::extension_guide::pin(cx),
@@ -701,9 +701,20 @@ impl Render for ChromeExtensionView {
             .child(guide_step(
                 None,
                 false,
+                "Everything is under its button",
+                guide_text(
+                    "Click PilotHouse in the toolbar to send the page, a screenshot or an element to a chat, to record a bug report or a workflow, and to let agents use the tab in front. Where what you send goes is chosen there too.",
+                    cx,
+                ),
+                crate::extension_guide::popup(cx),
+                cx,
+            ))
+            .child(guide_step(
+                None,
+                false,
                 "Agents work in a tab group of their own",
                 guide_text(
-                    "When an agent opens a page, a purple PilotHouse tab group appears. A tab glows while an agent acts in it, and Chrome says that PilotHouse is debugging the browser. To hand an agent a tab of yours, use “Let agents use this tab” in the panel.",
+                    "When an agent opens a page, a purple PilotHouse tab group appears. A tab glows while an agent acts in it, and Chrome says that PilotHouse is debugging the browser. Agents never see a tab outside the group.",
                     cx,
                 ),
                 crate::extension_guide::tab_group(cx),
@@ -712,9 +723,9 @@ impl Render for ChromeExtensionView {
             .child(guide_step(
                 None,
                 false,
-                "Right-click to send to a chat",
+                "Right-click what you want to send",
                 guide_text(
-                    "PilotHouse in a page's menu sends the selection, the page, a link, an image, an area or an element, and records a bug report or a workflow.",
+                    "A page's menu sends what you point at: the selection, a link, an image or the page, a screenshot of an area, or an element.",
                     cx,
                 ),
                 crate::extension_guide::context_menu(cx),
@@ -727,7 +738,7 @@ impl Render for ChromeExtensionView {
                 v_flex()
                     .gap_2()
                     .child(guide_text(
-                        "It is put in the chat's message box and goes when you send it: the chat on screen, a new chat or the quick chat, as the panel's “Send to” says.",
+                        "It is put in the chat's message box and goes when you send it.",
                         cx,
                     ))
                     .child(
@@ -736,7 +747,7 @@ impl Render for ChromeExtensionView {
                             .child(shortcut("P", "Send the selection, or the page", cx))
                             .child(shortcut("S", "Screenshot an area", cx))
                             .child(shortcut("E", "Pick an element", cx))
-                            .child(shortcut("O", "Open the panel", cx)),
+                            .child(shortcut("O", "Open PilotHouse's menu", cx)),
                     )
                     .child(div().text_xs().text_color(muted).child(
                         "The shortcuts are changed at chrome://extensions/shortcuts.",

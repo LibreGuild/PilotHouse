@@ -34,23 +34,24 @@
 
 * { box-sizing: border-box; }
 
+/* A popup is as wide as its page says, and no taller than the browser lets
+   it be (600px): past that it scrolls. */
 body {
   margin: 0;
+  width: 340px;
+  max-height: 580px;
+  overflow-y: auto;
   background: var(--bg);
   color: var(--fg);
   font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 .top {
-  position: sticky;
-  top: 0;
-  z-index: 1;
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg);
 }
 
 .top h1 { margin: 0; font-size: 14px; font-weight: 600; flex: 1; }
@@ -64,23 +65,19 @@ body {
   padding: 10px 12px;
   border-radius: var(--radius);
   background: var(--warning-soft);
-  color: var(--fg);
 }
 
-main { padding: 4px 14px 8px; }
+main { padding: 0 14px; }
 
-section { padding: 12px 0; border-bottom: 1px solid var(--border); }
-section:last-child { border-bottom: none; }
+section { padding: 10px 0; }
+section[hidden] { display: none; }
 
-h2 { margin: 0 0 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
-h3 { margin: 14px 0 4px; font-size: 12px; font-weight: 600; }
+h2 { margin: 0 0 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
 
-.tab-name { margin: 0 0 8px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.hint { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.name { font-weight: 500; }
+.hint { color: var(--muted); font-size: 12px; }
 
 .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.list.compact { gap: 2px; }
 
 .item {
   display: flex;
@@ -96,9 +93,7 @@ h3 { margin: 14px 0 4px; font-size: 12px; font-weight: 600; }
 .item .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item.waiting { border-color: var(--warning); background: var(--warning-soft); cursor: pointer; }
 .item.waiting:hover, .item.waiting:focus-visible { outline: 2px solid var(--warning); outline-offset: -1px; }
-
-.row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 0; }
-.row .sub { color: var(--muted); }
+.item .row { display: flex; align-items: center; gap: 8px; }
 
 .tabs { list-style: none; margin: 4px 0 0; padding: 0; }
 .tabs button { padding: 0; border: none; background: none; color: var(--accent); cursor: pointer; font: inherit; text-align: left; }
@@ -120,20 +115,34 @@ button:hover:not(:disabled) { border-color: var(--accent); }
 button:focus-visible, input:focus-visible + span, input[type=checkbox]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button:disabled { opacity: 0.5; cursor: default; }
 button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
-button.link { padding: 0; margin-top: 6px; border: none; background: none; color: var(--accent); }
-button.link:hover { text-decoration: underline; }
 
-.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 10px; }
-.actions button { padding: 8px 6px; }
+/* What the button does, a line each: a list to read down, with the key
+   that does the same beside it. */
+.commands { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.commands button {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  column-gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 0;
+  background: var(--bg);
+  text-align: left;
+}
+.commands button[hidden] { display: none; }
+.commands button + button { border-top: 1px solid var(--border); }
+.commands button:hover:not(:disabled) { background: var(--accent-soft); }
+.commands button:focus-visible { outline-offset: -2px; }
+.commands .hint { grid-column: 1 / -1; }
 
-.result { min-height: 18px; margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+.result { min-height: 0; margin: 0; font-size: 12px; color: var(--muted); }
+.result:empty { display: none; }
 .result.ok { color: var(--ok); }
 .result.error { color: var(--danger); }
 
-.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; cursor: pointer; }
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; }
 .switch-row > span { display: flex; flex-direction: column; }
-.row-title { font-weight: 500; }
-.row-hint { color: var(--muted); font-size: 12px; }
 
 input[type=checkbox][role=switch] {
   appearance: none;
@@ -170,27 +179,39 @@ input[type=checkbox][role=switch]:disabled { opacity: 0.5; cursor: default; }
 .segmented label + label span { border-left: 1px solid var(--border); }
 .segmented input:checked + span { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 
+.check-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--muted); font-size: 12px; cursor: pointer; }
+.check-row input { margin: 0; accent-color: var(--accent); }
+
 kbd {
   font: 11px ui-monospace, Menlo, monospace;
+  color: var(--muted);
   padding: 1px 5px;
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--panel);
 }
+kbd:empty { display: none; }
 
-footer { padding: 10px 14px 14px; border-top: 1px solid var(--border); }
+footer { padding: 10px 14px 12px; border-top: 1px solid var(--border); background: var(--panel); }
 
 .recording {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 10px;
+  margin: 10px 0 0;
   padding: 8px 10px;
   border-radius: var(--radius);
   border: 1px solid var(--danger);
   background: rgba(239, 68, 68, 0.08);
 }
 .recording[hidden] { display: none; }
-.recording .grow { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* What is recorded on a line of its own, its two buttons under it. */
+.recording { flex-wrap: wrap; }
+.recording .grow { flex: 1 1 calc(100% - 20px); min-width: 0; display: flex; flex-direction: column; }
+.recording .primary { margin-left: auto; }
 .recording .dot { width: 10px; height: 10px; border-radius: 50%; background: #ef4444; flex: none; animation: pulse 1.4s infinite; }
 @keyframes pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .recording .dot { animation: none; }
+  input[type=checkbox][role=switch], input[type=checkbox][role=switch]::after { transition: none; }
+}

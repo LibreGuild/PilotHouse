@@ -52,7 +52,7 @@ mod inbox;
 mod shared_text;
 mod site_tools;
 mod workflow_run;
-pub use inbox::{BrowserHost, ChatNews, ChatNote, Delivery, SendTo, SiteAction, WorkflowUse};
+pub use inbox::{BrowserHost, ChatNote, Delivery, SendTo, WorkflowUse};
 pub use shared_text::TabText;
 
 /// How long navigation waits for the page's load event.

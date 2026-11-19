@@ -258,7 +258,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "chrome_workflows",
-        description: "Workflows the user recorded in Chrome (PilotHouse menu → Record a workflow): steps on a website they do often. Without a name, the list; with a name, its steps. chrome_run_workflow runs one.",
+        description: "Workflows the user recorded in Chrome (PilotHouse’s toolbar button → Record → A workflow): steps on a website they do often. Without a name, the list; with a name, its steps. chrome_run_workflow runs one.",
         schema: || json!({ "type": "object", "properties": { "name": { "type": "string" } } }),
         build: |arguments, project_id, _| {
             Ok(("chrome.workflows", with_project(arguments, project_id)))

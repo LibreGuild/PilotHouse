@@ -7,37 +7,23 @@ export const DEFAULTS = Object.freeze({
   destination: 'current',
   /** PilotHouse comes forward when you send something. */
   bringForward: true,
-  /** The toolbar icon counts chats waiting for you. */
-  badge: true,
-  /** A Chrome notification when a chat finishes or waits for you
-   * (PilotHouse already posts system notifications: off by default). */
-  notifyNews: false,
-  /** A Chrome notification when an agent needs you in one of its tabs (to
-   * sign in, or a check that a person is there). */
-  notifyHandoff: true,
-  /** Buttons on these sites' pages (each asks Chrome for access first). */
-  sites: Object.freeze({ github: false, jira: false, linear: false }),
 });
 
+/** The choices; what an earlier version kept besides them is left out. */
 export async function settings() {
   const stored = (await chrome.storage.local.get('settings')).settings ?? {};
-  return {
-    ...DEFAULTS,
-    ...stored,
-    sites: { ...DEFAULTS.sites, ...(stored.sites ?? {}) },
-  };
+  const chosen = { ...DEFAULTS };
+  for (const key of Object.keys(DEFAULTS)) {
+    if (typeof stored[key] === typeof DEFAULTS[key]) chosen[key] = stored[key];
+  }
+  return chosen;
 }
 
 export async function update(change) {
-  const now = await settings();
-  const next = { ...now, ...change, sites: { ...now.sites, ...(change.sites ?? {}) } };
+  const next = { ...(await settings()) };
+  for (const key of Object.keys(DEFAULTS)) {
+    if (typeof change[key] === typeof DEFAULTS[key]) next[key] = change[key];
+  }
   await chrome.storage.local.set({ settings: next });
   return next;
-}
-
-/** Calls `listener(settings)` when they change. */
-export function onSettings(listener) {
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.settings) void settings().then(listener);
-  });
 }

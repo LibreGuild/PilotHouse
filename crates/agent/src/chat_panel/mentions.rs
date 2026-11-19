@@ -148,7 +148,7 @@ impl ChatPanel {
                 match result {
                     Ok(tabs) if tabs.is_empty() => window.push_notification(
                         gpui_kit::component::notification::Notification::info(
-                            "No tab is shared yet. In Chrome, put tabs in the purple PilotHouse group (the PilotHouse panel: “Let agents use this tab”), then try again.",
+                            "No tab is shared yet. In Chrome, put tabs in the purple PilotHouse group (PilotHouse’s button in the toolbar: “Let agents use this tab”), then try again.",
                         ),
                         cx,
                     ),

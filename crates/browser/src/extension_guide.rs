@@ -476,6 +476,60 @@ pub(crate) fn tab_group(cx: &App) -> AnyElement {
     window(tabs, None, extension_mark(cx), (PAGE, page), cx).into_any_element()
 }
 
+/// The extension's popup, under its button in the toolbar.
+pub(crate) fn popup(cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let row = |text: &'static str| h_flex().h(rem(17.)).px_2().child(word(text, cx));
+    let heading = |width: f32| h_flex().h(rem(13.)).px_2().child(bar(width, cx));
+    let switch = h_flex()
+        .flex_none()
+        .w(rem(20.))
+        .h(rem(11.))
+        .px(px(2.))
+        .rounded_full()
+        .bg(theme.muted_foreground.opacity(0.35))
+        .child(div().size(rem(7.)).rounded_full().bg(theme.background));
+    let menu = v_flex()
+        .absolute()
+        .top_1()
+        .right_2()
+        .w(rem(172.))
+        .py_1()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.popover)
+        .shadow_md()
+        .child(heading(64.))
+        .child(row("This page"))
+        .child(row("A screenshot"))
+        .child(row("An element"))
+        .child(div().my_1().h(px(1.)).bg(theme.border))
+        .child(heading(36.))
+        .child(row("A bug report"))
+        .child(row("A workflow"))
+        .child(div().my_1().h(px(1.)).bg(theme.border))
+        .child(
+            h_flex()
+                .h(rem(17.))
+                .px_2()
+                .justify_between()
+                .child(word("Let agents use this tab", cx))
+                .child(switch),
+        );
+    let button = h_flex()
+        .gap_1()
+        .child(pointer(cx))
+        .child(target(cx).p(px(2.)).child(extension_mark(cx)));
+    let page = v_flex()
+        .gap_2()
+        .child(bar(96., cx))
+        .child(bar(70., cx))
+        .child(menu);
+    // Taller than the others: the whole popup shows.
+    window(plain_tab(cx), None, button, (168., page), cx).into_any_element()
+}
+
 /// A page's right-click menu, with the extension's entries beside it.
 pub(crate) fn context_menu(cx: &App) -> AnyElement {
     let theme = cx.theme();
@@ -522,19 +576,16 @@ pub(crate) fn context_menu(cx: &App) -> AnyElement {
     let ours = menu(152.)
         .top(rem(38.))
         .left(rem(134.))
-        .child(entry("Send the selection"))
         .child(entry("Send this page"))
         .child(entry("Screenshot an area…"))
-        .child(entry("Pick an element…"))
-        .child(entry("Record a bug report…"));
+        .child(entry("Pick an element…"));
     let page = v_flex()
         .gap_2()
         .child(bar(150., cx))
         .child(bar(200., cx))
         .child(chrome)
         .child(ours);
-    // Taller than the others: two menus, one beside the other.
-    window(plain_tab(cx), None, extension_mark(cx), (132., page), cx).into_any_element()
+    window(plain_tab(cx), None, extension_mark(cx), (PAGE, page), cx).into_any_element()
 }
 
 /// A chat's message box with what was sent from Chrome waiting in it.
