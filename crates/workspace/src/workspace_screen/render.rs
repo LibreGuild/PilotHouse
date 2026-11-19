@@ -498,20 +498,38 @@ impl Render for WorkspaceScreen {
             // room: the chat starts with two fifths of it.
             (Some(chat), Some(result)) => {
                 let room = window.viewport_size().width;
-                let chat_width = (room * 0.4).clamp(
-                    ph_theme::layout::CHAT_MIN.min(room * 0.5),
-                    ph_ui::scaled_px(640., window).max(ph_theme::layout::CHAT_MIN),
-                );
+                // In a small window neither pane may ask for more than
+                // its part: the two least widths together would not fit.
+                let chat_min = ph_theme::layout::CHAT_MIN.min(room * 0.45);
+                let result_min = ph_theme::layout::CONTEXT_PANEL_MIN.min(room * 0.4);
+                let chat_width = match self.layout.chat_share {
+                    // Where the line between them was last left.
+                    Some(share) => (room * share).max(chat_min),
+                    None => {
+                        (room * 0.4).clamp(chat_min, ph_ui::scaled_px(640., window).max(chat_min))
+                    }
+                };
+                let screen = cx.entity().downgrade();
                 h_resizable(("space-split", self.project.id as u64))
+                    .on_resize(move |state, window, cx| {
+                        // Of the window's width, as the size it starts
+                        // with is worked out above.
+                        let room = f32::from(window.viewport_size().width);
+                        let chat = state.read(cx).sizes().first().copied();
+                        if let Some(chat) = chat.filter(|_| room > 0.) {
+                            let share = f32::from(chat) / room;
+                            _ = screen.update(cx, |screen, cx| screen.set_chat_share(share, cx));
+                        }
+                    })
                     .child(
                         resizable_panel()
                             .size(chat_width)
-                            .size_range(ph_theme::layout::CHAT_MIN..gpui_kit::Pixels::MAX)
+                            .size_range(chat_min..gpui_kit::Pixels::MAX)
                             .child(div().size_full().pr(gap / 2.).child(chat)),
                     )
                     .child(
                         resizable_panel()
-                            .size_range(ph_theme::layout::CONTEXT_PANEL_MIN..gpui_kit::Pixels::MAX)
+                            .size_range(result_min..gpui_kit::Pixels::MAX)
                             .child(div().size_full().pl(gap / 2.).child(result)),
                     )
                     .into_any_element()

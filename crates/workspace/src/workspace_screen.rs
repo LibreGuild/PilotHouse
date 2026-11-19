@@ -115,6 +115,8 @@ pub struct WorkspaceScreen {
     /// The panes on screen, as the layout last had them: what tells which
     /// came into view or left it.
     shown: HashSet<Pane>,
+    /// Writes the panes' sizes once a drag of the line between them rests.
+    _save_split: Option<gpui_kit::Task<()>>,
     away: Option<Away>,
     /// What the workspace's folders hold, once looked at.
     traits: Option<Traits>,
@@ -323,6 +325,9 @@ impl WorkspaceScreen {
         let mut layout = Layout::new(tool, saved.context_panel_open.unwrap_or(!project.empty));
         layout.chat_folded = saved.chat_folded.unwrap_or(false) && layout.result_open;
         layout.tree_open = saved.tree_open.unwrap_or(true);
+        layout.chat_share = saved
+            .chat_share
+            .filter(|share| (0.05..=0.95).contains(share));
         if let Some(preview) = saved
             .preview
             .as_deref()
@@ -336,6 +341,7 @@ impl WorkspaceScreen {
         let mut space = Self {
             layout,
             shown: HashSet::new(),
+            _save_split: None,
             away: None,
             traits: None,
             git_folder: 0,
@@ -662,6 +668,21 @@ impl WorkspaceScreen {
         }
         self.save_layout(cx);
         cx.notify();
+    }
+
+    /// The line between the chat and the result pane was dragged: the
+    /// chat's share of the room is kept, written once the drag rests.
+    pub(crate) fn set_chat_share(&mut self, share: f32, cx: &mut Context<Self>) {
+        if self.layout.chat_share == Some(share) {
+            return;
+        }
+        self.layout.chat_share = Some(share);
+        self._save_split = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+            _ = this.update(cx, |this, cx| this.save_layout(cx));
+        }));
     }
 
     /// Shows or hides the folders' tree beside the editor.
@@ -1264,6 +1285,7 @@ impl WorkspaceScreen {
             chat_folded: Some(self.layout.chat_folded),
             tree_open: Some(self.layout.tree_open),
             preview: Some(self.layout.preview.key().to_string()),
+            chat_share: self.layout.chat_share,
         };
         if let Err(err) = AppState::store(cx).save_project_ui_state(self.project.id, &self.saved) {
             tracing::warn!(

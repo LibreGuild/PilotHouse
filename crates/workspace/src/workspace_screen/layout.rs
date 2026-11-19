@@ -85,7 +85,7 @@ impl ResultTab {
 }
 
 /// Which panes a workspace's screen shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Layout {
     /// The tool the result pane shows ([`ContextTab::Files`] stands for
     /// the tree and the editor together).
@@ -100,6 +100,9 @@ pub(super) struct Layout {
     pub tree_open: bool,
     /// What the result pane showed before the terminal, for ⌘J to go back.
     pub before_terminal: Option<ContextTab>,
+    /// The chat's share of the window's width (0 to 1) once the line
+    /// between the panes was dragged; before that it starts at two fifths.
+    pub chat_share: Option<f32>,
 }
 
 impl Layout {
@@ -115,6 +118,7 @@ impl Layout {
             chat_folded: false,
             tree_open: true,
             before_terminal: None,
+            chat_share: None,
         }
     }
 

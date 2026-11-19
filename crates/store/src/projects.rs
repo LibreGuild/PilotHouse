@@ -91,6 +91,10 @@ pub struct ProjectUiState {
     pub chat_folded: Option<bool>,
     /// The folders' tree showed beside the editor.
     pub tree_open: Option<bool>,
+    /// The chat's share of the window's width (0 to 1), once the line
+    /// between it and the result pane was dragged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_share: Option<f32>,
     /// What Preview showed last: `browser` or `devices`.
     pub preview: Option<String>,
 }
