@@ -28,6 +28,7 @@ Short, practical notes on how PilotHouse is built. Start with **architecture**, 
 | [features/themes.md](features/themes.md) | Eight themes, and designing your own with an agent, shown live as it changes |
 | [features/utilities.md](features/utilities.md) | Offline utilities: formats, encodings, hashes, ids, times, regex, diff, SQLite |
 | [features/changes.md](features/changes.md) | Git: branch picker, commit, history graph, stashes, conflicts, blame, review per hunk |
+| [features/explanations.md](features/explanations.md) | Explain: a change told in plain words before it is committed, kept with its commit, *Why Is This Here?* for a line, sharing one as a file |
 | [features/terminal.md](features/terminal.md) | Embedded terminals |
 | [features/browser.md](features/browser.md) | The per-project browser pane over Chrome DevTools, and its agent tools |
 | [features/devices.md](features/devices.md) | Android emulators and phones: live screen, input, logcat, UI tree, files, agent tools |

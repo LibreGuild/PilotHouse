@@ -1,9 +1,9 @@
 // What moves on the page. Without this file everything is still there, drawn
 // in place: it adds the night sky and the sea the agents float on, the
 // scene that stays while the window comes up out of that sea, the window
-// playing a task by itself, the one window the four moves change, the
-// Bridge's cards going from column to column, the colour the whole page
-// takes, and the sun coming up at the end.
+// playing a task by itself, the one window the four moves change, a diff
+// turning into its explanation, the Bridge's cards going from column to
+// column, the colour the whole page takes, and the sun coming up at the end.
 //
 // Each piece runs only while it is on screen, and none of them runs for a
 // reader who asked their system for less motion. A piece that changes how
@@ -606,6 +606,54 @@ if ($("#sea-day")) {
     };
     followers.push(pick);
     show(0);
+  }
+}
+
+// ---- Explain: the diff turns into plain words, and back ---------------------
+{
+  const win = $("#told");
+  if (win) {
+    const tabs = $$(".seg .s", win);
+    const show = (view) => {
+      win.dataset.view = view;
+      for (const tab of tabs) tab.classList.toggle("on", tab.dataset.to === view);
+    };
+    win.classList.add("live");
+    show("story");
+    let run = 0;
+    let visible = false;
+    // The change as a diff for a moment, then told: long enough to read.
+    const play = async () => {
+      const mine = ++run;
+      while (mine === run && visible) {
+        show("diff");
+        await sleep(2600);
+        if (mine !== run) return;
+        show("story");
+        await sleep(7400);
+      }
+    };
+    // The reader flips it: it stays as they left it for a while.
+    win.addEventListener("click", (event) => {
+      const tab = event.target.closest(".s");
+      if (!tab) return;
+      const mine = ++run;
+      show(tab.dataset.to);
+      setTimeout(() => {
+        if (mine === run && visible && !reduce) play();
+      }, 12000);
+    });
+    if (!reduce) {
+      watch(win, (now) => {
+        visible = now;
+        if (now) {
+          play();
+        } else {
+          run += 1;
+          show("story");
+        }
+      });
+    }
   }
 }
 

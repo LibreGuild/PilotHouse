@@ -43,6 +43,7 @@
     <a class="brand" href="#top"><img src="mark.svg" alt="" width="26" height="26"><span>PilotHouse</span></a>
     <nav aria-label="Sections">
       <a href="#how">How it works</a>
+      <a href="#explain">Explain</a>
       <a href="#bridge">The Bridge</a>
       <a href="#features">Features</a>
       <a href="#yours">Privacy</a>
@@ -253,6 +254,95 @@
         <!-- Filled by the script where there is room: the one window the four moves change. -->
         <div class="moves-stage" aria-hidden="true"><div class="stage-glow"></div><div class="stage-frames"></div><ol class="stage-dots"><li></li><li></li><li></li><li></li></ol></div>
       </div>
+    </section>
+
+    <!-- ===== Explain: a change in plain words, kept with its commit ===== -->
+    <section class="explain-sec" id="explain">
+      <header class="section-head center">
+        <p class="eyebrow">Explain</p>
+        <h2 data-reveal>An agent wrote it. You still understand it.</h2>
+        <p>Before you commit, read the change in plain words. Flip the switch.</p>
+      </header>
+      <figure class="wf" role="img" aria-label="The Git tab with a switch over the changes: Changes, or Explanation. The explanation of a change called The tide chart works offline says, in short sentences: what is different now, how it worked before, what changed and where, and what is worth a word with the team.">
+        <div class="win told" id="told" aria-hidden="true">
+          <div class="win-bar"><i></i><i></i><i></i><span class="win-title">Git</span></div>
+          <div class="told-body">
+            <div class="files">
+              <span class="f on"><i class="tick on"><svg class="ico"><use href="#i-check"/></svg></i><code>cache.rs</code></span>
+              <span class="f"><i class="tick on"><svg class="ico"><use href="#i-check"/></svg></i><code>chart.rs</code></span>
+              <span class="f"><i class="tick"></i><code>README.md</code></span>
+            </div>
+            <div class="told-pane">
+              <div class="told-bar">
+                <span class="seg"><span class="s" data-to="diff">Changes</span><span class="s on" data-to="story">Explanation</span></span>
+                <span class="told-acts"><span class="wbtn">Add to commit</span><span class="wbtn">Again</span></span>
+              </div>
+              <div class="told-stack">
+                <div class="diff told-diff">
+                  <span class="l"><b>9</b><i class="bar w50"></i></span>
+                  <span class="l del"><b>10</b><i class="bar w70"></i></span>
+                  <span class="l add"><b>10</b><i class="bar w80"></i></span>
+                  <span class="l add"><b>11</b><i class="bar w40"></i></span>
+                  <span class="l add"><b>12</b><code>let chart = cache.last()?;</code></span>
+                  <span class="l"><b>13</b><i class="bar w60"></i></span>
+                  <span class="l"><b>14</b><i class="bar w30"></i></span>
+                  <span class="l del"><b>15</b><i class="bar w50"></i></span>
+                  <span class="l add"><b>15</b><i class="bar w70"></i></span>
+                  <span class="l add"><b>16</b><i class="bar w60"></i></span>
+                  <span class="l"><b>17</b><i class="bar w40"></i></span>
+                </div>
+                <div class="story">
+                  <b class="story-title">The tide chart works offline</b>
+                  <p><em>In short</em>With no connection, you now see the last tide chart the app had.</p>
+                  <p><em>How it worked before</em>It asked the server every time. Offline, the chart was empty.</p>
+                  <p><em>What changed</em>Each chart is saved to disk. When a request fails, the saved one is drawn. <code>cache.rs:12</code></p>
+                  <p><em>Worth a word with the team</em>A saved chart can be days old. Nobody asked for a limit.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </figure>
+      <ul class="told-points">
+        <li>
+          <figure class="wf art" role="img" aria-label="History: a commit from three weeks ago, with its explanation beside its changes.">
+            <div class="mini-kept" aria-hidden="true">
+              <span class="h on"><i class="dot blue"></i><b>Offline tide chart</b><small>3 weeks ago</small></span>
+              <span class="h"><i class="dot grey"></i><i class="bar w60"></i><small></small></span>
+              <span class="seg"><span class="s">Changes</span><span class="s on">Explanation</span></span>
+              <span class="txt"><i class="bar w90"></i><i class="bar w70"></i><i class="bar w50"></i></span>
+            </div>
+          </figure>
+          <h3>It stays with the commit.</h3>
+          <p>Weeks later, History still has the story.</p>
+        </li>
+        <li>
+          <figure class="wf art" role="img" aria-label="A line of code and a note over it: Why is this here? You asked to show the last chart when offline, three weeks ago.">
+            <div class="mini-why" aria-hidden="true">
+              <span class="l"><b>11</b><i class="bar w50"></i></span>
+              <span class="l hit"><b>12</b><code>let chart = cache.last()?;</code></span>
+              <span class="l"><b>13</b><i class="bar w70"></i></span>
+              <span class="l"><b>14</b><i class="bar w40"></i></span>
+              <span class="l"><b>15</b><i class="bar w60"></i></span>
+              <div class="pop"><b>Why is this here?</b><p>You asked: “show the last chart when offline”.</p><small>Offline tide chart · 3 weeks ago</small></div>
+            </div>
+          </figure>
+          <h3>Why is this here?</h3>
+          <p>Right-click any line. See who asked for it, and why.</p>
+        </li>
+        <li>
+          <figure class="wf art" role="img" aria-label="The files of a commit, and the explanation joining them as one more file after Add to commit is pressed.">
+            <div class="mini-share" aria-hidden="true">
+              <span class="f"><i class="tick on"><svg class="ico"><use href="#i-check"/></svg></i><code>cache.rs</code></span>
+              <span class="f"><i class="tick on"><svg class="ico"><use href="#i-check"/></svg></i><code>chart.rs</code></span>
+              <span class="f new"><i class="tick on"><svg class="ico"><use href="#i-check"/></svg></i><code>explanations/offline-tide-chart.md</code></span>
+              <span class="act"><span class="wbtn pri">Add to commit</span><small>only when you press it</small></span>
+            </div>
+          </figure>
+          <h3>Share it when you choose.</h3>
+          <p>One click adds it to your commit as a file. Never by itself.</p>
+        </li>
+      </ul>
     </section>
 
     <!-- ===== The Bridge: cards move by themselves ===== -->

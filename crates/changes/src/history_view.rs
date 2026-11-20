@@ -5,6 +5,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
+    resizable::{ResizableState, resizable_panel, v_resizable},
     tab::{Tab, TabBar},
     v_flex,
 };
@@ -52,6 +53,9 @@ pub struct HistoryView {
     /// panel gives it, and whether it shows in place of the changes.
     explanation: Option<(String, gpui_kit::AnyView)>,
     explaining: bool,
+    /// The line between the commits and the one shown, which drags: a
+    /// commit's changes or its explanation want more room than the list.
+    split: Entity<ResizableState>,
     _load: Option<Task<()>>,
     _write: Option<Task<()>>,
     _detail: Option<Task<()>>,
@@ -80,6 +84,7 @@ impl HistoryView {
             explains: false,
             explanation: None,
             explaining: false,
+            split: cx.new(|_| ResizableState::default()),
             _load: None,
             _write: None,
             _detail: None,
@@ -298,13 +303,10 @@ impl HistoryView {
         Some(
             v_flex()
                 .id("commit-detail")
-                .flex_1()
-                .min_h_0()
+                .size_full()
                 .overflow_y_scroll()
                 .p_3()
                 .gap_2()
-                .border_t_1()
-                .border_color(cx.theme().border)
                 .child(
                     h_flex()
                         .gap_2()
@@ -402,13 +404,11 @@ impl HistoryView {
 }
 
 impl Render for HistoryView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let detail = self.render_detail(cx);
         let list = v_flex()
             .id("history-list")
-            .when(detail.is_some(), |this| this.h(px(ROW_HEIGHT * 7.)))
-            .when(detail.is_none(), |this| this.flex_1())
-            .min_h_0()
+            .size_full()
             .overflow_y_scroll()
             .children(
                 {
@@ -483,8 +483,27 @@ impl Render for HistoryView {
                         )
                     }),
             )
-            .child(list)
-            .children(detail)
+            .child(div().flex_1().min_h_0().child(match detail {
+                None => list.into_any_element(),
+                // The commits over the one shown, the line between them
+                // dragged to give either more of the pane.
+                Some(detail) => v_resizable("git-history-split")
+                    .with_state(&self.split)
+                    .child(
+                        resizable_panel()
+                            .size(ph_ui::scaled_px(ROW_HEIGHT * 5., window))
+                            .size_range(
+                                ph_ui::scaled_px(ROW_HEIGHT * 2., window)..Pixels::MAX,
+                            )
+                            .child(list),
+                    )
+                    .child(
+                        resizable_panel()
+                            .size_range(ph_ui::scaled_px(120., window)..Pixels::MAX)
+                            .child(detail),
+                    )
+                    .into_any_element(),
+            }))
     }
 }
 

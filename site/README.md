@@ -9,7 +9,7 @@ The page loads nothing from other sites: no web fonts, analytics or scripts from
 
 ## What it is for
 
-Someone who has never seen PilotHouse should be able to say, after one scroll, what it is, how a task goes in it, and what is in the window. Nobody reads a long page, so the headings and the drawings carry it and the text under them is a line or two. The order: what it is (the hero, with a window that plays a whole task), what it holds to (*You steer. You see. You own it.*), a task in four moves, the Bridge, the rest in a grid of tiles, privacy, and the download.
+Someone who has never seen PilotHouse should be able to say, after one scroll, what it is, how a task goes in it, and what is in the window. Nobody reads a long page, so the headings and the drawings carry it and the text under them is a line or two. The order: what it is (the hero, with a window that plays a whole task), what it holds to (*You steer. You see. You own it.*), a task in four moves, Explain (a change in plain words), the Bridge, the rest in a grid of tiles, privacy, and the download.
 
 Write it the way you would say it to a colleague: short, plain words, "you". Say what a thing does, not how good it is. If a heading needs a paragraph to be understood, change the heading. Keep it true to `docs/` when the app changes.
 
@@ -32,6 +32,7 @@ A screenshot goes stale each time the app's look changes, in every theme. A draw
 - **The hero is one scene**: a sky of stars, the words, the window, and a sea in front with the agents afloat on it as small boats. On a wide screen the scene stays in place for a stretch of scrolling (`.hero.pin`): the words leave, and the window comes up out of the sea and flat to the reader. One number, `--p`, goes from 0 to 1 over that stretch and the styles follow it.
 - **The window plays a task** on a loop: the request is typed, the agent works, asks, gets a yes, the tests pass, the files are ticked as read, the change is committed. The steps and their timing are the `play` function; the parts it shows carry `data-d`, the things it points at `data-demo`, and the row of phases above the window says where the task is. On a phone the window has room for one pane, so the script switches it (`data-view`): the chat while the agent works, the Git pane for the review and the commit.
 - **A task in four moves** keeps one window in place on a wide screen while the four steps scroll by, and shows each step's drawing in it. On a narrow one each step has its drawing under it.
+- **Explain** flips one window between a change as a diff and the same change told in plain words, which comes a line at a time; the reader can flip the switch too, and it stays as they left it for a while. Without the script the explanation is what shows. Three small drawings under it loop (a commit that kept its story, *Why is this here?* on a line, the explanation joining a commit as a file).
 - **The Bridge's cards** go from column to column (the `script` list), and a reader can answer one: Allow, Deny and Review changes move its card.
 - **The tiles'** small drawings loop while they are on screen (CSS keyframes), and a light follows the pointer across the grid.
 - **Make it yours** repaints the page in the accent picked, the way the app's accent setting does.

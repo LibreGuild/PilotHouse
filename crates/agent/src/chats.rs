@@ -632,12 +632,14 @@ impl WorkspaceChats {
 }
 
 /// The first non-empty line of `text`, without Markdown emphasis marks, cut
-/// to a list row's length.
+/// to a list row's length. A line that is only a comment is passed over:
+/// the marks around an explanation or a walkthrough are for the app, and a
+/// card that quoted one would say nothing.
 fn first_line(text: &str) -> String {
     let line = text
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
+        .find(|line| !line.is_empty() && !(line.starts_with("<!--") && line.ends_with("-->")))
         .unwrap_or_default()
         .trim_start_matches(['#', '>', '-', '*', ' '])
         .replace("**", "")
@@ -660,6 +662,10 @@ mod tests {
             "Done. PR is green"
         );
         assert_eq!(first_line(""), "");
+        assert_eq!(
+            first_line("<!-- pilothouse-explanation -->\n# Deleting a note\n"),
+            "Deleting a note"
+        );
         assert_eq!(first_line(&"x".repeat(200)).chars().count(), 141);
     }
 }
