@@ -105,6 +105,8 @@ pub fn init(cx: &mut App) {
     network_drives::install(cx);
     sidebar::load_sizes(cx);
     ph_files::init(cx, WORKSPACE_CONTEXT);
+    // Editors offer Why Is This Here? where the build explains changes.
+    ph_files::set_explains(workspace_screen::explain::explains());
     file_window::bind_keys(cx);
     ph_studio::bind_keys(cx);
     ph_terminal::init(cx);

@@ -885,6 +885,107 @@ fn changes_are_reviewed_beside_their_list(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+/// The changes are read in two ways in one pane: as they are, or told in
+/// plain words. *Explain* shows the explanation there is of the work as it
+/// stands, and runs no agent for it.
+#[gpui_kit::test]
+fn changes_are_explained_in_place_of_their_diff(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let folder = temp_project("explain");
+    let git = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&folder)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(done.status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&[
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "Start",
+    ]);
+    std::fs::write(
+        folder.join("src/main.rs"),
+        "fn main() {\n    println!(\"hi\");\n}\n",
+    )
+    .unwrap();
+    // An agent explained this work earlier.
+    let top = ph_git::content::top(&folder).unwrap();
+    let content = ph_git::content::pending(&top).unwrap();
+    let project = cx
+        .update_window(window, |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.add_project_path(&folder, window, cx)
+            });
+            window.dispatch_action(Box::new(ph_workspace::ShowChanges), cx);
+            let store = AppState::store(cx);
+            let id = store
+                .create_explanation(
+                    &top.to_string_lossy(),
+                    "changes",
+                    "Claude Code",
+                    &content,
+                    "[]",
+                )
+                .unwrap();
+            store
+                .finish_explanation(
+                    id,
+                    "It says hi",
+                    "# It says hi\n\n## In short\n\nThe program prints a greeting now.",
+                    None,
+                )
+                .unwrap();
+            workspace
+                .read(cx)
+                .active_space()
+                .unwrap()
+                .read(cx)
+                .project()
+                .id
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("explain-changes").is_some(),
+            "Explain stands beside Review"
+        );
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("git-review").is_some(), "the changes show");
+        assert!(window.try_find("git-explanation").is_none());
+    })
+    .unwrap();
+    click(window, "explain-changes", cx);
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("git-explanation").is_some(),
+            "the explanation shows in place of the diff"
+        );
+        assert!(window.try_find("explain-again").is_some());
+        // The one there is was shown: no chat was started to write it.
+        assert!(AppState::store(cx).sessions(project).unwrap().is_empty());
+    })
+    .unwrap();
+}
+
 /// Chats that need no folder (the quick chat's) always have their place,
 /// the Scratch workspace, and are found there: it is not removed, takes no
 /// folder, and a chat made away from the window (as the quick chat makes

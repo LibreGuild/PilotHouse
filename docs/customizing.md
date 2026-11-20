@@ -81,6 +81,8 @@ A feature that is off is not in the app at all. It is not in the tools beside th
 | `parallel_runs` | One prompt to several agents, each in its own copy |
 | `presentations` | Slides in Studio, and their agent tools |
 | `chrome_extension` | Agents in the user's own Chrome, through PilotHouse's extension |
+| `quick_chat` | A small chat window over every app, opened with a global shortcut |
+| `explanations` | Changes explained in plain words: *Explain* in the Git tab and on a commit, *Why Is This Here?* in the editor |
 
 Your people can still switch tools off for themselves in *Settings → Features*; that list only shows the tools your build has.
 

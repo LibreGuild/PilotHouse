@@ -66,6 +66,8 @@ pub enum FilesPanelEvent {
     Opened,
     /// Ask the agent about selected code.
     Ask(crate::Ask),
+    /// Say why this 1-based line of this file (its full path) is there.
+    Why(PathBuf, u32),
     /// Make this folder the workspace's primary one.
     MakePrimary(PathBuf),
     /// Take this folder out of the workspace (it stays on disk).
@@ -388,6 +390,10 @@ impl FilesPanel {
                     |this, view, event: &crate::file_view::FileViewEvent, cx| match event {
                         crate::file_view::FileViewEvent::Ask(ask) => {
                             cx.emit(FilesPanelEvent::Ask(ask.clone()))
+                        }
+                        crate::file_view::FileViewEvent::Why(line) => {
+                            let path = view.read(cx).absolute_path().to_path_buf();
+                            cx.emit(FilesPanelEvent::Why(path, *line))
                         }
                         crate::file_view::FileViewEvent::OpenInBrowser(path) => {
                             cx.emit(FilesPanelEvent::OpenInBrowser(path.clone()))

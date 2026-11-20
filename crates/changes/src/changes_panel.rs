@@ -59,6 +59,15 @@ pub enum ChangesPanelEvent {
     /// Have an agent review the changes before they are pushed; its
     /// findings come back as notes on the lines.
     ReviewChanges,
+    /// Have an agent explain the changes in plain words; what it writes is
+    /// shown in place of the diff (see [`ChangesPanel::set_explanation`]).
+    ExplainChanges,
+    /// The working tree was read and is not as it was.
+    ChangesRead,
+    /// History shows this commit (its id and first line), or none now: its
+    /// explanation can be given with
+    /// [`ChangesPanel::set_commit_explanation`].
+    CommitShown(Option<(String, String)>),
 }
 
 enum State {
@@ -118,6 +127,12 @@ pub struct ChangesPanel {
     review: review::Review,
     /// What the task's chat did to check its work, said over the changes.
     evidence: Vec<Evidence>,
+    /// The changes explained in plain words, as whoever shows the panel
+    /// gives it (this crate knows no agents); `None` where the build has no
+    /// explanations, and then nothing here offers one.
+    explanation: Option<gpui_kit::AnyView>,
+    /// The explanation shows in place of the diff.
+    explaining: bool,
     /// The pane has the room to show the diff beside the list (under it
     /// otherwise); not known until it was drawn once.
     wide: Option<bool>,
@@ -209,6 +224,8 @@ impl ChangesPanel {
             writer: None,
             review: review::Review::new(cx),
             evidence: Vec::new(),
+            explanation: None,
+            explaining: false,
             wide: None,
             undo: Vec::new(),
             refresh_again: false,
@@ -311,6 +328,7 @@ impl ChangesPanel {
                         };
                         this.sync_rows();
                         this.changes_read(cx);
+                        cx.emit(ChangesPanelEvent::ChangesRead);
                         cx.notify();
                     }
                     std::mem::take(&mut this.refresh_again)
@@ -478,16 +496,65 @@ impl ChangesPanel {
         self.writer = Some(writer);
     }
 
+    /// Gives the view that explains the changes in plain words: it shows
+    /// in place of the diff when asked for (*Explain*, or the switch over
+    /// the diff). With `None` the panel offers no explanations.
+    pub fn set_explanation(&mut self, view: Option<gpui_kit::AnyView>, cx: &mut Context<Self>) {
+        self.explaining &= view.is_some();
+        self.explanation = view;
+        if let Some(history) = &self.history {
+            let explains = self.explanation.is_some();
+            history.update(cx, |history, cx| history.set_explains(explains, cx));
+        }
+        self.list.remeasure_items(0..1);
+        cx.notify();
+    }
+
+    /// Shows the explanation of the changes in place of their diff.
+    pub fn show_explanation(&mut self, cx: &mut Context<Self>) {
+        if self.explanation.is_some() {
+            self.view = GitView::Changes;
+            self.explaining = true;
+            cx.notify();
+        }
+    }
+
+    /// Gives the view that explains commit `sha`, for History to show with
+    /// it (asked for with [`ChangesPanelEvent::CommitShown`]).
+    pub fn set_commit_explanation(
+        &mut self,
+        sha: &str,
+        view: gpui_kit::AnyView,
+        explain: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(history) = &self.history {
+            history.update(cx, |history, cx| {
+                history.set_explanation(sha, view, explain, cx)
+            });
+        }
+    }
+
     pub fn show_view(&mut self, view: GitView, window: &mut Window, cx: &mut Context<Self>) {
         self.view = view;
         match view {
             GitView::History if self.history.is_none() => {
                 let (repo, writer) = (self.repo.clone(), self.writer.clone());
-                self.history = Some(cx.new(|cx| {
+                let explains = self.explanation.is_some();
+                let history = cx.new(|cx| {
                     let mut history = HistoryView::new(repo, cx);
                     history.set_writer(writer);
+                    history.set_explains(explains, cx);
                     history
-                }));
+                });
+                cx.subscribe(
+                    &history,
+                    |_, _, event: &crate::history_view::CommitShown, cx| {
+                        cx.emit(ChangesPanelEvent::CommitShown(event.0.clone()))
+                    },
+                )
+                .detach();
+                self.history = Some(history);
             }
             GitView::Stashes if self.stashes.is_none() => {
                 let repo = self.repo.clone();
@@ -752,6 +819,26 @@ impl ChangesPanel {
                         })
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesPanelEvent::ReviewChanges))),
                 )
+                .when(self.explanation.is_some(), |this| {
+                    this.child(
+                        Button::new("explain-changes")
+                            .ghost()
+                            .xsmall()
+                            .icon(ph_ui::Icons::MessageSquare)
+                            .when(!narrow, |this| this.label("Explain"))
+                            .accessibility_label("Explain")
+                            .tooltip(if narrow {
+                                "Explain: an agent tells you in plain words what these changes do, how it worked before and why, before you commit"
+                            } else {
+                                "An agent tells you in plain words what these changes do, how it worked before and why, before you commit"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.explaining = true;
+                                cx.emit(ChangesPanelEvent::ExplainChanges);
+                                cx.notify();
+                            })),
+                    )
+                })
             })
             .when(!self.undo.is_empty(), |this| {
                 this.child(
@@ -1431,7 +1518,11 @@ impl ChangesPanel {
                 // Which way to divide the pane is decided once its width is
                 // known (a frame later): a split first made too narrow
                 // would keep those shares when given the room.
-                let (Some(wide), true) = (self.wide, self.review.has_files(cx)) else {
+                // The explanation shows there too, also of new files alone.
+                let (Some(wide), true) = (
+                    self.wide,
+                    self.review.has_files(cx) || (self.explaining && self.explanation.is_some()),
+                ) else {
                     return list;
                 };
                 let diff = self.render_review(cx);

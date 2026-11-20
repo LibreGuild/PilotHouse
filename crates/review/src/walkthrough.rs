@@ -143,33 +143,55 @@ impl Walkthrough {
     /// file opens `<web>/blob/<sha>/<path>#L<line>` (`web`: the repository's
     /// page). Code blocks and diagrams are left as they are.
     pub fn linked(&self, changed: &[String], web: Option<&str>, sha: &str) -> String {
-        let mut out = String::with_capacity(self.markdown.len() + 256);
-        let mut fence: Option<&str> = None;
-        for line in self.markdown.split_inclusive('\n') {
-            let trimmed = line.trim_start();
-            match fence {
-                Some(open) => {
-                    if trimmed.trim_end() == open {
-                        fence = None;
-                    }
-                    out.push_str(line);
-                    continue;
-                }
-                None if trimmed.starts_with("```") || trimmed.starts_with("~~~") => {
-                    let marks = trimmed
-                        .chars()
-                        .take_while(|c| *c == '`' || *c == '~')
-                        .count();
-                    fence = Some(&trimmed[..marks]);
-                    out.push_str(line);
-                    continue;
-                }
-                None => {}
+        link_references(&self.markdown, |path, start, end| {
+            if changed.iter().any(|changed| changed == path) {
+                return Some(file_link(path, start));
             }
-            out.push_str(&link_spans(line, changed, web, sha));
-        }
-        out
+            web.filter(|_| !sha.is_empty()).map(|web| {
+                let lines = match (start, end) {
+                    (Some(start), Some(end)) if end > start => format!("#L{start}-L{end}"),
+                    (Some(start), _) => format!("#L{start}"),
+                    _ => String::new(),
+                };
+                format!("{}/blob/{sha}/{path}{lines}", web.trim_end_matches('/'))
+            })
+        })
     }
+}
+
+/// `markdown` with its code references (`` `src/a.rs:12-20` ``) made links:
+/// `target` gives the link for a path and its lines, or `None` to leave the
+/// reference as code. Code blocks and diagrams are left as they are.
+pub fn link_references(
+    markdown: &str,
+    target: impl Fn(&str, Option<u64>, Option<u64>) -> Option<String>,
+) -> String {
+    let mut out = String::with_capacity(markdown.len() + 256);
+    let mut fence: Option<&str> = None;
+    for line in markdown.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        match fence {
+            Some(open) => {
+                if trimmed.trim_end() == open {
+                    fence = None;
+                }
+                out.push_str(line);
+                continue;
+            }
+            None if trimmed.starts_with("```") || trimmed.starts_with("~~~") => {
+                let marks = trimmed
+                    .chars()
+                    .take_while(|c| *c == '`' || *c == '~')
+                    .count();
+                fence = Some(&trimmed[..marks]);
+                out.push_str(line);
+                continue;
+            }
+            None => {}
+        }
+        out.push_str(&link_spans(line, &target));
+    }
+    out
 }
 
 /// The scheme of a link to a changed file, opened in the Files tab.
@@ -194,7 +216,10 @@ pub fn parse_file_link(url: &str) -> Option<(String, Option<u64>)> {
 }
 
 /// `line` with each inline code span that names a file made a link.
-fn link_spans(line: &str, changed: &[String], web: Option<&str>, sha: &str) -> String {
+fn link_spans(
+    line: &str,
+    target: &impl Fn(&str, Option<u64>, Option<u64>) -> Option<String>,
+) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
     while let Some(open) = rest.find('`') {
@@ -206,27 +231,12 @@ fn link_spans(line: &str, changed: &[String], web: Option<&str>, sha: &str) -> S
         // Already a link's text (`[`…`](…)`): left alone.
         let in_link = rest[..open].ends_with('[') && after[close + 1..].starts_with("](");
         out.push_str(&rest[..open]);
-        match (!in_link).then(|| reference(code)).flatten() {
-            Some((path, start, end)) => {
-                let target = if changed.iter().any(|changed| changed == path) {
-                    Some(file_link(path, start))
-                } else {
-                    web.filter(|_| !sha.is_empty()).map(|web| {
-                        let lines = match (start, end) {
-                            (Some(start), Some(end)) if end > start => {
-                                format!("#L{start}-L{end}")
-                            }
-                            (Some(start), _) => format!("#L{start}"),
-                            _ => String::new(),
-                        };
-                        format!("{}/blob/{sha}/{path}{lines}", web.trim_end_matches('/'))
-                    })
-                };
-                match target {
-                    Some(target) => out.push_str(&format!("[`{code}`]({target})")),
-                    None => out.push_str(&format!("`{code}`")),
-                }
-            }
+        let link = (!in_link)
+            .then(|| reference(code))
+            .flatten()
+            .and_then(|(path, start, end)| target(path, start, end));
+        match link {
+            Some(link) => out.push_str(&format!("[`{code}`]({link})")),
             None => out.push_str(&format!("`{code}`")),
         }
         rest = &after[close + 1..];

@@ -12,6 +12,7 @@
 //! finishes in well under a millisecond, so callers may use it from the UI
 //! thread. Bulk work should still go through a background task.
 
+pub mod explanations;
 mod migrations;
 pub mod parallel;
 pub mod paths;

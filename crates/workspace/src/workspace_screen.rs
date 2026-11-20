@@ -49,6 +49,7 @@ use crate::app_state::AppState;
 use crate::context_panel::ContextTab;
 use crate::detect::{Stack, detect};
 
+pub(crate) mod explain;
 mod layout;
 mod panels;
 mod render;
@@ -146,6 +147,13 @@ pub struct WorkspaceScreen {
     /// The Files tool's tree over `files`.
     file_tree: Option<Entity<FileTree>>,
     changes: HashMap<usize, Entity<ChangesPanel>>,
+    /// The explanation of each Git panel's changes, by its folder (where
+    /// the build explains changes).
+    explanations: HashMap<usize, Entity<ph_explain::ExplanationView>>,
+    /// The explanation of the commit History shows, with what it asks for.
+    commit_explanation: Option<(Entity<ph_explain::ExplanationView>, Subscription)>,
+    /// What the open *Why Is This Here?* pop-up asks for.
+    _why: Option<Subscription>,
     terminal: Option<Entity<TerminalPanel>>,
     browser: Option<Entity<BrowserPanel>>,
     devices: Option<Entity<DevicesPanel>>,
@@ -381,6 +389,9 @@ impl WorkspaceScreen {
             files: None,
             file_tree: None,
             changes: HashMap::new(),
+            explanations: HashMap::new(),
+            commit_explanation: None,
+            _why: None,
             terminal: None,
             browser: None,
             devices: None,
@@ -929,6 +940,9 @@ impl WorkspaceScreen {
                 FilesPanelEvent::OpenFilesChanged => this.save_layout(cx),
                 FilesPanelEvent::Opened => this.show_tool(ContextTab::Files, window, cx),
                 FilesPanelEvent::Ask(ask) => this.ask_about_code(ask.clone(), window, cx),
+                FilesPanelEvent::Why(path, line) => {
+                    this.why_is_this_here(path.clone(), *line, window, cx)
+                }
                 FilesPanelEvent::MakePrimary(path) => {
                     cx.emit(WorkspaceScreenEvent::MakePrimary(path.clone()))
                 }

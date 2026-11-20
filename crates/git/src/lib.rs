@@ -25,6 +25,7 @@ pub mod branches;
 pub mod checkpoint;
 pub mod commit;
 pub mod conflicts;
+pub mod content;
 pub mod diff;
 pub mod files;
 pub mod log;

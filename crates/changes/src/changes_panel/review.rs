@@ -550,6 +550,47 @@ impl ChangesPanel {
                 }
             });
         let (seen, files) = self.viewed_count();
+        // The changes as they are, or told in plain words: one pane, two
+        // ways to read it (where the build has explanations).
+        let explaining = self.explaining && self.explanation.is_some();
+        let which = self.explanation.is_some().then(|| {
+            TabBar::new("review-reading")
+                .segmented()
+                .xsmall()
+                .selected_index(usize::from(explaining))
+                .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                    this.explaining = *ix == 1;
+                    cx.notify();
+                }))
+                .child(Tab::new().label("Changes"))
+                .child(Tab::new().label("Explanation"))
+        });
+        if explaining {
+            let bar = h_flex()
+                .flex_none()
+                .h_9()
+                .px_3()
+                .gap_2()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .children(which);
+            return v_flex()
+                .id("git-explanation")
+                .size_full()
+                .bg(cx.theme().background)
+                .child(bar)
+                .child(
+                    div()
+                        .id("git-explanation-text")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .p_3()
+                        .children(self.explanation.clone()),
+                )
+                .test_support()
+                .into_any_element();
+        }
         let toolbar = h_flex()
             .flex_none()
             .h_9()
@@ -559,6 +600,7 @@ impl ChangesPanel {
             .border_color(cx.theme().border)
             .text_xs()
             .text_color(cx.theme().muted_foreground)
+            .children(which)
             .child(
                 div()
                     .flex_1()

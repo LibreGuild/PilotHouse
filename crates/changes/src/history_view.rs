@@ -4,7 +4,9 @@ use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
-    h_flex, v_flex,
+    h_flex,
+    tab::{Tab, TabBar},
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -25,6 +27,11 @@ const PAGE: usize = 200;
 const ROW_HEIGHT: f32 = 44.;
 const LANE_WIDTH: f32 = 14.;
 
+/// The commit whose changes show (its id and first line), or none now.
+pub struct CommitShown(pub Option<(String, String)>);
+
+impl gpui_kit::EventEmitter<CommitShown> for HistoryView {}
+
 pub struct HistoryView {
     repo: Entity<Repo>,
     commits: Vec<Commit>,
@@ -39,6 +46,12 @@ pub struct HistoryView {
     loaded: bool,
     writer: Option<Writer>,
     writing: bool,
+    /// Commits can be explained in plain words (the build has that).
+    explains: bool,
+    /// The explanation of the commit with this id, as whoever shows the
+    /// panel gives it, and whether it shows in place of the changes.
+    explanation: Option<(String, gpui_kit::AnyView)>,
+    explaining: bool,
     _load: Option<Task<()>>,
     _write: Option<Task<()>>,
     _detail: Option<Task<()>>,
@@ -64,12 +77,39 @@ impl HistoryView {
             loaded: false,
             writer: None,
             writing: false,
+            explains: false,
+            explanation: None,
+            explaining: false,
             _load: None,
             _write: None,
             _detail: None,
         };
         view.reload(cx);
         view
+    }
+
+    /// Whether commits can be explained here.
+    pub fn set_explains(&mut self, explains: bool, cx: &mut Context<Self>) {
+        self.explains = explains;
+        if !explains {
+            self.explanation = None;
+            self.explaining = false;
+        }
+        cx.notify();
+    }
+
+    /// The view that explains commit `sha`; `show`: in place of its
+    /// changes at once (one was just asked for).
+    pub fn set_explanation(
+        &mut self,
+        sha: &str,
+        view: gpui_kit::AnyView,
+        show: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.explanation = Some((sha.to_string(), view));
+        self.explaining |= show;
+        cx.notify();
     }
 
     pub fn set_writer(&mut self, writer: Option<Writer>) {
@@ -171,6 +211,14 @@ impl HistoryView {
         };
         self.selected = Some(ix);
         self.detail = None;
+        self.explanation = None;
+        self.explaining = false;
+        if self.explains {
+            cx.emit(CommitShown(Some((
+                commit.id.clone(),
+                commit.subject.clone(),
+            ))));
+        }
         let root = self.repo.read(cx).root().to_path_buf();
         let read = cx.background_spawn(async move { log::changes(&root, &commit) });
         self._detail = Some(cx.spawn(async move |this, cx| {
@@ -242,6 +290,11 @@ impl HistoryView {
             .as_ref()
             .filter(|(id, _)| *id == commit.id)
             .map(|(_, files)| files.clone());
+        let explanation = self
+            .explanation
+            .as_ref()
+            .filter(|(id, _)| *id == commit.id)
+            .map(|(_, view)| view.clone());
         Some(
             v_flex()
                 .id("commit-detail")
@@ -270,6 +323,9 @@ impl HistoryView {
                                 .accessibility_label("Close commit")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.selected = None;
+                                    this.explanation = None;
+                                    this.explaining = false;
+                                    cx.emit(CommitShown(None));
                                     cx.notify();
                                 })),
                         ),
@@ -286,7 +342,27 @@ impl HistoryView {
                             ago(commit.time)
                         )),
                 )
+                // The commit's changes, or the commit told in plain words.
+                .when_some(explanation.clone(), |this, _| {
+                    this.child(
+                        h_flex().child(
+                            TabBar::new("commit-reading")
+                                .segmented()
+                                .xsmall()
+                                .selected_index(usize::from(self.explaining))
+                                .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                    this.explaining = *ix == 1;
+                                    cx.notify();
+                                }))
+                                .child(Tab::new().label("Changes"))
+                                .child(Tab::new().label("Explanation")),
+                        ),
+                    )
+                })
                 .map(|this| match files {
+                    _ if self.explaining && explanation.is_some() => {
+                        this.children(explanation.clone())
+                    }
                     None => this.child(
                         div()
                             .text_xs()

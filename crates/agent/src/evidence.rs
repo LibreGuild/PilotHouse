@@ -94,6 +94,13 @@ fn count(text: &str, word: &str) -> Option<usize> {
     total
 }
 
+/// For a call that ran a test command: how many tests its output says
+/// passed (`None` inside when it does not say). `None` for any other call.
+pub(crate) fn tests_passed(tool: &ToolEntry) -> Option<Option<usize>> {
+    (tool.kind == ToolKindLabel::Execute && is_test_command(&tool.title))
+        .then(|| count(&tool.output, "passed"))
+}
+
 /// A tool call and the calls of the subagent it started.
 fn with_children(tool: &ToolEntry) -> impl Iterator<Item = &ToolEntry> {
     std::iter::once(tool).chain(tool.children.iter())

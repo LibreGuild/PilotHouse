@@ -49,7 +49,7 @@ These are read by other programs, written into users' repositories or stored in 
 - the MCP server name `pilothouse` (and the `mcp__pilothouse__` tool prefix agents see)
 - `pilothouse.toml` and `.pilothouse/` in repositories, and the `pilothouse.desktop` entry
 - the `refs/pilothouse/*` Git refs and checkpoint commits (author `PilotHouse`, `PilotHouse-Untracked:` trailer)
-- the `<!-- pilothouse-…` markers in pull request comments and the `(Workspace note from PilotHouse` prefix in transcripts
+- the `<!-- pilothouse-…` markers in pull request comments and in shared explanations (`.pilothouse/explanations/*.md`), and the `(Workspace note from PilotHouse` prefix in transcripts
 - `PILOTHOUSE_*` environment variables and `TERM_PROGRAM=PilotHouse`
 - the slide deck schema and parts inside `.pptx` files
 - the Chrome extension's name, id, native host and `PilotHouse.*` messages

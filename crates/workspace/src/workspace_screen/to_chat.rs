@@ -119,6 +119,7 @@ impl WorkspaceScreen {
             FilesPanelEvent::OpenFilesChanged
             | FilesPanelEvent::Opened
             | FilesPanelEvent::Ask(_)
+            | FilesPanelEvent::Why(..)
             | FilesPanelEvent::MakePrimary(_)
             | FilesPanelEvent::RemoveFolder(_) => {}
         }

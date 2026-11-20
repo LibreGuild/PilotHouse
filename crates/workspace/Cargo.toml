@@ -17,6 +17,7 @@ ph-agent.workspace = true
 ph-browser.workspace = true
 ph-changes.workspace = true
 ph-github.workspace = true
+ph-explain.workspace = true
 ph-pulls.workspace = true
 ph-review.workspace = true
 ph-git.workspace = true

@@ -42,6 +42,11 @@ impl WorkspaceScreen {
                     this.open_file(&path, Some(*line), window, cx);
                 }
                 ChangesPanelEvent::ReviewChanges => this.review_changes(window, cx),
+                ChangesPanelEvent::ExplainChanges => this.explain_changes(window, cx),
+                ChangesPanelEvent::ChangesRead => this.changes_read(cx),
+                ChangesPanelEvent::CommitShown(commit) => {
+                    this.commit_shown(commit.clone(), window, cx)
+                }
                 ChangesPanelEvent::SendNotes(text) => {
                     this.reveal_chat(cx);
                     let attachment = Attachment::Text {
@@ -65,6 +70,7 @@ impl WorkspaceScreen {
             },
         ));
         self.changes.insert(self.git_folder, changes.clone());
+        self.attach_explanation(&changes, window, cx);
         self.update_live_panes(cx);
         self.refresh_evidence(cx);
         changes

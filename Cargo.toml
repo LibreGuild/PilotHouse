@@ -58,6 +58,7 @@ ph-agy = { path = "crates/agy" }
 ph-git = { path = "crates/git" }
 ph-lsp = { path = "crates/lsp" }
 ph-github = { path = "crates/github" }
+ph-explain = { path = "crates/explain" }
 ph-pulls = { path = "crates/pulls" }
 ph-review = { path = "crates/review" }
 ph-remote = { path = "crates/remote" }

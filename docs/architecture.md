@@ -20,7 +20,10 @@ crates/
   changes/    Git tab, branch picker, blame data: commit, history, stashes, conflicts, review
   github/     GitHub REST client, accounts, secrets in the OS keychain
   pulls/      PR list and view, Settings → GitHub, the Reviews view's managed clones
-  review/     agent PR reviews: template, parsing, re-review merge, posting
+  review/     agent PR reviews: template, parsing, re-review merge, posting; explanations of
+              changes: the prompt, the shared file, finding one by the content it explains
+  explain/    explanations of changes where they are read: beside the changes in the Git tab,
+              on a commit in History, Why Is This Here? in the editor
   git/        git operations over the CLI (status, branches, log graph, blame, conflicts, worktrees,
               checkpoints, parallel-run patches)
   terminal/   PTY terminals (alacritty_terminal)
@@ -51,6 +54,7 @@ Dependency direction (arrows point at dependencies):
 
 ```
 app ──► workspace ──► agent, files, changes, terminal, browser, devices, runs ──► store, ui, theme, env
+ │        workspace ──► pulls, explain ──► agent ──► review ──► git, store
  │                                        browser, devices ──► media
  │                                         files, changes ──► preview
  │                          browser, devices, runs ──► control

@@ -319,6 +319,34 @@ const MIGRATIONS: &[&str] = &[
         ON CONFLICT(key) DO UPDATE SET value = excluded.value;
     UPDATE projects SET kind = 'empty', name = 'Chats' WHERE kind = 'chats';
     "#,
+    // 18: explanations of changes, written by an agent and kept here until
+    // the user shares one as a file in the repository. Each is filed under
+    // the content it explains (a file's path and its Git blob id), so the
+    // one for a commit is found by what the commit holds.
+    r#"
+    CREATE TABLE explanations (
+        id          INTEGER PRIMARY KEY,
+        root        TEXT NOT NULL,
+        subject     TEXT NOT NULL,
+        title       TEXT NOT NULL DEFAULT '',
+        markdown    TEXT NOT NULL DEFAULT '',
+        agent       TEXT NOT NULL DEFAULT '',
+        session_id  INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
+        asked       TEXT NOT NULL DEFAULT '[]',
+        finished    INTEGER NOT NULL DEFAULT 0,
+        created_at  INTEGER NOT NULL
+    );
+    CREATE INDEX explanations_by_root ON explanations(root, subject);
+
+    CREATE TABLE explanation_files (
+        explanation_id  INTEGER NOT NULL REFERENCES explanations(id) ON DELETE CASCADE,
+        path            TEXT NOT NULL,
+        blob            TEXT NOT NULL
+    );
+    CREATE INDEX explanation_files_by_blob ON explanation_files(blob);
+    CREATE INDEX explanation_files_by_path ON explanation_files(path);
+    CREATE INDEX explanation_files_by_explanation ON explanation_files(explanation_id);
+    "#,
 ];
 
 /// Backups kept of a database file, newest first; older ones are deleted.

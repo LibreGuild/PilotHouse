@@ -38,7 +38,7 @@ use crate::line_changes::{LineChange, line_changes};
 use crate::{
     AskAboutSelection, CopyAsMarkdown, CopyFilePath, CopyFileRelativePath, CopyLinkToLines,
     CopyReference, ExplainSelection, FindBugsInSelection, FindReferences, RenameSymbol, RevealFile,
-    RevealInFiles, ShowOutline, WriteTestsForSelection,
+    RevealInFiles, ShowOutline, WhyIsThisHere, WriteTestsForSelection,
 };
 
 /// What the user wants to know about selected code.
@@ -141,6 +141,8 @@ impl Ask {
 #[derive(Debug, Clone)]
 pub enum FileViewEvent {
     Ask(Ask),
+    /// Say why this 1-based line of the file is there.
+    Why(u32),
     /// Show this HTML file in the workspace's browser.
     OpenInBrowser(PathBuf),
     /// Edit this picture or video in Studio.
@@ -150,6 +152,16 @@ pub enum FileViewEvent {
     /// The cursor jumped far (to a definition, a line): it was on this
     /// 0-based line, for Back.
     Jumped(u32),
+}
+
+/// Whether the editor offers *Why Is This Here?*: where the build has
+/// explanations of changes (this crate does not know the brand's features;
+/// whoever shows editors says so once).
+static EXPLAINS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Says whether editors offer *Why Is This Here?* (see [`EXPLAINS`]).
+pub fn set_explains(explains: bool) {
+    EXPLAINS.store(explains, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// A cursor move of at least this many lines counts as a jump for Back.
@@ -649,6 +661,20 @@ impl FileView {
         self.ask(AskIntent::WriteTests, cx);
     }
 
+    /// Asks why the line at the cursor is there (the first line of a
+    /// selection).
+    fn why_is_this_here(&mut self, _: &WhyIsThisHere, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.asks || !EXPLAINS.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let editor = self.editor.read(cx);
+        let text = editor.value();
+        let start = editor.selected_range().start.min(text.len());
+        let rope = gpui_kit::component::input::Rope::from(text.as_ref());
+        let line = rope.offset_to_position(start).line + 1;
+        cx.emit(FileViewEvent::Why(line));
+    }
+
     /// Sends the selection (or the cursor's line) to the chat.
     pub fn ask(&mut self, intent: AskIntent, cx: &mut Context<Self>) {
         if !self.asks {
@@ -939,6 +965,11 @@ impl FileView {
     }
 
     /// The file's path as Files names it.
+    /// The file's full path.
+    pub fn absolute_path(&self) -> &std::path::Path {
+        &self.absolute
+    }
+
     pub fn relative_path(&self) -> &SharedString {
         if !self.label.is_empty() {
             return &self.label;
@@ -2022,8 +2053,13 @@ fn editor_menu_lines(asks: bool, navigates: bool) -> Vec<MenuLine> {
             item("Explain", Box::new(ExplainSelection)),
             item("Find Bugs", Box::new(FindBugsInSelection)),
             item("Write Tests", Box::new(WriteTestsForSelection)),
-            None,
         ]);
+        // What an agent says the code does is asked above; who asked for
+        // this line and why is looked up, with no agent run.
+        if EXPLAINS.load(std::sync::atomic::Ordering::Relaxed) {
+            lines.push(item("Why Is This Here?", Box::new(WhyIsThisHere)));
+        }
+        lines.push(None);
     }
     lines.extend([
         // Without a language server they still find declarations and
@@ -2135,6 +2171,7 @@ impl Render for FileView {
             .on_action(cx.listener(Self::explain_selection))
             .on_action(cx.listener(Self::find_bugs_in_selection))
             .on_action(cx.listener(Self::write_tests_for_selection))
+            .on_action(cx.listener(Self::why_is_this_here))
             .on_action(cx.listener(Self::copy_as_markdown))
             .on_action(cx.listener(Self::copy_reference))
             .on_action(cx.listener(Self::copy_link_to_lines))

@@ -1573,9 +1573,13 @@ pub(crate) fn chat_menu_items(
 pub(crate) const REVIEW_TOOL: ContextTab = ContextTab::Changes;
 
 /// A chat PilotHouse started rather than the user: a schedule's, a UI
-/// test's recording or repair, a review of the user's own changes.
+/// test's recording or repair, a review of the user's own changes, an
+/// explanation of them.
 fn is_automated(session: &Session) -> bool {
     session.kind == "review"
+        || session
+            .title
+            .starts_with(ph_agent::explanations::CHAT_TITLE)
         || session.title.ends_with("(scheduled)")
         || session.title.starts_with("Record test:")
         || session.title.starts_with("Repair test:")

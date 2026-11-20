@@ -1,6 +1,6 @@
 [package]
 name = "ph-review"
-description = "Agent pull request reviews: the review prompt, parsing the agent's findings, carrying them across re-reviews, and posting them to GitHub."
+description = "Agent pull request reviews: the review prompt, parsing the agent's findings, carrying them across re-reviews, and posting them to GitHub. And explanations of changes: their prompt, their shared file, finding one by the content it explains."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,7 @@ ph-brand.workspace = true
 anyhow.workspace = true
 base64 = "0.23"
 ph-git.workspace = true
+jiff.workspace = true
 ph-github.workspace = true
 ph-store.workspace = true
 serde.workspace = true

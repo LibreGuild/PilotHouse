@@ -697,7 +697,7 @@ fn turn_diffs(entries: &[Entry]) -> impl Iterator<Item = &FileDiff> {
 /// The tag is `entry`, not `kind`: tool entries have a `kind` field of their own.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "entry", rename_all = "snake_case")]
-enum StoredEntry {
+pub(crate) enum StoredEntry {
     User {
         text: String,
         #[serde(default)]

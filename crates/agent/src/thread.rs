@@ -166,6 +166,9 @@ pub enum ReviewTurn {
     Claim { finding_id: i64 },
     /// A walkthrough, saved as run `run_id`.
     Walkthrough { run_id: i64 },
+    /// An explanation of a change, saved as explanation `id` (started in
+    /// the store, without its text).
+    Explanation { id: i64 },
 }
 
 /// The agent session id, once set up; shared so concurrent callers await one setup.
@@ -508,6 +511,38 @@ impl ChatThread {
                         ph_review::walkthrough::END
                     ),
                 };
+                self.push(
+                    Entry::Notice {
+                        text: notice,
+                        is_error: false,
+                    },
+                    cx,
+                );
+            }
+            ReviewTurn::Explanation { id } => {
+                let session = self.session.as_ref().map(|session| session.id);
+                let notice = match ph_review::explanation::parse(&reply) {
+                    Some(explanation) => match self.store.finish_explanation(
+                        id,
+                        &explanation.title(),
+                        &explanation.markdown,
+                        session,
+                    ) {
+                        Ok(()) => "The explanation is ready in the Git tab.".to_string(),
+                        Err(err) => format!("Could not save the explanation: {err:#}"),
+                    },
+                    None => {
+                        // Nothing to show for it: no one waits for it.
+                        let _ = self.store.delete_explanation(id);
+                        format!(
+                            "No explanation in that reply (between {} and {}).",
+                            ph_review::explanation::START,
+                            ph_review::explanation::END
+                        )
+                    }
+                };
+                // Every view of the change shows it now.
+                crate::explanations::Explanations::written(id, cx);
                 self.push(
                     Entry::Notice {
                         text: notice,
@@ -2069,7 +2104,11 @@ impl ChatThread {
         // A turn that did not finish has no answer to read; what is said
         // next is conversation.
         if !matches!(result_kind, Some(StopReason::EndTurn)) {
-            self.review_turn = None;
+            // An explanation that will not come is not waited for.
+            if let Some(ReviewTurn::Explanation { id }) = self.review_turn.take() {
+                let _ = self.store.delete_explanation(id);
+                crate::explanations::Explanations::written(id, cx);
+            }
         }
         match result {
             Ok(StopReason::EndTurn) => self.record_review(cx),

@@ -35,7 +35,7 @@ pub mod unsaved;
 mod watcher;
 
 pub use file_index::{FileList, index_files};
-pub use file_view::{Ask, AskIntent, FileView, FileViewEvent};
+pub use file_view::{Ask, AskIntent, FileView, FileViewEvent, set_explains};
 pub use files_panel::{FileTree, FilesPanel, FilesPanelEvent};
 pub use tree_drag::DraggedFiles;
 pub use watcher::{FilesChanged, ProjectWatcher, WatcherHub};
@@ -71,6 +71,9 @@ actions!(
         FindBugsInSelection,
         /// Ask the agent to write tests for the selected code.
         WriteTestsForSelection,
+        /// Say why the line at the cursor is there: the explanation of the
+        /// change that wrote it.
+        WhyIsThisHere,
         /// A new file in the selected folder of the tree.
         NewFile,
         /// A new folder in the selected folder of the tree.

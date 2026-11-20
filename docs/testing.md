@@ -34,6 +34,25 @@ pilothouse ctl app.state                            # projects, active tab, sess
 
 Screenshots render the window offscreen (`Window::render_to_image`), so they need no screen-recording permission. Release builds do not include the `ui.*` methods.
 
+## The explanation prompt
+
+What an agent is asked when it explains a change (`crates/review/src/explanation/prompt.rs`, see [explanations](features/explanations.md)) is tried on real agents and real changes, without the app:
+
+```sh
+# The prompt for the work not committed in a folder, or for a commit.
+cargo run -p ph-review --example explanation_prompt -- /path/to/repo > /tmp/prompt.txt
+cargo run -p ph-review --example explanation_prompt -- /path/to/repo --commit abc1234
+# With what the chats said (a list of `Asked`: chat, agent, request, outcome, commands).
+cargo run -p ph-review --example explanation_prompt -- /path/to/repo --asked record.json
+
+# Give it to an agent in that folder, read-only, and read what comes back.
+cd /path/to/repo
+claude -p "$(cat /tmp/prompt.txt)" --allowedTools Read Grep Glob "Bash(git diff:*)" "Bash(git show:*)" "Bash(git status:*)"
+codex exec -s read-only "$(cat /tmp/prompt.txt)"
+```
+
+Try a small change, an ordinary one, a large one, and a commit with no record. Read each reply as the person it is for: would you read it to the end, does it say how this part worked before, is anything in it not true of the code, is it within its words (the prompt names the limit), and is the explanation in the reply between its two marker lines. Agents differ: one wrote a file instead of replying, and one ran the project's tests, until the prompt said not to. Change the prompt, not the reply.
+
 ## Network drives (SSH)
 
 Unit tests cover paths both ways (Windows spellings included), quoting, failures and parsing. Git against a real server is `crates/git/tests/network_drive.rs`, skipped unless pointed at one. A container with SSH and Git sharing a folder with this computer stands in for a Samba server:

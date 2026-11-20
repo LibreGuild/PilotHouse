@@ -6246,6 +6246,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ph-explain"
+version = "0.6.4"
+dependencies = [
+ "anyhow",
+ "gpui-kit",
+ "ph-agent",
+ "ph-git",
+ "ph-review",
+ "ph-store",
+ "ph-theme",
+ "ph-ui",
+ "tracing",
+]
+
+[[package]]
 name = "ph-files"
 version = "0.6.4"
 dependencies = [
@@ -6413,6 +6428,7 @@ version = "0.6.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "jiff",
  "ph-brand",
  "ph-git",
  "ph-github",
@@ -6608,6 +6624,7 @@ dependencies = [
  "ph-custom",
  "ph-devices",
  "ph-env",
+ "ph-explain",
  "ph-files",
  "ph-git",
  "ph-github",

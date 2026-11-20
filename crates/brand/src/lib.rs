@@ -45,10 +45,13 @@ pub enum Feature {
     Presentations,
     ChromeExtension,
     QuickChat,
+    /// Changes explained in plain words: Explain in the Git tab and on a
+    /// commit, and Why Is This Here? in the editor.
+    Explanations,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 18] = [
+    pub const ALL: [Feature; 19] = [
         Feature::Files,
         Feature::Changes,
         Feature::Pulls,
@@ -67,6 +70,7 @@ impl Feature {
         Feature::Presentations,
         Feature::ChromeExtension,
         Feature::QuickChat,
+        Feature::Explanations,
     ];
 
     /// Its key in `[features]`.
@@ -90,6 +94,7 @@ impl Feature {
             Feature::Presentations => "presentations",
             Feature::ChromeExtension => "chrome_extension",
             Feature::QuickChat => "quick_chat",
+            Feature::Explanations => "explanations",
         }
     }
 }
