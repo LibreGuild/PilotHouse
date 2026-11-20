@@ -8,16 +8,9 @@
   <meta property="og:title" content="PilotHouse: one window for your coding agents">
   <meta property="og:description" content="See what each coding agent is doing, review what it changed, and decide what ships. Free, open source, and all on your computer.">
   <meta property="og:type" content="website">
-  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#070b16">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
-  <script>
-    // The chosen look, before the page draws (no flash of the other one).
-    try {
-      const look = localStorage.getItem("look");
-      if (look === "light" || look === "dark") document.documentElement.dataset.look = look;
-    } catch (error) {}
-  </script>
 </head>
 <body>
   <!-- The line icons the drawings use. -->
@@ -27,28 +20,21 @@
     <symbol id="i-chats" viewBox="0 0 24 24"><path d="M4.5 4.5h9A1.5 1.5 0 0 1 15 6v5a1.5 1.5 0 0 1-1.5 1.5H8L4.5 15.5v-3A1.5 1.5 0 0 1 3 11V6a1.5 1.5 0 0 1 1.5-1.5z"/><path d="M18 9.5h1.5A1.5 1.5 0 0 1 21 11v4.5a1.5 1.5 0 0 1-1.5 1.5v3L16 17h-4"/></symbol>
     <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="5.5" r="2.5"/><circle cx="6" cy="18.5" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8v8M18 10.5c0 4-6 3-12 6"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
-    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-file" viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></symbol>
-    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h9A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/></symbol>
     <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></symbol>
-    <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></symbol>
     <symbol id="i-term" viewBox="0 0 24 24"><path d="m5 8 4 4-4 4M12 16h7"/></symbol>
-    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
     <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9.5" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
     <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
     <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v11M6.5 10.5 12 16l5.5-5.5M5 20h14"/></symbol>
-    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></symbol>
     <symbol id="i-test" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9.5A1.5 1.5 0 0 0 6.3 21h11.4a1.5 1.5 0 0 0 1.3-2.5L14 9V3"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
     <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m4 17 5-4.5 4 3.5 3-2.5 4 3.5"/></symbol>
-    <symbol id="i-swatch" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="8.5" cy="9.5" r="1"/><circle cx="12.5" cy="7.5" r="1"/><circle cx="16" cy="10.5" r="1"/></symbol>
-    <symbol id="i-kbd" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7.5 14h9"/></symbol>
-    <symbol id="i-cursor" viewBox="0 0 24 24"><path d="m5 4 5 15 2.5-6 6-2.5z"/></symbol>
+    <symbol id="i-cursor" viewBox="0 0 24 24"><path d="m5 3 5.5 16 2.4-6.6L19.5 10z"/></symbol>
     <symbol id="i-undo" viewBox="0 0 24 24"><path d="M8 5 4 9l4 4"/><path d="M4 9h10a5 5 0 0 1 0 10h-3"/></symbol>
-    <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h13M13 4l4 4-4 4M20 16H7M11 12l-4 4 4 4"/></symbol>
-    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V4M4 20h16M8 16v-5M12 16V8M16 16v-3"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z"/></symbol>
     <symbol id="i-server" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="7" rx="1.5"/><rect x="3.5" y="13" width="17" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
-    <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.5 6.5a4 4 0 0 0 5 5L11 20a2.1 2.1 0 0 1-3-3z"/><path d="M14.5 6.5 17 4"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h9A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/></symbol>
   </svg>
 
   <a class="skip" href="#main">Skip to the page</a>
@@ -57,77 +43,258 @@
     <a class="brand" href="#top"><img src="mark.svg" alt="" width="26" height="26"><span>PilotHouse</span></a>
     <nav aria-label="Sections">
       <a href="#how">How it works</a>
+      <a href="#bridge">The Bridge</a>
       <a href="#features">Features</a>
       <a href="#yours">Privacy</a>
-      <a href="#download">Download</a>
     </nav>
     <div class="nav-end">
-      <button id="look" class="icon-button" type="button" aria-label="Switch between light and dark">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor" stroke="none"/></svg>
-      </button>
       <a class="button quiet" href="https://github.com/LibreGuild/PilotHouse">GitHub</a>
+      <a class="button primary small" href="#download">Download</a>
     </div>
   </header>
 
   <main id="main">
 
-    <!-- ===== Hero ===== -->
+    <!-- ===== Hero: the window plays a task by itself, over a night sea ===== -->
     <section class="hero" id="top">
+      <div class="stars" aria-hidden="true"></div>
       <div class="hero-text">
-        <p class="eyebrow">Free and open source · macOS, Windows, Linux</p>
-        <h1>One window for your coding agents.</h1>
-        <p class="lead">PilotHouse is a desktop app for working with Claude Code, Codex, Gemini CLI, Antigravity and Cline. They work on your code. You see what each one is doing, review what it changed, and decide what ships.</p>
+        <h1>One window for<br><span class="grad">your coding agents.</span></h1>
+        <p class="lead">See what each one is doing. Review what it changed. Decide what ships.</p>
         <div class="actions">
           <a class="button primary" id="download-main" href="#download"><svg class="ico" aria-hidden="true"><use href="#i-down"/></svg><span>Download PilotHouse</span></a>
-          <a class="button" href="#how">See how it works</a>
+          <a class="button" href="#how">Watch a task go by</a>
         </div>
-        <p class="fine">It runs on your computer. No account, no server, no telemetry.</p>
+        <p class="fine">Free and open source · macOS, Windows, Linux · No account</p>
       </div>
 
-      <figure class="wf hero-figure" role="img" aria-label="A drawing of PilotHouse's window. Down the left edge are the Bridge, Reviews and Chats, then two workspaces. The middle is a chat: your request, the agent's steps, and a question asking whether it may run the tests, with Allow and Deny. On the right is the Git pane: three changed files with ticks for the ones you have read, and the diff of one of them.">
-        <div class="win" aria-hidden="true">
+      <figure class="wf hero-stage" role="img" aria-label="A drawing of PilotHouse's window playing a task by itself. A request is typed; the agent reads and edits two files; it asks whether it may run the tests and gets a yes; the tests pass; the changed files show in the Git pane with their diff; the change is committed and a pull request opened.">
+        <div class="halo" aria-hidden="true"></div>
+        <div class="win tilt" id="demo" aria-hidden="true">
           <div class="win-bar"><i></i><i></i><i></i><span class="win-title">tidewatch</span><span class="win-search"><svg class="ico"><use href="#i-search"/></svg>Search or run a command</span></div>
           <div class="app">
             <div class="rail">
-              <span class="r"><svg class="ico"><use href="#i-wheel"/></svg>Bridge<b class="count">1</b></span>
+              <span class="r"><svg class="ico"><use href="#i-wheel"/></svg>Bridge<b class="count" data-d="count">1</b></span>
               <span class="r"><svg class="ico"><use href="#i-pr"/></svg>Reviews</span>
               <span class="r"><svg class="ico"><use href="#i-chats"/></svg>Chats</span>
               <hr>
               <span class="r on"><b class="badge b1">T</b>tidewatch</span>
-              <span class="r"><b class="badge b2">R</b>receipts<i class="dot green pin"></i></span>
-              <span class="r add"><svg class="ico"><use href="#i-plus"/></svg></span>
+              <span class="r"><b class="badge b2">R</b>receipts</span>
             </div>
             <div class="chat">
-              <div class="tabs"><span class="tab on"><i class="dot amber"></i>Offline tide chart</span><span class="tab"><i class="dot blue"></i>Units in the table</span></div>
+              <div class="tabs"><span class="tab on"><i class="dot" data-demo="tabdot"></i>Offline tide chart</span><span class="tab"><i class="dot blue"></i>Units in the table</span></div>
               <div class="thread">
-                <div class="me">Show the tide chart when there is no network.</div>
+                <div class="me" data-d="msg">Show the tide chart when there is no network.</div>
                 <div class="steps">
-                  <span><svg class="ico ok"><use href="#i-check"/></svg>Read <code>src/chart.rs</code></span>
-                  <span><svg class="ico ok"><use href="#i-check"/></svg>Edited <code>src/chart.rs</code> <em class="add">+38</em> <em class="del">−5</em></span>
-                  <span><svg class="ico ok"><use href="#i-check"/></svg>Edited <code>src/cache.rs</code> <em class="add">+4</em> <em class="del">−2</em></span>
+                  <span data-d="s1"><svg class="ico ok"><use href="#i-check"/></svg>Read <code>src/chart.rs</code></span>
+                  <span data-d="s2"><svg class="ico ok"><use href="#i-check"/></svg>Edited <code>src/chart.rs</code> <em class="add">+38</em> <em class="del">−5</em></span>
+                  <span data-d="s3"><svg class="ico ok"><use href="#i-check"/></svg>Edited <code>src/cache.rs</code> <em class="add">+4</em> <em class="del">−2</em></span>
                 </div>
-                <div class="ask">
+                <div class="ask" data-d="ask" data-demo="ask">
                   <p><b>May I run the tests?</b><code>cargo test -p tidewatch</code></p>
-                  <div><span class="wbtn pri">Allow</span><span class="wbtn">Always for this</span><span class="wbtn">Deny</span></div>
+                  <div><span class="wbtn pri" data-demo="allow">Allow</span><span class="wbtn">Always</span><span class="wbtn">Deny</span></div>
                 </div>
+                <div class="steps"><span class="passed" data-d="tests"><svg class="ico ok"><use href="#i-check"/></svg><b>14 tests passed</b></span></div>
               </div>
-              <div class="composer"><span class="bar w50"></span><i class="send"><svg class="ico"><use href="#i-up"/></svg></i></div>
+              <div class="composer"><span class="typed" data-demo="typed"></span><i class="caret"></i><i class="send" data-demo="send"><svg class="ico"><use href="#i-up"/></svg></i></div>
             </div>
             <div class="result">
               <div class="names"><span class="on">Git</span><span>Preview</span><span>Terminal</span><span>Files</span></div>
               <div class="files">
-                <span class="f"><i class="tick on"><svg class="ico"><use href="#i-check"/></svg></i><code>src/chart.rs</code><em class="add">+38</em><em class="del">−5</em></span>
-                <span class="f"><i class="tick"></i><code>src/cache.rs</code><em class="add">+4</em><em class="del">−2</em></span>
-                <span class="f"><i class="tick"></i><code>README.md</code><em class="add">+3</em></span>
+                <span class="f" data-d="f1"><i class="tick" data-demo="t1"><svg class="ico"><use href="#i-check"/></svg></i><code>src/chart.rs</code><em class="add">+38</em><em class="del">−5</em></span>
+                <span class="f" data-d="f2"><i class="tick" data-demo="t2"><svg class="ico"><use href="#i-check"/></svg></i><code>src/cache.rs</code><em class="add">+4</em><em class="del">−2</em></span>
               </div>
-              <div class="diff">
+              <div class="diff" data-d="diff">
                 <span class="l"><b>12</b><i class="bar w60"></i></span>
                 <span class="l del"><b>13</b><i class="bar w70"></i></span>
                 <span class="l add"><b>13</b><i class="bar w80"></i></span>
                 <span class="l add"><b>14</b><i class="bar w50"></i></span>
                 <span class="l add"><b>15</b><i class="bar w70"></i></span>
                 <span class="l"><b>16</b><i class="bar w40"></i></span>
-                <span class="hunk"><span class="wbtn">Keep these lines</span><span class="wbtn">Undo these lines</span></span>
+              </div>
+              <div class="commit-row" data-d="commit"><span class="wbtn pri" data-demo="commit">Commit and open a pull request</span></div>
+              <div class="toast" data-d="toast"><svg class="ico ok"><use href="#i-check"/></svg>Pull request #12 opened</div>
+            </div>
+          </div>
+          <svg class="pointer" data-demo="pointer"><use href="#i-cursor"/></svg>
+        </div>
+      </figure>
+
+      <!-- The agents, afloat. -->
+      <div class="sea" aria-hidden="true">
+        <canvas id="sea"></canvas>
+        <span class="boat" data-x="0.1"><i class="dot c-a"></i>Claude Code</span>
+        <span class="boat" data-x="0.3"><i class="dot c-b"></i>Codex</span>
+        <span class="boat" data-x="0.5"><i class="dot c-c"></i>Gemini CLI</span>
+        <span class="boat" data-x="0.7"><i class="dot c-d"></i>Antigravity</span>
+        <span class="boat" data-x="0.9"><i class="dot c-e"></i>Cline</span>
+      </div>
+      <p class="sr-only">Works with Claude Code, Codex, Gemini CLI, Antigravity and Cline.</p>
+    </section>
+
+    <!-- ===== Three things it holds to ===== -->
+    <section class="creed" aria-label="What PilotHouse holds to">
+      <article>
+        <svg class="ico turn" aria-hidden="true"><use href="#i-wheel"/></svg>
+        <h2 data-reveal>You steer.</h2>
+        <p>Agents ask before they act. Nothing ships without your yes.</p>
+      </article>
+      <article>
+        <svg class="ico" aria-hidden="true"><use href="#i-eye"/></svg>
+        <h2 data-reveal>You see.</h2>
+        <p>Every change is a diff. Every claim comes with its test run.</p>
+      </article>
+      <article>
+        <svg class="ico" aria-hidden="true"><use href="#i-lock"/></svg>
+        <h2 data-reveal>You own it.</h2>
+        <p>No account, no server. Your code stays on your machine.</p>
+      </article>
+    </section>
+
+    <!-- ===== A task in four moves: one window, changing as you scroll ===== -->
+    <section class="moves" id="how">
+      <header class="section-head">
+        <p class="eyebrow">How it works</p>
+        <h2 data-reveal>A task in four moves.</h2>
+      </header>
+      <div class="moves-grid">
+        <div class="moves-steps">
+          <article class="move" id="move-1">
+            <div class="move-text"><span class="num">01</span><h3>Ask</h3><p>Say what you want. Point at things with <code>@</code>.</p></div>
+            <figure class="wf move-fig" role="img" aria-label="The message box with a request typed in it, and what @ can attach: a screenshot, a log, a test run, a pull request.">
+              <div class="pane" aria-hidden="true">
+                <div class="composer tall">
+                  <p>Why does <span class="mention">@src/chart.rs</span> draw nothing when <span class="mention">@scr</span><i class="caret"></i></p>
+                  <i class="send"><svg class="ico"><use href="#i-up"/></svg></i>
+                </div>
+                <div class="menu">
+                  <span class="on"><svg class="ico"><use href="#i-image"/></svg><b>@screenshot</b><small>What is on screen</small></span>
+                  <span><svg class="ico"><use href="#i-file"/></svg><b>@log</b><small>Recent console lines</small></span>
+                  <span><svg class="ico"><use href="#i-test"/></svg><b>@test-run</b><small>How each test went</small></span>
+                  <span><svg class="ico"><use href="#i-pr"/></svg><b>@pr:12</b><small>A pull request</small></span>
+                </div>
+              </div>
+            </figure>
+          </article>
+          <article class="move" id="move-2">
+            <div class="move-text"><span class="num">02</span><h3>It works</h3><p>It plans, edits, and asks before it runs anything.</p></div>
+            <figure class="wf move-fig" role="img" aria-label="An agent's plan of three steps, two done, and its question whether it may run a command, with Allow and Deny.">
+              <div class="pane" aria-hidden="true">
+                <div class="plan">
+                  <b>Plan</b>
+                  <span class="done"><i class="tick on"><svg class="ico"><use href="#i-check"/></svg></i>Keep the last chart on disk</span>
+                  <span class="done"><i class="tick on"><svg class="ico"><use href="#i-check"/></svg></i>Draw it when the request fails</span>
+                  <span><i class="tick spin"></i>Run the tests</span>
+                </div>
+                <div class="ask show">
+                  <p><b>May I run the tests?</b><code>cargo test -p tidewatch</code></p>
+                  <div><span class="wbtn pri">Allow</span><span class="wbtn">Always</span><span class="wbtn">Deny</span></div>
+                </div>
+              </div>
+            </figure>
+          </article>
+          <article class="move" id="move-3">
+            <div class="move-text"><span class="num">03</span><h3>You review</h3><p>Read the diff. Keep or undo any part of it.</p></div>
+            <figure class="wf move-fig" role="img" aria-label="The review: fourteen tests passed and two screenshots were taken; a list of files, one ticked as read; a diff with a note on a line and buttons to keep or undo the lines.">
+              <div class="pane" aria-hidden="true">
+                <div class="evidence"><span class="tag ok"><svg class="ico"><use href="#i-check"/></svg>14 tests passed</span><span class="tag"><svg class="ico"><use href="#i-image"/></svg>2 screenshots</span><span class="tag"><svg class="ico"><use href="#i-term"/></svg>3 commands</span></div>
+                <div class="review">
+                  <div class="files">
+                    <span class="f"><i class="tick on"><svg class="ico"><use href="#i-check"/></svg></i><code>chart.rs</code></span>
+                    <span class="f on"><i class="tick"></i><code>cache.rs</code></span>
+                    <span class="f"><i class="tick"></i><code>README.md</code></span>
+                  </div>
+                  <div class="diff">
+                    <span class="l"><b>40</b><i class="bar w60"></i></span>
+                    <span class="l del"><b>41</b><i class="bar w80"></i></span>
+                    <span class="l add"><b>41</b><i class="bar w70"></i></span>
+                    <span class="l add"><b>42</b><i class="bar w50"></i></span>
+                    <span class="wnote">You: keep the old file until the new one is written.</span>
+                    <span class="hunk"><span class="wbtn">Keep</span><span class="wbtn">Undo</span></span>
+                  </div>
+                </div>
+              </div>
+            </figure>
+          </article>
+          <article class="move" id="move-4">
+            <div class="move-text"><span class="num">04</span><h3>You ship</h3><p>Commit, push, open the pull request. Same window.</p></div>
+            <figure class="wf move-fig" role="img" aria-label="A commit message with a Commit button, and the task's card: its branch, lines changed, passing tests and its pull request with passing checks.">
+              <div class="pane" aria-hidden="true">
+                <div class="commit">
+                  <p>Keep the last tide chart for offline use</p>
+                  <div><span class="wbtn pri">Commit</span><span class="wbtn">Commit and push</span><span class="wbtn">Open a pull request</span></div>
+                </div>
+                <div class="card">
+                  <p class="card-top"><i class="dot green"></i>tidewatch<small>2 min</small></p>
+                  <b>Offline tide chart</b>
+                  <p class="facts"><span><svg class="ico"><use href="#i-branch"/></svg>offline-chart</span><span><em class="add">+45</em> <em class="del">−7</em></span><span><svg class="ico ok"><use href="#i-check"/></svg>tests</span><span><svg class="ico"><use href="#i-pr"/></svg>#12 <i class="dot green"></i></span></p>
+                </div>
+              </div>
+            </figure>
+          </article>
+        </div>
+        <!-- Filled by the script where there is room: the one window the four moves change. -->
+        <div class="moves-stage" aria-hidden="true"><div class="stage-glow"></div><div class="stage-frames"></div><ol class="stage-dots"><li></li><li></li><li></li><li></li></ol></div>
+      </div>
+    </section>
+
+    <!-- ===== The Bridge: cards move by themselves ===== -->
+    <section class="bridge-sec" id="bridge">
+      <header class="section-head center">
+        <p class="eyebrow">The Bridge</p>
+        <h2 data-reveal>Every task, sorted by what it needs from you.</h2>
+        <p>Answer an agent right on its card.</p>
+      </header>
+      <figure class="wf" role="img" aria-label="The Bridge: four columns named Needs you, Working, Ready for review and Done. Cards for tasks move from one column to the next as agents work, ask, finish and are reviewed.">
+        <div class="win board" id="board" aria-hidden="true">
+          <div class="win-bar"><i></i><i></i><i></i><span class="win-title">Bridge</span></div>
+          <div class="bridge">
+            <div class="col" data-col="needs"><p class="col-head"><i class="dot amber"></i>Needs you<small>1</small></p>
+              <div class="card" data-id="a" data-state="needs">
+                <p class="card-top"><i class="dot ws1"></i>tidewatch</p>
+                <b>Offline tide chart</b>
+                <p class="when needs"><span class="q">May I run the tests?</span><span class="row"><span class="wbtn pri">Allow</span><span class="wbtn">Deny</span></span></p>
+                <p class="when working facts"><span><i class="tick spin"></i>working</span><span><svg class="ico"><use href="#i-branch"/></svg>offline-chart</span></p>
+                <p class="when ready"><span class="facts"><span><em class="add">+45</em> <em class="del">−7</em></span><span><svg class="ico ok"><use href="#i-check"/></svg>14 tests</span></span><span class="row"><span class="wbtn">Review changes</span></span></p>
+                <p class="when done facts"><span><svg class="ico"><use href="#i-pr"/></svg>#12 merged</span></p>
+              </div>
+            </div>
+            <div class="col" data-col="working"><p class="col-head"><i class="dot blue"></i>Working<small>2</small></p>
+              <div class="card" data-id="b" data-state="working">
+                <p class="card-top"><i class="dot ws2"></i>receipts</p>
+                <b>Fix the date on receipts</b>
+                <p class="when needs"><span class="q">May I install a package?</span><span class="row"><span class="wbtn pri">Allow</span><span class="wbtn">Deny</span></span></p>
+                <p class="when working facts"><span><i class="tick spin"></i>working</span><span><svg class="ico"><use href="#i-branch"/></svg>date-format</span></p>
+                <p class="when ready"><span class="facts"><span><em class="add">+6</em> <em class="del">−2</em></span><span><svg class="ico ok"><use href="#i-check"/></svg>31 tests</span></span><span class="row"><span class="wbtn">Review changes</span></span></p>
+                <p class="when done facts"><span><svg class="ico"><use href="#i-pr"/></svg>#7 merged</span></p>
+              </div>
+              <div class="card" data-id="c" data-state="working">
+                <p class="card-top"><i class="dot ws1"></i>tidewatch</p>
+                <b>Units in the tide table</b>
+                <p class="when needs"><span class="q">May I push the branch?</span><span class="row"><span class="wbtn pri">Allow</span><span class="wbtn">Deny</span></span></p>
+                <p class="when working facts"><span><i class="tick spin"></i>working</span><span><svg class="ico"><use href="#i-branch"/></svg>units</span></p>
+                <p class="when ready"><span class="facts"><span><em class="add">+12</em> <em class="del">−3</em></span><span><svg class="ico ok"><use href="#i-check"/></svg>9 tests</span></span><span class="row"><span class="wbtn">Review changes</span></span></p>
+                <p class="when done facts"><span><svg class="ico"><use href="#i-pr"/></svg>#13 merged</span></p>
+              </div>
+            </div>
+            <div class="col" data-col="ready"><p class="col-head"><i class="dot green"></i>Ready for review<small>1</small></p>
+              <div class="card" data-id="d" data-state="ready">
+                <p class="card-top"><i class="dot ws2"></i>receipts</p>
+                <b>Totals round the wrong way</b>
+                <p class="when needs"><span class="q">May I run the tests?</span><span class="row"><span class="wbtn pri">Allow</span><span class="wbtn">Deny</span></span></p>
+                <p class="when working facts"><span><i class="tick spin"></i>working</span><span><svg class="ico"><use href="#i-branch"/></svg>rounding</span></p>
+                <p class="when ready"><span class="facts"><span><em class="add">+9</em> <em class="del">−4</em></span><span><svg class="ico ok"><use href="#i-check"/></svg>31 tests</span></span><span class="row"><span class="wbtn">Review changes</span></span></p>
+                <p class="when done facts"><span><svg class="ico"><use href="#i-pr"/></svg>#6 merged</span></p>
+              </div>
+            </div>
+            <div class="col" data-col="done"><p class="col-head"><i class="dot grey"></i>Done<small>1</small></p>
+              <div class="card" data-id="e" data-state="done">
+                <p class="card-top"><i class="dot ws1"></i>tidewatch</p>
+                <b>Nightly summary</b>
+                <p class="when needs"><span class="q">May I run the tests?</span><span class="row"><span class="wbtn pri">Allow</span><span class="wbtn">Deny</span></span></p>
+                <p class="when working facts"><span><i class="tick spin"></i>working</span><span><svg class="ico"><use href="#i-branch"/></svg>summary</span></p>
+                <p class="when ready"><span class="facts"><span><em class="add">+3</em></span><span><svg class="ico ok"><use href="#i-check"/></svg>4 tests</span></span><span class="row"><span class="wbtn">Review changes</span></span></p>
+                <p class="when done facts"><span><svg class="ico"><use href="#i-pr"/></svg>#11 merged</span></p>
               </div>
             </div>
           </div>
@@ -135,440 +302,161 @@
       </figure>
     </section>
 
-    <!-- ===== Why ===== -->
-    <section class="why" id="why">
-      <div class="prose">
-        <h2>Why it exists</h2>
-        <p>A day with coding agents usually means a few agent programs in terminals, an editor, a Git client, a browser to check the result, maybe a phone emulator, and a note somewhere saying which agent was waiting for an answer.</p>
-        <p>PilotHouse puts those in one window. Every project keeps its agents, shells and test runs going while you look at another one, and tells you when something needs you.</p>
-      </div>
-      <ol class="goals">
-        <li>
-          <h3>You stay at the helm</h3>
-          <p>An agent asks before it runs a command or changes a file, unless you told it that it need not. Nothing is committed, pushed or posted until you say so.</p>
-        </li>
-        <li>
-          <h3>See it, not just hear about it</h3>
-          <p>Every change is a diff you can read line by line. Next to it stands what the agent ran to check its work: the tests, the commands, the screenshots.</p>
-        </li>
-        <li>
-          <h3>Yours, on your machine</h3>
-          <p>There is no PilotHouse account and no PilotHouse server. It talks to the agents you installed, to Git, and to the hosts you add yourself.</p>
-        </li>
-      </ol>
-    </section>
-
-    <!-- ===== How a task goes ===== -->
-    <section class="how" id="how">
-      <header class="section-head">
-        <p class="eyebrow">How it works</p>
-        <h2>A task, from asking to shipping</h2>
-        <p>Four steps, all in the same window. You can do the first and come back for the third.</p>
-      </header>
-
-      <ol class="steps-list">
-        <li>
-          <div class="step-text">
-            <span class="num">1</span>
-            <h3>Ask</h3>
-            <p>Type what you want done. Point at things with <code>@</code> instead of describing them: a file, a function, the screenshot on screen, a failing test, a pull request.</p>
-          </div>
-          <figure class="wf" role="img" aria-label="The message box with a request typed in it, and a list of things @ can attach: a file, a screenshot, a log, a pull request.">
-            <div class="pane" aria-hidden="true">
-              <div class="composer tall">
-                <p>Why does <span class="mention">@src/chart.rs</span> draw nothing when <span class="mention">@scr</span><i class="caret"></i></p>
-                <i class="send"><svg class="ico"><use href="#i-up"/></svg></i>
-              </div>
-              <div class="menu">
-                <span class="on"><svg class="ico"><use href="#i-image"/></svg><b>@screenshot</b><small>The browser or phone on screen</small></span>
-                <span><svg class="ico"><use href="#i-file"/></svg><b>@log</b><small>Recent console lines</small></span>
-                <span><svg class="ico"><use href="#i-test"/></svg><b>@test-run</b><small>How each test last went</small></span>
-                <span><svg class="ico"><use href="#i-pr"/></svg><b>@pr:12</b><small>A pull request</small></span>
-              </div>
-            </div>
-          </figure>
-        </li>
-
-        <li>
-          <div class="step-text">
-            <span class="num">2</span>
-            <h3>Let it work</h3>
-            <p>The agent shows its plan and each step as it takes it. When it wants to run something, it asks. You do not have to watch: go to another project, and the Bridge shows a count when one of your agents is waiting.</p>
-          </div>
-          <figure class="wf" role="img" aria-label="An agent's plan of three steps, two of them done, and its question whether it may run a command, with Allow and Deny.">
-            <div class="pane" aria-hidden="true">
-              <div class="plan">
-                <b>Plan</b>
-                <span class="done"><i class="tick on"><svg class="ico"><use href="#i-check"/></svg></i>Keep the last chart on disk</span>
-                <span class="done"><i class="tick on"><svg class="ico"><use href="#i-check"/></svg></i>Draw it when the request fails</span>
-                <span><i class="tick spin"></i>Run the tests</span>
-              </div>
-              <div class="ask">
-                <p><b>May I run the tests?</b><code>cargo test -p tidewatch</code></p>
-                <div><span class="wbtn pri">Allow</span><span class="wbtn">Always for this</span><span class="wbtn">Deny</span></div>
-              </div>
-            </div>
-          </figure>
-        </li>
-
-        <li>
-          <div class="step-text">
-            <span class="num">3</span>
-            <h3>Review</h3>
-            <p>What changed is in the Git pane beside the chat: the files in a list, their diff next to it. Tick a file once you have read it. Keep or undo a single group of lines. Leave a note on a line and send your notes back to the agent in one message.</p>
-          </div>
-          <figure class="wf" role="img" aria-label="The review: a line saying fourteen tests passed and two screenshots were taken; a list of files, one ticked as read; a diff with added and removed lines, a note on one of them, and buttons to keep or undo the lines.">
-            <div class="pane" aria-hidden="true">
-              <div class="evidence"><span class="tag ok"><svg class="ico"><use href="#i-check"/></svg>14 tests passed</span><span class="tag"><svg class="ico"><use href="#i-image"/></svg>2 screenshots</span><span class="tag"><svg class="ico"><use href="#i-term"/></svg>3 commands</span></div>
-              <div class="review">
-                <div class="files">
-                  <span class="f"><i class="tick on"><svg class="ico"><use href="#i-check"/></svg></i><code>chart.rs</code></span>
-                  <span class="f on"><i class="tick"></i><code>cache.rs</code></span>
-                  <span class="f"><i class="tick"></i><code>README.md</code></span>
-                  <small>1 of 3 viewed</small>
-                </div>
-                <div class="diff">
-                  <span class="l"><b>40</b><i class="bar w60"></i></span>
-                  <span class="l del"><b>41</b><i class="bar w80"></i></span>
-                  <span class="l add"><b>41</b><i class="bar w70"></i></span>
-                  <span class="l add"><b>42</b><i class="bar w50"></i></span>
-                  <span class="note">You: keep the old file until the new one is written.</span>
-                  <span class="l"><b>43</b><i class="bar w40"></i></span>
-                  <span class="hunk"><span class="wbtn">Keep</span><span class="wbtn">Undo</span></span>
-                </div>
-              </div>
-            </div>
-          </figure>
-        </li>
-
-        <li>
-          <div class="step-text">
-            <span class="num">4</span>
-            <h3>Ship</h3>
-            <p>Commit, push and open the pull request from the same pane. The task's card then carries its branch, its pull request and whether the checks passed, so you can tell from the Bridge when it is safe to merge.</p>
-          </div>
-          <figure class="wf" role="img" aria-label="A commit message with a Commit button, and under it the task's card: its branch, how many lines it changed, that its tests passed, and its pull request with passing checks.">
-            <div class="pane" aria-hidden="true">
-              <div class="commit">
-                <p>Keep the last tide chart for offline use</p>
-                <div><span class="wbtn pri">Commit</span><span class="wbtn">Commit and push</span><span class="wbtn">Open a pull request</span></div>
-              </div>
-              <div class="card">
-                <p class="card-top"><i class="dot green"></i>tidewatch<small>2 min</small></p>
-                <b>Offline tide chart</b>
-                <p class="facts"><span><svg class="ico"><use href="#i-branch"/></svg>offline-chart</span><span><em class="add">+45</em> <em class="del">−7</em></span><span><svg class="ico ok"><use href="#i-check"/></svg>tests</span><span><svg class="ico"><use href="#i-pr"/></svg>#12 <i class="dot green"></i></span></p>
-              </div>
-            </div>
-          </figure>
-        </li>
-      </ol>
-    </section>
-
-    <!-- ===== Features ===== -->
-    <section class="features" id="features">
-      <header class="section-head">
+    <!-- ===== Features: small drawings that move ===== -->
+    <section class="bento-sec" id="features">
+      <header class="section-head center">
         <p class="eyebrow">Features</p>
-        <h2>What is in the window</h2>
-        <p>Each part below is something you would otherwise open another program for.</p>
+        <h2 data-reveal>One window. Not ten apps.</h2>
+        <p>Everything here is built in.</p>
       </header>
-
-      <article class="feature">
-        <div class="feature-text">
-          <h3>The Bridge</h3>
-          <p class="sub">Every task, sorted by what it needs from you.</p>
-          <p>PilotHouse opens on four columns: <b>Needs you</b>, <b>Working</b>, <b>Ready for review</b> and <b>Done</b>. Every chat of every project is a card in one of them. A card says which branch it is on, how much it changed, and how it checked its work.</p>
-          <p>If an agent is waiting for a yes or no, you can answer on the card without opening the chat.</p>
-        </div>
-        <figure class="wf wide" role="img" aria-label="The Bridge: four columns named Needs you, Working, Ready for review and Done. The first holds a card with an agent's question and Allow and Deny buttons; the others hold cards with a task's title, branch, lines changed and test results.">
-          <div class="win" aria-hidden="true">
-            <div class="win-bar"><i></i><i></i><i></i><span class="win-title">Bridge</span></div>
-            <div class="bridge">
-              <div class="col">
-                <p class="col-head"><i class="dot amber"></i>Needs you<small>1</small></p>
-                <div class="card hl">
-                  <p class="card-top"><i class="dot c1"></i>tidewatch<small>now</small></p>
-                  <b>Offline tide chart</b>
-                  <p class="q">May I run <code>cargo test</code>?</p>
-                  <p class="row"><span class="wbtn pri">Allow</span><span class="wbtn">Deny</span></p>
-                </div>
-              </div>
-              <div class="col">
-                <p class="col-head"><i class="dot blue"></i>Working<small>2</small></p>
-                <div class="card">
-                  <p class="card-top"><i class="dot c2"></i>receipts<small>4 min</small></p>
-                  <b>Fix the date on receipts</b>
-                  <p class="facts"><span><svg class="ico"><use href="#i-branch"/></svg>date-format</span></p>
-                </div>
-                <div class="card">
-                  <p class="card-top"><i class="dot c1"></i>tidewatch<small>9 min</small></p>
-                  <b>Units in the tide table</b>
-                  <p class="facts"><span><svg class="ico"><use href="#i-branch"/></svg>units</span><span><em class="add">+12</em> <em class="del">−3</em></span></p>
-                </div>
-              </div>
-              <div class="col">
-                <p class="col-head"><i class="dot green"></i>Ready for review<small>1</small></p>
-                <div class="card">
-                  <p class="card-top"><i class="dot c2"></i>receipts<small>1 h</small></p>
-                  <b>Totals round the wrong way</b>
-                  <p class="facts"><span><em class="add">+9</em> <em class="del">−4</em></span><span><svg class="ico ok"><use href="#i-check"/></svg>31 tests</span></p>
-                  <p class="row"><span class="wbtn">Review changes</span></p>
-                </div>
-              </div>
-              <div class="col">
-                <p class="col-head"><i class="dot grey"></i>Done<small>3</small></p>
-                <div class="card faded">
-                  <p class="card-top"><i class="dot c1"></i>tidewatch<small>Tue</small></p>
-                  <b>Nightly summary</b>
-                  <p class="facts"><span><svg class="ico"><use href="#i-pr"/></svg>#11 merged</span></p>
-                </div>
-                <div class="card faded">
-                  <p class="card-top"><i class="dot c2"></i>receipts<small>Mon</small></p>
-                  <b>Print in two columns</b>
-                </div>
-              </div>
+      <ul class="bento">
+        <li class="tile wide t-diff">
+          <div class="art" aria-hidden="true">
+            <div class="mini-diff">
+              <span class="l"><i class="bar w60"></i></span>
+              <span class="l del x"><i class="bar w80"></i></span>
+              <span class="l add y"><i class="bar w70"></i></span>
+              <span class="l add y"><i class="bar w50"></i></span>
+              <span class="l"><i class="bar w40"></i></span>
+              <span class="hunk"><span class="wbtn k">Keep</span><span class="wbtn u">Undo</span></span>
+            </div>
+            <svg class="cur c1"><use href="#i-cursor"/></svg>
+          </div>
+          <h3>Review line by line</h3><p>Keep or undo any group of lines.</p>
+        </li>
+        <li class="tile t-browser">
+          <div class="art" aria-hidden="true">
+            <div class="mini-browser"><span class="addr"><i class="bar w50"></i></span><div class="body"><i class="bar w60"></i><div class="chart"><i></i><i></i><i></i><i></i></div><span class="wbtn pri go">Refresh</span></div></div>
+            <svg class="cur agent"><use href="#i-cursor"/></svg>
+          </div>
+          <h3>A browser the agent can see</h3><p>It clicks. You watch. Or the other way round.</p>
+        </li>
+        <li class="tile t-phone">
+          <div class="art" aria-hidden="true">
+            <div class="mini-phone"><i class="notch"></i><i class="bar w70"></i><i class="row-a"></i><i class="row-a"></i><i class="row-a"></i><i class="tap"></i></div>
+          </div>
+          <h3>Android phones too</h3><p>Emulators and real devices, on screen.</p>
+        </li>
+        <li class="tile t-chrome">
+          <div class="art" aria-hidden="true">
+            <div class="mini-chrome"><div class="strip"><span class="group">PilotHouse</span><span class="ctab on"></span><span class="ctab"></span></div><div class="body"><i class="bar w70"></i><i class="bar w50"></i><i class="bar w60"></i></div></div>
+          </div>
+          <h3>Your Chrome, your sign-ins</h3><p>Agents get a tab group of their own. Nothing else.</p>
+        </li>
+        <li class="tile t-reviews">
+          <div class="art" aria-hidden="true">
+            <div class="mini-findings">
+              <span><i class="tick a"><svg class="ico"><use href="#i-check"/></svg></i><b class="sev crit">critical</b><i class="bar w50"></i></span>
+              <span><i class="tick b"><svg class="ico"><use href="#i-check"/></svg></i><b class="sev major">major</b><i class="bar w40"></i></span>
+              <span><i class="tick"><svg class="ico"><use href="#i-check"/></svg></i><b class="sev minor">minor</b><i class="bar w60"></i></span>
+              <span class="post"><span class="wbtn pri">Post comments</span></span>
             </div>
           </div>
-        </figure>
-      </article>
-
-      <article class="feature flip">
-        <div class="feature-text">
-          <h3>A workspace for each project</h3>
-          <p class="sub">The chat on one side, the work on the other.</p>
-          <p>A workspace is a project: one folder, several, or none. Its screen has two panes. One is the chat. The other shows one thing at a time, under four names:</p>
-          <ul class="plain">
-            <li><b>Git</b>: what changed, to review and commit, with branches, history and stashes.</li>
-            <li><b>Preview</b>: the page or the phone screen the work shows up on.</li>
-            <li><b>Terminal</b>: your shells, side by side if you like.</li>
-            <li><b>Files</b>: the folder tree and an editor with language servers.</li>
-          </ul>
-          <p>Several chats in one workspace are tabs over the chat, each with a small mark for what it is doing.</p>
-        </div>
-        <figure class="wf" role="img" aria-label="A workspace's screen: tabs for two chats over the chat on the left, and on the right the result pane with the names Git, Preview, Terminal and Files, showing Files: a folder tree and an open file.">
-          <div class="win" aria-hidden="true">
-            <div class="win-bar"><i></i><i></i><i></i><span class="win-title">receipts</span></div>
-            <div class="app two">
-              <div class="chat">
-                <div class="tabs"><span class="tab on"><i class="dot blue"></i>Date format</span><span class="tab"><i class="dot green"></i>Rounding</span></div>
-                <div class="thread">
-                  <div class="me">Print dates as 4 March, not 03/04.</div>
-                  <span class="bar w90"></span><span class="bar w70"></span><span class="bar w80"></span>
-                  <div class="steps"><span><svg class="ico ok"><use href="#i-check"/></svg>Edited <code>receipt.py</code> <em class="add">+6</em> <em class="del">−2</em></span></div>
-                </div>
-                <div class="composer"><span class="bar w40"></span><i class="send"><svg class="ico"><use href="#i-up"/></svg></i></div>
-              </div>
-              <div class="result">
-                <div class="names"><span>Git</span><span>Preview</span><span>Terminal</span><span class="on">Files</span></div>
-                <div class="files-view">
-                  <div class="tree">
-                    <span><svg class="ico"><use href="#i-folder"/></svg>receipts</span>
-                    <span class="in on"><svg class="ico"><use href="#i-file"/></svg>receipt.py</span>
-                    <span class="in"><svg class="ico"><use href="#i-file"/></svg>totals.py</span>
-                    <span><svg class="ico"><use href="#i-folder"/></svg>tests</span>
-                  </div>
-                  <div class="code">
-                    <span class="l"><b>1</b><i class="bar w40"></i></span>
-                    <span class="l"><b>2</b><i class="bar w70"></i></span>
-                    <span class="l"><b>3</b><i class="bar w60"></i></span>
-                    <span class="l"><b>4</b><i class="bar w30"></i></span>
-                    <span class="l"><b>5</b><i class="bar w80"></i></span>
-                    <span class="l"><b>6</b><i class="bar w50"></i></span>
-                  </div>
-                </div>
-              </div>
+          <h3>Reviews for your team</h3><p>Findings with evidence. You choose what is posted.</p>
+        </li>
+        <li class="tile wide t-night">
+          <div class="art" aria-hidden="true">
+            <div class="mini-night">
+              <svg class="ico moon"><use href="#i-moon"/></svg>
+              <ol><li><time>23:00</time><span>UI tests</span></li><li><time>02:00</time><span>A check failed: fix it</span></li><li><time>06:30</time><span>Morning summary</span></li></ol>
+              <i class="sun"></i>
             </div>
           </div>
-        </figure>
-      </article>
-
-      <article class="feature">
-        <div class="feature-text">
-          <h3>Reviews</h3>
-          <p class="sub">For when you review other people's pull requests.</p>
-          <p>The pull requests waiting for your review, across your repositories, in one queue. Ask an agent to review one, or several at once. Each gets a list of findings: the problem, the lines that show it, and a fix.</p>
-          <p>You read them and choose which become comments. Nothing is posted to GitHub until you press the button.</p>
-        </div>
-        <figure class="wf" role="img" aria-label="A pull request's findings: one marked critical and one marked minor, each with the lines it points at, a tick box, and a button to post the ticked ones as comments.">
-          <div class="pane" aria-hidden="true">
-            <p class="pr-title"><svg class="ico"><use href="#i-pr"/></svg><b>#48</b> Cache the tide table <small>acme/tidewatch</small></p>
-            <div class="names small"><span class="on">Findings 2</span><span>Walkthrough</span><span>Files</span><span>Conversation</span></div>
-            <div class="finding">
-              <i class="tick on"><svg class="ico"><use href="#i-check"/></svg></i>
-              <div><p><span class="sev crit">critical</span><b>The cache is never cleared</b></p><p class="where"><code>src/cache.rs:41</code></p><span class="bar w90"></span><span class="bar w60"></span></div>
-            </div>
-            <div class="finding">
-              <i class="tick"></i>
-              <div><p><span class="sev minor">minor</span><b>An error message without the file's name</b></p><p class="where"><code>src/chart.rs:88</code></p><span class="bar w70"></span></div>
-            </div>
-            <p class="row end"><small>Nothing is posted yet</small><span class="wbtn pri">Post 1 comment</span></p>
+          <h3>Works while you sleep</h3><p>Run a prompt at a set time, or when a check fails.</p>
+        </li>
+        <li class="tile t-quick">
+          <div class="art" aria-hidden="true">
+            <div class="mini-desk"><i class="w1"></i><i class="w2"></i><div class="pop"><i class="bar w70"></i><i class="bar w40"></i></div></div>
+            <div class="keys"><kbd>⌥</kbd><kbd class="space">Space</kbd></div>
           </div>
-        </figure>
-      </article>
-
-      <article class="feature flip">
-        <div class="feature-text">
-          <h3>A browser and phones the agent can see</h3>
-          <p class="sub">So it can check what it built, and so can you.</p>
-          <p>PilotHouse has a browser of its own, and shows Android emulators and phones you plug in. You and the agent look at the same screen, and either of you can click, type and scroll.</p>
-          <p>Draw an arrow or a box on what you see and send it to the chat. That is often quicker than describing a layout bug in words.</p>
-        </div>
-        <figure class="wf" role="img" aria-label="The Preview pane showing a web page with a box drawn round one part and an arrow pointing at it, a button to send it to the chat, and a phone beside it showing the same app.">
-          <div class="pane preview" aria-hidden="true">
-            <div class="browser">
-              <div class="addr"><svg class="ico"><use href="#i-globe"/></svg><code>localhost:5173</code></div>
-              <div class="page">
-                <span class="bar w40 thick"></span>
-                <span class="bar w80"></span><span class="bar w60"></span>
-                <div class="chart hl"><i></i><i></i><i></i><i></i><i></i></div>
-                <span class="arrow"></span>
-                <span class="wbtn pri send-shot">Send to chat</span>
-              </div>
+          <h3>A chat from anywhere</h3><p>One shortcut, over any app.</p>
+        </li>
+        <li class="tile t-undo">
+          <div class="art" aria-hidden="true">
+            <div class="mini-files"><span><svg class="ico"><use href="#i-file"/></svg><i class="bar w50"></i><em class="add">+38</em></span><span><svg class="ico"><use href="#i-file"/></svg><i class="bar w40"></i><em class="add">+4</em></span><span><svg class="ico"><use href="#i-file"/></svg><i class="bar w60"></i><em class="add">+3</em></span></div>
+            <span class="wbtn restore"><svg class="ico"><use href="#i-undo"/></svg>Restore files</span>
+          </div>
+          <h3>Undo a whole turn</h3><p>Every turn has a checkpoint.</p>
+        </li>
+        <li class="tile t-tests">
+          <div class="art" aria-hidden="true">
+            <div class="mini-screens"><span class="s desk"><i class="ok"><svg class="ico"><use href="#i-check"/></svg></i></span><span class="s tab"><i class="ok"><svg class="ico"><use href="#i-check"/></svg></i></span><span class="s ph"><i class="ok"><svg class="ico"><use href="#i-check"/></svg></i></span></div>
+          </div>
+          <h3>Tests in plain words</h3><p>Recorded once. Replayed without AI.</p>
+        </li>
+        <li class="tile t-studio">
+          <div class="art" aria-hidden="true">
+            <div class="mini-shot"><i class="bar w50"></i><span class="secret">ana@example.com</span><i class="box"></i><i class="draw"></i></div>
+          </div>
+          <h3>Pictures, video, slides</h3><p>Mark up, cut, present. Same window.</p>
+        </li>
+        <li class="tile full t-paint">
+          <div class="cap"><h3>Make it yours</h3><p>Eight themes and an accent. Or describe one to an agent.</p></div>
+          <div class="pick">
+            <div class="swatches" role="group" aria-label="Try an accent colour on this page">
+              <button type="button" data-accent="violet" aria-label="Violet" aria-pressed="true"></button>
+              <button type="button" data-accent="blue" aria-label="Blue" aria-pressed="false"></button>
+              <button type="button" data-accent="teal" aria-label="Teal" aria-pressed="false"></button>
+              <button type="button" data-accent="green" aria-label="Green" aria-pressed="false"></button>
+              <button type="button" data-accent="amber" aria-label="Amber" aria-pressed="false"></button>
+              <button type="button" data-accent="pink" aria-label="Pink" aria-pressed="false"></button>
             </div>
-            <div class="device"><i class="notch"></i><span class="bar w60 thick"></span><span class="bar w80"></span><div class="chart small"><i></i><i></i><i></i><i></i></div><span class="bar w50"></span></div>
+            <p class="hint" aria-hidden="true">Pick one. The whole page follows.</p>
           </div>
-        </figure>
-      </article>
-
-      <article class="feature">
-        <div class="feature-text">
-          <h3>Your own Chrome, when a site needs you signed in</h3>
-          <p class="sub">An extension, and a tab group that is the agent's.</p>
-          <p>Some pages only work when you are signed in: a dashboard, an admin screen, your staging site. With PilotHouse's extension, an agent works in your Chrome, in a tab group of its own. It never sees a tab outside that group.</p>
-          <p>The extension's button sends the page, a screenshot or one element to a chat, and records a bug report with its video, console errors and failed requests. In Settings you choose whether agents reach for your Chrome or the built-in browser first.</p>
-        </div>
-        <figure class="wf" role="img" aria-label="A Chrome window with a purple tab group named PilotHouse holding the agent's tab, and the extension's menu open: send this page, a screenshot or an element to a chat, record a bug report, and a switch to let agents use this tab.">
-          <div class="win chrome" aria-hidden="true">
-            <div class="win-bar tabsbar"><i></i><i></i><i></i><span class="group">PilotHouse</span><span class="ctab on"><i class="bar w60"></i></span><span class="ctab"><i class="bar w50"></i></span></div>
-            <div class="toolbar"><span class="addr"><i class="bar w30"></i></span><img src="mark.svg" alt="" width="16" height="16"></div>
-            <div class="page glow">
-              <span class="bar w50 thick"></span><span class="bar w80"></span><span class="bar w70"></span><span class="bar w40"></span>
-              <div class="menu pop">
-                <small>Send to a chat</small>
-                <span>This page<kbd>⌥⇧P</kbd></span>
-                <span>A screenshot<kbd>⌥⇧S</kbd></span>
-                <span>An element<kbd>⌥⇧E</kbd></span>
-                <small>Record</small>
-                <span>A bug report</span>
-                <hr>
-                <span>Let agents use this tab<i class="switch"></i></span>
-              </div>
-            </div>
-          </div>
-        </figure>
-      </article>
-
-      <article class="feature flip">
-        <div class="feature-text">
-          <h3>Work that goes on without you</h3>
-          <p class="sub">Schedules, triggers, and several attempts at once.</p>
-          <p>Give an agent a prompt to run at a set time, or when something happens: files change, a commit lands, a pull request opens, a check fails. The result is a chat like any other, waiting on the Bridge.</p>
-          <p>A task can have a branch and a folder of its own, so two agents never trip over each other. You can also send one prompt to several agents at once and keep the answer you like best.</p>
-        </div>
-        <figure class="wf" role="img" aria-label="A day's schedule: a morning summary at half past eight, a review whenever a pull request opens, a fix whenever checks fail, and UI tests at ten at night.">
-          <div class="pane" aria-hidden="true">
-            <ol class="timeline">
-              <li><time>08:30</time><i class="dot grey"></i><div><b>Morning summary</b><small>Every weekday</small></div></li>
-              <li><time>When a PR opens</time><i class="dot blue"></i><div><b>Review it</b><small>In its own copy of the repository</small></div></li>
-              <li class="hl-row"><time>When checks fail</time><i class="dot amber"></i><div><b>Find out why, and fix it</b><small>Waits for your review</small></div></li>
-              <li><time>22:00</time><i class="dot grey"></i><div><b>Run the UI tests</b><small>On three screen sizes</small></div></li>
-            </ol>
-          </div>
-        </figure>
-      </article>
-    </section>
-
-    <!-- ===== More ===== -->
-    <section class="more" id="more">
-      <header class="section-head">
-        <h2>Also in the box</h2>
-        <p>Smaller things, each of which saves a trip to another program.</p>
-      </header>
-      <ul class="grid">
-        <li><svg class="ico" aria-hidden="true"><use href="#i-kbd"/></svg><h3>Quick chat</h3><p>⌥Space (Alt+Shift+Space on Windows and Linux) opens a small chat window over whatever you are doing. Ask, and go back to it.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-chats"/></svg><h3>Chats without a project</h3><p>Not every question belongs to a folder. Those chats live under <b>Chats</b>, always in the same place.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-undo"/></svg><h3>Undo an agent's turn</h3><p>Before each turn PilotHouse notes how the files stood. <b>Restore files</b> under your message puts them back.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-swap"/></svg><h3>Hand a chat to another agent</h3><p>Stuck with one agent? Continue the same chat with another. It gets what was said and done so far.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-test"/></svg><h3>UI tests in plain words</h3><p>An agent records a test by doing it once. After that it replays without any AI, on several screen sizes, and compares the screens.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-file"/></svg><h3>Open almost any file</h3><p>Markdown as a document you can edit, images, video, PDF, tables, notebooks, databases, and logs of several gigabytes.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-term"/></svg><h3>Agents in a terminal too</h3><p>Prefer an agent's own terminal interface? Run it in a workspace terminal. PilotHouse still follows whether it is working or waiting.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-image"/></svg><h3>Studio</h3><p>Mark up a screenshot and blur what should not be shared, cut the waiting out of a screen recording, and make slide decks that open in PowerPoint.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg><h3>Search every chat</h3><p>Find the conversation where that odd bug was explained three weeks ago, in any project.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-chart"/></svg><h3>Usage</h3><p>How much each agent has used, per day and per project, and how close you are to its limits.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-server"/></svg><h3>Code on a network drive</h3><p>If your code sits on a server's share, Git and terminals run on that server over SSH, next to the files.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-swatch"/></svg><h3>Themes</h3><p>Eight themes and an accent colour. Or describe the look you want and let an agent build the theme while you watch.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-clock"/></svg><h3>A to-do for you</h3><p>An agent cannot sign in for you or plug in a phone. It leaves you a to-do with a reminder instead, in the inbox.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-wrench"/></svg><h3>Small utilities</h3><p>JSON, JWT, hashes, times, cron, regex, SQLite. They work offline, for you and for agents.</p></li>
-        <li><svg class="ico" aria-hidden="true"><use href="#i-gear"/></svg><h3>Your organisation's own build</h3><p>Set a name, icons and which features are on, add views of your own, and keep merging new releases.</p></li>
+        </li>
       </ul>
     </section>
 
-    <!-- ===== Yours ===== -->
-    <section class="yours" id="yours">
-      <div class="yours-text">
+    <!-- ===== Night ends: nothing leaves your computer ===== -->
+    <section class="dawn" id="yours">
+      <header class="section-head center">
         <p class="eyebrow">Privacy</p>
-        <h2>Everything stays on your computer</h2>
-        <p>PilotHouse is a program on your machine and nothing else. It has no account to create, no server of ours to talk to, and it sends no usage data anywhere.</p>
-        <ul class="plain checks">
-          <li><svg class="ico ok" aria-hidden="true"><use href="#i-check"/></svg><span>Your chats, settings and history are files in a folder on your disk. Settings shows where.</span></li>
-          <li><svg class="ico ok" aria-hidden="true"><use href="#i-check"/></svg><span>Each agent talks to its own service, with the sign-in you gave that agent. PilotHouse does not sit in between.</span></li>
-          <li><svg class="ico ok" aria-hidden="true"><use href="#i-check"/></svg><span>GitHub is reached only if you add an account, and only with the token you paste.</span></li>
-          <li><svg class="ico ok" aria-hidden="true"><use href="#i-check"/></svg><span>The Chrome extension asks for no site at all. It reads a tab only when you point at it.</span></li>
-          <li><svg class="ico ok" aria-hidden="true"><use href="#i-check"/></svg><span>The source is public, under the Apache 2.0 licence. You can read what it does, or build it yourself.</span></li>
-        </ul>
-      </div>
-      <figure class="wf" role="img" aria-label="A drawing of your computer holding PilotHouse, your code, Git and the agent programs. Lines leave it only to each agent's own service and to GitHub if you add it. There is no line to any PilotHouse server, because there is none.">
+        <h2 data-reveal>No account. No server. No telemetry.</h2>
+        <p>Everything stays on your computer.</p>
+      </header>
+      <figure class="wf" role="img" aria-label="Your computer holds PilotHouse, your code and the agent programs. Lines leave it only to each agent's own service and to GitHub if you add it. There is no line to a PilotHouse server, because there is none.">
         <div class="map" aria-hidden="true">
           <div class="machine">
             <small>Your computer</small>
-            <div class="inside">
-              <span class="node main"><img src="mark.svg" alt="" width="18" height="18">PilotHouse</span>
-              <span class="node"><svg class="ico"><use href="#i-folder"/></svg>Your code</span>
-              <span class="node"><svg class="ico"><use href="#i-branch"/></svg>Git</span>
-              <span class="node"><svg class="ico"><use href="#i-term"/></svg>Agent programs</span>
-            </div>
+            <span class="node main"><img src="mark.svg" alt="" width="18" height="18">PilotHouse</span>
+            <span class="node"><svg class="ico"><use href="#i-folder"/></svg>Your code and chats</span>
+            <span class="node"><svg class="ico"><use href="#i-term"/></svg>Your agents</span>
           </div>
+          <div class="wires"><i class="wire w-a"><b></b></i><i class="wire w-b"><b></b></i><i class="wire w-c"></i></div>
           <div class="outside">
-            <span class="node line"><svg class="ico"><use href="#i-globe"/></svg>Each agent's own service</span>
-            <span class="node line dashed"><svg class="ico"><use href="#i-pr"/></svg>GitHub, if you add it</span>
-            <span class="node none"><svg class="ico"><use href="#i-server"/></svg>A PilotHouse server<b>There is none</b></span>
+            <span class="node"><svg class="ico"><use href="#i-globe"/></svg>Each agent's own service</span>
+            <span class="node"><svg class="ico"><use href="#i-pr"/></svg>GitHub, if you add it</span>
+            <span class="node none"><svg class="ico"><use href="#i-server"/></svg>A PilotHouse server<b>does not exist</b></span>
           </div>
         </div>
       </figure>
+      <p class="plain-line">PilotHouse has no AI of its own. It works with the agents you already use.</p>
+      <div class="sun" aria-hidden="true"></div>
     </section>
 
-    <!-- ===== Honest ===== -->
-    <section class="honest" id="honest">
-      <div class="prose">
-        <h2>What it is not</h2>
-        <p>PilotHouse is not an agent and has no model of its own. It works with the agent programs you install and sign in to yourself: Claude Code, Codex, Gemini CLI, Antigravity or Cline. Their makers set what those cost.</p>
-        <p>It is also young. It does not show iPhone simulators yet, only Android. The downloads are not code-signed yet, so macOS and Windows ask you to confirm the first time you open it.</p>
-        <p>It is one native program written in Rust, not a web page in a wrapper, so it starts fast and stays light with several projects open.</p>
-      </div>
-    </section>
-
-    <!-- ===== Download ===== -->
-    <section class="download" id="download">
-      <img class="download-mark" src="mark.svg" alt="" width="72" height="72">
-      <h2>Download PilotHouse</h2>
-      <p class="lead">Free. No sign-up. Install the agents you want to use, sign in to them, and start a chat.</p>
+    <!-- ===== Day: download ===== -->
+    <section class="download day" id="download">
+      <div class="beacon" aria-hidden="true"><i></i><i></i><i></i><img src="mark.svg" alt="" width="84" height="84"></div>
+      <h2>Take the helm.</h2>
+      <p class="lead">Free and open source. No sign-up.</p>
       <div class="downloads">
         <a class="dl" data-os="mac" href="https://github.com/LibreGuild/PilotHouse/releases/latest/download/PilotHouse-macOS-universal.dmg">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 3c0 2-1.6 3.5-3.4 3.5C12.4 4.6 14 3 16 3zM19 16.5c-.6 1.4-1.9 3.5-3.4 3.5-1.3 0-1.6-.8-3.2-.8s-2 .8-3.2.8C7.4 20 5 16.5 5 13.2 5 10 7 8.4 8.9 8.4c1.3 0 2.2.8 3.2.8s2.1-.9 3.6-.8c.6 0 2.3.2 3.4 1.8-3 1.8-2.4 5.5-.1 6.3z"/></svg>
-          <span class="os">macOS</span><span class="sub">Apple silicon and Intel · macOS 11 or later</span>
+          <span class="os">macOS</span><span class="sub">Apple silicon and Intel</span>
         </a>
         <a class="dl" data-os="windows" href="https://github.com/LibreGuild/PilotHouse/releases/latest/download/PilotHouse-Windows-Setup-x64.exe">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5 10.5 4.5v7H3zM12 4.3 21 3v8.5h-9zM3 13h7.5v7L3 19zM12 13h9v8l-9-1.3z"/></svg>
-          <span class="os">Windows</span><span class="sub">Installer · Windows 10 or 11, x64</span>
+          <span class="os">Windows</span><span class="sub">Installer, x64</span>
         </a>
         <a class="dl" data-os="linux" href="https://github.com/LibreGuild/PilotHouse/releases/latest/download/PilotHouse-Linux-x86_64.AppImage">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c-2 0-3 1.8-3 4 0 1.5-.6 2.6-1.7 4.1C6 13 5 15 6 17c.6 1.2 2 1.8 3 1.4.8-.3 1.6.6 3 .6s2.2-.9 3-.6c1 .4 2.4-.2 3-1.4 1-2 0-4-1.3-5.9C15.6 9.6 15 8.5 15 7c0-2.2-1-4-3-4z"/></svg>
-          <span class="os">Linux</span><span class="sub">AppImage · x86-64 (a .deb is on the releases page)</span>
+          <span class="os">Linux</span><span class="sub">AppImage, x86-64</span>
         </a>
       </div>
-      <p class="note">The builds are not code-signed yet. On macOS, choose <em>Open Anyway</em> in System Settings → Privacy &amp; Security. On Windows, choose <em>More info → Run anyway</em>. Every file has a SHA-256 checksum and build provenance on the <a href="https://github.com/LibreGuild/PilotHouse/releases/latest">releases page</a>.</p>
+      <p class="note">Not code-signed yet: on macOS choose <em>Open Anyway</em> in Privacy &amp; Security, on Windows <em>More info → Run anyway</em>. Checksums and every other build are on the <a href="https://github.com/LibreGuild/PilotHouse/releases/latest">releases page</a>.</p>
       <!-- The Release workflow copies every release to these mirrors. -->
       <details class="mirrors">
-        <summary>Mirrors, if GitHub is slow or blocked where you are</summary>
+        <summary>Mirrors</summary>
         <ul>
           <li>
             <span>Mirror</span>
@@ -589,14 +477,14 @@
     </section>
   </main>
 
-  <footer class="footer">
+  <footer class="footer day">
     <div class="brand"><img src="mark.svg" alt="" width="22" height="22"><span>PilotHouse</span></div>
     <ul>
-      <li><a href="https://github.com/LibreGuild/PilotHouse">Source on GitHub</a></li>
+      <li><a href="https://github.com/LibreGuild/PilotHouse">Source</a></li>
       <li><a href="https://github.com/LibreGuild/PilotHouse/blob/main/docs/user-guide.md">User guide</a></li>
       <li><a href="https://github.com/LibreGuild/PilotHouse/blob/main/docs/security.md">Security</a></li>
       <li><a href="https://github.com/LibreGuild/PilotHouse/blob/main/CHANGELOG.md">What changed</a></li>
-      <li><a href="https://github.com/LibreGuild/PilotHouse/releases">All releases</a></li>
+      <li><a href="https://github.com/LibreGuild/PilotHouse/releases">Releases</a></li>
     </ul>
     <p>Apache 2.0 · Made by LibreGuild</p>
   </footer>
