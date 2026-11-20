@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
@@ -19,7 +20,7 @@ use ph_media::Frame;
 use crate::edit::{ImageEdit, MAX_PIXELS, MAX_SIDE};
 use crate::encode::{self, Encoded, ExportSettings, Format};
 use crate::history::History;
-use crate::render::{Quality, render};
+use crate::render::{Quality, render, render_within};
 
 /// The longest side of the copy previews are made from: sharp on a large
 /// high-density screen, small enough to redo on every change.
@@ -85,6 +86,25 @@ pub enum Estimate {
     Failed(String),
 }
 
+/// The original written over.
+pub struct Replaced {
+    pub encoded: Encoded,
+    /// The picture was changed while the file was being written: those
+    /// changes are not in the file, and stay in the editor, not yet saved.
+    pub changed_since: bool,
+}
+
+/// Raised when dropped, so work on another thread sees that the task it
+/// belongs to was let go and stops at its next step.
+#[derive(Default)]
+struct Stop(Arc<AtomicBool>);
+
+impl Drop for Stop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 pub struct ImageDocument {
     path: PathBuf,
     /// The workspace the picture was opened from; its agents edit it.
@@ -109,6 +129,9 @@ pub struct ImageDocument {
     /// The saved size is wanted (Export is open): working it out renders
     /// and encodes the whole picture, so only then.
     estimating: bool,
+    /// The full result the last estimate was made from, with its edit:
+    /// while Export is open, a change of format or quality only encodes.
+    rendered: Option<(ImageEdit, Arc<RgbaImage>)>,
     /// When the user or an agent last used it: agents edit the latest.
     pub(crate) used: Instant,
 }
@@ -134,6 +157,7 @@ impl ImageDocument {
             estimate: None,
             _estimate: None,
             estimating: false,
+            rendered: None,
             used: Instant::now(),
         };
         this.load(cx);
@@ -142,6 +166,8 @@ impl ImageDocument {
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
+        // Made from the original that is being read again.
+        self.rendered = None;
         let path = self.path.clone();
         let read = cx.background_spawn(async move { read(&path) });
         cx.spawn(async move |this, cx| {
@@ -209,6 +235,7 @@ impl ImageDocument {
                 self.schedule_estimate(cx);
             } else {
                 self._estimate = None;
+                self.rendered = None;
             }
             cx.notify();
         }
@@ -368,7 +395,8 @@ impl ImageDocument {
         let made = cx.background_spawn({
             let edit = edit.clone();
             async move {
-                let image = render(&small, size, &edit, Quality::Preview);
+                let image =
+                    render_within(&small, size, &edit, Quality::Preview, Some(PREVIEW_SIDE));
                 let frame = Frame::from_rgba_slice(image.width(), image.height(), image.as_raw());
                 (Arc::new(image), frame)
             }
@@ -412,13 +440,38 @@ impl ImageDocument {
         };
         let (full, size) = (original.full.clone(), original.size);
         let (edit, settings, revision) = (self.edit.clone(), self.export.clone(), self.revision);
+        let made = self
+            .rendered
+            .as_ref()
+            .filter(|(of, _)| *of == edit)
+            .map(|(_, image)| image.clone());
         self.estimate = Some((revision, Estimate::Working));
         self._estimate = Some(cx.spawn(async move |this, cx| {
+            // Dropped with this task, when a newer estimate replaces it or
+            // Export closes: the encoding under way then stops.
+            let stop = Stop::default();
             cx.background_executor().timer(ESTIMATE_DELAY).await;
+            let image = match made {
+                Some(image) => image,
+                None => {
+                    let image = cx
+                        .background_spawn({
+                            let edit = edit.clone();
+                            async move { Arc::new(render(&full, size, &edit, Quality::Full)) }
+                        })
+                        .await;
+                    _ = this.update(cx, |this, _| {
+                        if this.estimating {
+                            this.rendered = Some((edit, image.clone()));
+                        }
+                    });
+                    image
+                }
+            };
+            let stopped = stop.0.clone();
             let encoded = cx
                 .background_spawn(async move {
-                    let image = render(&full, size, &edit, Quality::Full);
-                    encode::encode(&image, &settings)
+                    encode::encode_until(&image, &settings, &|| stopped.load(Ordering::Relaxed))
                 })
                 .await;
             _ = this.update(cx, |this, cx| {
@@ -462,7 +515,7 @@ impl ImageDocument {
             self.edit.clone()
         };
         cx.background_spawn(async move {
-            let image = render(&small, size, &edit, Quality::Preview);
+            let image = render_within(&small, size, &edit, Quality::Preview, Some(PREVIEW_SIDE));
             let full = if original {
                 edit.turned_size(size)
             } else {
@@ -515,7 +568,7 @@ impl ImageDocument {
 
     /// Writes the result over the original, in its own format, and starts
     /// again from it (the edit is now in its pixels).
-    pub fn replace_original(&mut self, cx: &mut Context<Self>) -> Task<Result<Encoded>> {
+    pub fn replace_original(&mut self, cx: &mut Context<Self>) -> Task<Result<Replaced>> {
         let format = self
             .original()
             .and_then(|original| original.format)
@@ -539,18 +592,34 @@ impl ImageDocument {
             format,
             ..self.export.clone()
         };
+        let written = self.edit.clone();
         let saving = self.save(self.path.clone(), settings, true, cx);
         cx.spawn(async move |this, cx| {
             let encoded = saving.await?;
-            this.update(cx, |this, cx| {
+            let changed_since = this.update(cx, |this, cx| {
+                // Changed while the file was being written (by hand or by
+                // an agent): starting again from the file would drop those
+                // changes for good. They stay, on the original still held,
+                // as changes not saved (`saved` is the edit written).
+                if this.edit != written {
+                    return true;
+                }
+                // The texture Compare showed it with goes with it.
+                if let State::Ready(original) = &this.state {
+                    this.stale.push(original.frame.render_image());
+                }
                 this.edit = ImageEdit::default();
                 this.saved = ImageEdit::default();
                 this.history.clear();
                 this.state = State::Loading;
                 this.load(cx);
                 cx.notify();
+                false
             })?;
-            Ok(encoded)
+            Ok(Replaced {
+                encoded,
+                changed_since,
+            })
         })
     }
 }
@@ -574,14 +643,35 @@ fn write(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
     if !replace && path.exists() {
         bail!("{} exists already", path.display());
     }
+    // A link is followed: the file it leads to is replaced and the link
+    // stays one (renaming over the link would leave that file as it was).
+    // A link that leads nowhere is replaced itself.
+    let linked = std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+        .then(|| dunce::canonicalize(path).ok())
+        .flatten();
+    let path = linked.as_deref().unwrap_or(path);
     let folder = path.parent().context("the file has no folder")?;
     let name = path
         .file_name()
         .context("the file has no name")?
         .to_string_lossy();
-    let temporary = folder.join(format!(".{name}.pilothouse-{}", std::process::id()));
+    // Numbered, so two saves of one file at once never share a file.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let temporary = folder.join(format!(
+        ".{name}.pilothouse-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(&temporary, bytes)
         .with_context(|| format!("could not write in {}", folder.display()))?;
+    // The new file is as private (or as open) as the one it replaces. Not
+    // on Windows: all there is to copy is "read-only", and such a file is
+    // not replaced anyway.
+    #[cfg(unix)]
+    if let Ok(old) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(&temporary, old.permissions());
+    }
     std::fs::rename(&temporary, path).map_err(|err| {
         let _ = std::fs::remove_file(&temporary);
         anyhow::anyhow!("could not save {}: {err}", path.display())
@@ -694,6 +784,25 @@ mod tests {
         write(&path, b"two", true).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"two");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no leftovers");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writing_to_a_link_replaces_the_file_it_leads_to() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("ph-studio-link-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        let real = dir.join("assets").join("logo.png");
+        std::fs::write(&real, b"old").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("logo.png");
+        std::os::unix::fs::symlink("assets/logo.png", &link).unwrap();
+        write(&link, b"new", true).unwrap();
+        assert_eq!(std::fs::read(&real).unwrap(), b"new");
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "as private as it was");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

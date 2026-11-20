@@ -79,7 +79,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "studio_export",
-        description: "Saves what is open in Studio as a new file, as its export settings say (the format follows the path's extension). `path` is relative to the file's folder; an existing file is replaced only with overwrite: true. A picture can be written over its original with replace_original: true, only when the user asked; a video never is. A video's export can take a while; the user sees its progress.",
+        description: "Saves what is open in Studio as a new file, as its export settings say (the format follows the path's extension). `path` is relative to the file's folder and must stay inside that folder or one of the workspace's folders (anywhere else is refused; the user can save elsewhere with Export); an existing file is replaced only with overwrite: true. A picture can be written over its original with replace_original: true, only when the user asked; a video never is. A video's export can take a while; the user sees its progress.",
         schema: || {
             json!({ "type": "object", "properties": {
                 "path": { "type": "string" },

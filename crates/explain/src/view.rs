@@ -105,6 +105,11 @@ pub struct ExplanationView {
     busy: bool,
     /// The last one did not work: why.
     failed: Option<String>,
+    /// Something changed since the last look: looked at again when the view
+    /// is drawn, so a hidden one costs nothing.
+    stale: bool,
+    /// A look is running: a newer one waits for it, then starts once.
+    looking: bool,
     _load: Option<Task<()>>,
     _work: Option<Task<()>>,
     _written: Subscription,
@@ -120,32 +125,52 @@ impl ExplanationView {
         let written = cx.subscribe(&explanations, |this, _, _: &ExplanationWritten, cx| {
             this.reload(cx)
         });
-        let mut view = Self {
+        Self {
             store,
             root,
             target,
             state: State::Loading,
             busy: false,
             failed: None,
+            stale: true,
+            looking: false,
             _load: None,
             _work: None,
             _written: written,
-        };
-        view.reload(cx);
-        view
+        }
     }
 
     pub fn target(&self) -> &Target {
         &self.target
     }
 
-    /// Looks again: the files changed, or an explanation was written.
+    /// Looks again: the files changed, or an explanation was written. The
+    /// look itself waits until the view is drawn: the Git panel reads the
+    /// work as often as an agent writes it, mostly while no explanation is
+    /// on screen, and one look hashes every changed file.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.stale = true;
+        cx.notify();
+    }
+
+    /// Starts the look a [`Self::reload`] asked for, when none is running
+    /// (called while drawing; the look runs on a background thread).
+    fn look_when_stale(&mut self, cx: &mut Context<Self>) {
+        if !self.stale || self.looking {
+            return;
+        }
+        self.stale = false;
+        self.looking = true;
         let (store, root, target) = (self.store.clone(), self.root.clone(), self.target.clone());
         let look = cx.background_spawn(async move { look(&store, &root, &target) });
         self._load = Some(cx.spawn(async move |this, cx| {
             let looked = look.await;
-            _ = this.update(cx, |this, cx| this.show(looked, cx));
+            _ = this.update(cx, |this, cx| {
+                this.looking = false;
+                // The last word goes to the newest look (`show` redraws, and
+                // a reload that came meanwhile starts it).
+                this.show(looked, cx);
+            });
         }));
     }
 
@@ -436,6 +461,7 @@ impl ExplanationView {
 
 impl Render for ExplanationView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.look_when_stale(cx);
         let body = match &self.state {
             State::Loading => div().into_any_element(),
             State::Missing { writing } => self.render_missing(*writing, cx).into_any_element(),
@@ -455,7 +481,6 @@ impl Render for ExplanationView {
 /// and files: not for the UI thread.
 fn look(store: &Store, root: &Path, target: &Target) -> Looked {
     let top = ph_git::content::top(root).unwrap_or_else(|_| root.to_path_buf());
-    let pending = ph_git::content::pending(&top).unwrap_or_default();
     let key = top.to_string_lossy();
     let writing = store
         .latest_explanation(&key, target.key())
@@ -471,6 +496,7 @@ fn look(store: &Store, root: &Path, target: &Target) -> Looked {
     };
     let found = match target {
         Target::Changes => {
+            let pending = ph_git::content::pending(&top).unwrap_or_default();
             let work: Vec<(String, String)> = pending
                 .iter()
                 .filter(|(path, _)| !is_explanation_file(path))
@@ -518,13 +544,30 @@ fn look(store: &Store, root: &Path, target: &Target) -> Looked {
     };
     if let Some(found) = &found {
         looked.uncommitted = match &found.source {
-            Source::Shared { path } => pending.iter().any(|(file, _)| file == path),
+            Source::Shared { path } => is_pending(&top, path),
             Source::Local { .. } => false,
         };
         looked.text = crate::linked(&top, &found.markdown);
     }
     looked.found = found;
     looked
+}
+
+/// Whether `path` (from `top`) is changed or new in the working tree: one
+/// path asked about, not every changed file hashed.
+fn is_pending(top: &Path, path: &str) -> bool {
+    ph_git::git(
+        top,
+        &[
+            "--literal-pathspecs",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            path,
+        ],
+    )
+    .is_ok_and(|status| !status.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -706,6 +749,13 @@ mod tests {
         });
         settle(cx);
         assert_eq!(looked(&of_commit, cx).unwrap().1, 0);
+        // One that is not drawn does not look at Git at all.
+        let hidden = cx.new(|cx| ExplanationView::new(store, dir.clone(), Target::Changes, cx));
+        hidden.update(cx, |view, cx| view.reload(cx));
+        settle(cx);
+        hidden.read_with(cx, |view, _| {
+            assert!(view.stale && !view.looking && matches!(view.state, State::Loading))
+        });
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

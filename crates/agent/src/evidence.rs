@@ -36,7 +36,7 @@ impl Evidence {
     }
 }
 
-/// Parts of a command line that say it runs tests.
+/// Commands that run tests: a program, or a program and what it is told.
 const TEST_COMMANDS: &[&str] = &[
     "cargo test",
     "cargo nextest",
@@ -66,9 +66,208 @@ const TEST_COMMANDS: &[&str] = &[
     "xcodebuild test",
 ];
 
+/// Programs that run the command named after them (and after their own
+/// options): `npx vitest`, `uv run pytest`, `python -m pytest`.
+const WRAPPERS: &[&[&str]] = &[
+    &["pnpm", "exec"],
+    &["pnpm", "dlx"],
+    &["pnpm", "run"],
+    &["npm", "exec"],
+    &["npm", "run"],
+    &["yarn", "exec"],
+    &["yarn", "dlx"],
+    &["yarn", "run"],
+    &["bun", "run"],
+    &["bun", "x"],
+    &["uv", "run"],
+    &["poetry", "run"],
+    &["pipenv", "run"],
+    &["pdm", "run"],
+    &["hatch", "run"],
+    &["rye", "run"],
+    &["bundle", "exec"],
+    &["python", "-m"],
+    &["python3", "-m"],
+    &["py", "-m"],
+    &["doppler", "run"],
+    &["mise", "exec"],
+    &["op", "run"],
+    &["docker", "compose", "exec"],
+    &["docker", "compose", "run"],
+    &["docker", "exec"],
+    &["docker", "run"],
+    &["docker-compose", "exec"],
+    &["docker-compose", "run"],
+    &["sudo"],
+    &["doas"],
+    &["time"],
+    &["env"],
+    &["nice"],
+    &["nohup"],
+    &["command"],
+    &["exec"],
+    &["npx"],
+    &["bunx"],
+    &["pnpx"],
+    &["uvx"],
+    &["dotenv"],
+    &["xvfb-run"],
+    &["timeout"],
+    &["gtimeout"],
+    // A package's own program: `pnpm vitest`, `yarn jest`.
+    &["pnpm"],
+    &["yarn"],
+];
+
+/// Wrappers that take one word of their own before the command: how
+/// long, or where it runs.
+const WRAPPERS_WITH_A_WORD: &[&str] = &["timeout", "gtimeout", "docker", "docker-compose"];
+
+/// Shells, which run the script after `-c`.
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "fish"];
+
+/// The commands of a shell line, each as its words: split where one
+/// command ends and the next starts (`&&`, `||`, `;`, `|`, brackets, a
+/// line end), quotes taken off. What is in quotes stays one word, so a
+/// command that only names a test tool in a message or a pattern is not
+/// taken apart there.
+fn commands_in(line: &str) -> Vec<Vec<String>> {
+    let mut commands = vec![Vec::new()];
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(open) if c == open => quote = None,
+            Some('"') if c == '\\' => word.extend(chars.next()),
+            Some(_) => word.push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                in_word = true;
+            }
+            None if c == '\\' => {
+                word.extend(chars.next());
+                in_word = true;
+            }
+            None if c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')' | '{' | '}') => {
+                if std::mem::take(&mut in_word)
+                    && let Some(command) = commands.last_mut()
+                {
+                    command.push(std::mem::take(&mut word));
+                }
+                if c != ' ' && c != '\t' {
+                    commands.push(Vec::new());
+                }
+            }
+            None => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word && let Some(command) = commands.last_mut() {
+        command.push(word);
+    }
+    commands
+}
+
+/// Whether the command `words` runs tests: by the program it starts, not
+/// by what it mentions (`pip install pytest`, `cat jest.config.js` and
+/// `git commit -m "make test green"` run none).
+fn runs_tests(mut words: &[String]) -> bool {
+    loop {
+        // Variables set for the command, and the options of a wrapper
+        // taken off before.
+        while let Some((first, rest)) = words.split_first()
+            && (first.starts_with('-') || is_assignment(first))
+        {
+            words = rest;
+        }
+        let Some((program, rest)) = words.split_first() else {
+            return false;
+        };
+        // By its name, wherever it is started from (`./gradlew`,
+        // `node_modules/.bin/jest`).
+        let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+        if TEST_COMMANDS
+            .iter()
+            .any(|test| is_command(test, name, rest))
+        {
+            return true;
+        }
+        if SHELLS.contains(&name) {
+            let script = rest
+                .iter()
+                .skip_while(|word| !(word.starts_with('-') && word.ends_with('c')))
+                .nth(1);
+            return script.is_some_and(|script| is_test_command(script));
+        }
+        let Some(wrapper) = WRAPPERS.iter().find(|wrapper| {
+            wrapper[0] == name
+                && rest.len() + 1 >= wrapper.len()
+                && wrapper[1..] == rest[..wrapper.len() - 1]
+        }) else {
+            return false;
+        };
+        words = &words[wrapper.len()..];
+        if WRAPPERS_WITH_A_WORD.contains(&wrapper[0]) {
+            while let Some((first, rest)) = words.split_first()
+                && (first.starts_with('-') || is_assignment(first))
+            {
+                words = rest;
+            }
+            words = words.get(1..).unwrap_or_default();
+        }
+    }
+}
+
+/// `NAME=value`, as set before a command.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Whether the program `name` with the words `rest` after it is the test
+/// command `test` (`cargo test`): its words in their order, with options
+/// allowed before the last (`cargo -q test`). The last may name one of
+/// several scripts (`npm run test:unit`).
+fn is_command(test: &str, name: &str, rest: &[String]) -> bool {
+    let mut wanted = test.split(' ');
+    if wanted.next() != Some(name) {
+        return false;
+    }
+    let mut rest = rest.iter().filter(|word| !word.starts_with(['-', '+']));
+    wanted.all(|wanted| {
+        rest.next().is_some_and(|word| {
+            word.strip_prefix(wanted)
+                .is_some_and(|after| after.is_empty() || after.starts_with(':'))
+        })
+    })
+}
+
 fn is_test_command(command: &str) -> bool {
-    let command = command.to_lowercase();
-    TEST_COMMANDS.iter().any(|test| command.contains(test))
+    commands_in(&command.to_lowercase())
+        .iter()
+        .any(|words| runs_tests(words))
+}
+
+/// Whether the call took a screenshot: a tool named for it, not a command
+/// or a file read that has the word in it (`ls screenshots/`), unless it
+/// gave a picture back.
+fn took_screenshot(tool: &ToolEntry) -> bool {
+    tool.title.to_lowercase().contains("screenshot")
+        && (!tool.images.is_empty()
+            || !matches!(
+                tool.kind,
+                ToolKindLabel::Execute
+                    | ToolKindLabel::Read
+                    | ToolKindLabel::Search
+                    | ToolKindLabel::Edit
+                    | ToolKindLabel::Delete
+                    | ToolKindLabel::Move
+            ))
 }
 
 /// The number before each `word` in `text` ("14 passed", "0 failed;"),
@@ -121,7 +320,7 @@ pub fn of(entries: &[Entry]) -> Evidence {
         if matches!(tool.status, ToolStatus::Pending | ToolStatus::Running) {
             continue;
         }
-        if tool.title.to_lowercase().contains("screenshot") {
+        if took_screenshot(tool) {
             evidence.screenshots += 1;
             continue;
         }
@@ -210,6 +409,78 @@ mod tests {
         assert_eq!(count(jest, "passed"), Some(14));
         assert_eq!(count(jest, "failed"), Some(1));
         assert_eq!(count("ok  \tshop/cart\t0.31s", "passed"), None);
+    }
+
+    #[test]
+    fn a_command_that_only_names_a_test_tool_ran_no_tests() {
+        for command in [
+            "cargo test -p shop",
+            "cd crates/shop && RUST_BACKTRACE=1 cargo test 2>&1 | tail -20",
+            "cargo -q nextest run",
+            "npm run test:unit",
+            "pnpm vitest run",
+            "npx --yes jest src",
+            "yarn test --watch=false",
+            "python3 -m pytest -q",
+            "uv run --frozen pytest",
+            ".venv/bin/pytest tests",
+            "./gradlew test",
+            "bundle exec rspec",
+            "timeout 300 go test ./...",
+            "bash -lc 'cargo test'",
+            "docker compose exec web pytest",
+            "(cd web; npm test)",
+            "make -j4 check",
+        ] {
+            assert!(is_test_command(command), "{command}");
+        }
+        for command in [
+            "pip install pytest",
+            "npm install -D vitest",
+            "pnpm add jest",
+            "cat jest.config.js",
+            "rg \"cargo test\" .github",
+            "git commit -m \"make test green\"",
+            "git commit -m 'fix; pytest now passes'",
+            "cat docs/perspective.md",
+            "echo \"then run: npm test\"",
+            "ls tests && cargo build",
+            "cargo testing",
+            "which pytest",
+        ] {
+            assert!(!is_test_command(command), "{command}");
+        }
+        // Such a command is a command run, not a test that passed.
+        let evidence = of(&[run("pip install pytest", ToolStatus::Done, "")]);
+        assert!(evidence.tests.is_empty());
+        assert_eq!(evidence.commands, 1);
+    }
+
+    #[test]
+    fn a_screenshot_is_a_tool_that_took_one() {
+        let tool = |title: &str, kind, image: bool| {
+            let Entry::Tool(mut tool) = run(title, ToolStatus::Done, "") else {
+                unreachable!()
+            };
+            tool.kind = kind;
+            if image {
+                tool.images.push("shot.png".into());
+            }
+            Entry::Tool(tool)
+        };
+        let entries = [
+            tool("browser_screenshot", ToolKindLabel::Other, false),
+            tool("ls screenshots/", ToolKindLabel::Execute, false),
+            tool("Read docs/screenshot.png", ToolKindLabel::Read, false),
+            tool(
+                "adb exec-out screencap # screenshot",
+                ToolKindLabel::Execute,
+                true,
+            ),
+        ];
+        let evidence = of(&entries);
+        assert_eq!(evidence.screenshots, 2);
+        assert_eq!(evidence.commands, 1);
     }
 
     #[test]

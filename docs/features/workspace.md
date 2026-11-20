@@ -84,7 +84,7 @@ copy = [".env", ".env.local"]  # files copied from the main checkout
 share = ["node_modules"]       # folders linked to the main checkout's
 ```
 
-The setup sees `PILOTHOUSE_PORT`, a port of the task's own (4100, 4110, …) for its dev server. *Finish task* (the workspace's menu, ⌘K) removes the worktree and the workspace after asking: files PilotHouse copied in go if unchanged and links go; anything else not committed makes Git refuse, and the task stays. Its branch is deleted too once merged (`git branch -d`), else kept. When the branch has been merged into its base, the status bar offers **Merged · Finish task**. Which workspaces are tasks is kept in the `workspace.tasks` setting.
+The setup sees `PILOTHOUSE_PORT`, a port of the task's own (4100, 4110, …) for its dev server. Only your own repository's `pilothouse.toml` is followed: for a task made from a copy PilotHouse made (a GitHub clone, or a task's folder, which can hold a pull request author's files) nothing is copied, linked or run, and a notice shows the setup command to read and run by hand ([security.md](../security.md#reviews-clones)). *Finish task* (the workspace's menu, ⌘K) removes the worktree and the workspace after asking: files PilotHouse copied in go if unchanged and links go; anything else not committed makes Git refuse, and the task stays. Its branch is deleted too once merged (`git branch -d`), else kept. When the branch has been merged into its base, the status bar offers **Merged · Finish task**. Which workspaces are tasks is kept in the `workspace.tasks` setting.
 
 ## Status bar
 
@@ -183,7 +183,7 @@ Stored in the `settings` table:
 `open.rs`, `file_window.rs`, `shell_integration.rs`.
 
 - **`pilothouse <path>...`**: a folder opens as a workspace (the listed one if it is already there), a file in a workspace's folder opens in its editor, and any other file opens in a **window of its own**: just the file in the editor (or the large-file viewer), like a notepad, with **Open folder** to make its folder a workspace. What the file's kind offers is in a bar under the title: **Edit** for a picture, a video or a PowerPoint deck (Studio, with no workspace needed), the Markdown views, *Format* for JSON, *Open in Default App*. Opening the same file again focuses its window.
-- **One app at a time**: a second launch with paths sends them to the running app over the control socket (`app.open`) and exits, so there is never a second copy of the window or the agents.
+- **One app at a time**: a second launch with paths sends them to the running app over the control socket (`app.open`) and exits, so there is never a second copy of the window or the agents. The place of the one app is taken first of all, with a lock file beside the database (`pilothouse.lock`), so two launches at the same moment (several files opened at once from Explorer, a double click) cannot both become the app: the later one waits for the first to answer, hands its paths over and exits.
 - **File manager**: *Settings → Features → System* adds "Open with PilotHouse" for the current user only. Windows: Explorer verbs under `HKCU\Software\Classes` for folders, folder backgrounds and files (on Windows 11 under *Show more options*). Linux: a `.desktop` entry in `~/.local/share/applications` (folders and text files). macOS: Finder's *Open With* and `open -a PilotHouse <path>` come from the app bundle's document types; the app receives them as file URLs (`on_open_urls`).
 
 ## Adding a tool

@@ -754,7 +754,10 @@ fn screen_lines(
             None
         };
 
-        let ch = if cell.flags.contains(Flags::HIDDEN) || cell.c == '\0' {
+        // alacritty keeps a tab as `\t` in the first cell it covers; the
+        // shaper would give it a tab's width, and shift the rest of the line
+        // off the cells it is in.
+        let ch = if cell.flags.contains(Flags::HIDDEN) || cell.c == '\0' || cell.c == '\t' {
             ' '
         } else {
             cell.c
@@ -988,13 +991,28 @@ fn replaced_tail(typed: &str, start: usize) -> (usize, usize) {
 /// none; on macOS with Option too, which types accents and symbols there),
 /// as opposed to Enter, arrows or a Ctrl, Alt or ⌘ shortcut.
 fn is_text(keystroke: &gpui_kit::Keystroke) -> bool {
-    let modifiers = &keystroke.modifiers;
+    types_text(
+        &keystroke.modifiers,
+        keystroke.key_char.as_deref(),
+        cfg!(windows),
+    )
+}
+
+/// [`is_text`] for a key with `modifiers` that types `key_char`. Windows
+/// reports AltGr as Ctrl+Alt: with both held and a character typed, the key
+/// is that character (`@` on a German AltGr+Q, `ć` on a Polish one), never
+/// the Ctrl+letter it would otherwise send (Ctrl+C for `ć`).
+fn types_text(modifiers: &gpui_kit::Modifiers, key_char: Option<&str>, windows: bool) -> bool {
+    let printable =
+        key_char.is_some_and(|text| !text.is_empty() && !text.chars().any(char::is_control));
+    if !printable || modifiers.platform || modifiers.function {
+        return false;
+    }
+    if windows && modifiers.control && modifiers.alt {
+        return true;
+    }
     let alt_is_shortcut = modifiers.alt && !cfg!(target_os = "macos");
-    !(modifiers.control || alt_is_shortcut || modifiers.platform || modifiers.function)
-        && keystroke
-            .key_char
-            .as_deref()
-            .is_some_and(|text| !text.is_empty() && !text.chars().any(char::is_control))
+    !(modifiers.control || alt_is_shortcut)
 }
 
 /// The platform's text input: typed and composed text. The text it sees is
@@ -1140,6 +1158,29 @@ mod input_tests {
         assert!(!is_text(&key("enter")));
         assert!(!is_text(&key("ctrl-c")));
         assert!(!is_text(&key("cmd-v")));
+    }
+
+    #[test]
+    fn altgr_types_its_character_on_windows_only() {
+        let ctrl_alt = gpui_kit::Modifiers {
+            control: true,
+            alt: true,
+            ..Default::default()
+        };
+        // AltGr+Q on a German layout: `@` on Windows, not Ctrl+Q.
+        assert!(types_text(&ctrl_alt, Some("@"), true));
+        assert!(types_text(&ctrl_alt, Some("ć"), true));
+        // Ctrl+Alt with no character typed stays a shortcut there.
+        assert!(!types_text(&ctrl_alt, None, true));
+        assert!(!types_text(&ctrl_alt, Some("\u{3}"), true));
+        // Elsewhere Ctrl+Alt is a shortcut, whatever it types.
+        assert!(!types_text(&ctrl_alt, Some("@"), false));
+        let ctrl = gpui_kit::Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        assert!(!types_text(&ctrl, Some("c"), true));
+        assert!(!types_text(&ctrl, Some("c"), false));
     }
 }
 

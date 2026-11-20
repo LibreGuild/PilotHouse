@@ -199,7 +199,11 @@ impl TestsPanel {
         else {
             return;
         };
-        record::start(self.project_id, path, Vec::new(), cx);
+        if let Err(err) = record::start(self.project_id, path, Vec::new(), cx) {
+            self.message = Some((err.to_string().into(), true));
+            cx.notify();
+            return;
+        }
         self.repairing = false;
         self.watch_recording(cx);
         let (start, tools) = match &test.target {
@@ -241,9 +245,22 @@ impl TestsPanel {
             return;
         };
         let plan = run::plan(&test);
+        // The report can be of an older, longer version of the test.
+        if failed >= plan.len() {
+            self.message = Some((
+                "That failure is from an older version of the test: run it again first.".into(),
+                true,
+            ));
+            cx.notify();
+            return;
+        }
         let kept = plan[..failed].to_vec();
         let remaining: Vec<String> = plan[failed..].iter().map(Step::describe).collect();
-        record::start(self.project_id, path, kept, cx);
+        if let Err(err) = record::start(self.project_id, path, kept, cx) {
+            self.message = Some((err.to_string().into(), true));
+            cx.notify();
+            return;
+        }
         self.repairing = true;
         self.watch_recording(cx);
         let prompt = format!(
@@ -290,6 +307,10 @@ impl TestsPanel {
 
     /// Ends the recording: a new one is saved, a repair becomes a proposal.
     pub fn finish_recording(&mut self, cx: &mut Context<Self>) {
+        // Another workspace's recording is its panel's to end.
+        if !record::current(cx).is_some_and(|recording| recording.project_id == self.project_id) {
+            return;
+        }
         let Some(recording) = record::stop(cx) else {
             return;
         };

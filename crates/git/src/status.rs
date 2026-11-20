@@ -1,7 +1,6 @@
 //! The working tree: what changed, what is staged, and staging or
 //! discarding changes hunk by hunk.
 
-use std::io::Write as _;
 use std::path::Path;
 use std::process::Stdio;
 
@@ -79,18 +78,13 @@ pub fn apply(root: &Path, patch: &str, mode: ApplyMode) -> Result<()> {
     };
     let mut command = command(root);
     command.args(args);
-    let mut child = crate::run::ready(command)
+    let child = crate::run::ready(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .context("running git")?;
-    child
-        .stdin
-        .take()
-        .context("git stdin")?
-        .write_all(patch.as_bytes())?;
-    let output = child.wait_with_output()?;
+    let output = crate::run::finish_with_input(child, patch.as_bytes())?;
     if !output.status.success() {
         bail!("{}", crate::run::failure(root, "apply", &output));
     }

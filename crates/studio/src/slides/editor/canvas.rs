@@ -9,10 +9,10 @@ use gpui_kit::component::{
     v_flex,
 };
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, Hsla, InteractiveElement as _,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, ParentElement as _, PathBuilder, PinchEvent, Pixels, Point, ScrollEvent,
-    Styled as _, StyledImage as _, Window, canvas, div, fill, img, point, px,
+    AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, Focusable as _, Hsla,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _, PathBuilder, PinchEvent, Pixels,
+    Point, ScrollEvent, Styled as _, StyledImage as _, Window, canvas, div, fill, img, point, px,
 };
 use ph_ui::Icons;
 use serde_json::json;
@@ -521,8 +521,15 @@ impl SlidesEditor {
                         let moving: Vec<&String> = frames.iter().map(|(id, _)| id).collect();
                         for (id, frame) in &frames {
                             if let Some(element) = slide.elements.iter_mut().find(|e| &e.id == id) {
-                                element.frame.x = frame.x + dx;
-                                element.frame.y = frame.y + dy;
+                                // A group's children go with it.
+                                crate::slides::ops::set_frame(
+                                    element,
+                                    Frame {
+                                        x: frame.x + dx,
+                                        y: frame.y + dy,
+                                        ..element.frame
+                                    },
+                                );
                                 // A line moved without what it is fixed to
                                 // lets go of it.
                                 if let Kind::Shape(shape) = &mut element.kind
@@ -688,7 +695,8 @@ impl SlidesEditor {
                 };
                 let slide = std::sync::Arc::make_mut(slide);
                 if let Some(element) = slide.elements.iter_mut().find(|element| element.id == id) {
-                    element.frame = frame;
+                    // A group's children are moved and scaled with it.
+                    crate::slides::ops::set_frame(element, frame);
                 }
             },
             cx,
@@ -870,7 +878,15 @@ impl SlidesEditor {
         };
         self.typing_watch = None;
         let value = editing.input.read(cx).value().to_string();
-        self.focus.focus(window, cx);
+        // The editor takes the keys again, unless the field was left for
+        // another one (the notes, a comment, the chat): that one keeps
+        // them, or Backspace there would remove the box just typed in.
+        let field = editing.input.read(cx).focus_handle(cx);
+        if field.is_focused(window) || window.focused(cx).is_none() {
+            self.focus.focus(window, cx);
+        } else {
+            self.left_field = Some(field);
+        }
         cx.notify();
         let Some((_, element)) = self.deck(cx).element(&editing.id) else {
             return;

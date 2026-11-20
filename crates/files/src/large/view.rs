@@ -2,7 +2,9 @@
 //!
 //! Only the lines on screen are read, from the checkpoint before them (see
 //! [`index`](super::index)), so opening a multi-gigabyte log is instant and
-//! scrolling stays smooth while the line index is still being built. The
+//! scrolling stays smooth while the line index is still being built. They
+//! are read off the UI thread, one read at a time: until a read is back the
+//! lines read before stay on screen. The
 //! scroll position is a line number, not pixels: a list of 100 million rows
 //! is beyond what `f32` pixel offsets can address, so this draws its own
 //! rows and scrollbar.
@@ -37,6 +39,15 @@ const CHAR: f32 = 7.8;
 /// Most bytes copied at once.
 const COPY_CAP: usize = 32 << 20;
 
+/// What a read brought, and the view it was for.
+struct Shown {
+    top: u64,
+    rows: usize,
+    /// [`LargeFileView::epoch`] when it was asked for.
+    epoch: u64,
+    lines: Vec<Line>,
+}
+
 pub struct LargeFileView {
     path: PathBuf,
     file: Option<Arc<File>>,
@@ -54,8 +65,14 @@ pub struct LargeFileView {
     /// do not yet add up to one.
     left: usize,
     left_rest: f32,
-    /// What was read for `(top, rows)`, kept until either changes.
-    shown: Option<(u64, Vec<Line>)>,
+    /// The lines read last, on screen until a read for where the view is
+    /// now is back.
+    shown: Option<Shown>,
+    /// Counts the times the file was looked at again: lines read before
+    /// are read again.
+    epoch: u64,
+    /// A read is under way; the next one starts when it is back.
+    reading: bool,
     /// Selected lines (anchor, head).
     selection: Option<(u64, u64)>,
     /// The current search match: its line and byte offset.
@@ -73,6 +90,8 @@ pub struct LargeFileView {
     error: Option<SharedString>,
     _scan: Option<Task<()>>,
     _search: Option<Task<()>>,
+    _read: Option<Task<()>>,
+    _copy: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -121,6 +140,8 @@ impl LargeFileView {
             left: 0,
             left_rest: 0.,
             shown: None,
+            epoch: 0,
+            reading: false,
             selection: None,
             hit: None,
             follow: false,
@@ -135,6 +156,8 @@ impl LargeFileView {
             error: None,
             _scan: None,
             _search: None,
+            _read: None,
+            _copy: None,
             _subscriptions: subscriptions,
         };
         view.refresh(cx);
@@ -170,11 +193,13 @@ impl LargeFileView {
             self.top = 0;
             self.selection = None;
             self.hit = None;
+            // Another file's lines: nothing of them stays on screen.
+            self.shown = None;
         }
         let file = Arc::new(file);
         self.file = Some(file.clone());
         self.len = len;
-        self.shown = None;
+        self.epoch += 1;
         // One scan at a time: the one running stops, the new one goes on
         // from where the index is.
         self.cancel_scan.store(true, Ordering::Relaxed);
@@ -249,38 +274,71 @@ impl LargeFileView {
         cx.notify();
     }
 
-    /// The lines on screen, read when the view moved (or more lines came).
-    fn visible(&mut self) -> &[Line] {
-        let stale = match &self.shown {
-            Some((top, lines)) => {
-                *top != self.top
-                    || (lines.len() < self.rows && self.top + (lines.len() as u64) < self.lines())
-            }
-            None => true,
-        };
-        if stale {
-            let lines = self.read(self.top, self.rows).unwrap_or_default();
-            self.shown = Some((self.top, lines));
-        }
-        let lines = &self.shown.as_ref().expect("just read").1;
+    /// The lines read last, as many as fit.
+    fn shown_lines(&self) -> &[Line] {
+        let lines = self.shown.as_ref().map_or(&[][..], |shown| &shown.lines);
         &lines[..lines.len().min(self.rows)]
     }
 
-    fn read(&self, first: u64, count: usize) -> Option<Vec<Line>> {
-        let file = self.file.as_ref()?;
-        let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
-        // Read on from the lines already shown when scrolling down a little.
-        let anchor = match &self.shown {
-            Some((_, lines))
-                if lines.first().is_some_and(|line| line.number <= first)
-                    && first - lines[0].number < index::STRIDE =>
-            {
-                (lines[0].number, lines[0].start)
-            }
-            _ => index.anchor(first),
+    /// Reads the lines on screen when the view moved or the file changed,
+    /// off the UI thread: a read is megabytes when lines are long, and
+    /// waits for the disk when the file is not in memory. One read at a
+    /// time, the next when it is back, so dragging through the file does
+    /// not start a read per frame. A read that brought fewer lines than
+    /// fit (the end, or enormous lines) is not asked again until the view
+    /// moves or the file changes.
+    fn read_shown(&mut self, cx: &mut Context<Self>) {
+        let (top, rows, epoch) = (self.top, self.rows, self.epoch);
+        let read = self
+            .shown
+            .as_ref()
+            .is_some_and(|shown| (shown.top, shown.rows, shown.epoch) == (top, rows, epoch));
+        if read || self.reading {
+            return;
+        }
+        let Some(file) = self.file.clone() else {
+            return;
         };
-        drop(index);
-        index::read_lines(file, self.len, anchor, first, count).ok()
+        let (anchor, len, index) = (self.anchor(top), self.len, self.index.clone());
+        self.reading = true;
+        let lines =
+            cx.background_spawn(async move { index::read_lines(&file, len, anchor, top, rows) });
+        self._read = Some(cx.spawn(async move |this, cx| {
+            let lines = lines.await.unwrap_or_default();
+            _ = this.update(cx, |this, cx| {
+                this.reading = false;
+                // The index is another one when the file was written anew
+                // meanwhile (see `refresh`): these are the old file's
+                // lines, and the next draw reads what is there now. Lines
+                // of a file that only grew are shown until then.
+                if Arc::ptr_eq(&index, &this.index) {
+                    this.shown = Some(Shown {
+                        top,
+                        rows,
+                        epoch,
+                        lines,
+                    });
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Where a read of line `first` starts: the nearest place before it
+    /// whose line is known, a checkpoint or the first line on screen
+    /// (scrolling down a little reads on from there).
+    fn anchor(&self, first: u64) -> (u64, u64) {
+        let checkpoint = self
+            .index
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .anchor(first);
+        match self.shown.as_ref().and_then(|shown| shown.lines.first()) {
+            Some(line) if line.number <= first && line.number > checkpoint.0 => {
+                (line.number, line.start)
+            }
+            _ => checkpoint,
+        }
     }
 
     fn scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -317,7 +375,21 @@ impl LargeFileView {
         let keystroke = &event.keystroke;
         let command = keystroke.modifiers.platform || keystroke.modifiers.control;
         let page = self.rows.saturating_sub(2).max(1) as i64;
+        // Keys typed in the Find and Line fields come by here too. From
+        // there only ⌘F and ⌘G act: the others belong to the field (a
+        // space is a space in what is searched for, ⌘A selects its text),
+        // and a key stopped here never reaches it.
+        let own = self.focus_handle.is_focused(window);
         let moved = match keystroke.key.as_str() {
+            "f" if command => {
+                self.search.update(cx, |input, cx| input.focus(window, cx));
+                None
+            }
+            "g" if command || keystroke.modifiers.control => {
+                self.go_to.update(cx, |input, cx| input.focus(window, cx));
+                None
+            }
+            _ if !own => None,
             "up" if command => Some(i64::MIN),
             "down" if command => Some(i64::MAX),
             "up" => Some(-1),
@@ -328,14 +400,6 @@ impl LargeFileView {
             "end" => Some(i64::MAX),
             "c" if command => {
                 self.copy(cx);
-                None
-            }
-            "f" if command => {
-                self.search.update(cx, |input, cx| input.focus(window, cx));
-                None
-            }
-            "g" if command || keystroke.modifiers.control => {
-                self.go_to.update(cx, |input, cx| input.focus(window, cx));
                 None
             }
             "a" if command => {
@@ -365,36 +429,50 @@ impl LargeFileView {
         cx.notify();
     }
 
-    /// Copies the selected lines (up to 32 MB).
+    /// Copies the selected lines (up to 32 MB). Where they start and end is
+    /// found, and they are read, off the UI thread.
     fn copy(&mut self, cx: &mut Context<Self>) {
         let (Some((a, b)), Some(file)) = (self.selection, self.file.clone()) else {
             return;
         };
         let (first, last) = (a.min(b), a.max(b));
-        let ends = self
-            .read(first, 1)
-            .and_then(|start| Some((start.first()?.start, self.read(last, 1)?.first()?.end)));
-        let Some((start, end)) = ends else { return };
-        match index::read_range(&file, start, end, COPY_CAP) {
-            Ok(bytes) => {
-                let cut = (end - start) as usize > bytes.len();
-                cx.write_to_clipboard(ClipboardItem::new_string(
-                    String::from_utf8_lossy(&bytes).into_owned(),
-                ));
-                self.status = Some(if cut {
-                    "Copied the first 32 MB of the selection.".into()
-                } else {
-                    format!(
-                        "Copied {} line{}.",
-                        last - first + 1,
-                        if first == last { "" } else { "s" }
-                    )
-                    .into()
-                });
-            }
-            Err(err) => self.status = Some(format!("Could not copy: {err}").into()),
-        }
-        cx.notify();
+        let (from, to, len) = (self.anchor(first), self.anchor(last), self.len);
+        let read = cx.background_spawn(async move {
+            let start = index::read_lines(&file, len, from, first, 1)?;
+            let end = index::read_lines(&file, len, to, last, 1)?;
+            let (Some(start), Some(end)) = (start.first(), end.first()) else {
+                return Ok(None);
+            };
+            let (start, end) = (start.start, end.end);
+            let bytes = index::read_range(&file, start, end, COPY_CAP)?;
+            let cut = (end - start) as usize > bytes.len();
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            std::io::Result::Ok(Some((text, cut)))
+        });
+        self._copy = Some(cx.spawn(async move |this, cx| {
+            let read = read.await;
+            _ = this.update(cx, |this, cx| {
+                match read {
+                    Ok(Some((text, cut))) => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        this.status = Some(if cut {
+                            "Copied the first 32 MB of the selection.".into()
+                        } else {
+                            format!(
+                                "Copied {} line{}.",
+                                last - first + 1,
+                                if first == last { "" } else { "s" }
+                            )
+                            .into()
+                        });
+                    }
+                    // The lines are not there any more.
+                    Ok(None) => {}
+                    Err(err) => this.status = Some(format!("Could not copy: {err}").into()),
+                }
+                cx.notify();
+            });
+        }));
     }
 
     /// Finds the next (or previous) match after the current one, wrapping
@@ -408,17 +486,21 @@ impl LargeFileView {
         self.cancel_search = cancel.clone();
         let len = self.len;
         // From the current match, else from the top of the screen.
-        let from = match self.hit {
-            Some((_, offset)) => offset,
-            None => self
-                .read(self.top, 1)
-                .and_then(|lines| lines.first().map(|line| line.start))
-                .unwrap_or(0),
-        };
+        let hit = self.hit.map(|(_, offset)| offset);
+        let (top, anchor) = (self.top, self.anchor(self.top));
         let index = self.index.clone();
         self.status = Some("Searching…".into());
         cx.notify();
         let work = cx.background_spawn(async move {
+            let from = match hit {
+                Some(offset) => offset,
+                // Where the top line starts is read here, not on the UI
+                // thread.
+                None => index::read_lines(&file, len, anchor, top, 1)
+                    .ok()
+                    .and_then(|lines| lines.first().map(|line| line.start))
+                    .unwrap_or(0),
+            };
             let found = if back {
                 match index::find_prev(&file, &query, from, &cancel)? {
                     Some(found) => Some(found),
@@ -639,6 +721,7 @@ impl Render for LargeFileView {
         if self.follow && !self.indexing {
             self.scroll_to_end();
         }
+        self.read_shown(cx);
         let theme = cx.theme();
         let (active, warning, muted, danger, border, mono) = (
             theme.list_active,
@@ -653,7 +736,7 @@ impl Render for LargeFileView {
         let gutter = px(16. + CHAR * group_digits(self.lines()) as f32);
         let left = self.left;
         let rows: Vec<_> = self
-            .visible()
+            .shown_lines()
             .iter()
             .map(|line| {
                 let number = line.number;

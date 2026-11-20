@@ -56,40 +56,43 @@ impl Store {
         let Some(query) = fts_query(text) else {
             return Ok(Vec::new());
         };
-        let conn = self.conn();
-        let mut statement = conn.prepare(
-            "SELECT m.session_id, s.title, s.project_id, m.id, m.role,
-                    snippet(message_search, 0, ?3, ?4, '…', 14), m.created_at
-             FROM message_search
-             JOIN messages m ON m.id = message_search.rowid
-             JOIN sessions s ON s.id = m.session_id
-             WHERE message_search MATCH ?1 AND (?2 IS NULL OR s.project_id = ?2)
-             ORDER BY bm25(message_search), m.created_at DESC
-             LIMIT ?5",
-        )?;
-        let hits = statement
-            .query_map(
-                params![
-                    query,
-                    project_id,
-                    MATCH_START.to_string(),
-                    MATCH_END.to_string(),
-                    limit as i64
-                ],
-                |row| {
-                    Ok(SearchHit {
-                        session_id: row.get(0)?,
-                        session_title: row.get(1)?,
-                        project_id: row.get(2)?,
-                        message_id: row.get(3)?,
-                        role: row.get(4)?,
-                        snippet: row.get(5)?,
-                        created_at: row.get(6)?,
-                    })
-                },
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(hits)
+        // Its first letters match most messages, all read before the best
+        // are picked: a long read, kept off the connection the UI uses.
+        self.read(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT m.session_id, s.title, s.project_id, m.id, m.role,
+                        snippet(message_search, 0, ?3, ?4, '…', 14), m.created_at
+                 FROM message_search
+                 JOIN messages m ON m.id = message_search.rowid
+                 JOIN sessions s ON s.id = m.session_id
+                 WHERE message_search MATCH ?1 AND (?2 IS NULL OR s.project_id = ?2)
+                 ORDER BY bm25(message_search), m.created_at DESC
+                 LIMIT ?5",
+            )?;
+            let hits = statement
+                .query_map(
+                    params![
+                        query,
+                        project_id,
+                        MATCH_START.to_string(),
+                        MATCH_END.to_string(),
+                        limit as i64
+                    ],
+                    |row| {
+                        Ok(SearchHit {
+                            session_id: row.get(0)?,
+                            session_title: row.get(1)?,
+                            project_id: row.get(2)?,
+                            message_id: row.get(3)?,
+                            role: row.get(4)?,
+                            snippet: row.get(5)?,
+                            created_at: row.get(6)?,
+                        })
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(hits)
+        })
     }
 
     /// Where message `message_id` sits among its session's messages
@@ -107,6 +110,38 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_search_does_not_wait_for_the_main_connection() {
+        let folder = std::env::temp_dir().join(format!("ph-search-file-{}", std::process::id()));
+        _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let store = Store::open(&folder.join("store.db")).unwrap();
+        let project = store.add_project(&folder).unwrap();
+        let session = store.create_session(project.id, "Notes", "claude").unwrap();
+        store
+            .append_message(
+                session.id,
+                "user",
+                r#"{"entry":"user","text":"retry later"}"#,
+            )
+            .unwrap();
+        // The UI's connection busy (or held by a long write): the search
+        // reads on its own and sees what was written.
+        let held = store.conn();
+        assert_eq!(store.search_messages(None, "retr", 10).unwrap().len(), 1);
+        drop(held);
+        store
+            .append_message(
+                session.id,
+                "agent",
+                r#"{"entry":"agent","text":"retrying now"}"#,
+            )
+            .unwrap();
+        assert_eq!(store.search_messages(None, "retr", 10).unwrap().len(), 2);
+        drop(store);
+        _ = std::fs::remove_dir_all(&folder);
+    }
 
     #[test]
     fn typed_text_becomes_a_safe_prefix_query() {

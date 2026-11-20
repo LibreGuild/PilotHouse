@@ -12,6 +12,7 @@ ph-agent.workspace = true
 anyhow.workspace = true
 gpui-kit.workspace = true
 ph-changes.workspace = true
+ph-env.workspace = true
 ph-git.workspace = true
 ph-github.workspace = true
 ph-review.workspace = true

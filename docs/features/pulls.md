@@ -51,7 +51,7 @@ The tabs put what an agent found, and how to read the change, before the convers
 - **Findings**: what agent reviews found, kept across rounds (see [Findings](#findings)). The tab shows how many are open; opening it reads the author's ticks and replies.
 - **Walkthrough**: a briefing on the change for whoever reviews it (see [Walkthrough](#walkthrough)).
 - **Files**: each file's diff with its line comment threads; Reply in a thread. Only the files in sight are drawn (patches are parsed once), and a diff over 400 lines is folded behind *Show diff*. **Ask about lines** under a file asks an agent about some of its lines (type `start-end: question`).
-- **Conversation** (it was *Overview*, and came first): the description and conversation (Markdown), reviews with their state, then Comment / Request changes / Approve, and Merge (merge, squash or rebase; asks to confirm).
+- **Conversation** (it was *Overview*, and came first): the description and conversation (Markdown), reviews with their state, then Comment / Request changes / Approve, and Merge (merge, squash or rebase; asks to confirm; it merges the commit the page shows, and says so when something was pushed since).
 - **Commits**, **Checks** (click to open a check's page).
 - **The header** has one button, **Review with agent**, and a **⋯** menu with the rest (*Watch*, *Check out this branch*, *Address the reviewers' comments*, *Refresh*); **Watching** shows beside it while it is on. The tabs fold to icons in a narrow pane.
 - **Watch**: PilotHouse looks at the pull request every three minutes and tells you (a system notification) when the author pushes or answers a finding; answers are applied. Merged or closed pull requests stop being watched.

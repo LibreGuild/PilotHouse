@@ -5,7 +5,9 @@
 //! polling.
 
 use std::io::{Read as _, Write as _};
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -22,6 +24,14 @@ pub struct DevicesChanged;
 pub struct DeviceManager {
     sdk: Sdk,
     adb: Option<Adb>,
+    /// The SDK is still being looked for (see [`Self::global`]): until it
+    /// is found there is no adb, as when there is none.
+    locating: bool,
+    /// Closed once the SDK has been looked for.
+    located: smol::channel::Receiver<()>,
+    /// Devices were asked for while the SDK was looked for: they are
+    /// followed once adb is found.
+    track_when_located: bool,
     devices: Vec<DeviceInfo>,
     avds: Vec<String>,
     /// The device shown in the pane; agents default to it too.
@@ -30,6 +40,7 @@ pub struct DeviceManager {
     booting: Vec<String>,
     tracking: bool,
     _track: Option<Task<()>>,
+    _locate: Option<Task<()>>,
 }
 
 impl EventEmitter<DevicesChanged> for DeviceManager {}
@@ -52,21 +63,60 @@ impl DeviceManager {
         if let Some(manager) = cx.try_global::<GlobalManager>() {
             return manager.0.clone();
         }
-        let manager = cx.new(|_| {
-            let sdk = Sdk::locate();
+        let manager = cx.new(|cx: &mut Context<Self>| {
+            // Finding the SDK reads the login shell's environment, which
+            // can take seconds to come just after the app starts, and looks
+            // at the disk. The first window may be what makes this manager
+            // (Devices or Logcat was open last), so it is done on a
+            // background thread and the manager starts without an SDK.
+            let (done, located) = smol::channel::bounded::<()>(1);
+            let locate = cx.spawn(async move |this, cx| {
+                let sdk = cx.background_spawn(async { Sdk::locate() }).await;
+                let _ = this.update(cx, |manager, cx| {
+                    manager.adb = sdk.adb.clone().map(Adb::new);
+                    manager.sdk = sdk;
+                    manager.locating = false;
+                    if std::mem::take(&mut manager.track_when_located) {
+                        manager.ensure_tracking(cx);
+                    }
+                    cx.emit(DevicesChanged);
+                    cx.notify();
+                });
+                // Closes the channel: whoever waits in `located` goes on.
+                drop(done);
+            });
             Self {
-                adb: sdk.adb.clone().map(Adb::new),
-                sdk,
+                sdk: Sdk::default(),
+                adb: None,
+                locating: true,
+                located,
+                track_when_located: false,
                 devices: Vec::new(),
                 avds: Vec::new(),
                 selected: None,
                 booting: Vec::new(),
                 tracking: false,
                 _track: None,
+                _locate: Some(locate),
             }
         });
         cx.set_global(GlobalManager(manager.clone()));
         manager
+    }
+
+    /// Whether the SDK is still being looked for: no adb yet does not mean
+    /// there is none.
+    pub fn looking_for_sdk(&self) -> bool {
+        self.locating
+    }
+
+    /// Waits until the SDK has been looked for (no time at all once it
+    /// has): for callers that answer "not found" otherwise.
+    pub(crate) fn located(&self) -> impl Future<Output = ()> + use<> {
+        let located = self.located.clone();
+        async move {
+            let _ = located.recv().await;
+        }
     }
 
     pub fn adb(&self) -> Option<&Adb> {
@@ -195,7 +245,11 @@ impl DeviceManager {
         if self.tracking {
             return;
         }
-        let Some(adb) = self.adb.clone() else { return };
+        let Some(adb) = self.adb.clone() else {
+            // Not found yet: followed as soon as it is.
+            self.track_when_located = self.locating;
+            return;
+        };
         self.tracking = true;
         let emulator = self.sdk.emulator.clone();
         let (changes, receiver) = smol::channel::unbounded::<()>();
@@ -310,13 +364,37 @@ impl DeviceManager {
             return Task::ready(Ok(device.serial.clone()));
         }
         self.ensure_tracking(cx);
+        // Asked for twice: a second emulator would only refuse to run
+        // beside the first, so this one waits for that.
+        let starting = self.booting.iter().any(|booting| booting == avd);
         self.booting.push(avd.to_string());
         cx.notify();
         let name = avd.to_string();
+        // The list is not read yet (an agent's first call of the session).
+        let unchecked = self.avds.is_empty();
         cx.spawn(async move |this, cx| {
             let boot_name = name.clone();
             let result = cx
                 .background_spawn(async move {
+                    if starting {
+                        return wait_for_boot(&adb, &boot_name, None, None);
+                    }
+                    // So it is read here: a name that does not exist is
+                    // refused now, not waited on until the boot times out.
+                    if unchecked {
+                        let avds = list_avds(Some(&emulator));
+                        if !avds.is_empty() && !avds.contains(&boot_name) {
+                            bail!(
+                                "There is no emulator named `{boot_name}`. Available: {}",
+                                avds.join(", ")
+                            );
+                        }
+                    }
+                    let complaints = complaints_file();
+                    let (kept, stderr) = match complaints {
+                        Some((path, file)) => (Some(path), Stdio::from(file)),
+                        None => (None, Stdio::null()),
+                    };
                     let child = ph_env::command(&emulator)
                         .args([
                             "-avd",
@@ -327,18 +405,27 @@ impl DeviceManager {
                         ])
                         .stdin(Stdio::null())
                         .stdout(Stdio::null())
-                        .stderr(Stdio::null())
+                        .stderr(stderr)
                         .spawn()
-                        .context("starting the emulator")?;
-                    // Reaped when it exits, so no zombie is left behind.
-                    let mut child = child;
-                    std::thread::Builder::new()
-                        .name("emulator-wait".into())
-                        .spawn(move || {
-                            let _ = child.wait();
-                        })
-                        .ok();
-                    wait_for_boot(&adb, &boot_name)
+                        .context("starting the emulator");
+                    let booted = child.and_then(|mut child| {
+                        let booted =
+                            wait_for_boot(&adb, &boot_name, Some(&mut child), kept.as_deref());
+                        // Reaped when it exits, so no zombie is left behind.
+                        std::thread::Builder::new()
+                            .name("emulator-wait".into())
+                            .spawn(move || {
+                                let _ = child.wait();
+                            })
+                            .ok();
+                        booted
+                    });
+                    // Read by now, if it was needed; a running emulator
+                    // keeps writing to it, unseen, until it ends.
+                    if let Some(path) = kept {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    booted
                 })
                 .await;
             let _ = this.update(cx, |manager, cx| {
@@ -402,8 +489,58 @@ pub(crate) fn list_avds(emulator: Option<&std::path::Path>) -> Vec<String> {
         .collect()
 }
 
-/// Waits for an emulator running `avd` to finish booting; returns its serial.
-fn wait_for_boot(adb: &Adb, avd: &str) -> Result<String> {
+/// A new file for what the emulator complains of while it starts, which
+/// only the user can read; `None` when it cannot be made that way (the
+/// complaints are then not kept).
+fn complaints_file() -> Option<(PathBuf, std::fs::File)> {
+    static STARTS: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "emulator-start-{}-{}.log",
+        std::process::id(),
+        STARTS.fetch_add(1, Ordering::Relaxed)
+    ));
+    // Never an existing file: in a temp folder everyone shares, one of that
+    // name may be a link someone else put there.
+    let _ = std::fs::remove_file(&path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(&path).ok()?;
+    Some((path, file))
+}
+
+/// What to say when the emulator stopped before Android started: the last
+/// lines it wrote, which say why (no such AVD, no hardware acceleration, a
+/// broken system image).
+fn gave_up(avd: &str, complaints: &str) -> String {
+    let lines: Vec<String> = complaints
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.chars().take(300).collect())
+        .collect();
+    let last = &lines[lines.len().saturating_sub(6)..];
+    if last.is_empty() {
+        return format!(
+            "The emulator stopped before {avd} started. Run `emulator -avd {avd}` in a terminal to see why."
+        );
+    }
+    format!(
+        "The emulator stopped before {avd} started:\n{}",
+        last.join("\n")
+    )
+}
+
+/// Waits for an emulator running `avd` to finish booting; returns its
+/// serial. `emulator` is its process when this call started it, and
+/// `complaints` the file its errors go to.
+fn wait_for_boot(
+    adb: &Adb,
+    avd: &str,
+    mut emulator: Option<&mut Child>,
+    complaints: Option<&Path>,
+) -> Result<String> {
     let started = Instant::now();
     while started.elapsed() < BOOT_TIMEOUT {
         if let Ok(devices) = adb.devices()
@@ -413,6 +550,19 @@ fn wait_for_boot(adb: &Adb, avd: &str) -> Result<String> {
             && adb.boot_completed(&device.serial)
         {
             return Ok(device.serial.clone());
+        }
+        // It gave up: said now, with its reason, not when the wait is over.
+        // One that ended without an error is still waited for (the program
+        // started may be a launcher that leaves the emulator running).
+        if let Some(emulator) = emulator.as_deref_mut()
+            && let Ok(Some(status)) = emulator.try_wait()
+            && !status.success()
+        {
+            let said = complaints
+                .and_then(|path| std::fs::read(path).ok())
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default();
+            bail!("{}", gave_up(avd, &said));
         }
         std::thread::sleep(Duration::from_secs(1));
     }
@@ -472,4 +622,26 @@ fn track_devices(adb: &Adb, changes: &smol::channel::Sender<()>) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_emulator_that_gave_up_says_why() {
+        let said = "INFO    | Android emulator version 35.1\n\nPANIC: Unknown AVD name [Pixel], use -list-avds to see valid list.\nHOME is defined but there is no file Pixel.ini in $HOME/.android/avd\n";
+        assert_eq!(
+            gave_up("Pixel", said),
+            "The emulator stopped before Pixel started:\nINFO    | Android emulator version 35.1\nPANIC: Unknown AVD name [Pixel], use -list-avds to see valid list.\nHOME is defined but there is no file Pixel.ini in $HOME/.android/avd"
+        );
+        // Only the end of a long complaint, and a long line cut short.
+        let long: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+        let message = gave_up("Pixel", &long);
+        assert!(message.ends_with("line 15\nline 16\nline 17\nline 18\nline 19\nline 20"));
+        assert!(!message.contains("line 14"));
+        assert!(gave_up("Pixel", &"é".repeat(1000)).chars().count() < 400);
+        // Nothing was written: how to find out.
+        assert!(gave_up("Pixel", "\n").contains("emulator -avd Pixel"));
+    }
 }

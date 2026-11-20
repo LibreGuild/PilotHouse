@@ -131,6 +131,15 @@ impl BrowserPanel {
             }),
             cx.subscribe(&tools, |_, _, event: &ToChat, cx| cx.emit(event.clone())),
             cx.observe(&browser, |_, _, cx| cx.notify()),
+            // The pane goes with its window, which may close while the pane
+            // shows: the browser outlives it in the hub, and would otherwise
+            // stream frames to nobody and never stop for being idle.
+            cx.on_release(|this, cx| {
+                if this.active {
+                    this.browser
+                        .update(cx, |browser, _| browser.set_screencast(false));
+                }
+            }),
         ];
         Self {
             browser,
@@ -170,16 +179,17 @@ impl BrowserPanel {
     fn surface_event(&mut self, event: &SurfaceEvent, cx: &mut Context<Self>) {
         match event {
             SurfaceEvent::Pointer(pointer) => self.browser.read(cx).pointer(*pointer),
-            SurfaceEvent::Key(keystroke) if keystroke.modifiers.platform => {
-                self.editing_shortcut(&keystroke.key, cx)
+            SurfaceEvent::Key(keystroke) if ph_media::editing_shortcut(keystroke, cx) => {
+                self.editing_shortcut(&keystroke.key, keystroke.modifiers.shift, cx)
             }
             SurfaceEvent::Key(keystroke) => self.browser.read(cx).key(keystroke),
             SurfaceEvent::Picked { x, y } => self.pick(*x, *y, cx),
         }
     }
 
-    /// ⌘C/⌘V/⌘X/⌘A/⌘Z inside the page, through the system clipboard.
-    fn editing_shortcut(&mut self, key: &str, cx: &mut Context<Self>) {
+    /// ⌘C/⌘V/⌘X/⌘A/⌘Z/⌘⇧Z (Ctrl elsewhere) inside the page, through the
+    /// system clipboard.
+    fn editing_shortcut(&mut self, key: &str, shift: bool, cx: &mut Context<Self>) {
         let browser = self.browser.clone();
         match key {
             "v" => {
@@ -209,7 +219,11 @@ impl BrowserPanel {
                 .detach();
             }
             "a" | "z" => {
-                let command = if key == "a" { "selectAll" } else { "undo" };
+                let command = match (key, shift) {
+                    ("a", _) => "selectAll",
+                    (_, true) => "redo",
+                    _ => "undo",
+                };
                 browser.update(cx, |browser, cx| {
                     browser
                         .evaluate(format!("document.execCommand('{command}')"), cx)

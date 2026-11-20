@@ -9,6 +9,7 @@
 //! still untouched) after taking one more checkpoint, so a restore can be
 //! undone the same way.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -90,12 +91,11 @@ fn git_in(root: &Path, index: &Path, args: &[&str], input: Option<&[u8]>) -> Res
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().context("running git (is it installed?)")?;
-    if let Some(input) = input {
-        use std::io::Write as _;
-        child.stdin.take().context("git stdin")?.write_all(input)?;
-    }
-    let output = child.wait_with_output()?;
+    let child = command.spawn().context("running git (is it installed?)")?;
+    let output = match input {
+        Some(input) => crate::run::finish_with_input(child, input)?,
+        None => child.wait_with_output()?,
+    };
     if !output.status.success() {
         bail!(
             "{}",
@@ -294,37 +294,89 @@ pub fn restore(root: &Path, checkpoint: &str) -> Result<Restored> {
     } else {
         0
     };
+    let git_dir = crate::local_path(
+        &top,
+        &crate::git(&top, &["rev-parse", "--absolute-git-dir"])?,
+    );
+    // A checkpoint leaves ignored files out, so a file ignored then and not
+    // now (the turn changed `.gitignore`) looks created since. The
+    // checkpoint's ignore files go back first, and every file they ignore
+    // stays.
+    let (ignore_files, rest): (Vec<String>, Vec<String>) = write_back
+        .iter()
+        .cloned()
+        .partition(|path| path.rsplit('/').next() == Some(".gitignore"));
+    write_from(&top, &git_dir, checkpoint, &ignore_files)?;
+    if !remove.is_empty() {
+        let ignored = match ignored(&top, &remove) {
+            Ok(ignored) => ignored,
+            // Unsure which are ignored: keep them all.
+            Err(error) => {
+                tracing::warn!("restore: checking ignored files: {error:#}");
+                remove.iter().cloned().collect()
+            }
+        };
+        // Not counted in `kept`: the checkpoint never covered them, and they
+        // are ignored again as they were.
+        remove.retain(|path| !ignored.contains(path));
+    }
     for path in &remove {
         let file = top.join(path);
         if file.is_file() || file.is_symlink() {
             std::fs::remove_file(&file).with_context(|| format!("removing {path}"))?;
         }
     }
-    if !write_back.is_empty() {
-        let list = write_back.join("\0");
-        let index = TempIndex::new(&crate::local_path(
-            &top,
-            &crate::git(&top, &["rev-parse", "--absolute-git-dir"])?,
-        ))?;
-        git_in(
-            &top,
-            &index.0,
-            &[
-                "restore",
-                &format!("--source={checkpoint}"),
-                "--worktree",
-                "--pathspec-from-file=-",
-                "--pathspec-file-nul",
-            ],
-            Some(list.as_bytes()),
-        )?;
-    }
+    write_from(&top, &git_dir, checkpoint, &rest)?;
     Ok(Restored {
         restored: write_back.len(),
         removed: remove.len(),
         kept,
         undo,
     })
+}
+
+/// Writes `paths` back from `checkpoint` into the working tree.
+fn write_from(top: &Path, git_dir: &Path, checkpoint: &str, paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let list = paths.join("\0");
+    let index = TempIndex::new(git_dir)?;
+    git_in(
+        top,
+        &index.0,
+        &[
+            "restore",
+            &format!("--source={checkpoint}"),
+            "--worktree",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ],
+        Some(list.as_bytes()),
+    )?;
+    Ok(())
+}
+
+/// Which of `paths` the ignore rules on disk ignore, tracked or not.
+fn ignored(top: &Path, paths: &[String]) -> Result<HashSet<String>> {
+    let mut command = command(top);
+    command.args(["check-ignore", "--no-index", "-z", "--stdin"]);
+    let child = crate::run::ready(command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("running git (is it installed?)")?;
+    let output = crate::run::finish_with_input(child, paths.join("\0").as_bytes())?;
+    // 1: none of them is ignored.
+    if !matches!(output.status.code(), Some(0 | 1)) {
+        bail!("{}", crate::run::failure(top, "check-ignore", &output));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 #[cfg(test)]
@@ -350,6 +402,33 @@ mod tests {
         let restored = restore(&root, &checkpoint).unwrap();
         assert_eq!((restored.removed, restored.kept), (0, 2));
         assert!(root.join("big.bin").exists() && root.join("new.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Files ignored when the checkpoint was taken are not in it; a turn
+    /// that stops ignoring them must not get them deleted by a restore.
+    #[test]
+    fn a_restore_keeps_files_that_were_ignored() {
+        let root = temp_repo("ignored");
+        let run = |args: &[&str]| crate::git(&root, args).unwrap();
+        std::fs::write(root.join(".gitignore"), ".env\nbuild/\n").unwrap();
+        run(&["add", ".gitignore"]);
+        run(&["commit", "-q", "-m", "ignore"]);
+        std::fs::write(root.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::write(root.join("build/out.bin"), b"out").unwrap();
+        let checkpoint = create(&root, "before").unwrap().unwrap();
+        // The turn stops ignoring them and makes a file of its own.
+        std::fs::write(root.join(".gitignore"), "").unwrap();
+        std::fs::write(root.join("new.txt"), b"new").unwrap();
+        let restored = restore(&root, &checkpoint).unwrap();
+        assert_eq!((restored.removed, restored.kept), (1, 0));
+        assert!(root.join(".env").exists() && root.join("build/out.bin").exists());
+        assert!(!root.join("new.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join(".gitignore")).unwrap(),
+            ".env\nbuild/\n"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -32,8 +32,11 @@ pub fn register(cx: &mut App) {
         "util.run",
         |params, cx| match utility_input(params, cx) {
             // Run off the UI thread (a query or a cron line can take a while).
-            Ok((id, input)) => cx.background_spawn(async move {
-                let output = ph_utils::run(&id, &input)?;
+            Ok((id, input, within)) => cx.background_spawn(async move {
+                let output = match within {
+                    Some(roots) => sqlite_within(&input, &roots)?,
+                    None => ph_utils::run(&id, &input)?,
+                };
                 Ok(json!({ "output": output }))
             }),
             Err(err) => gpui_kit::Task::ready(Err(err)),
@@ -42,6 +45,20 @@ pub fn register(cx: &mut App) {
     );
     ph_workspace::theme_mods::register_control_methods(cx);
     ph_studio::register_control_methods(cx);
+    // An agent's export from Studio may be written in its workspace's
+    // folders (as they are when it asks), and nowhere else but the folder
+    // of the file it works on.
+    ph_studio::set_workspace_folders(
+        |project_id, cx| {
+            AppState::store(cx)
+                .project(project_id)
+                .ok()
+                .flatten()
+                .map(|project| project.folders())
+                .unwrap_or_default()
+        },
+        cx,
+    );
 
     // Testing hook: add a project without the native folder picker.
     #[cfg(feature = "automation")]
@@ -251,9 +268,13 @@ fn list_utilities(_: Value, _: &mut App) -> Result<Value> {
 
 /// Runs a utility on `text` (and `second`), in mode `mode` (an index or a
 /// mode's name).
-/// What `util.run` runs: the utility's id and its input (checked here,
-/// on the UI thread, where the workspace is known).
-fn utility_input(params: Value, cx: &mut App) -> Result<(String, ph_utils::Input)> {
+/// What `util.run` runs: the utility's id and its input, and for an agent's
+/// SQLite query the folders of its workspace, the only ones it may open a
+/// file in (looked up here, on the UI thread, where the store is).
+fn utility_input(
+    params: Value,
+    cx: &mut App,
+) -> Result<(String, ph_utils::Input, Option<Vec<std::path::PathBuf>>)> {
     let id = params
         .get("id")
         .and_then(Value::as_str)
@@ -283,22 +304,15 @@ fn utility_input(params: Value, cx: &mut App) -> Result<(String, ph_utils::Input
     };
     // An agent (its call names its workspace) may only open SQLite files
     // inside that workspace's folders; the Utilities dialog is the user's.
-    if id == "sqlite"
-        && let Some(project_id) = params.get("project_id").and_then(Value::as_i64)
-    {
-        let project = AppState::store(cx)
-            .project(project_id)?
-            .context("no such workspace")?;
-        let file = ph_store::paths::canonical(std::path::Path::new(text("text").trim()))
-            .context("no such file")?;
-        let inside = project
-            .roots()
-            .iter()
-            .any(|root| ph_store::paths::canonical(root).is_ok_and(|root| file.starts_with(root)));
-        if !inside {
-            bail!("Only SQLite files inside this workspace's folders can be opened.");
-        }
-    }
+    let within = match params.get("project_id").and_then(Value::as_i64) {
+        Some(project_id) if id == "sqlite" => Some(
+            AppState::store(cx)
+                .project(project_id)?
+                .context("no such workspace")?
+                .roots(),
+        ),
+        _ => None,
+    };
     Ok((
         id.to_string(),
         ph_utils::Input {
@@ -306,5 +320,21 @@ fn utility_input(params: Value, cx: &mut App) -> Result<(String, ph_utils::Input
             second: text("second"),
             mode,
         },
+        within,
     ))
+}
+
+/// An agent's SQLite query: the file is made canonical once, checked
+/// against `roots`, and that same path is opened, with no link followed, so
+/// nothing put in its place between the check and the open is read.
+fn sqlite_within(input: &ph_utils::Input, roots: &[std::path::PathBuf]) -> Result<String> {
+    let file = paths::canonical(std::path::Path::new(ph_utils::sqlite::path_of(&input.text)))
+        .context("no such file")?;
+    let inside = roots
+        .iter()
+        .any(|root| paths::canonical(root).is_ok_and(|root| file.starts_with(root)));
+    if !inside {
+        bail!("Only SQLite files inside this workspace's folders can be opened.");
+    }
+    ph_utils::sqlite::query_at(&file, input)
 }

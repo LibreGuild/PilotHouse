@@ -200,7 +200,11 @@ impl FindingsView {
             .collect();
         self.bodies = texts
             .into_iter()
-            .map(|(label, text)| (label, cx.new(|cx| TextViewState::markdown(&text, cx))))
+            .map(|(label, text)| {
+                // (Text nested too deeply to parse is shown plain.)
+                let text = ph_ui::markdown::guarded(&text);
+                (label, cx.new(|cx| TextViewState::markdown(&text, cx)))
+            })
             .collect();
         cx.emit(FindingsEvent::Changed);
         cx.notify();

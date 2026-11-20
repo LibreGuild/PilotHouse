@@ -66,7 +66,7 @@ pub use app_state::AppState;
 pub use context_panel::ContextTab;
 pub use detect::Stack;
 pub use github_view::GithubView;
-pub use open::{main_workspace, open_paths, set_main_window};
+pub use open::{main_workspace, main_workspace_or_open, open_paths, set_main_window};
 pub use quick_chat::toggle as toggle_quick_chat;
 
 /// Opens `path` (a picture or video) in Studio without a chat (testing).
@@ -109,7 +109,16 @@ pub fn init(cx: &mut App) {
     actions::bind_keys(cx);
     network_drives::install(cx);
     sidebar::load_sizes(cx);
-    ph_files::init(cx, WORKSPACE_CONTEXT);
+    // Ctrl+P and Ctrl+T are a shell's too: in a terminal they stay its own.
+    ph_files::init(
+        cx,
+        actions::context_for(
+            ph_ui::keys("secondary-p"),
+            Some(WORKSPACE_CONTEXT),
+            cfg!(target_os = "macos"),
+        )
+        .unwrap_or(WORKSPACE_CONTEXT),
+    );
     // Editors offer Why Is This Here? where the build explains changes.
     ph_files::set_explains(workspace_screen::explain::explains());
     file_window::bind_keys(cx);

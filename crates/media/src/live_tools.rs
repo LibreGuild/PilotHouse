@@ -112,15 +112,24 @@ impl LiveTools {
 
     /// Saves the current frame, with annotations, and sends it to chat.
     pub fn capture(&mut self, cx: &mut Context<Self>) {
-        let Some(frame) = self.surface.read(cx).composite() else {
+        let surface = self.surface.read(cx);
+        let Some(frame) = surface.frame().cloned() else {
             return;
         };
-        let annotated = self.surface.read(cx).has_annotations();
+        let marks = surface.marks();
+        let annotated = !marks.is_empty();
         let stem = file_stem(&self.source);
         let label = format!("{} screenshot", self.source);
         self.surface
             .update(cx, |surface, cx| surface.clear_annotations(cx));
         self.save(cx, move || {
+            // Burning the marks in copies the whole picture: done here, off
+            // the UI thread, with the encoding.
+            let frame = if annotated {
+                crate::annotate::render(&frame, &marks)
+            } else {
+                frame
+            };
             let path = capture::save_png(&frame, &stem)?;
             let note = annotated.then(|| {
                 "The red marks on the screenshot are mine: boxes, arrows and numbered pins point at what I mean.".to_string()

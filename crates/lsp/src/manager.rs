@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 use gpui_kit::{AppContext as _, Context, EventEmitter, SharedString, Task};
@@ -41,16 +42,43 @@ enum Outgoing {
     ),
 }
 
+/// Times in a row a server that keeps stopping is started again.
+const MAX_RESTARTS: u32 = 3;
+/// A server that ran this long before it stopped starts its count again.
+const RESTART_WINDOW: Duration = Duration::from_secs(60);
+
 struct Slot {
     spec: &'static ServerSpec,
     outbox: smol::channel::Sender<Outgoing>,
     status: ServerStatus,
+    /// The server ran and then stopped (crashed, killed, updated).
+    exited: bool,
+    /// Starts after it stopped, in a row.
+    restarts: u32,
+    started: Instant,
     _task: Task<()>,
+}
+
+impl Slot {
+    /// The restart count of the next start, when it stopped and may start
+    /// again.
+    fn next_restart(&self) -> Option<u32> {
+        if !self.exited {
+            return None;
+        }
+        if self.started.elapsed() >= RESTART_WINDOW {
+            Some(0)
+        } else {
+            (self.restarts < MAX_RESTARTS).then_some(self.restarts + 1)
+        }
+    }
 }
 
 struct Document {
     server: &'static str,
     version: i32,
+    /// The latest text, to open it again on a restarted server.
+    text: String,
 }
 
 pub struct LspManager {
@@ -67,8 +95,8 @@ impl EventEmitter<LspEvent> for LspManager {}
 impl LspManager {
     /// Language servers for the folder `root`; `trusted` false for code
     /// that is not the user's (a clone of someone else's repository): there
-    /// servers that would run its build scripts or its own copy of a tool
-    /// start without them, or not at all.
+    /// servers that could run its build scripts, its config's programs or
+    /// its own copy of a tool do not start at all.
     pub fn new(root: PathBuf, trusted: bool) -> Self {
         Self {
             root,
@@ -106,14 +134,16 @@ impl LspManager {
         if !self.trusted && !spec.safe_untrusted {
             return None;
         }
-        if !self.servers.contains_key(spec.name) {
+        let restarts = match self.servers.get(spec.name) {
+            None => Some(0),
+            Some(slot) => slot.next_restart(),
+        };
+        if let Some(restarts) = restarts {
+            let restart = self.servers.contains_key(spec.name);
             let (outbox, inbox) = smol::channel::unbounded::<Outgoing>();
             let root = self.root.clone();
-            let trusted = self.trusted;
             let start =
-                cx.background_spawn(
-                    async move { Server::start(spec, &program, &root, trusted).await },
-                );
+                cx.background_spawn(async move { Server::start(spec, &program, &root).await });
             let task = cx.spawn(async move |this, cx| {
                 let server = match start.await {
                     Ok(server) => Arc::new(server),
@@ -136,6 +166,7 @@ impl LspManager {
                 });
                 // Diagnostics arrive as notifications.
                 let notifications = server.transport.notifications.clone();
+                let transport = server.transport.clone();
                 let listen = cx.spawn({
                     let this = this.clone();
                     async move |cx| {
@@ -164,9 +195,15 @@ impl LspManager {
                                 })
                                 .is_err()
                             {
-                                break;
+                                return;
                             }
                         }
+                        // The channel closed: the server stopped.
+                        let reason = transport
+                            .stopped()
+                            .unwrap_or_else(|| "the language server stopped".to_string());
+                        tracing::warn!("{}: {reason}", spec.name);
+                        _ = this.update(cx, |this, cx| this.exited(spec.name, reason, cx));
                     }
                 });
                 // The outbox, strictly in order.
@@ -190,11 +227,30 @@ impl LspManager {
                 spec.name,
                 Slot {
                     spec,
-                    outbox,
+                    outbox: outbox.clone(),
                     status: ServerStatus::Starting,
+                    exited: false,
+                    restarts,
+                    started: Instant::now(),
                     _task: task,
                 },
             );
+            if restart {
+                // The new server knows none of the files the old one had open.
+                for (path, document) in &self.documents {
+                    if document.server != spec.name {
+                        continue;
+                    }
+                    let Some(uri) = crate::uri::from_path(path) else {
+                        continue;
+                    };
+                    let language = servers::language_id(path, spec);
+                    let _ = outbox.try_send(Outgoing::Notify(
+                        "textDocument/didOpen",
+                        json!({ "textDocument": { "uri": uri, "languageId": language, "version": document.version, "text": document.text } }),
+                    ));
+                }
+            }
             cx.emit(LspEvent::Status);
         }
         self.servers
@@ -210,7 +266,8 @@ impl LspManager {
         let Some(slot) = self.slot(path, cx) else {
             return;
         };
-        let (name, language, outbox) = (slot.spec.name, slot.spec.language, slot.outbox.clone());
+        let (name, outbox) = (slot.spec.name, slot.outbox.clone());
+        let language = servers::language_id(path, slot.spec);
         let Some(uri) = crate::uri::from_path(path) else {
             return;
         };
@@ -223,17 +280,56 @@ impl LspManager {
             Document {
                 server: name,
                 version: 1,
+                text: text.to_string(),
             },
         );
     }
 
+    /// The server `name` stopped: says so, and drops what it reported.
+    /// The next use of one of its files starts it again (see [`Slot::next_restart`]).
+    fn exited(&mut self, name: &'static str, reason: String, cx: &mut Context<Self>) {
+        let Some(slot) = self.servers.get_mut(name) else {
+            return;
+        };
+        slot.exited = true;
+        slot.status = ServerStatus::Failed(reason.into());
+        let paths: Vec<PathBuf> = self
+            .documents
+            .iter()
+            .filter(|(_, document)| document.server == name)
+            .map(|(path, _)| path.clone())
+            .collect();
+        for path in paths {
+            if self.diagnostics.remove(&path).is_some() {
+                cx.emit(LspEvent::Diagnostics(path));
+            }
+        }
+        cx.emit(LspEvent::Status);
+    }
+
+    /// Starts `server` again for `path` when it stopped and may restart.
+    fn revive(&mut self, server: &'static str, path: &Path, cx: &mut Context<Self>) {
+        if self
+            .servers
+            .get(server)
+            .is_some_and(|slot| slot.next_restart().is_some())
+        {
+            self.slot(path, cx);
+        }
+    }
+
     /// Sends the whole new text of an open file.
-    pub fn change(&mut self, path: &Path, text: &str, _cx: &mut Context<Self>) {
+    pub fn change(&mut self, path: &Path, text: &str, cx: &mut Context<Self>) {
         let Some(document) = self.documents.get_mut(path) else {
             return;
         };
         document.version += 1;
+        document.text = text.to_string();
         let (server, version) = (document.server, document.version);
+        if self.servers.get(server).is_some_and(|slot| slot.exited) {
+            // A restarted server is sent every open file, this one as it is now.
+            return self.revive(server, path, cx);
+        }
         let (Some(slot), Some(uri)) = (self.servers.get(server), crate::uri::from_path(path))
         else {
             return;
@@ -303,6 +399,7 @@ impl LspManager {
         let Some(server) = self.documents.get(path).map(|document| document.server) else {
             return Task::ready(Err(anyhow!("no language server for this file")));
         };
+        self.revive(server, path, cx);
         let Some(slot) = self.servers.get(server) else {
             return Task::ready(Err(anyhow!("the language server is not running")));
         };

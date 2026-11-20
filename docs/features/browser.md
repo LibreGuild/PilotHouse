@@ -31,7 +31,7 @@ Which browser first: the user's choice, **Settings → Agents → Preferred brow
 
 | Tool | Does |
 |---|---|
-| `browser_open` | Navigate and wait for the load event (20 s max) |
+| `browser_open` | Navigate and wait for the load event (20 s max). Web pages, `data:` and files inside the workspace's folders only |
 | `browser_snapshot` | Title, URL, visible text, and interactive elements with CSS selectors |
 | `browser_click` | Click by selector (scrolled into view) or by CSS-pixel point |
 | `browser_type` | Type, optionally into a selector, optionally pressing Enter |
@@ -73,7 +73,7 @@ Settings shows *Connected to Chrome 131* once the extension reached the app, and
 
 | Tool | Does |
 |---|---|
-| `chrome_open` | Open a URL in the agent's tab (or a new one) and wait for it to load |
+| `chrome_open` | Open a URL in the agent's tab (or a new one) and wait for it to load. Web pages (`http:`, `https:`) and `about:blank` only; a tab that moves to anything else is let go |
 | `chrome_snapshot` | Title, address, scroll position, numbered interactive elements with their state, and the text |
 | `chrome_click`, `chrome_hover`, `chrome_drag` | By element number, CSS selector, text on it, or a point; right and double clicks, modifier keys |
 | `chrome_type`, `chrome_select`, `chrome_press` | Type (replace, a key at a time, Enter after), choose list options, keys and shortcuts (`Control+A`) |

@@ -521,17 +521,16 @@ impl ToolEntry {
         // again, and that must cost the same however much was printed.
         if run.stream.len() > 2 * STREAM_BYTES {
             // Whole lines fall off the start; a single endless line is cut
-            // where a character starts.
+            // where a character starts. (Where a character starts first:
+            // the text is looked through from there, and a place inside a
+            // character is none to look from.)
             let mut cut = run.stream.len() - STREAM_BYTES;
-            cut = match run.stream[cut..].find('\n') {
-                Some(at) => cut + at + 1,
-                None => {
-                    while !run.stream.is_char_boundary(cut) {
-                        cut += 1;
-                    }
-                    cut
-                }
-            };
+            while !run.stream.is_char_boundary(cut) {
+                cut += 1;
+            }
+            if let Some(at) = run.stream[cut..].find('\n') {
+                cut += at + 1;
+            }
             run.fell_off += run.stream[..cut].matches('\n').count();
             run.stream.drain(..cut);
         }
@@ -601,11 +600,11 @@ impl ToolEntry {
             .collect();
         let mut images = Vec::new();
         for (ix, image) in pictures.enumerate().take(MAX_TOOL_IMAGES) {
-            let extension = match image.mime_type.as_str() {
-                "image/png" => "png",
-                "image/jpeg" | "image/jpg" => "jpg",
-                "image/webp" => "webp",
-                "image/gif" => "gif",
+            let (extension, kind) = match image.mime_type.as_str() {
+                "image/png" => ("png", "image/png"),
+                "image/jpeg" | "image/jpg" => ("jpg", "image/jpeg"),
+                "image/webp" => ("webp", "image/webp"),
+                "image/gif" => ("gif", "image/gif"),
                 // Not one the app draws.
                 _ => continue,
             };
@@ -614,6 +613,12 @@ impl ToolEntry {
                 let Some(bytes) = crate::attachments::unbase64(&image.data) else {
                     continue;
                 };
+                // What it is said to be is the tool's word; only what its
+                // bytes are is kept as a picture (a drawing sent as a PNG
+                // is not one).
+                if crate::attachments::image_media_type(&bytes) != Some(kind) {
+                    continue;
+                }
                 if std::fs::create_dir_all(dir).is_err() || std::fs::write(&path, bytes).is_err() {
                     continue;
                 }
@@ -1122,6 +1127,7 @@ impl Entry {
 }
 
 /// A parsed `session/update` notification.
+#[derive(Debug)]
 pub struct Update {
     pub session_id: String,
     pub update: agent_client_protocol_schema::v1::SessionUpdate,
@@ -1135,9 +1141,7 @@ pub struct Update {
 
 /// Parses a `session/update` notification's update, tolerating update types
 /// newer than this build (they are ignored, not treated as errors).
-pub fn parse_update(params: &Value) -> Option<Update> {
-    let notification: agent_client_protocol_schema::v1::SessionNotification =
-        serde_json::from_value(params.clone()).ok()?;
+pub fn parse_update(params: Value) -> Option<Update> {
     let parent = params["update"]["_meta"]["claudeCode"]["parentToolUseId"]
         .as_str()
         .map(str::to_string);
@@ -1145,6 +1149,10 @@ pub fn parse_update(params: &Value) -> Option<Update> {
         .get("_claude/rateLimit")
         .filter(|info| info.is_object())
         .cloned();
+    // Last, so that the update (it may hold a whole file) is moved into
+    // its type, not copied for it.
+    let notification: agent_client_protocol_schema::v1::SessionNotification =
+        serde_json::from_value(params).ok()?;
     Some(Update {
         session_id: notification.session_id.0.to_string(),
         update: notification.update,
@@ -1369,6 +1377,20 @@ mod tests {
             &noisy.output[..60]
         );
         assert!(noisy.output.ends_with("line 39999 of a long build log\n"));
+        // What is printed in other letters than ASCII is cut where a
+        // character starts: a tick is three bytes, and half of what is
+        // held is not a whole number of them (a cut inside one stopped
+        // the app).
+        let mut ticks = ToolEntry {
+            kind: ToolKindLabel::Execute,
+            ..ToolEntry::placeholder()
+        };
+        let many = 2 * STREAM_BYTES / 3 + 1;
+        assert_ne!((3 * many - STREAM_BYTES) % 3, 0);
+        ticks.push_output(&"✓".repeat(many));
+        assert!(ticks.run.stream.len() <= STREAM_BYTES);
+        assert!(ticks.run.stream.chars().all(|c| c == '✓'));
+        assert!(ticks.output.ends_with('✓'));
         // A progress bar's rewrites do not pile up.
         let mut bar = ToolEntry {
             kind: ToolKindLabel::Execute,
@@ -1405,6 +1427,14 @@ mod tests {
             } },
             { "type": "content", "content": {
                 "type": "image", "mimeType": "image/png", "data": "not base64!"
+            } },
+            // Said to be a PNG, and is a drawing that links a file: its
+            // bytes say what it is.
+            { "type": "content", "content": {
+                "type": "image", "mimeType": "image/png",
+                "data": crate::attachments::base64(
+                    br#"<svg xmlns="http://www.w3.org/2000/svg"><image href="/dev/zero"/></svg>"#
+                )
             } },
         ]))
         .unwrap();
@@ -1558,13 +1588,13 @@ mod tests {
             "sessionId": "s1",
             "update": { "sessionUpdate": "some_future_update", "x": 1 }
         });
-        assert!(parse_update(&params).is_none());
+        assert!(parse_update(params).is_none());
 
         let params = serde_json::json!({
             "sessionId": "s1",
             "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "hi" } }
         });
-        let parsed = parse_update(&params).unwrap();
+        let parsed = parse_update(params).unwrap();
         assert_eq!(parsed.session_id, "s1");
         assert!(parsed.parent.is_none());
 
@@ -1577,7 +1607,7 @@ mod tests {
             }
         });
         assert_eq!(
-            parse_update(&params).unwrap().parent.as_deref(),
+            parse_update(params).unwrap().parent.as_deref(),
             Some("toolu_1")
         );
     }

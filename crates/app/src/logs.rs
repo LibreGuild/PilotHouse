@@ -125,6 +125,11 @@ fn rotate(path: &Path, keep: usize) {
 pub fn install_crash_handler() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // A text being tried on the Markdown parser, which panics on a few:
+        // caught where it is tried, and no crash.
+        if ph_ui::markdown::on_trial() {
+            return;
+        }
         let backtrace = std::backtrace::Backtrace::force_capture();
         let thread = std::thread::current();
         let report = format!(

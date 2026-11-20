@@ -34,6 +34,28 @@ pub fn release_render_image(image: Arc<RenderImage>, cx: &mut App) {
     });
 }
 
+/// Lets go of the pictures drawn from the files `paths` (a chat's
+/// attachments, shown through [`crate::images_safe::attached`]): their
+/// decoded pixels and their textures. One that was never drawn costs
+/// nothing, and one still on screen is read again when it is next drawn.
+pub fn release_paths(paths: Vec<std::path::PathBuf>, cx: &mut App) {
+    if paths.is_empty() {
+        return;
+    }
+    cx.defer(move |cx| {
+        let mut freed = false;
+        for path in paths {
+            if let Some(render) = crate::images_safe::forget_attached(&path, cx) {
+                cx.drop_image(render, None);
+                freed = true;
+            }
+        }
+        if freed {
+            trim_soon(cx);
+        }
+    });
+}
+
 /// Lets go of an encoded picture shown with `img(image)`: its decoded
 /// pixels (GPUI's asset cache) and its textures.
 pub fn release_image(image: Arc<Image>, cx: &mut App) {

@@ -49,11 +49,33 @@ impl Options<'_> {
     }
 }
 
-/// Slide `index` of `deck` as an SVG document, in points.
+/// The most rows of a table, and the most cells in a row, that are read
+/// from a PowerPoint file, drawn and written to one: more than a slide
+/// shows. A table is laid out in a grid of its rows by its longest row,
+/// which a few long rows would make larger than the memory.
+pub const TABLE_MOST: usize = 200;
+
+/// Slide `index` of `deck` as an SVG document, in points (empty when it
+/// could not be drawn).
 pub fn slide(deck: &Deck, index: usize, options: &Options) -> String {
-    let Some(slide) = deck.slides.get(index) else {
-        return String::new();
-    };
+    super::raster::caught("drawing a slide", || {
+        let Some(slide) = deck.slides.get(index) else {
+            return String::new();
+        };
+        let svg = drawn(deck, slide, options);
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><defs>{}</defs>{}</svg>"#,
+            svg.defs,
+            svg.body,
+            w = n(deck.size.width),
+            h = n(deck.size.height)
+        )
+    })
+    .unwrap_or_default()
+}
+
+/// `slide` of `deck` drawn: its body, and what that names (`defs`).
+fn drawn<'a>(deck: &'a Deck, slide: &Slide, options: &'a Options<'a>) -> Svg<'a> {
     let (w, h) = (deck.size.width, deck.size.height);
     let mut svg = Svg {
         body: String::new(),
@@ -95,13 +117,7 @@ pub fn slide(deck: &Deck, index: usize, options: &Options) -> String {
             .and_then(|kind| layout.and_then(|layout| layout.placeholder(kind)));
         svg.element(element, place);
     }
-    format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><defs>{}</defs>{}</svg>"#,
-        svg.defs,
-        svg.body,
-        w = n(w),
-        h = n(h)
-    )
+    svg
 }
 
 /// Element `id` of slide `index` alone, on nothing, framed by its outline
@@ -113,6 +129,10 @@ pub fn element_layer(
     id: &str,
     options: &Options,
 ) -> Option<(String, [f32; 4])> {
+    super::raster::caught("drawing an element", || layer(deck, index, id, options)).flatten()
+}
+
+fn layer(deck: &Deck, index: usize, id: &str, options: &Options) -> Option<(String, [f32; 4])> {
     let slide = deck.slides.get(index)?;
     let element = slide.elements.iter().find(|element| element.id == id)?;
     let layout = deck.theme.layout(&slide.layout);
@@ -703,8 +723,14 @@ impl Svg<'_> {
     }
 
     fn table(&mut self, table: &Table, w: f32, h: f32) {
-        let rows = table.rows.len();
-        let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0);
+        // No more of it than `TABLE_MOST` each way, wherever it came from.
+        let rows = table.rows.len().min(TABLE_MOST);
+        let columns = table.rows[..rows]
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0)
+            .min(TABLE_MOST);
         if rows == 0 || columns == 0 {
             return;
         }
@@ -742,13 +768,13 @@ impl Svg<'_> {
         // Each row as tall as its tallest cell, at least an even share.
         let floor = h / rows as f32;
         let pad = table.font_size * 0.45;
-        let heights: Vec<f32> = table
-            .rows
+        let heights: Vec<f32> = table.rows[..rows]
             .iter()
             .enumerate()
             .map(|(row, cells)| {
                 cells
                     .iter()
+                    .take(columns)
                     .enumerate()
                     .map(|(column, cell)| {
                         let header = table.header && row == 0;
@@ -770,8 +796,8 @@ impl Svg<'_> {
             .collect();
         let mut covered = vec![vec![false; columns]; rows];
         let mut y = 0.;
-        for (row, cells) in table.rows.iter().enumerate() {
-            for (column, cell) in cells.iter().enumerate() {
+        for (row, cells) in table.rows[..rows].iter().enumerate() {
+            for (column, cell) in cells.iter().take(columns).enumerate() {
                 if covered[row][column] {
                     continue;
                 }
@@ -935,7 +961,9 @@ impl Svg<'_> {
     /// An SVG document fitted into the box (as a picture, so its ids and
     /// styles stay its own).
     fn art(&mut self, source: &str, w: f32, h: f32) {
-        if source.trim().is_empty() {
+        // One nested too deeply is left out: drawing it would use up the
+        // stack.
+        if source.trim().is_empty() || super::raster::too_deep(source.as_bytes()) {
             return;
         }
         let data = base64::engine::general_purpose::STANDARD.encode(source.as_bytes());
@@ -995,13 +1023,28 @@ pub fn contrasting(background: Rgba, theme: &Theme) -> Rgba {
 /// A notes page for slide `index`: the slide above, its notes below, on
 /// a US Letter page.
 pub fn notes_page(deck: &Deck, index: usize, options: &Options) -> String {
+    super::raster::caught("drawing a notes page", || notes(deck, index, options))
+        .unwrap_or_default()
+}
+
+fn notes(deck: &Deck, index: usize, options: &Options) -> String {
     let (page_w, page_h) = (612., 792.);
     let margin = 54.;
     let slide_w = page_w - margin * 2.;
     let slide_h = slide_w * deck.size.height / deck.size.width.max(1.);
     let slide_h = slide_h.min(page_h * 0.45);
-    let picture = slide(deck, index, options);
-    let data = base64::engine::general_purpose::STANDARD.encode(picture.as_bytes());
+    // The slide itself, drawn into the page, not a picture of it: an SVG
+    // put in as a picture may not load pictures of its own (the PDF's
+    // reader drops them), so its photos, icons and graphics would be
+    // missing above the notes.
+    let picture = deck
+        .slides
+        .get(index)
+        .map(|slide| drawn(deck, slide, options));
+    let (slide_defs, slide_body, drawn_ids) = match picture {
+        Some(picture) => (picture.defs, picture.body, picture.next),
+        None => Default::default(),
+    };
     let notes = deck
         .slides
         .get(index)
@@ -1013,7 +1056,8 @@ pub fn notes_page(deck: &Deck, index: usize, options: &Options) -> String {
     let mut svg = Svg {
         body: String::new(),
         defs: String::new(),
-        next: 0,
+        // On from the slide's: both are in one document now.
+        next: drawn_ids,
         theme: &theme,
         options,
     };
@@ -1046,12 +1090,14 @@ pub fn notes_page(deck: &Deck, index: usize, options: &Options) -> String {
     svg.text(&body, None, None, slide_w, page_h - text_y - margin, None);
     svg.body.push_str("</g>");
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{pw}" height="{ph}" viewBox="0 0 {pw} {ph}"><defs>{}</defs><rect width="{pw}" height="{ph}" fill="#FFFFFF"/><image href="data:image/svg+xml;base64,{data}" x="{}" y="{}" width="{}" height="{}" preserveAspectRatio="xMidYMid meet"/><rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="#BBBBBB" stroke-width="0.75"/>{}</svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{pw}" height="{ph}" viewBox="0 0 {pw} {ph}"><defs>{slide_defs}{}</defs><rect width="{pw}" height="{ph}" fill="#FFFFFF"/><svg x="{}" y="{}" width="{}" height="{}" viewBox="0 0 {} {}" preserveAspectRatio="xMidYMid meet">{slide_body}</svg><rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="#BBBBBB" stroke-width="0.75"/>{}</svg>"##,
         svg.defs,
         n(margin),
         n(margin),
         n(slide_w),
         n(slide_h),
+        n(deck.size.width),
+        n(deck.size.height),
         n(margin),
         n(margin),
         n(slide_w),
@@ -1060,4 +1106,111 @@ pub fn notes_page(deck: &Deck, index: usize, options: &Options) -> String {
         pw = n(page_w),
         ph = n(page_h),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::slides::ops::{Op, apply, new_deck};
+
+    /// A deck whose last slide holds `elements` (as an agent gives them).
+    fn deck_with(elements: serde_json::Value) -> Deck {
+        let mut deck = new_deck("Drawn", "clean", SlideSize::default());
+        let op: Op = serde_json::from_value(serde_json::json!({
+            "op": "add_slide", "layout": "blank", "notes": "Say it.", "elements": elements
+        }))
+        .unwrap();
+        apply(&mut deck, op).unwrap();
+        deck
+    }
+
+    #[test]
+    fn a_notes_page_shows_the_slides_pictures() {
+        let root = std::env::temp_dir().join(format!("pilothouse-notes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let media = root.join(crate::slides::space::MEDIA);
+        std::fs::create_dir_all(&media).unwrap();
+        image::RgbImage::from_pixel(8, 6, image::Rgb([10, 20, 30]))
+            .save(media.join("pic.png"))
+            .unwrap();
+        let deck = deck_with(serde_json::json!([
+            {"type": "picture", "media": "pic.png", "frame": {"x": 10, "y": 10, "w": 80, "h": 60}}
+        ]));
+        let index = deck.slides.len() - 1;
+        // The pictures in the PDF of that slide, without and with its notes
+        // page.
+        let pictures = |notes: bool| {
+            let out = root.join(format!("{notes}.pdf"));
+            crate::slides::pdf::write(&deck, Some(&media), &[index], notes, &out).unwrap();
+            let bytes = std::fs::read(&out).unwrap();
+            String::from_utf8_lossy(&bytes)
+                .matches("/Subtype /Image")
+                .count()
+        };
+        let alone = pictures(false);
+        assert!(alone > 0);
+        assert_eq!(pictures(true), alone * 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_table_is_drawn_and_written_to_its_first_rows_and_columns() {
+        let mut deck = new_deck("Table", "clean", SlideSize::default());
+        // Longer and wider than `TABLE_MOST`, as a deck's file may say.
+        let mut rows = vec![vec![Cell::default()]; TABLE_MOST + 50];
+        rows[0] = vec![Cell::default(); TABLE_MOST + 50];
+        std::sync::Arc::make_mut(&mut deck.slides[0])
+            .elements
+            .push(Element {
+                id: "big".into(),
+                frame: Frame::new(0., 0., 400., 300.),
+                kind: Kind::Table(Table {
+                    rows,
+                    ..Table::default()
+                }),
+                ..Element::default()
+            });
+        let svg = slide(&deck, 0, &Options::default());
+        assert_eq!(svg.matches(r#"<line x1="0""#).count(), TABLE_MOST);
+        let parts = crate::slides::pptx::package(&deck, None).unwrap();
+        let xml = String::from_utf8_lossy(&parts["ppt/slides/slide1.xml"]);
+        assert_eq!(xml.matches("<a:tr ").count(), TABLE_MOST);
+        assert_eq!(xml.matches("<a:gridCol ").count(), TABLE_MOST);
+    }
+
+    #[test]
+    fn a_graphic_nested_without_end_is_left_out() {
+        let nested = |depth: usize| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'>{}<circle cx='5' cy='5' r='4'/>{}</svg>",
+                "<g>".repeat(depth),
+                "</g>".repeat(depth)
+            )
+        };
+        let deck = deck_with(serde_json::json!([
+            {"type": "svg", "source": nested(8), "frame": {"x": 10, "y": 10, "w": 80, "h": 60}}
+        ]));
+        let index = deck.slides.len() - 1;
+        let drawn = slide(&deck, index, &Options::default());
+        assert_eq!(drawn.matches("<image ").count(), 1);
+        // Put in the deck as a file could say it (an agent's is checked as
+        // it is added): drawn on a background thread, it used up the stack.
+        let mut deep = deck.clone();
+        for element in &mut std::sync::Arc::make_mut(&mut deep.slides[index]).elements {
+            if let Kind::Svg(art) = &mut element.kind {
+                art.source = nested(5000);
+            }
+        }
+        let image = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                let drawn = slide(&deep, index, &Options::default());
+                assert_eq!(drawn.matches("<image ").count(), 0);
+                crate::slides::raster::rasterize(&drawn, 320)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(image.is_ok());
+    }
 }

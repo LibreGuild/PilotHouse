@@ -36,11 +36,13 @@ impl TestRunHub {
         cx.try_global::<Self>()?.runs.get(&project_id).cloned()
     }
 
-    /// Stops a removed workspace's run.
+    /// Stops a removed workspace's run and deletes its runs and baselines.
     pub fn remove(project_id: i64, cx: &mut App) {
         if cx.has_global::<Self>() {
             cx.global_mut::<Self>().runs.remove(&project_id);
         }
+        cx.background_spawn(async move { run::forget_workspace(project_id) })
+            .detach();
     }
 }
 

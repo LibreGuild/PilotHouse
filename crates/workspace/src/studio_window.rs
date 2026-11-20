@@ -623,8 +623,10 @@ impl StudioWindow {
     }
 
     fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        // A presentation saves what is left before it closes.
+        // A presentation saves what is left before it closes: also text
+        // still being typed in place, which is in the deck once typing ends.
         if let Content::Slides(editor) = &self.editor {
+            editor.update(cx, |editor, cx| editor.finish_typing(window, cx));
             let doc = editor.read(cx).document().clone();
             if let Err(err) = doc.update(cx, |doc, _| doc.save_now()) {
                 if self.may_close {
@@ -791,7 +793,13 @@ impl Render for StudioWindow {
         v_flex()
             .size_full()
             .bg(theme.background)
-            .on_action(cx.listener(|_, _: &ph_files::CloseFile, window, _| window.remove_window()))
+            // Closing by the key is closing by the button: the presentation
+            // is saved first, a picture or video with changes asks.
+            .on_action(cx.listener(|this, _: &ph_files::CloseFile, window, cx| {
+                if this.should_close(window, cx) {
+                    window.remove_window();
+                }
+            }))
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<ChatEdge>, _, cx| {
                     this.drag_edge(event, cx)

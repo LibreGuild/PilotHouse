@@ -261,7 +261,9 @@ fn json_blocks(text: &str) -> Vec<&str> {
         };
         let info = after[..newline].trim().to_ascii_lowercase();
         let body = &after[newline + 1..];
-        let Some(end) = body.find("```") else { break };
+        let Some(end) = closing_fence(body) else {
+            break;
+        };
         if info.is_empty()
             || info.starts_with("json")
             || info.contains("review")
@@ -276,6 +278,22 @@ fn json_blocks(text: &str) -> Vec<&str> {
         blocks.push(text.trim());
     }
     blocks
+}
+
+/// Where the fence that closes a block opened just before `body` starts: a
+/// line of only backticks. A fence elsewhere on a line is part of the
+/// content, such as a snippet in a finding's `suggestion`: a JSON string
+/// holds no raw line break, so it never starts a line.
+fn closing_fence(body: &str) -> Option<usize> {
+    let mut at = 0;
+    for line in body.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") && trimmed.trim_start_matches('`').is_empty() {
+            return Some(at + line.find("```")?);
+        }
+        at += line.len();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -315,6 +333,14 @@ mod tests {
         assert_eq!((major.line, major.end_line), (Some(10), Some(14)));
         assert_eq!(major.details, "No backoff.");
         assert_eq!(report.findings[2].path, "src/app.py");
+    }
+
+    #[test]
+    fn a_fence_inside_a_finding_does_not_end_the_block() {
+        let reply = "Done.\n\n```json pilothouse-review\n{\"summary\": \"s\", \"verdict\": \"comment\", \"findings\": [\n  {\"severity\": \"major\", \"path\": \"src/a.rs\", \"line\": 3, \"title\": \"Unbounded\", \"suggestion\": \"Bound it:\\n```rust\\nlet n = n.min(9);\\n```\"}\n]}\n```\n";
+        let report = parse(reply).unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert!(report.findings[0].suggestion.contains("```rust"));
     }
 
     #[test]

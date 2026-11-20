@@ -211,6 +211,22 @@ impl TerminalAgents {
         }
     }
 
+    /// Chat `session` goes on in the chat from here: the agent in its CLI
+    /// (closed with this) is no longer followed, so nothing more of the
+    /// CLI is kept with the chat. Its transcript is the chat's own again,
+    /// and what [`sync`] keeps of an agent whose terminal went (its record
+    /// as text, in the transcript's place) would write over it.
+    pub(crate) fn let_go(session: SessionId, cx: &mut App) {
+        if Self::list(cx)
+            .iter()
+            .any(|agent| agent.session == Some(session))
+        {
+            cx.default_global::<Self>()
+                .agents
+                .retain(|agent| agent.session != Some(session));
+        }
+    }
+
     pub(crate) fn seen(pane: &str, cx: &mut App) {
         let Some(agent) = cx
             .default_global::<Self>()
@@ -620,6 +636,11 @@ fn remember(cx: &mut App) {
 /// chat: the last thing it said (under its title), and what was asked and
 /// answered, for Search chats. Read from its session file (found by its id
 /// in its folder when not known), off the UI thread.
+///
+/// What was asked and answered takes the place of the chat's stored
+/// messages, so only for a session that was a CLI's from its start: a chat
+/// that went on in its agent's CLI has its own transcript there, which
+/// stays (see `workspace_screen::cli`).
 fn keep_last_reply(
     session: SessionId,
     agent: &'static str,
@@ -640,13 +661,19 @@ fn keep_last_reply(
         let job_store = store.clone();
         let line = cx
             .background_spawn(async move {
+                // Deleted meanwhile: there is no chat to keep it with.
+                let row = job_store.session(session).ok().flatten()?;
+                // A chat's own transcript (it went on in its agent's CLI,
+                // or is back in the chat by now) is not written over: what
+                // was said in the CLI is added to it on the way back.
+                let own_transcript =
+                    crate::workspace_screen::cli::has_chat_transcript(&job_store, &row);
                 let path = transcript.or_else(|| {
-                    let row = job_store.session(session).ok().flatten()?;
                     // Its files are where its account keeps them.
                     let environment = ph_agent::profiles::Profiles::load(&job_store)
                         .of(agent)
                         .environment_for(&row.account);
-                    let (cwd, cli) = (PathBuf::from(row.cwd?), cli?);
+                    let (cwd, cli) = (PathBuf::from(row.cwd.clone()?), cli?);
                     ph_agent::cli_sessions::sessions_in(agent, &cwd, &environment)
                         .into_iter()
                         .find(|past| past.id == cli)?
@@ -654,17 +681,20 @@ fn keep_last_reply(
                 })?;
                 let said = ph_agent::cli_transcript::said(format, &path);
                 let line = ph_agent::cli_transcript::first_line_of_last_reply(&said);
-                // For Search: the start of each message is enough, and keeps
-                // the write (under the store's lock) short for a long session.
-                const KEPT_CHARS: usize = 8_000;
-                let messages: Vec<(&str, String)> = said
-                    .into_iter()
-                    .map(|(role, text)| {
-                        let text: String = text.chars().take(KEPT_CHARS).collect();
-                        (role, serde_json::json!({ "text": text }).to_string())
-                    })
-                    .collect();
-                let _ = job_store.replace_messages(session, &messages);
+                if !own_transcript {
+                    // For Search: the start of each message is enough, and
+                    // keeps the write (under the store's lock) short for a
+                    // long session.
+                    const KEPT_CHARS: usize = 8_000;
+                    let messages: Vec<(&str, String)> = said
+                        .into_iter()
+                        .map(|(role, text)| {
+                            let text: String = text.chars().take(KEPT_CHARS).collect();
+                            (role, serde_json::json!({ "text": text }).to_string())
+                        })
+                        .collect();
+                    let _ = job_store.replace_messages(session, &messages);
+                }
                 if line.is_some() {
                     let _ = job_store.set_session_line(session, line.as_deref());
                 }
@@ -927,14 +957,27 @@ fn command(
         .filter(plain)
         .filter(|model| *model != "default");
     let mode = start.mode.filter(plain);
+    // Each value as the shell is to take it: quoted unless no shell reads
+    // any of its characters as more than itself (zsh reads `opus[1m]` as
+    // a file pattern, and runs nothing when no file matches).
+    let word = |value: &str| {
+        if value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-:/".contains(c))
+        {
+            value.to_string()
+        } else {
+            quoted(Path::new(value))
+        }
+    };
     let mut words = vec![program.to_string()];
     match start.agent_id {
         "claude" => {
             if let Some(session) = start.resume {
-                words.extend(["--resume".into(), session.to_string()]);
+                words.extend(["--resume".into(), word(session)]);
             }
             if let Some(model) = model {
-                words.extend(["--model".into(), model.to_string()]);
+                words.extend(["--model".into(), word(model)]);
             }
             // The modes a chat and the CLI name alike; the plain one
             // ("default", the CLI's "manual") is what it starts in anyway.
@@ -948,33 +991,33 @@ fn command(
                 ]
                 .contains(mode)
             }) {
-                words.extend(["--permission-mode".into(), mode.to_string()]);
+                words.extend(["--permission-mode".into(), word(mode)]);
             }
         }
         "codex" => {
             if let Some(session) = start.resume {
-                words.extend(["resume".into(), session.to_string()]);
+                words.extend(["resume".into(), word(session)]);
             }
             if let Some(model) = model {
-                words.extend(["--model".into(), model.to_string()]);
+                words.extend(["--model".into(), word(model)]);
             }
         }
         "gemini" => {
             if let Some(session) = start.resume {
-                words.extend(["--resume".into(), session.to_string()]);
+                words.extend(["--resume".into(), word(session)]);
             }
             if let Some(model) = model {
-                words.extend(["--model".into(), model.to_string()]);
+                words.extend(["--model".into(), word(model)]);
             }
         }
         "antigravity" => {
             if let Some(session) = start.resume {
-                words.extend(["--conversation".into(), session.to_string()]);
+                words.extend(["--conversation".into(), word(session)]);
             }
         }
         "cline" => {
             if let Some(session) = start.resume {
-                words.extend(["--id".into(), session.to_string()]);
+                words.extend(["--id".into(), word(session)]);
             }
         }
         _ => anyhow::bail!("{} cannot run in a terminal", name(start.agent_id)),
@@ -1522,6 +1565,20 @@ mod tests {
         assert_eq!(
             with("claude", Some("opus; rm -rf ~"), Some("plan && true")),
             "claude --settings 'hooks.json'"
+        );
+        // A model with brackets (Claude Code's 1M-context ones) is quoted:
+        // zsh would read it as a file pattern.
+        assert_eq!(
+            with("claude", Some("opus[1m]"), None),
+            format!(
+                "claude --model {} --settings 'hooks.json'",
+                quoted(Path::new("opus[1m]"))
+            )
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            with("claude", Some("opus[1m]"), None),
+            "claude --model 'opus[1m]' --settings 'hooks.json'"
         );
         // An agent whose CLI takes neither.
         assert_eq!(

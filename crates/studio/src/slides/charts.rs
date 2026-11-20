@@ -443,18 +443,27 @@ fn draw_pie(
         let end = angle + sweep;
         let large = if sweep > std::f64::consts::PI { 1 } else { 0 };
         let point = |r: f32, a: f64| (cx + r * a.cos() as f32, cy + r * a.sin() as f32);
-        let d = if sweep >= std::f64::consts::TAU - 1e-6 {
-            // The whole circle (an arc cannot end where it starts).
-            format!(
-                "M{} {} A{r} {r} 0 1 1 {} {} A{r} {r} 0 1 1 {} {} Z",
-                n(cx - radius),
-                n(cy),
-                n(cx + radius),
-                n(cy),
-                n(cx - radius),
-                n(cy),
-                r = n(radius)
-            )
+        let whole = sweep >= std::f64::consts::TAU - 1e-6;
+        let d = if whole {
+            // The whole circle (an arc cannot end where it starts); a
+            // doughnut's hole is a second circle, cut out by the fill rule.
+            let circle = |r: f32| {
+                format!(
+                    "M{} {} A{r} {r} 0 1 1 {} {} A{r} {r} 0 1 1 {} {} Z",
+                    n(cx - r),
+                    n(cy),
+                    n(cx + r),
+                    n(cy),
+                    n(cx - r),
+                    n(cy),
+                    r = n(r)
+                )
+            };
+            if inner > 0. {
+                format!("{} {}", circle(radius), circle(inner))
+            } else {
+                circle(radius)
+            }
         } else {
             let (x1, y1) = point(radius, angle);
             let (x2, y2) = point(radius, end);
@@ -490,7 +499,12 @@ fn draw_pie(
         let background = theme.resolve(&Color::from("light1"));
         let _ = write!(
             out,
-            r##"<path d="{d}" fill="#{}" stroke="#{}" stroke-width="{}"/>"##,
+            r##"<path d="{d}"{} fill="#{}" stroke="#{}" stroke-width="{}"/>"##,
+            if whole && inner > 0. {
+                r#" fill-rule="evenodd""#
+            } else {
+                ""
+            },
             color.hex(),
             background.hex(),
             n(size * 0.12)
@@ -648,8 +662,11 @@ pub fn escape(text: &str) -> String {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
-            // Characters XML forbids (control codes) are left out.
+            // Characters XML forbids (control codes, and the two that are
+            // no characters) are left out: one of them and the slide's
+            // drawing is refused whole.
             c if (c as u32) < 0x20 && c != '\t' && c != '\n' && c != '\r' => {}
+            '\u{FFFE}' | '\u{FFFF}' => {}
             c => out.push(c),
         }
     }
@@ -669,5 +686,40 @@ mod tests {
         assert_eq!(format_value(2_500_000.), "2.5M");
         assert_eq!(format_value(0.25), "0.25");
         assert_eq!(escape("a<b & \"c\""), "a&lt;b &amp; &quot;c&quot;");
+        assert_eq!(escape("a\u{FFFF}b\u{FFFE}\u{1}c\td"), "abc\td");
+    }
+
+    #[test]
+    fn a_doughnut_of_one_slice_keeps_its_hole() {
+        let chart = |kind| Chart {
+            chart: kind,
+            series: vec![super::super::model::Series {
+                values: vec![100., 0.],
+                ..Default::default()
+            }],
+            ..Chart::default()
+        };
+        let draw = |kind| {
+            let mut out = String::new();
+            let text = Rgba::BLACK;
+            draw_pie(
+                &chart(kind),
+                200.,
+                0.,
+                200.,
+                &Theme::default(),
+                "Inter",
+                text,
+                12.,
+                &mut out,
+            );
+            out
+        };
+        // The ring: the outer circle and the hole in one path.
+        let ring = draw(ChartKind::Doughnut);
+        assert_eq!(ring.matches(" A").count(), 4, "{ring}");
+        assert!(ring.contains(r#"fill-rule="evenodd""#), "{ring}");
+        let pie = draw(ChartKind::Pie);
+        assert_eq!(pie.matches(" A").count(), 2, "{pie}");
     }
 }

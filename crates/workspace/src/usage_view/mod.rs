@@ -25,6 +25,8 @@
 mod data;
 mod prices;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -80,6 +82,9 @@ pub fn open(window: &mut Window, cx: &mut App) {
     });
 }
 
+/// An agent's details, with the numbers, period and agent they are of.
+type KeptDetail = (Arc<Dashboard>, Range, &'static str, Rc<data::AgentDetail>);
+
 struct UsageView {
     range: Range,
     group: Group,
@@ -98,6 +103,12 @@ struct UsageView {
     updating_prices: bool,
     /// What the last *Update prices* came to, when it failed.
     prices_failed: bool,
+    /// The sums shown, as last worked out, and what for: worked out again
+    /// only when the numbers, the period or the grouping change, not at
+    /// each draw (each bar the pointer crosses draws again).
+    summary: Option<(Arc<Dashboard>, Range, Group, Rc<data::Summary>)>,
+    /// The open agent's details, likewise.
+    detail: RefCell<Option<KeptDetail>>,
     _load: Option<Task<()>>,
     _tick: Option<Task<()>>,
     _prices: Option<Task<()>>,
@@ -117,6 +128,8 @@ impl UsageView {
             explained: false,
             updating_prices: false,
             prices_failed: false,
+            summary: None,
+            detail: RefCell::new(None),
             _load: None,
             _tick: None,
             _prices: None,
@@ -207,12 +220,50 @@ impl UsageView {
     }
 }
 
+impl UsageView {
+    /// `agent`'s details over the period, worked out once for the numbers
+    /// read (`dashboard`, the one shown).
+    fn detail_of(&self, dashboard: &Dashboard, agent: &'static str) -> Rc<data::AgentDetail> {
+        let mut kept = self.detail.borrow_mut();
+        if let Some((of, range, id, detail)) = &*kept
+            && std::ptr::eq(&**of, dashboard)
+            && *range == self.range
+            && *id == agent
+        {
+            return detail.clone();
+        }
+        let detail = Rc::new(dashboard.detail(agent, self.range));
+        if let Some(shown) = self
+            .dashboard
+            .clone()
+            .filter(|shown| std::ptr::eq(&**shown, dashboard))
+        {
+            *kept = Some((shown, self.range, agent, detail.clone()));
+        }
+        detail
+    }
+}
+
 impl Render for UsageView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body: AnyElement = match self.dashboard.clone() {
             None => self.reading_note(cx).into_any_element(),
             Some(dashboard) => {
-                let summary = dashboard.summary(self.range, self.group);
+                let summary = match &self.summary {
+                    Some((of, range, group, summary))
+                        if Arc::ptr_eq(of, &dashboard)
+                            && *range == self.range
+                            && *group == self.group =>
+                    {
+                        summary.clone()
+                    }
+                    _ => {
+                        let summary = Rc::new(dashboard.summary(self.range, self.group));
+                        self.summary =
+                            Some((dashboard.clone(), self.range, self.group, summary.clone()));
+                        summary
+                    }
+                };
                 let limits = RateLimits::all(cx);
                 v_flex()
                     .gap_5()
@@ -903,7 +954,7 @@ impl UsageView {
         cx: &App,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let detail = dashboard.detail(spec.id, self.range);
+        let detail = self.detail_of(dashboard, spec.id);
         let total: u64 = detail.models.iter().map(|(_, tally)| tally.tokens()).sum();
         let windows: Vec<Limit> = limits
             .iter()

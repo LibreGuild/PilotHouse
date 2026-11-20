@@ -408,6 +408,22 @@ impl Kind {
         }
     }
 
+    /// Its `type` as the deck's JSON has it.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Kind::Shape(_) => "shape",
+            Kind::Text(_) => "text",
+            Kind::Picture(_) => "picture",
+            Kind::Table(_) => "table",
+            Kind::Chart(_) => "chart",
+            Kind::Code(_) => "code",
+            Kind::Icon(_) => "icon",
+            Kind::Svg(_) => "svg",
+            Kind::Group(_) => "group",
+            Kind::Raw(_) => "raw",
+        }
+    }
+
     /// The text it holds, when it holds text in one body.
     pub fn text(&self) -> Option<&TextBody> {
         match self {

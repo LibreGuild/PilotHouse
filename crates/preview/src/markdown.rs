@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui_kit::AppContext as _;
-use gpui_kit::base::text::{MarkdownNode, TextView, markdown_ast};
+use gpui_kit::base::text::{
+    MarkdownNode, MarkdownParseContext, MarkdownPlugin, TextView, markdown_ast,
+};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -15,7 +17,7 @@ use gpui_kit::{
 };
 
 use crate::PreviewEvent;
-use crate::mermaid::{self, Diagram};
+use crate::mermaid;
 
 /// The widest a line of rendered text gets, for reading comfort.
 pub const READING_WIDTH: f32 = 820.;
@@ -23,7 +25,8 @@ pub const READING_WIDTH: f32 = 820.;
 const DIAGRAM_WIDTH: f32 = READING_WIDTH - 64.;
 
 /// A Markdown view of `text`, the file at `path`: images resolve beside
-/// it, ```` ```mermaid ```` blocks become diagrams, and links to files call
+/// it (one on the web is a link to it: nothing is fetched),
+/// ```` ```mermaid ```` blocks become diagrams, and links to files call
 /// `open` (web and mail links open in the browser; other schemes do
 /// nothing, since a document may come from anyone). A selection copies as
 /// plain text and as HTML (`ph_ui::rich_copy`), so it pastes elsewhere with
@@ -51,10 +54,17 @@ pub(crate) fn markdown_text(
 ) -> TextView {
     let dir: Arc<Path> = path.parent().unwrap_or(Path::new(".")).into();
     let images = dir.clone();
+    // Text nested too deeply to parse is shown plain.
+    let plain = match ph_ui::markdown::guarded(&text) {
+        std::borrow::Cow::Owned(plain) => Some(plain),
+        std::borrow::Cow::Borrowed(_) => None,
+    };
+    let text = plain.map_or(text, SharedString::from);
     TextView::markdown(id, text)
         .selectable(true)
         .code_block_actions(ph_ui::markdown::code_actions)
         .image_source(move |uri: &SharedUri| resolve_image(&images, uri))
+        .plugin(WebPicture)
         .on_link_click(move |url, _, window, cx| match local_target(&dir, url) {
             Some(path) => open(path, window, cx),
             None if ph_ui::platform::is_web_link(url) => cx.open_url(url),
@@ -67,16 +77,21 @@ pub(crate) fn markdown_text(
             if code.lang.as_deref() != Some("mermaid") {
                 return None;
             }
-            let drawn = mermaid::draw(&code.value, dark);
+            // Only named here: a short document is parsed on the UI
+            // thread, and drawing a diagram can take long.
             Some(
-                MarkdownNode::new("mermaid", drawn)
+                MarkdownNode::new("mermaid", ())
                     .text(code.value.clone())
                     .markdown(format!("```mermaid\n{}\n```", code.value)),
             )
         })
-        .markdown_block_renderer("mermaid", |node, _, cx| {
+        .markdown_block_renderer("mermaid", move |node, _, cx| {
+            let drawn = mermaid::cached(node.as_text(), dark);
+            if drawn.is_none() {
+                mermaid::draw_soon(node.as_text().to_string(), dark, false, cx);
+            }
             let theme = cx.theme();
-            match node.data::<Result<Diagram, String>>() {
+            match &drawn {
                 Some(Ok(diagram)) => {
                     // A document's blocks have no ids of their own: the
                     // diagram's source names it.
@@ -122,14 +137,83 @@ pub(crate) fn markdown_text(
                             .child(node.as_text().to_string()),
                     )
                     .into_any_element(),
-                None => div().into_any_element(),
+                // Being drawn, off the UI thread.
+                None => div()
+                    .w_full()
+                    .py_3()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Drawing the diagram…")
+                    .into_any_element(),
             }
         })
 }
 
-/// A document image: HTTPS and data URLs as they are, anything else a file
-/// beside the document. Other web schemes and files on other computers are
-/// not loaded (an image that does not load shows nothing).
+/// A picture on the web. It is not loaded: opening a file calls no address
+/// the file names (that would tell whoever wrote the file when and from
+/// where it is read). What the picture is said to show, or else its
+/// address, stands in its place as a link to it.
+struct WebPicture;
+
+/// Whether `url` is an address on the web.
+fn on_the_web(url: &str) -> bool {
+    let lower = url.trim_start().to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://")
+}
+
+/// What stands in for `node` when it is a picture on the web: its address
+/// (the node's data), shown as its description, or as the address itself
+/// when it has none.
+fn web_picture(node: &markdown_ast::Node) -> Option<MarkdownNode> {
+    let markdown_ast::Node::Image(image) = node else {
+        return None;
+    };
+    if !on_the_web(&image.url) {
+        return None;
+    }
+    let shown = match image.alt.trim() {
+        "" => image.url.trim(),
+        alt => alt,
+    };
+    let url = SharedString::from(image.url.trim().to_string());
+    Some(MarkdownNode::new("web-picture", url).text(shown.to_string()))
+}
+
+impl MarkdownPlugin for WebPicture {
+    fn name(&self) -> &str {
+        "web-picture"
+    }
+
+    fn parse(
+        &self,
+        node: &markdown_ast::Node,
+        _: &MarkdownParseContext<'_>,
+    ) -> Option<MarkdownNode> {
+        web_picture(node)
+    }
+
+    fn render(&self, node: &MarkdownNode, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let url = node.data::<SharedString>().cloned().unwrap_or_default();
+        // A document's pictures have no ids of their own: where one is
+        // written names it.
+        let at = node.source_range().map_or(0, |range| range.start);
+        div()
+            .id(("web-picture", at))
+            .cursor_pointer()
+            .text_color(cx.theme().link)
+            .child(node.as_text().to_string())
+            .on_click(move |_, _, cx| {
+                if ph_ui::platform::is_web_link(&url) {
+                    cx.open_url(&url);
+                }
+            })
+    }
+}
+
+/// A document image: a `data:` URL as it is, anything else a file beside
+/// the document. Pictures on the web are links ([`WebPicture`]) and files
+/// on other computers are not loaded (an image that does not load shows
+/// nothing).
 fn resolve_image(dir: &Path, uri: &SharedUri) -> ImageSource {
     // Through a loader that refuses drawings that would read files.
     match image_target(dir, uri) {
@@ -141,15 +225,22 @@ fn resolve_image(dir: &Path, uri: &SharedUri) -> ImageSource {
 /// Where a document picture is read from, if it may be.
 fn image_target(dir: &Path, uri: &SharedUri) -> Option<gpui_kit::Resource> {
     let text = uri.as_ref();
-    let lower = text.to_ascii_lowercase();
-    if lower.starts_with("https://") || lower.starts_with("data:") {
+    // (Case-insensitive, without copying a picture's megabytes of Base64.)
+    if text
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+    {
         return Some(gpui_kit::Resource::Uri(uri.clone()));
+    }
+    // Nothing is fetched, whatever asks for it.
+    if on_the_web(text) {
+        return None;
     }
     local_path(dir, text).map(|path| gpui_kit::Resource::Path(path.into()))
 }
 
 /// An image that is not loaded: it shows nothing, quietly.
-fn refused_image() -> ImageSource {
+pub(crate) fn refused_image() -> ImageSource {
     ImageSource::Custom(std::sync::Arc::new(|_, _| {
         Some(Err(gpui_kit::ImageCacheError::Asset(
             "not loaded from a document".into(),
@@ -241,6 +332,11 @@ pub(crate) fn percent_decode(text: &str) -> String {
 /// gets the definitions it uses.
 fn chunks(text: &str) -> Vec<String> {
     use crate::rich::blocks::{Document, Kind};
+    // Nested too deeply to parse: one piece, as it is shown (plain, and
+    // only its start, so that a frame does not read megabytes).
+    if let std::borrow::Cow::Owned(plain) = ph_ui::markdown::guarded(text) {
+        return vec![plain];
+    }
     let document = Document::parse(text);
     let mut chunks: Vec<String> = Vec::new();
     if !document.leading.trim().is_empty() {
@@ -505,6 +601,21 @@ mod tests {
     }
 
     #[test]
+    fn a_document_nested_too_deeply_is_one_plain_piece() {
+        // Larger than a short document, and deep at its very end.
+        let deep = format!("{}\n{}x\n", "A line.\n\n".repeat(10_000), ">".repeat(5000));
+        let pieces = chunks(&deep);
+        assert_eq!(pieces.len(), 1);
+        assert!(pieces[0].len() < 40 * 1024);
+        // Drawn, the piece is taken as it is: it is not wrapped again.
+        let shown = ph_ui::markdown::keep_line_breaks(&pieces[0]);
+        assert!(matches!(
+            ph_ui::markdown::guarded(&shown),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
     fn links_to_files_open_them() {
         let dir = std::env::temp_dir().join(format!("ph-md-links-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("docs")).unwrap();
@@ -533,8 +644,32 @@ mod tests {
         assert_eq!(local_path(dir, "%5C%5Cserver%5Cshare%5Ca.png"), None);
         let refused = |uri: &str| image_target(dir, &SharedUri::from(uri.to_string())).is_none();
         assert!(refused("http://tracker.example/pixel.gif"));
+        assert!(refused("https://tracker.example/pixel.gif"));
+        assert!(refused("HTTPS://tracker.example/pixel.gif"));
+        assert!(!refused("data:image/png;base64,AAEC"));
         assert!(refused(r"\\server\share\a.png"));
         assert!(!refused("img/a.png"));
+    }
+
+    #[test]
+    fn web_pictures_become_links() {
+        let parsed = |markdown: &str| {
+            let root = ::markdown::to_mdast(markdown, &::markdown::ParseOptions::gfm()).unwrap();
+            let paragraph = &root.children().unwrap()[0];
+            web_picture(&paragraph.children().unwrap()[0])
+        };
+        let badge = parsed("![Build status](https://ci.example/badge.svg)").unwrap();
+        assert_eq!(badge.as_text(), "Build status");
+        assert_eq!(
+            badge.data::<SharedString>().unwrap().as_ref(),
+            "https://ci.example/badge.svg"
+        );
+        // No description: the address is what is shown.
+        let bare = parsed("![](http://example.com/a.png)").unwrap();
+        assert_eq!(bare.as_text(), "http://example.com/a.png");
+        // A picture beside the document, or inside it, is drawn as before.
+        assert!(parsed("![logo](img/logo.png)").is_none());
+        assert!(parsed("![dot](data:image/png;base64,AAEC)").is_none());
     }
 
     #[test]

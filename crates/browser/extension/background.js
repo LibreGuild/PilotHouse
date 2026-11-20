@@ -16,7 +16,7 @@
 //   (`lib/link.js`). There is no network port and no remote code.
 
 import { connect, onConnection, post, send, setRequestHandler } from './lib/link.js';
-import { attached, allowed, allowedTabs, frontTab, inGroup, known, openTab, popups, setShared } from './lib/tabs.js';
+import { addressOf, attached, allowed, allowedTabs, frontTab, inGroup, known, openTab, popups, setShared, webAddress } from './lib/tabs.js';
 import * as sending from './features/send.js';
 import * as statusFeature from './features/status.js';
 import * as recording from './features/record.js';
@@ -77,6 +77,10 @@ setRequestHandler(async ({ method, params, sessionId }) => {
     const tabId = Number(sessionId);
     if (!attached.has(tabId)) throw new Error('PilotHouse is not attached to that tab');
     if (!ALLOWED.has(method)) throw new Error(`${method} is not allowed`);
+    // Checked here as well as in the app, so neither rests on the other.
+    if (method === 'Page.navigate' && !webAddress(String(params?.url ?? ''))) {
+      throw new Error('agents can open web addresses (http, https) and about:blank, nothing else');
+    }
     return chrome.debugger.sendCommand({ tabId }, method, params ?? {});
   }
   return command(method, params ?? {});
@@ -95,6 +99,10 @@ async function command(method, params) {
     case 'PilotHouse.attach': {
       const tabId = await allowed(params.tabId);
       if (!attached.has(tabId)) {
+        const tab = await chrome.tabs.get(tabId).catch(() => null);
+        if (tab && !webAddress(addressOf(tab))) {
+          throw new Error('that tab does not show a web page; agents can use only tabs that do');
+        }
         try {
           await chrome.debugger.attach({ tabId }, PROTOCOL);
         } catch (error) {
@@ -202,6 +210,12 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
     return;
   }
   if (!known.has(tabId)) return;
+  // A tab of the group that moved to a local file or a browser's or an
+  // extension's own page is let go until it shows a web page again.
+  if (change.url !== undefined && !webAddress(change.url) && attached.delete(tabId)) {
+    await chrome.debugger.detach({ tabId }).catch(() => {});
+    post({ method: 'PilotHouse.detached', params: { tabId, reason: 'not_a_web_page' } });
+  }
   if (change.url !== undefined || change.title !== undefined) {
     post({ method: 'PilotHouse.tabUpdated', params: { tabId, url: tab.url ?? '', title: tab.title ?? '' } });
   }
@@ -305,12 +319,12 @@ recording.onBarFinish(async (keep) => {
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const id = String(info.menuItemId);
   if (!tab?.id || !MENU.some(([known]) => known === id)) return;
-  connect();
+  connect({ asked: true });
   await act(id, tab, info).catch(() => {});
 });
 
 chrome.commands.onCommand.addListener(async (command, tab) => {
-  connect();
+  connect({ asked: true });
   const target = tab ?? (await frontTab());
   if (!target) return;
   const action = { 'send-to-pilothouse': 'selection-or-page', 'screenshot-area': 'area', 'pick-element': 'element' }[command];
@@ -386,7 +400,7 @@ chrome.runtime.onConnect.addListener((port) => {
   // Content scripts are this extension too, but run in pages: only the
   // popup (no tab) hears what agents do.
   if (port.name !== 'popup' || port.sender?.id !== chrome.runtime.id || port.sender.tab) return;
-  connect();
+  connect({ asked: true });
   const stop = statusFeature.watch((status) => {
     try {
       port.postMessage({ type: 'status', status });

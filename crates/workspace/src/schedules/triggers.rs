@@ -32,6 +32,8 @@ const QUIET: Duration = Duration::from_secs(5);
 const COOL_DOWN: Duration = Duration::from_secs(120);
 /// GitHub is asked every this many ticks (about 5 minutes).
 const GITHUB_EVERY: u32 = 10;
+/// Most events kept for a schedule busy when they came.
+const MOST_WAITING: usize = 20;
 
 #[derive(Default)]
 pub(crate) struct Triggers {
@@ -45,6 +47,10 @@ pub(crate) struct Triggers {
     failed_checks: HashSet<String>,
     /// When each schedule last started on an event.
     fired: HashMap<ScheduleId, Instant>,
+    /// Pull requests opened and checks failed while their schedule was
+    /// busy (running, or started just before): each starts it later, oldest
+    /// first. They are seen once, and would be lost otherwise.
+    waiting: HashMap<ScheduleId, Vec<String>>,
     ticks: u32,
     /// The background look at Git and GitHub, while it runs.
     looking: Option<Task<()>>,
@@ -94,6 +100,28 @@ impl Automation {
             return;
         }
         self.triggers.ticks += 1;
+        // What came while a schedule was busy, one a tick, once it is free.
+        self.triggers
+            .waiting
+            .retain(|id, _| schedules.iter().any(|schedule| schedule.id == *id));
+        for schedule in &schedules {
+            let Some(context) = self
+                .triggers
+                .waiting
+                .get(&schedule.id)
+                .and_then(|waiting| waiting.first().cloned())
+            else {
+                continue;
+            };
+            if self.fire(schedule, context, cx)
+                && let Some(waiting) = self.triggers.waiting.get_mut(&schedule.id)
+            {
+                waiting.remove(0);
+                if waiting.is_empty() {
+                    self.triggers.waiting.remove(&schedule.id);
+                }
+            }
+        }
         let wants = |test: fn(&When) -> bool| -> Vec<ProjectId> {
             let mut projects: Vec<ProjectId> = schedules
                 .iter()
@@ -222,7 +250,7 @@ impl Automation {
             {
                 let context = format!("Pull request #{number} “{title}” by {author} was opened.");
                 for schedule in of(project_id, |when| matches!(when, When::PullRequest)) {
-                    self.fire(&schedule, context.clone(), cx);
+                    self.fire_or_wait(&schedule, context.clone(), cx);
                 }
             }
         }
@@ -233,7 +261,7 @@ impl Automation {
             let short: String = sha.chars().take(8).collect();
             let context = format!("Checks failed on commit {short}: {}.", failing.join(", "));
             for schedule in of(project_id, |when| matches!(when, When::ChecksFail)) {
-                self.fire(&schedule, context.clone(), cx);
+                self.fire_or_wait(&schedule, context.clone(), cx);
             }
         }
     }
@@ -292,7 +320,8 @@ impl Automation {
     }
 
     /// Starts an event schedule, unless it runs already or ran very lately.
-    fn fire(&mut self, schedule: &Schedule, context: String, cx: &mut Context<Self>) {
+    /// Whether it started.
+    fn fire(&mut self, schedule: &Schedule, context: String, cx: &mut Context<Self>) -> bool {
         let running = schedule.last_result.as_deref() == Some("Running…");
         let lately = self
             .triggers
@@ -300,10 +329,29 @@ impl Automation {
             .get(&schedule.id)
             .is_some_and(|at| at.elapsed() < COOL_DOWN);
         if running || lately {
-            return;
+            return false;
         }
         self.triggers.fired.insert(schedule.id, Instant::now());
         self.run_schedule(schedule, Some(context), cx);
+        true
+    }
+
+    /// Starts `schedule` on an event seen only once (a pull request
+    /// opened, checks failed), or keeps the event for when it is free.
+    fn fire_or_wait(&mut self, schedule: &Schedule, context: String, cx: &mut Context<Self>) {
+        let busy = self
+            .triggers
+            .waiting
+            .get(&schedule.id)
+            .is_some_and(|waiting| !waiting.is_empty());
+        // Those that came first go first.
+        if !busy && self.fire(schedule, context.clone(), cx) {
+            return;
+        }
+        let waiting = self.triggers.waiting.entry(schedule.id).or_default();
+        if !waiting.contains(&context) && waiting.len() < MOST_WAITING {
+            waiting.push(context);
+        }
     }
 }
 

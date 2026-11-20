@@ -1074,7 +1074,11 @@ impl ChatPanel {
                     // preview on a click.
                     cx.stop_propagation();
                     if ix < this.attachments.len() {
-                        this.attachments.remove(ix);
+                        // A picture taken off is not drawn again: GPUI
+                        // would keep it decoded until told.
+                        if let Attachment::Image { path, .. } = this.attachments.remove(ix) {
+                            ph_ui::images::release_paths(vec![path], cx);
+                        }
                         cx.notify();
                     }
                 }));

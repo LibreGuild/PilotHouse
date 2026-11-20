@@ -9,7 +9,7 @@ import { onAppNote, onConnection } from '../lib/link.js';
 const HANDOFF = 'pilothouse-handoff|';
 
 /** The latest from the app; an open popup is told of each change. */
-let latest = { connected: false, waiting: [], working: [], agents: [] };
+let latest = { connected: false, busy: false, waiting: [], working: [], agents: [] };
 /** Fields set since this worker started, which what was kept must not undo. */
 const live = new Set();
 const watchers = new Set();
@@ -62,12 +62,14 @@ export function install() {
   void chrome.storage.session.get('status').then(({ status: kept }) => {
     if (!kept) return;
     const restored = Object.fromEntries(Object.entries(kept)
-      .filter(([key]) => key !== 'connected' && !live.has(key) && key in latest));
+      .filter(([key]) => key !== 'connected' && key !== 'busy' && !live.has(key) && key in latest));
     if (Object.keys(restored).length) changed(restored);
   }).catch(() => {});
   void badge();
 
-  onConnection((connected) => changed(connected ? { connected } : { connected, waiting: [], working: [], agents: [] }));
+  onConnection((connected, busy) => changed(connected
+    ? { connected, busy: false }
+    : { connected, busy: !!busy, waiting: [], working: [], agents: [] }));
 
   onAppNote('PilotHouse.status', (params) => {
     changed({

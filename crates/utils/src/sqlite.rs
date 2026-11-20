@@ -1,6 +1,8 @@
 //! Looking into a SQLite file: its tables, or a query's rows. The file is
 //! opened read-only, so nothing in it can change.
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context as _, Result, bail};
 use rusqlite::{Connection, OpenFlags, types::ValueRef};
 
@@ -11,15 +13,45 @@ const MAX_ROWS: usize = 200;
 
 /// The tables (with their row counts), or the rows of a query.
 pub fn query(input: &Input) -> Result<String> {
-    let path = input.text.trim().trim_matches('"');
+    query_at(&file_of(&input.text)?, input)
+}
+
+/// The path a SQLite input names, without the spaces and quotes around it.
+/// Everything that checks the path and everything that opens it start from
+/// this one form, so a check cannot pass on one file while another opens.
+pub fn path_of(text: &str) -> &str {
+    text.trim().trim_matches('"')
+}
+
+/// The file `text` names, absolute and free of links.
+pub fn file_of(text: &str) -> Result<PathBuf> {
+    let path = path_of(text);
     if path.is_empty() {
         bail!("Give the path of a SQLite file.");
     }
     if is_network_path(path) {
         bail!("{path} is on another computer");
     }
-    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("could not open {path}"))?;
+    dunce::canonicalize(path).with_context(|| format!("no such file: {path}"))
+}
+
+/// Like [`query`], on `file` exactly as given: a caller that checked where
+/// `file` is opens that same path, and a link put in its place (or in any
+/// folder on its way) after the check is refused, not followed.
+pub fn query_at(file: &Path, input: &Input) -> Result<String> {
+    // An absolute path never starts with `file:`, which this SQLite (built
+    // with `SQLITE_USE_URI`) reads as a URI whatever the open flags say.
+    if !file.is_absolute() {
+        bail!("{} is not a full path", file.display());
+    }
+    if is_network_path(&file.to_string_lossy()) {
+        bail!("{} is on another computer", file.display());
+    }
+    let db = Connection::open_with_flags(
+        file,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .with_context(|| format!("could not open {}", file.display()))?;
     // One file, read only: no other databases attached (they could be any
     // file), no functions from the file's own schema, and a time limit.
     db.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_ATTACHED, 0)?;
@@ -185,5 +217,44 @@ mod tests {
             ..Input::new(file)
         });
         assert!(write.is_err(), "read only");
+    }
+
+    #[test]
+    fn one_path_is_checked_and_opened() {
+        assert_eq!(path_of(" \"/ws/a.db\" "), "/ws/a.db");
+        assert_eq!(path_of("/ws/a.db\""), "/ws/a.db");
+        // `file:` text is a path like any other here, never a URI.
+        let uri = query_at(Path::new("file:/etc/x.db"), &Input::default()).unwrap_err();
+        assert!(uri.to_string().contains("not a full path"), "{uri}");
+        assert!(file_of("//server/share/x.db").is_err());
+        assert!(file_of(" \"\" ").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_not_followed_when_opened() {
+        let dir = std::env::temp_dir().join(format!("ph-utils-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.db");
+        Connection::open(&real)
+            .unwrap()
+            .execute_batch("CREATE TABLE t (x);")
+            .unwrap();
+        let link = dir.join("link.db");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let canonical_dir = dunce::canonicalize(&dir).unwrap();
+        // Checked as the real file, then swapped for a link: refused.
+        assert!(query_at(&canonical_dir.join("link.db"), &Input::default()).is_err());
+        assert_eq!(
+            query_at(&canonical_dir.join("real.db"), &Input::default()).unwrap(),
+            "t (0 rows)"
+        );
+        // Through `query`, the link is resolved once and the target opened.
+        assert_eq!(
+            file_of(&link.display().to_string()).unwrap(),
+            canonical_dir.join("real.db")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -7,7 +7,7 @@
   const ns = (globalThis.__pilothouse ??= {});
   if (ns.pick) return;
 
-  const CSS = `
+  const STYLE = `
     :host { all: initial; }
     .box { position: fixed; border: 2px solid rgb(139, 92, 246); background: rgba(139, 92, 246, 0.10);
       border-radius: 2px; pointer-events: none; display: none; }
@@ -23,7 +23,7 @@
     const esc = (s) => (globalThis.CSS && CSS.escape ? CSS.escape(s) : s);
     for (const attr of ['data-testid', 'data-test', 'data-cy']) {
       const value = el.getAttribute && el.getAttribute(attr);
-      if (value) return `[${attr}="${value}"]`;
+      if (value) return `[${attr}="${esc(value)}"]`;
     }
     const parts = [];
     for (let node = el; node && node.nodeType === 1 && parts.length < 5; node = node.parentElement) {
@@ -42,8 +42,16 @@
     return parts.join(' > ');
   };
 
-  const labelOf = (el) => (el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder
-    || el.title || el.alt || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+  // What was typed into a field is never its name (a password would be sent
+  // as the element's text): only a button's value is the words on it.
+  const labelOf = (el) => {
+    const field = el.localName === 'input' || el.localName === 'textarea';
+    const button = el.localName === 'input' && ['submit', 'button', 'reset'].includes(el.type);
+    const label = el.getAttribute('aria-label') || (field && el.labels && el.labels.length ? el.labels[0].innerText : '')
+      || (field ? '' : el.innerText) || (button ? el.value : '') || el.placeholder || el.title || el.alt
+      || (field ? el.getAttribute('name') || el.id : '') || '';
+    return label.trim().replace(/\s+/g, ' ').slice(0, 120);
+  };
 
   /** Where the element comes from, when the page is a dev build that says:
    * React (before 19), Vue, Svelte, or a data-source attribute. */
@@ -100,7 +108,7 @@
     host.style.setProperty('pointer-events', 'none', 'important');
     const root = host.attachShadow({ mode: 'closed' });
     const sheet = new CSSStyleSheet();
-    sheet.replaceSync(CSS);
+    sheet.replaceSync(STYLE);
     root.adoptedStyleSheets = [sheet];
     const box = element(root, 'div', 'box');
     const tag = element(root, 'div', 'tag');

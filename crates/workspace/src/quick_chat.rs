@@ -791,8 +791,13 @@ impl QuickChatWindow {
         let session = self.chat.read(cx).active_session_id(cx);
         let project = self.project.id;
         cx.defer(move |cx| {
-            let Some((handle, workspace)) = crate::open::main_workspace(cx) else {
-                return;
+            // With no window left open (macOS), one is opened for it.
+            let (handle, workspace) = match crate::open::main_workspace_or_open(cx) {
+                Ok(main) => main,
+                Err(err) => {
+                    tracing::warn!("opening a window for the quick chat failed: {err:#}");
+                    return;
+                }
             };
             let _ = handle.update(cx, |_, window, cx| {
                 workspace.update(cx, |workspace, cx| match session {

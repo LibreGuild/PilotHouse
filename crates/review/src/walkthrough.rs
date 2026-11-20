@@ -205,14 +205,29 @@ pub fn file_link(path: &str, line: Option<u64>) -> String {
     }
 }
 
-/// The file and line a link made by [`file_link`] names.
+/// The file and line a link made by [`file_link`] names. Only a path
+/// inside the repository ([`is_inside`]): the link's text is the agent's or
+/// the repository's, never trusted.
 pub fn parse_file_link(url: &str) -> Option<(String, Option<u64>)> {
     let rest = url.strip_prefix(FILE_SCHEME)?;
     let (path, line) = match rest.rsplit_once('#') {
         Some((path, line)) => (path, line.parse().ok()),
         None => (rest, None),
     };
-    (!path.is_empty()).then(|| (path.to_string(), line))
+    is_inside(path).then(|| (path.to_string(), line))
+}
+
+/// Whether `path`, read as text, is a relative path that stays inside the
+/// folder it is joined to: not absolute, no `..`, no drive or share. Decided
+/// before the file system is asked anything: on Windows a path such as
+/// `//host/share/a` alone makes the system connect to that host and offer
+/// the user's credentials.
+pub fn is_inside(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with(['/', '\\'])
+        && path
+            .split(['/', '\\'])
+            .all(|part| !part.is_empty() && part != ".." && !part.contains(':'))
 }
 
 /// `line` with each inline code span that names a file made a link.
@@ -271,7 +286,7 @@ fn reference(code: &str) -> Option<(&str, Option<u64>, Option<u64>)> {
         && path
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '@' | '+'));
-    if !looks_like_path {
+    if !looks_like_path || !is_inside(path) {
         return None;
     }
     let (start, end) = match lines {
@@ -387,5 +402,30 @@ Run `cargo test` and see `docs/sessions.md` and [`src/app.rs`](https://example.c
         ] {
             assert_eq!(reference(code), None, "{code}");
         }
+    }
+
+    #[test]
+    fn only_paths_inside_the_repository_are_references() {
+        for code in [
+            "/etc/passwd",
+            "//203.0.113.5/s/a.txt",
+            "../../secret.txt",
+            "src/../../x.rs",
+            "/Volumes/share/a.md:3",
+        ] {
+            assert_eq!(reference(code), None, "{code}");
+        }
+        for url in [
+            "pilothouse-file:/etc/passwd",
+            "pilothouse-file://host/share/a.txt",
+            "pilothouse-file:\\\\host\\share\\a.txt",
+            "pilothouse-file:..\\a.txt",
+            "pilothouse-file:C:\\Users\\a.txt",
+            "pilothouse-file:src/../../a.txt#3",
+            "pilothouse-file:",
+        ] {
+            assert_eq!(parse_file_link(url), None, "{url}");
+        }
+        assert!(is_inside("src/a.rs") && is_inside("a..b/c.rs"));
     }
 }

@@ -126,15 +126,28 @@ impl TaskFacts {
     /// Says which folders `window` shows tasks of. New ones are looked at
     /// at once.
     pub(crate) fn want(&mut self, window: WindowId, folders: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let new = folders
-            .iter()
-            .any(|folder| !self.places.contains_key(folder));
         if self.wanted.get(&window) != Some(&folders) {
             self.wanted.insert(window, folders);
         }
+        // New among the folders a round looks at. One past the most looked
+        // at never gets a place: counted as new, it had the host asked at
+        // every call (every few seconds) for as long as it was wanted.
+        let new = self
+            .looked_at()
+            .iter()
+            .any(|folder| !self.places.contains_key(folder));
         if new {
             self.look(true, cx);
         }
+    }
+
+    /// The folders a round looks at: every window's, [`FOLDERS`] at most.
+    fn looked_at(&self) -> Vec<PathBuf> {
+        let mut folders: Vec<PathBuf> = self.wanted.values().flatten().cloned().collect();
+        folders.sort();
+        folders.dedup();
+        folders.truncate(FOLDERS);
+        folders
     }
 
     /// A window closed: its folders are no longer looked at.
@@ -148,10 +161,7 @@ impl TaskFacts {
         if self.looking.is_some() {
             return;
         }
-        let mut folders: Vec<PathBuf> = self.wanted.values().flatten().cloned().collect();
-        folders.sort();
-        folders.dedup();
-        folders.truncate(FOLDERS);
+        let folders = self.looked_at();
         self.places.retain(|folder, _| folders.contains(folder));
         if folders.is_empty() {
             return;

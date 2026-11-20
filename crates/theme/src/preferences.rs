@@ -438,30 +438,59 @@ fn first_installed(candidates: &[&str], installed: &[String]) -> String {
         .unwrap_or_default()
 }
 
-/// Installed font families, sorted, for the settings' font pickers.
+/// Installed font families, sorted, for the settings' font pickers: as
+/// listed the first time they were asked for in this run, so opening
+/// Settings does not wait for the system (about 100 ms on a Mac with many
+/// installed) each time. A font installed meanwhile is there after a
+/// restart. (Not [`system_fonts`]: that list can be from before the app's
+/// own fonts were loaded.)
 pub fn installed_fonts(cx: &App) -> Vec<String> {
-    let mut names = cx.text_system().all_font_names();
-    names.retain(|name| !name.starts_with('.'));
-    names.sort();
-    names.dedup();
-    names
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES
+        .get_or_init(|| {
+            let mut names = cx.text_system().all_font_names();
+            names.retain(|name| !name.starts_with('.'));
+            names.sort();
+            names.dedup();
+            names
+        })
+        .clone()
 }
 
 /// The families in effect: the user's choice, else the platform default.
+///
+/// Asked for every window and on every change of a theme or a preference
+/// (each step of a size slider), so it must not list the system's fonts:
+/// that takes about 100 ms on a Mac with many installed. The default is the
+/// family the app carries, which is there once it loaded; only without it is
+/// the system asked what it has, and then once.
 pub fn effective_fonts(preferences: &Preferences, cx: &App) -> (String, String) {
-    let installed = cx.text_system().all_font_names();
     let (ui, code) = default_fonts();
+    let default = |candidates: &[&str]| {
+        if crate::fonts::registered(cx) {
+            candidates.first().copied().unwrap_or_default().to_string()
+        } else {
+            first_installed(candidates, system_fonts(cx))
+        }
+    };
     let ui_font = if preferences.ui_font.is_empty() {
-        first_installed(ui, &installed)
+        default(ui)
     } else {
         preferences.ui_font.clone()
     };
     let code_font = if preferences.code_font.is_empty() {
-        first_installed(code, &installed)
+        default(code)
     } else {
         preferences.code_font.clone()
     };
     (ui_font, code_font)
+}
+
+/// The system's font families as they were when first asked: the fallback's
+/// answer does not need to follow a font installed while the app runs.
+fn system_fonts(cx: &App) -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| cx.text_system().all_font_names())
 }
 
 pub fn preferences(cx: &App) -> Preferences {

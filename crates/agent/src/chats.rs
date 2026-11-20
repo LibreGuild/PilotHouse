@@ -230,6 +230,9 @@ impl WorkspaceChats {
             for kept in this.threads.values() {
                 kept.thread.update(cx, |thread, cx| thread.persist_now(cx));
             }
+            // Nothing is dropped when the app quits, so nothing else ends
+            // the agents (each in a process group of its own).
+            crate::rpc::stop_all_before_exit();
             async {}
         });
         Self {
@@ -378,58 +381,43 @@ impl WorkspaceChats {
         {
             return connection.clone();
         }
-        // A copy PilotHouse made (a GitHub clone, a task folder that may
-        // hold a pull request author's tree): the agent's launcher starts
-        // outside it, so its `.npmrc` or a vendored copy of the adapter
-        // never runs; each chat still works in the folder (the session's
-        // own folder).
-        let cwd = if self.project.read_only || ph_store::paths::is_copy(&self.project.path) {
-            let neutral = ph_store::paths::data_dir().join("agents");
-            let _ = std::fs::create_dir_all(&neutral);
-            neutral
-        } else {
-            self.project.path.clone()
-        };
-        let mut env = self.mcp_settings_env(spec);
-        if spec.id == "cline" {
-            env.extend(crate::cline::env_for(&self.store));
-        }
-        // What Settings → Agents sets for the agent, and for the account
-        // the chat is in: one process serves one account.
-        env.extend(
-            crate::profiles::Profiles::load(&self.store)
-                .of(spec.id)
-                .environment_for(account),
+        // Where it starts and with what is worked out with the start, off
+        // the UI's thread: folders and Cline's settings file are written,
+        // and Cline's variables wait for the login shell's environment.
+        let (store, project, account) = (
+            self.store.clone(),
+            self.project.clone(),
+            account.to_string(),
         );
-        let connection = cx.new(|cx| AgentConnection::start_with(spec, cwd, env, cx));
+        let prepare = move || {
+            // A copy PilotHouse made (a GitHub clone, a task folder that
+            // may hold a pull request author's tree): the agent's launcher
+            // starts outside it, so its `.npmrc` or a vendored copy of the
+            // adapter never runs; each chat still works in the folder (the
+            // session's own folder).
+            let cwd = if project.read_only || ph_store::paths::is_copy(&project.path) {
+                let neutral = ph_store::paths::data_dir().join("agents");
+                let _ = std::fs::create_dir_all(&neutral);
+                neutral
+            } else {
+                project.path.clone()
+            };
+            let mut env = mcp_settings_env(&store, &project, spec);
+            if spec.id == "cline" {
+                env.extend(crate::cline::env_for(&store));
+            }
+            // What Settings → Agents sets for the agent, and for the
+            // account the chat is in: one process serves one account.
+            env.extend(
+                crate::profiles::Profiles::load(&store)
+                    .of(spec.id)
+                    .environment_for(&account),
+            );
+            (cwd, env)
+        };
+        let connection = cx.new(|cx| AgentConnection::start_prepared(spec, prepare, cx));
         self.connections.insert(key, connection.clone());
         connection
-    }
-
-    /// For an agent that reads MCP servers only from its own settings file
-    /// (Cline): a copy of that file with PilotHouse's servers and those from
-    /// Settings → MCP & skills, named in the variable the agent reads.
-    fn mcp_settings_env(&self, spec: &'static AgentSpec) -> Vec<(String, String)> {
-        let Some(var) = spec.quirks.mcp_settings_env else {
-            return Vec::new();
-        };
-        let servers: Vec<_> =
-            crate::thread::pilothouse_mcp_server(&self.project.path, spec.id, self.project.id)
-                .into_iter()
-                .chain(crate::mcp_config::for_session(&self.store))
-                .collect();
-        let key = format!("{}:{}", self.project.id, self.project.path.display());
-        match crate::cline::write_mcp_settings(
-            &crate::cline::Paths::of_this_computer(),
-            &servers,
-            &key,
-        ) {
-            Ok(path) => vec![(var.to_string(), path.to_string_lossy().into_owned())],
-            Err(err) => {
-                tracing::warn!("{} gets no MCP servers: {err:#}", spec.name);
-                Vec::new()
-            }
-        }
     }
 
     /// Starts a chat named `title` with `prompt` and the default agent,
@@ -660,6 +648,32 @@ impl WorkspaceChats {
         self.unseen.retain(|id| *id != session);
         cx.emit(WorkspaceChatsEvent::SessionsChanged);
         Ok(())
+    }
+}
+
+/// For an agent that reads MCP servers only from its own settings file
+/// (Cline): a copy of that file with PilotHouse's servers and those from
+/// Settings → MCP & skills, named in the variable the agent reads.
+fn mcp_settings_env(
+    store: &Store,
+    project: &ThreadProject,
+    spec: &'static AgentSpec,
+) -> Vec<(String, String)> {
+    let Some(var) = spec.quirks.mcp_settings_env else {
+        return Vec::new();
+    };
+    let servers: Vec<_> = crate::thread::pilothouse_mcp_server(&project.path, spec.id, project.id)
+        .into_iter()
+        .chain(crate::mcp_config::for_session(store))
+        .collect();
+    let key = format!("{}:{}", project.id, project.path.display());
+    match crate::cline::write_mcp_settings(&crate::cline::Paths::of_this_computer(), &servers, &key)
+    {
+        Ok(path) => vec![(var.to_string(), path.to_string_lossy().into_owned())],
+        Err(err) => {
+            tracing::warn!("{} gets no MCP servers: {err:#}", spec.name);
+            Vec::new()
+        }
     }
 }
 

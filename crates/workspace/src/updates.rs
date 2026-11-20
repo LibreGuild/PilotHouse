@@ -937,20 +937,29 @@ pub(crate) fn download_update(cx: &mut App) {
 
 /// Installs the update now: PilotHouse quits, is replaced, and starts again.
 pub(crate) fn restart_to_update(cx: &mut App) {
-    let Some(updater) = cx.try_global::<Updater>() else {
-        return;
-    };
-    let Status::Ready { staged, .. } = updater.status.clone() else {
-        return;
-    };
-    match apply(&updater.install, &staged, true) {
-        Ok(()) => {
-            // Installed by the script now, not again on quit.
-            Updater::set(Status::Idle, cx);
-            cx.quit();
+    // Studio's work is saved, or asked about, first, as quitting does; and
+    // before the script starts, which installs and relaunches whenever the
+    // app quits. Deferred: a Studio window asks once the window the click
+    // came from is free.
+    cx.defer(|cx| {
+        if !crate::studio_window::ready_to_quit(cx) {
+            return;
         }
-        Err(err) => Updater::set(Status::Failed(format!("{err:#}").into()), cx),
-    }
+        let Some(updater) = cx.try_global::<Updater>() else {
+            return;
+        };
+        let Status::Ready { staged, .. } = updater.status.clone() else {
+            return;
+        };
+        match apply(&updater.install, &staged, true) {
+            Ok(()) => {
+                // Installed by the script now, not again on quit.
+                Updater::set(Status::Idle, cx);
+                cx.quit();
+            }
+            Err(err) => Updater::set(Status::Failed(format!("{err:#}").into()), cx),
+        }
+    });
 }
 
 #[cfg(test)]

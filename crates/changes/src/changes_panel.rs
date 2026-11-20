@@ -37,13 +37,13 @@ use crate::conflict_view::{ConflictEvent, ConflictView};
 use crate::history_view::HistoryView;
 use crate::repo::Repo;
 use crate::stash_view::StashView;
-use ph_preview::diff as diff_view;
 
 mod review;
 
 pub use review::{Evidence, EvidenceKind};
 
-/// How many discards can be undone.
+/// How many discards can be undone (each a click: a hunk, a file or a
+/// folder, whatever its size).
 const UNDO_DEPTH: usize = 20;
 
 /// The Git pane shows the diff beside the list of files from this width
@@ -136,8 +136,9 @@ pub struct ChangesPanel {
     /// The pane has the room to show the diff beside the list (under it
     /// otherwise); not known until it was drawn once.
     wide: Option<bool>,
-    /// Patches that were discarded, newest last.
-    undo: Vec<String>,
+    /// What each discard reverted, newest last: its patches in the order
+    /// they were applied.
+    undo: Vec<Vec<String>>,
     /// A refresh was asked for while one was running.
     refresh_again: bool,
     /// Review notes on changed lines, waiting to go to a chat.
@@ -154,9 +155,9 @@ pub struct ChangesPanel {
     narrow: bool,
     /// Folders folded in View as Tree (new files' with a `new:` prefix).
     folded: HashSet<String>,
-    /// The branch against its base, once looked at (`None` inside: there
-    /// is no base, or this is it).
-    branch: Option<Result<Option<git::diff::BranchChanges>, SharedString>>,
+    /// The branch against its base while the Branch view shows (`None`
+    /// inside: there is no base, or this is it).
+    branch: Option<Result<Option<BranchShown>, SharedString>>,
     _branch_task: Option<Task<()>>,
     _refresh: Option<Task<()>>,
     /// How closely the panel is looked at, for how often it reads Git.
@@ -166,6 +167,19 @@ pub struct ChangesPanel {
     /// The next read of a panel only glanced at.
     _glance: Option<Task<()>>,
     _subscription: Subscription,
+}
+
+/// The branch's changes against its base, read and laid out for the
+/// Branch view.
+struct BranchShown {
+    base: String,
+    fork: String,
+    files: usize,
+    added: usize,
+    removed: usize,
+    diffs: crate::diff_list::Diffs,
+    /// The summary, then the diffs (see [`crate::diff_list`]).
+    list: gpui_kit::ListState,
 }
 
 /// How closely the panel is looked at. Reading the working tree is three
@@ -399,22 +413,15 @@ impl ChangesPanel {
         let Some(patch) = self.file(file_ix).and_then(|file| file.hunk_patch(hunk_ix)) else {
             return;
         };
-        self.remember_discard(patch.clone());
-        self.run(window, cx, move |root| {
-            git::apply(root, &patch, ApplyMode::Discard)
-        });
+        self.discard(vec![patch], window, cx);
     }
 
     fn keep_path(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         self.run(window, cx, move |root| git::stage_path(root, &path));
     }
 
-    /// Keeps changed files `files` (a folder's, in View as Tree).
-    fn keep_files(&mut self, files: &[usize], window: &mut Window, cx: &mut Context<Self>) {
-        let paths: Vec<String> = files
-            .iter()
-            .filter_map(|ix| self.file(*ix).map(|file| file.path.clone()))
-            .collect();
+    /// Keeps changed files `paths` (a folder's, in View as Tree).
+    fn keep_files(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.run(window, cx, move |root| {
             for path in &paths {
                 git::stage_path(root, path)?;
@@ -453,38 +460,72 @@ impl ChangesPanel {
         .detach();
     }
 
-    fn discard_file(&mut self, file_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(file) = self.file(file_ix) else {
+    /// Discards the changes of files `paths`, as they are now: a menu
+    /// opened before the list changed still names the right files.
+    fn discard_files(&mut self, paths: &[String], window: &mut Window, cx: &mut Context<Self>) {
+        let patches: Vec<String> = paths
+            .iter()
+            .filter_map(|path| self.file(self.file_ix(path)?))
+            .flat_map(|file| {
+                // From the last hunk up, so earlier hunks' line numbers
+                // stay valid.
+                (0..file.hunks.len())
+                    .rev()
+                    .filter_map(|ix| file.hunk_patch(ix))
+            })
+            .collect();
+        self.discard(patches, window, cx);
+    }
+
+    /// Reverts `patches` in the working tree, in this order; what was
+    /// reverted is one step of Undo discard.
+    fn discard(&mut self, patches: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if patches.is_empty() {
+            return;
+        }
+        let root = self.root.clone();
+        let task = cx.background_spawn(async move {
+            let mut done = Vec::new();
+            for patch in patches {
+                if let Err(err) = git::apply(&root, &patch, ApplyMode::Discard) {
+                    return (done, Some(err));
+                }
+                done.push(patch);
+            }
+            (done, None)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let (done, err) = task.await;
+            _ = this.update_in(cx, |this, window, cx| {
+                // Only what was reverted: undoing a patch that was not
+                // would add its lines a second time.
+                if !done.is_empty() {
+                    this.undo.push(done);
+                    if this.undo.len() > UNDO_DEPTH {
+                        this.undo.remove(0);
+                    }
+                }
+                if let Some(err) = err {
+                    window.push_notification(Notification::error(format!("{err:#}")), cx);
+                }
+                this.review.follow = true;
+                this.refresh(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Brings back what the last discard reverted.
+    fn undo_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(patches) = self.undo.pop() else {
             return;
         };
-        // Discard from the last hunk up, so earlier hunks' line numbers stay valid.
-        let patches: Vec<String> = (0..file.hunks.len())
-            .rev()
-            .filter_map(|ix| file.hunk_patch(ix))
-            .collect();
-        for patch in patches.iter().rev() {
-            self.remember_discard(patch.clone());
-        }
         self.run(window, cx, move |root| {
             for patch in &patches {
-                git::apply(root, patch, ApplyMode::Discard)?;
+                git::apply(root, patch, ApplyMode::Restore)?;
             }
             Ok(())
         });
-    }
-
-    fn undo_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(patch) = self.undo.pop() else { return };
-        self.run(window, cx, move |root| {
-            git::apply(root, &patch, ApplyMode::Restore)
-        });
-    }
-
-    fn remember_discard(&mut self, patch: String) {
-        self.undo.push(patch);
-        if self.undo.len() > UNDO_DEPTH {
-            self.undo.remove(0);
-        }
     }
 
     // ---- Rendering -----------------------------------------------------------
@@ -514,6 +555,8 @@ impl ChangesPanel {
     pub fn show_explanation(&mut self, cx: &mut Context<Self>) {
         if self.explanation.is_some() {
             self.view = GitView::Changes;
+            self.branch = None;
+            self._branch_task = None;
             self.explaining = true;
             cx.notify();
         }
@@ -537,6 +580,11 @@ impl ChangesPanel {
 
     pub fn show_view(&mut self, view: GitView, window: &mut Window, cx: &mut Context<Self>) {
         self.view = view;
+        if view != GitView::Branch {
+            // A branch's diff can be large; it is read again when shown.
+            self.branch = None;
+            self._branch_task = None;
+        }
         match view {
             GitView::History if self.history.is_none() => {
                 let (repo, writer) = (self.repo.clone(), self.writer.clone());
@@ -566,16 +614,57 @@ impl ChangesPanel {
         cx.notify();
     }
 
-    /// Reads the branch's changes against its base, off the UI thread.
+    /// Reads the branch's changes against its base, and lays out their
+    /// rows, off the UI thread.
     fn load_branch(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
-        let read = cx.background_spawn(async move { git::diff::branch_changes(&root) });
+        let read = cx.background_spawn(async move {
+            let branch = git::diff::branch_changes(&root)?;
+            anyhow::Ok(branch.map(|branch| {
+                let added = branch.files.iter().map(FileChange::added).sum();
+                let removed = branch.files.iter().map(FileChange::removed).sum();
+                let diffs = crate::diff_list::Diffs::build(&branch.files);
+                (
+                    branch.base,
+                    branch.fork,
+                    branch.files.len(),
+                    added,
+                    removed,
+                    diffs,
+                )
+            }))
+        });
         self._branch_task = Some(cx.spawn(async move |this, cx| {
             let result = read
                 .await
                 .map_err(|err| SharedString::from(format!("{err:#}")));
             _ = this.update(cx, |this, cx| {
-                this.branch = Some(result);
+                // Compared again: the place read stays where it was.
+                let was = match &this.branch {
+                    Some(Ok(Some(shown))) => Some(shown.list.logical_scroll_top()),
+                    _ => None,
+                };
+                this.branch = Some(result.map(|read| {
+                    read.map(|(base, fork, files, added, removed, diffs)| {
+                        let list = gpui_kit::ListState::new(
+                            1 + diffs.len(),
+                            gpui_kit::ListAlignment::Top,
+                            gpui_kit::px(800.),
+                        );
+                        if let Some(was) = was {
+                            list.scroll_to(was);
+                        }
+                        BranchShown {
+                            base,
+                            fork,
+                            files,
+                            added,
+                            removed,
+                            diffs,
+                            list,
+                        }
+                    })
+                }));
                 cx.notify();
             });
         }));
@@ -595,57 +684,74 @@ impl ChangesPanel {
                 )
                 .into_any_element(),
             Some(Ok(Some(branch))) => {
-                let added: usize = branch.files.iter().map(FileChange::added).sum();
-                let removed: usize = branch.files.iter().map(FileChange::removed).sum();
-                v_flex()
-                    .id("branch-changes")
+                use gpui_kit::component::scroll::ScrollableElement as _;
+                // Drawn only where it shows (see `diff_list`).
+                let entity = cx.entity().downgrade();
+                div()
+                    .relative()
                     .size_full()
-                    .overflow_y_scroll()
-                    .px_2()
-                    .pb_3()
-                    .gap_2()
                     .child(
-                        h_flex()
-                            .px_1()
-                            .pt_2()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(div().flex_1().child(format!(
-                                "{} files against {} (since {})",
-                                branch.files.len(),
-                                branch.base,
-                                branch.fork
-                            )))
-                            .child(change_counts(added, removed, cx))
-                            .child(
-                                Button::new("refresh-branch")
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::RefreshCw)
-                                    .tooltip("Compare again")
-                                    .accessibility_label("Compare again")
-                                    .on_click(cx.listener(|this, _, _, cx| this.load_branch(cx))),
-                            ),
+                        gpui_kit::list(branch.list.clone(), move |ix, _, cx| {
+                            entity
+                                .update(cx, |this, cx| this.render_branch_item(ix, cx))
+                                .unwrap_or_else(|_| div().into_any_element())
+                        })
+                        .size_full(),
                     )
-                    .when(branch.files.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .px_1()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("No commits beyond the base yet."),
-                        )
-                    })
-                    .children(
-                        branch
-                            .files
-                            .iter()
-                            .map(|file| diff_view::file_diff(file, cx)),
-                    )
+                    .vertical_scrollbar(&branch.list)
                     .into_any_element()
             }
         }
+    }
+
+    /// The Branch view's row `ix`: the summary, then the files' diffs.
+    fn render_branch_item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(Ok(Some(branch))) = &self.branch else {
+            return div().into_any_element();
+        };
+        if ix > 0 {
+            return div()
+                .px_2()
+                .when(ix == branch.diffs.len(), |this| this.pb_3())
+                .child(branch.diffs.render_item("branch", ix - 1, cx))
+                .into_any_element();
+        }
+        v_flex()
+            .px_2()
+            .pb_2()
+            .gap_2()
+            .child(
+                h_flex()
+                    .px_1()
+                    .pt_2()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(div().flex_1().child(format!(
+                        "{} files against {} (since {})",
+                        branch.files, branch.base, branch.fork
+                    )))
+                    .child(change_counts(branch.added, branch.removed, cx))
+                    .child(
+                        Button::new("refresh-branch")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::RefreshCw)
+                            .tooltip("Compare again")
+                            .accessibility_label("Compare again")
+                            .on_click(cx.listener(|this, _, _, cx| this.load_branch(cx))),
+                    ),
+            )
+            .when(branch.diffs.is_empty(), |this| {
+                this.child(
+                    div()
+                        .px_1()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No commits beyond the base yet."),
+                )
+            })
+            .into_any_element()
     }
 
     fn open_conflict(&mut self, path: String, cx: &mut Context<Self>) {
@@ -970,7 +1076,7 @@ impl ChangesPanel {
                         let panel = cx.weak_entity();
                         let path = file.path.clone();
                         move |menu, _, _| {
-                            file_menu(menu, panel.clone(), ix, path.clone(), open_path.clone())
+                            file_menu(menu, panel.clone(), path.clone(), open_path.clone())
                         }
                     }),
             )
@@ -1029,13 +1135,23 @@ impl ChangesPanel {
         (rows, tree)
     }
 
-    /// Takes the rows as they are now; the list keeps its place when they
-    /// are the same ones.
+    /// Takes the rows as they are now; the list keeps its place.
     fn sync_rows(&mut self) {
         let (rows, tree) = self.rows();
         self.tree = tree;
         if rows != self.list_rows {
+            // A reset scrolls to the top: going through the files one by
+            // one, each kept or discarded file would throw the list back.
+            let top = self.list.logical_scroll_top();
             self.list.reset(rows.len());
+            if top.item_ix < rows.len() {
+                self.list.scroll_to(top);
+            } else if let Some(last) = rows.len().checked_sub(1) {
+                self.list.scroll_to(gpui_kit::ListOffset {
+                    item_ix: last,
+                    offset_in_item: gpui_kit::px(0.),
+                });
+            }
             self.list_rows = rows;
         } else {
             // The same rows, but the top can be another height now.
@@ -1365,6 +1481,16 @@ impl ChangesPanel {
     ) -> AnyElement {
         let folded = self.folded.contains(&key);
         let new_files = counts.is_none();
+        // By path: the menu stays open while the list changes, and a
+        // position would then name another file.
+        let files: Vec<String> = if new_files {
+            Vec::new()
+        } else {
+            files
+                .iter()
+                .filter_map(|ix| self.file(*ix).map(|file| file.path.clone()))
+                .collect()
+        };
         h_flex()
             .id(id)
             .h(ph_theme::dense(1.75, cx))
@@ -1639,12 +1765,11 @@ fn ask_note(
     focus.update(cx, |input, cx| input.focus(window, cx));
 }
 
-/// The menu of changed file `ix` (`path`): see its changes, open it, keep
-/// or discard it.
+/// The menu of changed file `path`: see its changes, open it, keep or
+/// discard it.
 fn file_menu(
     menu: gpui_kit::component::menu::PopupMenu,
     panel: gpui_kit::WeakEntity<ChangesPanel>,
-    ix: usize,
     path: String,
     open_path: String,
 ) -> gpui_kit::component::menu::PopupMenu {
@@ -1673,9 +1798,11 @@ fn file_menu(
         }
     };
     let discard = {
-        let panel = panel.clone();
+        let (panel, path) = (panel.clone(), path.clone());
         move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
-            _ = panel.update(cx, |panel, cx| panel.discard_file(ix, window, cx));
+            _ = panel.update(cx, |panel, cx| {
+                panel.discard_files(std::slice::from_ref(&path), window, cx)
+            });
         }
     };
     menu.item(
@@ -1725,7 +1852,7 @@ fn folder_menu(
     menu: gpui_kit::component::menu::PopupMenu,
     panel: gpui_kit::WeakEntity<ChangesPanel>,
     path: String,
-    files: Vec<usize>,
+    files: Vec<String>,
     new_files: bool,
 ) -> gpui_kit::component::menu::PopupMenu {
     use gpui_kit::component::menu::PopupMenuItem;
@@ -1736,7 +1863,7 @@ fn folder_menu(
                 if new_files {
                     panel.keep_path(path.clone(), window, cx);
                 } else {
-                    panel.keep_files(&files, window, cx);
+                    panel.keep_files(files.clone(), window, cx);
                 }
             });
         }
@@ -1744,11 +1871,7 @@ fn folder_menu(
     let discard = {
         let (panel, files) = (panel.clone(), files.clone());
         move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
-            _ = panel.update(cx, |panel, cx| {
-                for ix in files.iter().rev() {
-                    panel.discard_file(*ix, window, cx);
-                }
-            });
+            _ = panel.update(cx, |panel, cx| panel.discard_files(&files, window, cx));
         }
     };
     let menu = menu.item(

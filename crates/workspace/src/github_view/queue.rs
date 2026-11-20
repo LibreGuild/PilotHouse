@@ -36,6 +36,9 @@ use ph_ui::Icons;
 
 use super::{GithubView, PullKey};
 
+/// One queued review got ready at a time (see `review_behind`).
+static PREPARING: smol::lock::Mutex<()> = smol::lock::Mutex::new(());
+
 /// What the newest finished round found on a pull request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Reviewed {
@@ -397,6 +400,10 @@ impl GithubView {
         );
         let store = self.store.clone();
         let work = cx.background_spawn(async move {
+            // Clones and fetches take turns behind a lock that blocks its
+            // thread; waiting here instead keeps N ticked reviews from
+            // holding N of the few background threads the app has.
+            let _turn = PREPARING.lock().await;
             let hosting = ph_pulls::hosting::for_repo(&store, &id)
                 .map_err(|missing| anyhow::anyhow!("{}", missing.explain()))?;
             let pull = ph_github::pulls::get(&hosting.client, &hosting.repo, number)?;

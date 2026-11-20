@@ -208,6 +208,12 @@ pub struct ChatThread {
     connection: Option<Entity<AgentConnection>>,
     acp_session_id: Option<String>,
     setup: Option<SetupTask>,
+    /// Which set-up of an agent session is the chat's: counted up when one
+    /// starts and when one is let go of (another account, the agent ended).
+    /// A set-up still under way then finds another number here when it
+    /// ends, and leaves the chat as it is: its session is the old account's
+    /// or a process's that is gone, and a newer set-up may be under way.
+    setup_generation: u64,
     /// What the agent offers (model, mode, effort…); from the cache until the session exists.
     options: Vec<AgentOption>,
     /// Ignore streamed history while the agent replays a resumed session.
@@ -328,6 +334,7 @@ impl ChatThread {
             connection: None,
             acp_session_id: None,
             setup: None,
+            setup_generation: 0,
             options,
             replaying: false,
             importing: false,
@@ -375,8 +382,28 @@ impl ChatThread {
     /// keeps the session, and what it holds for it, until it exits: Claude
     /// Code a process of its own and its MCP servers, hundreds of MB.
     fn end_session_on_release(cx: &mut Context<Self>) {
-        cx.on_release(|this, cx| this.end_agent_session(cx))
-            .detach();
+        cx.on_release(|this, cx| {
+            this.end_agent_session(cx);
+            // Its pictures too (sent images, what tools gave back): each
+            // one drawn stays decoded until GPUI is told to let go.
+            let mut pictures = crate::attachment_view::pictures(&this.entries);
+            pictures.extend(
+                this.queued
+                    .iter()
+                    .flat_map(|prompt| &prompt.attachments)
+                    .filter_map(|attachment| attachment.image.clone()),
+            );
+            ph_ui::images::release_paths(pictures, cx);
+        })
+        .detach();
+    }
+
+    /// Lets go of the chat's session set-up, done or still under way: one
+    /// under way no longer writes to the chat when it ends (see
+    /// `setup_generation`). Whoever takes it sees to the session it makes.
+    fn take_setup(&mut self) -> Option<SetupTask> {
+        self.setup_generation += 1;
+        self.setup.take()
     }
 
     /// Ends the chat's agent session, where the agent can, and lets go of
@@ -386,7 +413,7 @@ impl ChatThread {
         let Some(connection) = self.connection.take() else {
             return;
         };
-        let (known, setup) = (self.acp_session_id.take(), self.setup.take());
+        let (known, setup) = (self.acp_session_id.take(), self.take_setup());
         if known.is_none() && setup.is_none() {
             return;
         }
@@ -495,7 +522,7 @@ impl ChatThread {
         let Some(connection) = self.connection.take() else {
             return Task::ready(());
         };
-        let (known, setup) = (self.acp_session_id.take(), self.setup.take());
+        let (known, setup) = (self.acp_session_id.take(), self.take_setup());
         let me = cx.entity_id();
         if !connection.read(cx).busy(Some(me), cx) {
             let message = SharedString::from(format!("{} restarted.", self.agent.name));
@@ -834,6 +861,8 @@ impl ChatThread {
     pub fn show_history(&mut self, keep: usize, entries: Vec<Entry>, cx: &mut Context<Self>) {
         let keep = keep.min(self.entries.len());
         let old = self.entries.len();
+        // The pictures of the entries that go are let go of with them.
+        ph_ui::images::release_paths(crate::attachment_view::pictures(&self.entries[keep..]), cx);
         self.entries.truncate(keep);
         let added = entries.len();
         self.entries.extend(entries);
@@ -1330,7 +1359,7 @@ impl ChatThread {
         if restarted {
             option.current = value.to_string();
             self.acp_session_id = None;
-            self.setup = None;
+            self.take_setup();
             self.connection = None;
         } else {
             // Kept as it is: the choice is the user's to make again.
@@ -1557,8 +1586,11 @@ impl ChatThread {
                 };
                 // Token totals, when the agent reports them (not in the stable
                 // schema yet, so read from the raw reply).
-                if let Some(report) = response.get("usage").and_then(turn_usage) {
-                    _ = this.update(cx, |this, cx| this.record_usage(report, cx));
+                if let Some(mut report) = response.get("usage").and_then(turn_usage) {
+                    _ = this.update(cx, |this, cx| {
+                        report.per_turn = counts_turn_tokens(this.agent().id);
+                        this.record_usage(report, cx)
+                    });
                 }
                 let response: PromptResponse = serde_json::from_value(response)
                     .map_err(|err| SharedString::from(format!("Unexpected prompt reply: {err}")))?;
@@ -1646,7 +1678,7 @@ impl ChatThread {
         // The prompt's answer will not come: nothing waits for it.
         self._turn = None;
         self.acp_session_id = None;
-        self.setup = None;
+        self.take_setup();
         self.reads_this_turn = false;
         self.app_tools_this_turn = false;
         if self.background {
@@ -2165,7 +2197,7 @@ impl ChatThread {
         self.acp_session_id = None;
         self.reads_this_turn = false;
         self.app_tools_this_turn = false;
-        self.setup = None;
+        self.take_setup();
         self.connection = None;
         if self.status != ThreadStatus::Idle {
             // The prompt's own failure ("the agent process exited") would
@@ -2208,6 +2240,10 @@ impl ChatThread {
         if let Some(setup) = &self.setup {
             return setup.clone();
         }
+        // This set-up is the chat's from here; one before it that is still
+        // under way is not any more (see `setup_generation`).
+        self.setup_generation += 1;
+        let generation = self.setup_generation;
         self.connection = Some(connection.clone());
         let ready = connection.read(cx).ready();
         let cwd = self.project.path.clone();
@@ -2231,7 +2267,11 @@ impl ChatThread {
             let ready: Ready = match ready.await {
                 Ok(ready) => ready,
                 Err(err) => {
-                    let _ = this.update(cx, |this, cx| this.offer_sign_in(&err, &[], cx));
+                    let _ = this.update(cx, |this, cx| {
+                        if this.setup_generation == generation {
+                            this.offer_sign_in(&err, &[], cx)
+                        }
+                    });
                     return Err(err);
                 }
             };
@@ -2252,13 +2292,21 @@ impl ChatThread {
                 // Listen for the replay, which comes before the answer.
                 let weak = this.clone();
                 let replay_id = resume_id.clone();
-                let _ = this.update(cx, |this, cx| {
-                    this.replaying = !this.entries.is_empty();
-                    this.importing = !this.replaying;
-                    connection.update(cx, |connection, _| {
-                        connection.register_thread(replay_id, weak)
-                    });
-                });
+                // Not for a set-up the chat let go of: its replay is no
+                // one's to take in.
+                let listening = this
+                    .update(cx, |this, cx| {
+                        if this.setup_generation != generation {
+                            return false;
+                        }
+                        this.replaying = !this.entries.is_empty();
+                        this.importing = !this.replaying;
+                        connection.update(cx, |connection, _| {
+                            connection.register_thread(replay_id, weak)
+                        });
+                        true
+                    })
+                    .unwrap_or(false);
                 let mut params =
                     json!({ "sessionId": resume_id, "cwd": cwd, "mcpServers": mcp_servers });
                 if !extra.is_empty() {
@@ -2268,9 +2316,13 @@ impl ChatThread {
                     response = Some((resume_id.clone(), result));
                 }
                 let _ = this.update(cx, |this, cx| {
-                    this.replaying = false;
-                    this.importing = false;
-                    this.persist(cx);
+                    // Unless a newer set-up is under way: it may be taking
+                    // in a replay of its own, which is its to end.
+                    if listening && (this.setup_generation == generation || this.setup.is_none()) {
+                        this.replaying = false;
+                        this.importing = false;
+                        this.persist(cx);
+                    }
                 });
             }
             let resumed = response.is_some();
@@ -2287,8 +2339,11 @@ impl ChatThread {
                             let err =
                                 SharedString::from(format!("Could not start a session: {err:#}"));
                             let methods = ready.sign_in.clone();
-                            let _ =
-                                this.update(cx, |this, cx| this.offer_sign_in(&err, &methods, cx));
+                            let _ = this.update(cx, |this, cx| {
+                                if this.setup_generation == generation {
+                                    this.offer_sign_in(&err, &methods, cx)
+                                }
+                            });
                             return Err(err);
                         }
                     };
@@ -2315,6 +2370,12 @@ impl ChatThread {
             let weak = this.clone();
             let id = session_id.clone();
             let _ = this.update(cx, |this, cx| {
+                // Let go of meanwhile (another account was picked, the
+                // agent ended): the session is not the chat's. Whoever let
+                // go of it closes it, by the id returned below.
+                if this.setup_generation != generation {
+                    return;
+                }
                 this.acp_session_id = Some(id.clone());
                 // The chat had a session the agent did not take back: it
                 // starts over in this one.
@@ -2988,7 +3049,20 @@ pub fn own_tools_command(
     ))
 }
 
-/// The prompt reply's `usage` (running totals for the agent session).
+/// Whether `agent`'s prompt reply counts that turn's tokens alone, as the
+/// protocol describes it, rather than a running total. Read in their
+/// sources: claude-agent-acp 0.95.0 (pinned in `agents.rs`) sets its tally to
+/// zero when a turn starts, codex-acp 2.2.2 (pinned) reports the prompt's
+/// total less the one it started from, Gemini CLI 0.70.0 counts in the
+/// prompt's own variables. Check again when a pin changes; an agent not
+/// read yet is taken as a running total, which can count too little but
+/// never twice.
+fn counts_turn_tokens(agent: &str) -> bool {
+    matches!(agent, "claude" | "codex" | "gemini")
+}
+
+/// The prompt reply's `usage` (a running total for the agent session, or
+/// the turn's own: see [`counts_turn_tokens`]).
 fn turn_usage(usage: &Value) -> Option<UsageReport> {
     let number = |key: &str| usage.get(key).and_then(Value::as_u64);
     let report = UsageReport {
@@ -3247,6 +3321,47 @@ done"#,
         let methods = warm_and_drop(cx, &dir, false);
         assert!(methods.iter().any(|m| m == "session/new"), "{methods:?}");
         assert!(!methods.iter().any(|m| m == "session/close"), "{methods:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session still being set up when the chat's account changes is the
+    /// old account's: it is closed once it exists and never becomes the
+    /// chat's (the new account's agent knows nothing by its id).
+    #[gpui_kit::test]
+    fn a_set_up_let_go_of_does_not_become_the_chats_session(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = temp_dir("account");
+        let spec = fake_agent(&dir, true);
+        let store = Store::open_in_memory().unwrap();
+        let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+        let thread = cx.new(|cx| ChatThread::draft(store, project(&dir), spec, cx));
+        thread.update(cx, |thread, cx| {
+            thread.warm_up(connection.clone(), cx);
+            // Before the agent has answered, another account is picked.
+            thread.set_account("work", cx);
+        });
+        // Closed only after the set-up ended: what it did to the chat shows.
+        wait_until(cx, "the old account's session to be closed", |_| {
+            methods(&dir).iter().any(|m| m == "session/close")
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.account(), "work");
+            assert!(
+                thread.acp_session_id.is_none(),
+                "the old account's session is not the chat's"
+            );
+            assert!(thread.connection.is_none() && thread.setup.is_none());
+        });
+        // The new account's agent then sets the chat up as usual.
+        let other = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+        thread.update(cx, |thread, cx| thread.warm_up(other.clone(), cx));
+        wait_until(cx, "the new account's session to start", |cx| {
+            thread.read_with(cx, |thread, _| thread.acp_session_id.is_some())
+        });
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.connection.as_ref() == Some(&other));
+        });
+        drop((thread, connection, other));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

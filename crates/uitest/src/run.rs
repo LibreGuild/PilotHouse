@@ -25,6 +25,8 @@ const WAIT: Duration = Duration::from_secs(8);
 const SETTLE: Duration = Duration::from_millis(400);
 /// The pause before an action that failed is tried once more.
 const RETRY_AFTER: Duration = Duration::from_millis(800);
+/// Runs kept per test (each a screenshot per step); older ones are deleted.
+const KEEP_RUNS: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepResult {
@@ -281,12 +283,18 @@ async fn screenshot(
         .await
     }
     .ok()?;
-    let data = shot["images"][0]["data"].as_str()?;
-    let png = base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .ok()?;
+    let data = shot["images"][0]["data"].as_str()?.to_string();
     let name = format!("{n:03}.png");
-    std::fs::write(dir.join(&name), png).ok()?;
+    let path = dir.join(&name);
+    // A whole screen, decoded and written off the UI thread.
+    cx.background_executor()
+        .spawn(async move {
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .ok()?;
+            std::fs::write(path, png).ok()
+        })
+        .await?;
     Some(name)
 }
 
@@ -299,7 +307,11 @@ pub fn run(
     dir: PathBuf,
     cx: &mut App,
 ) -> Task<Result<Report>> {
-    cx.spawn(async move |cx| run_async(&test, project_id, variant, &dir, cx).await)
+    cx.spawn(async move |cx| {
+        let report = run_async(&test, project_id, variant, &dir, cx).await;
+        prune(&dir, cx).await;
+        report
+    })
 }
 
 /// Runs `test` on each of `variants` in turn, each into its own folder in
@@ -315,10 +327,58 @@ pub fn run_matrix(
         let mut reports = Vec::new();
         for (n, variant) in variants.into_iter().enumerate() {
             let folder = dir.join(format!("{n:02}-{}", Variant::slug(Some(&variant))));
-            reports.push(run_async(&test, project_id, Some(variant), &folder, cx).await?);
+            let report = run_async(&test, project_id, Some(variant), &folder, cx).await;
+            match report {
+                Ok(report) => reports.push(report),
+                Err(err) => {
+                    prune(&dir, cx).await;
+                    return Err(err);
+                }
+            }
         }
+        prune(&dir, cx).await;
         Ok(reports)
     })
+}
+
+/// Deletes the older runs of the test whose run folder is `run`, off the
+/// UI thread. Only folders made by [`report_dir`].
+async fn prune(run: &Path, cx: &mut AsyncApp) {
+    let runs = ph_store::paths::data_dir().join("test-runs");
+    let Some(test) = run.parent().filter(|test| test.starts_with(&runs)) else {
+        return;
+    };
+    let test = test.to_path_buf();
+    cx.background_executor()
+        .spawn(async move { prune_runs(&test, KEEP_RUNS) })
+        .await;
+}
+
+/// Deletes all but the newest `keep` run folders in `test` (their names are
+/// times, so they sort by age).
+fn prune_runs(test: &Path, keep: usize) {
+    let mut runs: Vec<PathBuf> = std::fs::read_dir(test)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    runs.sort();
+    let old = runs.len().saturating_sub(keep);
+    // One that cannot go now is tried again after the next run.
+    for run in &runs[..old] {
+        let _ = std::fs::remove_dir_all(run);
+    }
+}
+
+/// Deletes the runs and baselines of a removed workspace. Blocks: call it
+/// off the UI thread.
+pub fn forget_workspace(project_id: i64) {
+    let data = ph_store::paths::data_dir();
+    for folder in ["test-runs", "test-baselines"] {
+        let _ = std::fs::remove_dir_all(data.join(folder).join(project_id.to_string()));
+    }
 }
 
 async fn run_async(
@@ -403,9 +463,17 @@ async fn run_async(
         };
         let millis = started.elapsed().as_millis() as u64;
         let shot = screenshot(project_id, android, serial.as_deref(), dir, n, cx).await;
-        let visual = shot
-            .as_deref()
-            .and_then(|name| visual::check(&baseline, dir, name));
+        // Decoding, comparing and encoding whole screens is too slow for
+        // the UI thread.
+        let visual = match shot.clone() {
+            Some(name) => {
+                let (baseline, dir) = (baseline.clone(), dir.to_path_buf());
+                cx.background_executor()
+                    .spawn(async move { visual::check(&baseline, &dir, &name) })
+                    .await
+            }
+            None => None,
+        };
         failed = result.is_err();
         report.steps.push(StepResult {
             step,
@@ -420,10 +488,11 @@ async fn run_async(
         // The page follows the pane again.
         let _ = call("browser.emulate", json!({ "project_id": project_id }), cx).await;
     }
-    std::fs::write(
-        dir.join("report.json"),
-        serde_json::to_string_pretty(&report)?,
-    )?;
+    let json = serde_json::to_string_pretty(&report)?;
+    let path = dir.join("report.json");
+    cx.background_executor()
+        .spawn(async move { std::fs::write(path, json) })
+        .await?;
     Ok(report)
 }
 
@@ -536,6 +605,23 @@ fn with_secrets(mut params: serde_json::Value) -> anyhow::Result<serde_json::Val
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_newest_runs_are_kept() {
+        let test = std::env::temp_dir().join(format!("ph-uitest-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&test);
+        for millis in [1_700_000_000_003_i64, 1_700_000_000_001, 1_700_000_000_002] {
+            std::fs::create_dir_all(test.join(millis.to_string())).unwrap();
+        }
+        prune_runs(&test, 2);
+        let mut left: Vec<String> = std::fs::read_dir(&test)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["1700000000002", "1700000000003"]);
+        let _ = std::fs::remove_dir_all(&test);
+    }
 
     #[test]
     fn typed_secrets_come_from_the_environment() {

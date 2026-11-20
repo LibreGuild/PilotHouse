@@ -40,11 +40,16 @@ const MIN_WIDTH: f32 = 64.;
 const MAX_WIDTH: f32 = 360.;
 /// The row-number column.
 const NUMBER_WIDTH: f32 = 56.;
+/// Columns are built this far past each side of what is in view.
+const OVERSCAN: f32 = 400.;
 
 /// A table, sortable and filtered as typed.
 pub struct TableGrid {
     data: Arc<TableData>,
     widths: Vec<f32>,
+    /// Each column's left edge and, last, the right edge of the last one
+    /// (from the first column's left edge): which columns are in view.
+    starts: Vec<f32>,
     /// Rows shown, in order (after the filter and the sort).
     order: Arc<Vec<usize>>,
     sort: Option<(usize, bool)>,
@@ -72,6 +77,7 @@ impl TableGrid {
         Self {
             data: Arc::default(),
             widths: Vec::new(),
+            starts: vec![0.],
             order: Arc::default(),
             sort: None,
             filter,
@@ -94,6 +100,7 @@ impl TableGrid {
             self.sort = None;
         }
         self.widths = widths(&data);
+        self.starts = starts(&self.widths);
         // Rows in their own order until filtered and sorted.
         self.order = Arc::new((0..data.rows.len()).collect());
         self.data = Arc::new(data);
@@ -163,10 +170,11 @@ pub(crate) fn order_rows(data: &TableData, query: &str, sort: Option<(usize, boo
         .collect();
     // Each cell's key is worked out once, not at every comparison.
     match numbers {
-        Some(numbers) => order.sort_by(|a, b| {
-            numbers[*a]
-                .partial_cmp(&numbers[*b])
-                .unwrap_or(std::cmp::Ordering::Equal)
+        // `NaN` reads as a number too, and has to have its place (after
+        // the others): sorting needs every pair to compare.
+        Some(numbers) => order.sort_by(|a, b| match (numbers[*a], numbers[*b]) {
+            (Some(a), Some(b)) => a.total_cmp(&b),
+            (a, b) => a.is_some().cmp(&b.is_some()),
         }),
         None => {
             let texts: Vec<String> = (0..data.rows.len())
@@ -185,6 +193,55 @@ fn number(text: &str) -> Option<f64> {
     text.trim().replace(',', "").parse::<f64>().ok()
 }
 
+/// Each column's left edge, and the right edge of the last.
+fn starts(widths: &[f32]) -> Vec<f32> {
+    let mut edge = 0.;
+    let mut starts = Vec::with_capacity(widths.len() + 1);
+    starts.push(edge);
+    for width in widths {
+        edge += width;
+        starts.push(edge);
+    }
+    starts
+}
+
+/// The columns with any part between `from` and `to` (`starts` as
+/// [`starts`] gives them).
+fn columns_between(starts: &[f32], from: f32, to: f32) -> Range<usize> {
+    let count = starts.len().saturating_sub(1);
+    let first = starts[1..].partition_point(|right| *right <= from);
+    let end = starts[..count].partition_point(|left| *left < to);
+    first..end.max(first)
+}
+
+impl TableGrid {
+    /// The columns to build: those in view where the table is scrolled to,
+    /// and some either side. A table can have thousands of columns, and
+    /// building a cell for each, in every row, every frame, hangs the app.
+    fn columns_in_view(&self, window: &Window) -> Range<usize> {
+        // Widths are pixels at the usual interface size.
+        let scale = f32::from(ph_ui::rems_from_px(1.).to_pixels(window.rem_size()));
+        if scale <= 0. {
+            return 0..self.widths.len();
+        }
+        let content = NUMBER_WIDTH + self.starts.last().copied().unwrap_or(0.);
+        // Where the scroll will be once laid out: never past the end (a
+        // table swapped for a narrower one, a hard flick).
+        let window_width = f32::from(window.viewport_size().width) / scale;
+        let pane = match f32::from(self.across.bounds().size.width) / scale {
+            width if width > 0. => width,
+            _ => window_width,
+        };
+        let left = (-f32::from(self.across.offset().x) / scale).clamp(0., (content - pane).max(0.))
+            - NUMBER_WIDTH;
+        columns_between(
+            &self.starts,
+            left - OVERSCAN,
+            left + window_width + OVERSCAN,
+        )
+    }
+}
+
 /// Column widths from their names and first rows.
 fn widths(data: &TableData) -> Vec<f32> {
     (0..data.columns.len())
@@ -200,9 +257,13 @@ fn widths(data: &TableData) -> Vec<f32> {
 }
 
 impl Render for TableGrid {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let total: f32 = NUMBER_WIDTH + self.widths.iter().sum::<f32>();
+        let total: f32 = NUMBER_WIDTH + self.starts.last().copied().unwrap_or(0.);
+        // Only the columns in view are built; the ones before them are a
+        // space of their width.
+        let in_view = self.columns_in_view(window);
+        let before = self.starts[in_view.start];
         let shown = self.order.len();
         let all = self.data.rows.len();
         let count = if shown == all {
@@ -219,7 +280,9 @@ impl Render for TableGrid {
             .text_xs()
             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
             .child(div().w(ph_ui::rems_from_px(NUMBER_WIDTH)).flex_none())
-            .children(self.data.columns.iter().enumerate().map(|(ix, name)| {
+            .child(div().w(ph_ui::rems_from_px(before)).flex_none())
+            .children(in_view.clone().map(|ix| {
+                let name = &self.data.columns[ix];
                 let arrow = match self.sort {
                     Some((column, true)) if column == ix => Some(IconName::ChevronUp),
                     Some((column, false)) if column == ix => Some(IconName::ChevronDown),
@@ -242,7 +305,7 @@ impl Render for TableGrid {
             }));
         let data = self.data.clone();
         let order = self.order.clone();
-        let widths = self.widths.clone();
+        let widths: Vec<(usize, f32)> = in_view.map(|ix| (ix, self.widths[ix])).collect();
         let rows = uniform_list("table-rows", shown, move |range: Range<usize>, _, cx| {
             let theme = cx.theme();
             range
@@ -267,7 +330,8 @@ impl Render for TableGrid {
                                 .text_color(theme.muted_foreground)
                                 .child((ix + 1).to_string()),
                         )
-                        .children(widths.iter().enumerate().map(|(column, width)| {
+                        .child(div().w(ph_ui::rems_from_px(before)).flex_none())
+                        .children(widths.iter().map(|(column, width)| {
                             div()
                                 .flex_none()
                                 .w(ph_ui::rems_from_px(*width))
@@ -275,7 +339,7 @@ impl Render for TableGrid {
                                 .truncate()
                                 .border_l_1()
                                 .border_color(theme.border.opacity(0.35))
-                                .children(row.get(column).map(one_line))
+                                .children(row.get(*column).map(one_line))
                         }))
                         .into_any_element()
                 })
@@ -441,5 +505,40 @@ mod tests {
         assert_eq!(order_rows(&data, "", Some((0, false))), [3, 0, 1, 2]);
         assert_eq!(order_rows(&data, "", Some((1, true))), [1, 3, 0, 2]);
         assert_eq!(order_rows(&data, "a", None), [1, 3]);
+    }
+
+    #[test]
+    fn only_the_columns_in_view() {
+        let starts = starts(&[100., 50., 200., 100.]);
+        assert_eq!(starts, [0., 100., 150., 350., 450.]);
+        assert_eq!(columns_between(&starts, 0., 120.), 0..2);
+        // A column's edge at the edge of the view is not in it.
+        assert_eq!(columns_between(&starts, 100., 150.), 1..2);
+        assert_eq!(columns_between(&starts, 149., 151.), 1..3);
+        assert_eq!(columns_between(&starts, -500., 5_000.), 0..4);
+        // Out of the table, and a table with no columns: none, in range.
+        assert_eq!(columns_between(&starts, 900., 1_000.), 4..4);
+        assert_eq!(columns_between(&starts, -90., -10.), 0..0);
+        assert_eq!(columns_between(&[0.], -400., 2_000.), 0..0);
+    }
+
+    #[test]
+    fn a_column_with_nan_sorts() {
+        // Empty first, then the numbers, then `NaN`, whatever the rows' order.
+        let mut text = String::from("loss\n");
+        for ix in 0..60 {
+            match ix % 3 {
+                0 => text.push_str("nan\n"),
+                1 => text.push_str("\"\"\n"),
+                _ => text.push_str(&format!("{}\n", 60 - ix)),
+            }
+        }
+        let data = parse_delimited(&text, false).unwrap();
+        let order = order_rows(&data, "", Some((0, true)));
+        let cells: Vec<&str> = order.iter().map(|ix| data.rows[*ix][0].as_ref()).collect();
+        assert!(cells[..20].iter().all(|cell| cell.is_empty()), "{cells:?}");
+        let numbers: Vec<f64> = cells[20..40].iter().map(|c| c.parse().unwrap()).collect();
+        assert!(numbers.is_sorted(), "{numbers:?}");
+        assert!(cells[40..].iter().all(|cell| *cell == "nan"), "{cells:?}");
     }
 }

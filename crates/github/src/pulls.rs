@@ -377,11 +377,29 @@ pub fn branch_head(client: &Client, repo: &Repo, name: &str) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("branch {name} not found"))
 }
 
-pub fn merge(client: &Client, repo: &Repo, number: u64, method: MergeMethod) -> Result<Value> {
-    client.put(
-        &repo.path(&format!("pulls/{number}/merge")),
-        &json!({ "merge_method": method.api() }),
-    )
+/// Merges pull request `number` if its head is still `sha`, the commit the
+/// person saw: one pushed since is never merged unseen.
+pub fn merge(
+    client: &Client,
+    repo: &Repo,
+    number: u64,
+    sha: &str,
+    method: MergeMethod,
+) -> Result<Value> {
+    client
+        .put(
+            &repo.path(&format!("pulls/{number}/merge")),
+            &json!({ "merge_method": method.api(), "sha": sha }),
+        )
+        .map_err(|err| {
+            if err.to_string().starts_with("GitHub returned 409") {
+                anyhow::anyhow!(
+                    "Not merged: commits were pushed to #{number} since this page was loaded. Look at them, then merge again."
+                )
+            } else {
+                err
+            }
+        })
 }
 
 pub fn create(

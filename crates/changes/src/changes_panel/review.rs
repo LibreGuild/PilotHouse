@@ -348,7 +348,7 @@ impl ChangesPanel {
     }
 
     /// Changed file `path`'s place in the list of changes.
-    fn file_ix(&self, path: &str) -> Option<usize> {
+    pub(super) fn file_ix(&self, path: &str) -> Option<usize> {
         match &self.state {
             State::Loaded(changes) => changes.files.iter().position(|file| file.path == path),
             _ => None,
@@ -810,9 +810,7 @@ fn file_actions(
         move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut App| {
             cx.stop_propagation();
             _ = panel.update(cx, |panel, cx| {
-                if let Some(ix) = panel.file_ix(&path) {
-                    panel.discard_file(ix, window, cx);
-                }
+                panel.discard_files(std::slice::from_ref(&path), window, cx)
             });
         }
     };

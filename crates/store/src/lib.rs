@@ -40,6 +40,15 @@ pub struct Store {
     connection: Arc<Mutex<Connection>>,
     /// Settings read a moment ago (see [`settings`]).
     settings: Arc<Mutex<settings::Recent>>,
+    /// A second connection for long reads (see [`Store::read`]).
+    reader: Arc<Mutex<Reader>>,
+}
+
+/// The database file and, once a long read needed it, a read-only
+/// connection to it.
+struct Reader {
+    file: Option<std::path::PathBuf>,
+    connection: Option<Connection>,
 }
 
 impl Store {
@@ -81,10 +90,46 @@ impl Store {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         migrations::apply(&connection)?;
+        let file = connection
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from);
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             settings: Default::default(),
+            reader: Arc::new(Mutex::new(Reader {
+                file,
+                connection: None,
+            })),
         })
+    }
+
+    /// Runs a long read (one that may take more than a moment on a big
+    /// database) on a second, read-only connection, opened when first
+    /// needed: WAL lets it read while the main one writes, and the UI
+    /// thread's next store call does not wait for it. An in-memory store
+    /// (tests) has no file to open twice and uses its one connection.
+    pub(crate) fn read<T>(&self, read: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let mut reader = self
+            .reader
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(file) = reader.file.clone() else {
+            drop(reader);
+            return read(&self.conn());
+        };
+        let connection = match &mut reader.connection {
+            Some(connection) => connection,
+            empty => empty.insert(
+                Connection::open_with_flags(
+                    &file,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .with_context(|| format!("opening database {} to read", file.display()))?,
+            ),
+        };
+        read(connection)
     }
 
     /// Locks the connection for one unit of work.

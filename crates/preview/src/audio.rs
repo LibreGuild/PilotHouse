@@ -155,8 +155,9 @@ impl Output {
         if self.player.empty() {
             self.queue()?;
         }
-        _ = self.player.try_seek(from);
+        // The speed first: the player takes it before it seeks.
         self.player.set_speed(speed);
+        _ = self.player.try_seek(Self::played(from, speed));
         self.player.play();
         Ok(())
     }
@@ -166,15 +167,28 @@ impl Output {
     }
 
     fn seek(&self, to: Duration) {
-        _ = self.player.try_seek(to);
+        _ = self.player.try_seek(Self::played(to, self.player.speed()));
     }
 
     fn position(&self) -> Duration {
-        self.player.get_pos()
+        self.player.get_pos().mul_f32(self.player.speed())
     }
 
     fn set_speed(&self, speed: f32) {
+        // The player's count of played time is another place in the file
+        // at another speed: it is sent to where it is, in the new count.
+        let at = self.position();
         self.player.set_speed(speed);
+        if !self.player.empty() {
+            _ = self.player.try_seek(Self::played(at, speed));
+        }
+    }
+
+    /// The player's time for the place `at` in the file. It counts and
+    /// seeks in played time: at twice the speed, a minute into the file is
+    /// half a minute played.
+    fn played(at: Duration, speed: f32) -> Duration {
+        at.div_f32(speed)
     }
 
     fn is_playing(&self) -> bool {

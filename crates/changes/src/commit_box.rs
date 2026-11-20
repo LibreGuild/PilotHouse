@@ -35,7 +35,11 @@ pub struct CommitBox {
     writer: Option<Writer>,
     writing: bool,
     committing: bool,
-    _task: Option<Task<()>>,
+    // One task each: replacing another's would drop the code that clears
+    // its `writing` or `committing`, and its button would stay disabled.
+    _amend: Option<Task<()>>,
+    _write: Option<Task<()>>,
+    _commit: Option<Task<()>>,
 }
 
 impl CommitBox {
@@ -53,7 +57,9 @@ impl CommitBox {
             writer: None,
             writing: false,
             committing: false,
-            _task: None,
+            _amend: None,
+            _write: None,
+            _commit: None,
         }
     }
 
@@ -71,7 +77,7 @@ impl CommitBox {
         if amend && self.message.read(cx).value().trim().is_empty() {
             let root = self.root(cx);
             let read = cx.background_spawn(async move { ph_git::commit::last_message(&root) });
-            self._task = Some(cx.spawn_in(window, async move |this, cx| {
+            self._amend = Some(cx.spawn_in(window, async move |this, cx| {
                 if let Ok(message) = read.await {
                     _ = this.update_in(cx, |this, window, cx| {
                         this.message
@@ -108,7 +114,7 @@ impl CommitBox {
                 }
             }
         });
-        self._task = Some(cx.spawn_in(window, async move |this, cx| {
+        self._write = Some(cx.spawn_in(window, async move |this, cx| {
             let prompt = match diff.await {
                 Ok(diff) if !diff.trim().is_empty() => commit_prompt(&diff),
                 Ok(_) => {
@@ -163,6 +169,10 @@ impl CommitBox {
                 .status()
                 .is_some_and(|status| status.staged.is_empty() && !status.changes.is_empty());
         self.committing = true;
+        // The message is the one typed: an agent still writing one must
+        // not put its own in after the commit.
+        self._write = None;
+        self.writing = false;
         cx.notify();
         let work = cx.background_spawn(async move {
             if all {
@@ -170,7 +180,7 @@ impl CommitBox {
             }
             ph_git::commit::commit(&root, &message, amend)
         });
-        self._task = Some(cx.spawn_in(window, async move |this, cx| {
+        self._commit = Some(cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
             _ = this.update_in(cx, |this, window, cx| {
                 this.committing = false;
@@ -254,6 +264,7 @@ impl Render for CommitBox {
                             Checkbox::new("commit-amend")
                                 .label("Amend")
                                 .checked(self.amend)
+                                .disabled(self.committing)
                                 .on_click(cx.listener(|this, checked: &bool, window, cx| {
                                     this.toggle_amend(*checked, window, cx)
                                 })),
@@ -270,7 +281,11 @@ impl Render for CommitBox {
                                 } else {
                                     "Write message"
                                 })
-                                .disabled(self.writing || (staged.is_empty() && !changed))
+                                .disabled(
+                                    self.writing
+                                        || self.committing
+                                        || (staged.is_empty() && !changed),
+                                )
                                 .tooltip(if staged.is_empty() {
                                     "An agent writes the message from every change"
                                 } else {

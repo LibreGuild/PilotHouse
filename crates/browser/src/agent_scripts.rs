@@ -157,10 +157,29 @@ pub const AGENT: &str = r#"(() => {
     const aria = el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') && [...el.getAttribute('aria-labelledby').split(/\s+/)].map((id) => document.getElementById(id)?.innerText || '').join(' ');
     let label = aria || '';
     if (!label && el.labels && el.labels.length) label = el.labels[0].innerText;
-    // A list's own text is all its options: its name says more.
-    const text = el.localName === 'select' ? '' : el.innerText;
-    if (!label) label = text || (el.localName === 'select' ? '' : el.value) || el.placeholder || el.title || el.alt || el.getAttribute('name') || el.id || '';
+    // A list's own text is all its options: its name says more. What was
+    // typed into a field is never its name either (a password, a card
+    // number or a code would reach the agent as a label): only a button's
+    // value is the words on it.
+    const field = el.localName === 'input' || el.localName === 'textarea';
+    const button = el.localName === 'input' && ['submit', 'button', 'reset'].includes(el.type);
+    const text = el.localName === 'select' || field ? '' : el.innerText;
+    if (!label) label = text || (button ? el.value : '') || el.placeholder || el.title || el.alt || el.getAttribute('name') || el.id || '';
     return clean(label).slice(0, 80);
+  };
+  // Fields whose value is never shown: a password, also after the page's
+  // "show password" turned it into text, a one-time code, a card's details.
+  const wasPassword = new WeakSet();
+  const notePassword = (event) => {
+    const el = event.target;
+    if (el instanceof Element && el.localName === 'input' && el.type === 'password') wasPassword.add(el);
+  };
+  addEventListener('focusin', notePassword, true);
+  addEventListener('input', notePassword, true);
+  const secret = (el) => {
+    if (el.localName !== 'input' && el.localName !== 'textarea') return false;
+    if (el.type === 'password') { wasPassword.add(el); return true; }
+    return wasPassword.has(el) || /password|one-time-code|cc-/.test((el.getAttribute('autocomplete') || '').toLowerCase());
   };
   const visible = (el) => {
     const r = el.getBoundingClientRect();
@@ -182,6 +201,7 @@ pub const AGENT: &str = r#"(() => {
     if (el.localName === 'input' || el.localName === 'textarea') {
       if (el.type === 'checkbox' || el.type === 'radio') line += el.checked ? ' (checked)' : ' (not checked)';
       else if (el.type === 'password') line += el.value ? ' = (password, filled)' : '';
+      else if (secret(el)) line += el.value ? ' = (hidden, filled)' : '';
       else if (el.value) line += ` = "${clean(el.value).slice(0, 80)}"`;
     }
     if (el.localName === 'select') {

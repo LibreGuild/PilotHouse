@@ -77,6 +77,16 @@ pub struct Extra<'a> {
     pub tabs: bool,
 }
 
+/// Whether what is typed after `@` asks for a pull request: `pr`, `pr:…`,
+/// `pr#…` or `pr12`. Anything else that starts with those letters is a
+/// file or a definition (`@preload`, `@project`).
+pub fn asks_for_pulls(query: &str) -> bool {
+    query.strip_prefix("pr").is_some_and(|rest| {
+        !rest.contains('/')
+            && (rest.starts_with([':', '#']) || rest.chars().all(|c| c.is_ascii_digit()))
+    })
+}
+
 /// What to offer for `typing`, best first.
 pub fn suggestions(typing: &Typing, files: &[impl AsRef<str>], extra: &Extra) -> Vec<Suggestion> {
     let query = typing.query.as_str();
@@ -112,7 +122,7 @@ pub fn suggestions(typing: &Typing, files: &[impl AsRef<str>], extra: &Extra) ->
                 })
                 .collect()
         }
-        _ if query.starts_with("pr") && !query.contains('/') => {
+        _ if asks_for_pulls(query) => {
             let wanted = query
                 .trim_start_matches("pr")
                 .trim_start_matches([':', '#'])
@@ -309,5 +319,29 @@ mod tests {
         let prs = suggestions(&typing_at("@pr:log", 7).unwrap(), &[] as &[&str], &extra);
         assert_eq!(prs.len(), 1);
         assert_eq!(prs[0].insert, "@pr:12 ");
+    }
+
+    #[test]
+    fn names_that_start_with_pr_are_files_not_pull_requests() {
+        for query in ["pr", "pr:", "pr:12", "pr#7", "pr12", "pr:fix"] {
+            assert!(asks_for_pulls(query), "{query}");
+        }
+        for query in ["p", "preload", "project", "pr1x", "pr/", "src/pr", "pr:a/b"] {
+            assert!(!asks_for_pulls(query), "{query}");
+        }
+        let files = ["crates/agent/src/preload.rs", "docs/project.md"];
+        let pulls = [(12, "Preload the models".to_string())];
+        let extra = Extra {
+            pulls: &pulls,
+            ..Extra::default()
+        };
+        let found = suggestions(&typing_at("@prel", 5).unwrap(), &files, &extra);
+        assert_eq!(found[0].insert, "@crates/agent/src/preload.rs ");
+        // With no pull requests loaded either: the file, not a note that
+        // they load.
+        let found = suggestions(&typing_at("@proj", 5).unwrap(), &files, &Extra::default());
+        assert_eq!(found[0].insert, "@docs/project.md ");
+        let found = suggestions(&typing_at("@pr1", 4).unwrap(), &files, &extra);
+        assert_eq!(found[0].insert, "@pr:12 ");
     }
 }

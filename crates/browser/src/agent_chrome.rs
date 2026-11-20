@@ -220,6 +220,9 @@ pub struct AgentChrome {
     links: HashMap<u64, Link>,
     /// The link agents use: the first to say hello. One browser at a time.
     active: Option<u64>,
+    /// The active link's browser profile, as its extension names it (an
+    /// older extension sends none).
+    active_instance: Option<String>,
     tabs: Vec<Tab>,
     owners: HashMap<String, Owner>,
     downloads: Vec<(String, Download)>,
@@ -291,6 +294,7 @@ impl AgentChrome {
                 status: AgentChromeStatus::Disconnected,
                 links: HashMap::new(),
                 active: None,
+                active_instance: None,
                 tabs: Vec::new(),
                 owners: HashMap::new(),
                 downloads: Vec::new(),
@@ -304,13 +308,24 @@ impl AgentChrome {
             match bridge::listen() {
                 Ok(events) => {
                     this._bridge = Some(cx.spawn(async move |this, cx| {
-                        while let Ok(event) = events.recv().await {
-                            if this
-                                .update(cx, |this: &mut Self, cx| this.bridge_event(event, cx))
-                                .is_err()
+                        while let Ok(first) = events.recv().await {
+                            let mut batch = vec![first];
+                            while batch.len() < bridge::BATCH
+                                && let Ok(next) = events.try_recv()
                             {
+                                batch.push(next);
+                            }
+                            let handled = this.update(cx, |this: &mut Self, cx| {
+                                for event in batch {
+                                    this.bridge_event(event, cx);
+                                }
+                            });
+                            if handled.is_err() {
                                 return;
                             }
+                            // An extension that floods the link must not
+                            // hold the window.
+                            smol::future::yield_now().await;
                         }
                     }));
                 }
@@ -379,13 +394,22 @@ impl AgentChrome {
                 let sink: crate::cdp::Sink = Arc::new(move |text| bridge::send(&out, text));
                 let (browser, inbox, events) = Cdp::with_sink(sink);
                 let pump = cx.spawn(async move |this, cx| {
-                    while let Ok(event) = events.recv().await {
-                        if this
-                            .update(cx, |this, cx| this.link_event(id, event, cx))
-                            .is_err()
-                        {
+                    while let Some(batch) = events.next_batch().await {
+                        if batch.dropped > 0 {
+                            tracing::warn!(
+                                "agents' Chrome: left out {} console and network events that came too fast",
+                                batch.dropped
+                            );
+                        }
+                        let handled = this.update(cx, |this, cx| {
+                            for event in batch.events {
+                                this.link_event(id, event, cx);
+                            }
+                        });
+                        if handled.is_err() {
                             return;
                         }
+                        smol::future::yield_now().await;
                     }
                 });
                 self.links.insert(
@@ -423,9 +447,24 @@ impl AgentChrome {
                 .chars()
                 .take(60)
                 .collect();
+            let instance: Option<String> = event.params["instance"]
+                .as_str()
+                .filter(|instance| !instance.is_empty())
+                .map(|instance| instance.chars().take(64).collect());
+            // Two profiles of one browser say the same name: only the
+            // profile's own id tells them apart. When either extension sends
+            // none (an older version), the name is all there is.
+            let same_browser = match (&self.active_instance, &instance) {
+                (Some(known), Some(instance)) => known == instance,
+                _ => matches!(
+                    &self.status,
+                    AgentChromeStatus::Connected { browser: known } if known.as_ref() == browser.as_str()
+                ),
+            };
             match self.active {
                 None => {
                     self.active = Some(id);
+                    self.active_instance = instance;
                     self.status = AgentChromeStatus::Connected {
                         browser: browser.into(),
                     };
@@ -437,18 +476,13 @@ impl AgentChrome {
                 // The same browser again, before its old link's close was
                 // heard (its extension reloaded, its worker restarted): the
                 // old link is stale, and the new one takes over.
-                Some(active)
-                    if active != id
-                        && matches!(
-                            &self.status,
-                            AgentChromeStatus::Connected { browser: known } if known.as_ref() == browser.as_str()
-                        ) =>
-                {
+                Some(active) if active != id && same_browser => {
                     if let Some(old) = self.links.remove(&active) {
                         old.inbox.close();
                     }
                     self.forget_browser(cx);
                     self.active = Some(id);
+                    self.active_instance = instance;
                     self.status = AgentChromeStatus::Connected {
                         browser: browser.into(),
                     };
@@ -1169,6 +1203,11 @@ impl AgentChrome {
         cx: &mut Context<Self>,
     ) -> Task<Result<Value>> {
         let url = crate::normalize_url(url);
+        if !crate::browser::is_web_address(&url) {
+            return Task::ready(Err(anyhow!(
+                "agents can open web addresses (http, https) and about:blank in Chrome, not {url}"
+            )));
+        }
         let page = self.page(who, true, new_tab, cx);
         cx.spawn(async move |this, cx| {
             let page = page.await?;

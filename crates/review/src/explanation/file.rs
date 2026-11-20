@@ -70,6 +70,10 @@ pub fn read(text: &str) -> Option<Shared> {
             "author" => shared.author = value.trim().to_string(),
             "agent" => shared.agent = value.trim().to_string(),
             "file" => {
+                // Each file costs a look at git when the note is matched.
+                if shared.files.len() >= MAX_FILES {
+                    continue;
+                }
                 if let Some((blob, path)) = value.split_once(' ') {
                     shared.files.push((path.to_string(), blob.to_string()));
                 }
@@ -129,21 +133,54 @@ pub fn write(root: &Path, shared: &Shared) -> Result<String> {
 
 /// Every shared explanation in `root`'s working tree, with its path from
 /// `root`. Files without a note, or that cannot be read, are passed over.
+///
+/// The folder is the repository's content: only regular files (never a
+/// link, which could point at `/dev/zero`) up to [`MAX_SIZE`] are read, and
+/// at most [`MAX_ENTRIES`] of them.
 pub fn all(root: &Path) -> Vec<(String, Shared)> {
     let Ok(entries) = std::fs::read_dir(root.join(FOLDER)) else {
         return Vec::new();
     };
     let mut found: Vec<(String, Shared)> = entries
         .flatten()
+        .take(MAX_ENTRIES)
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
         .filter_map(|entry| {
-            let shared = read(&std::fs::read_to_string(entry.path()).ok()?)?;
+            let shared = read(&read_limited(&entry)?)?;
             let name = entry.file_name().to_string_lossy().into_owned();
             Some((format!("{FOLDER}/{name}"), shared))
         })
         .collect();
     found.sort_by(|a, b| a.0.cmp(&b.0));
     found
+}
+
+/// Most entries of the folder looked at.
+const MAX_ENTRIES: usize = 500;
+/// Largest explanation file read, far above any real one.
+const MAX_SIZE: u64 = 1024 * 1024;
+/// Most `file:` lines read from one note.
+const MAX_FILES: usize = 500;
+
+/// The text of `entry` when it is a regular file of at most [`MAX_SIZE`];
+/// the read itself is bounded too, for a file that grows meanwhile.
+fn read_limited(entry: &std::fs::DirEntry) -> Option<String> {
+    use std::io::Read as _;
+    // Neither looks through a link.
+    let meta = entry.metadata().ok()?;
+    if !entry.file_type().ok()?.is_file() || !meta.is_file() || meta.len() > MAX_SIZE {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(entry.path())
+        .ok()?
+        .take(MAX_SIZE + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_SIZE {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 /// `text` on one line (a name is never more).
@@ -224,6 +261,39 @@ mod tests {
             written
         );
         assert_eq!(all[0].1.files.len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_note_names_a_bounded_number_of_files() {
+        let many = Shared {
+            files: (0..MAX_FILES + 50)
+                .map(|n| (format!("src/{n}.rs"), "a".repeat(40)))
+                .collect(),
+            ..shared()
+        };
+        assert_eq!(read(&text(&many)).unwrap().files.len(), MAX_FILES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_and_huge_files_are_passed_over() {
+        let root =
+            std::env::temp_dir().join(format!("ph-explanation-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let kept = write(&root, &shared()).unwrap();
+        let folder = root.join(FOLDER);
+        std::os::unix::fs::symlink(root.join(&kept), folder.join("link.md")).unwrap();
+        let mut huge = text(&shared());
+        huge.insert_str(0, &"x".repeat(MAX_SIZE as usize));
+        std::fs::write(folder.join("huge.md"), huge).unwrap();
+        let all = all(&root);
+        assert_eq!(
+            all.iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            [kept.as_str()]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

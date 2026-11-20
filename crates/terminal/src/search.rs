@@ -49,6 +49,16 @@ impl Search {
         let Some(regex) = self.regex.as_mut() else {
             return;
         };
+        // The match shown was found in the grid as it was: a narrower pane or
+        // cleared history leaves its points outside the grid, and alacritty
+        // indexes them unchecked. Such a search starts again from the end.
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|found| !inside(*found.start(), term) || !inside(*found.end(), term))
+        {
+            self.current = None;
+        }
         let origin = match (&self.current, direction) {
             (None, _) => Point::new(term.bottommost_line(), term.last_column()),
             (Some(found), Direction::Left) => before(*found.start(), term),
@@ -75,6 +85,11 @@ impl Search {
     pub fn missing(&self) -> bool {
         self.regex.is_some() && self.current.is_none()
     }
+}
+
+fn inside<T>(point: Point, term: &Term<T>) -> bool {
+    (term.topmost_line()..=term.bottommost_line()).contains(&point.line)
+        && point.column <= term.last_column()
 }
 
 fn before<T>(point: Point, term: &Term<T>) -> Point {
@@ -106,5 +121,30 @@ mod tests {
         assert_eq!(literal("a.b(1)"), "a\\.b\\(1\\)");
         assert!(Search::new("").regex.is_none());
         assert!(Search::new("cargo test").regex.is_some());
+    }
+
+    #[test]
+    fn a_match_left_outside_a_narrower_grid_starts_the_search_again() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::Config;
+        use alacritty_terminal::term::test::TermSize;
+        use alacritty_terminal::vte::ansi::Processor;
+
+        let mut term = Term::new(Config::default(), &TermSize::new(40, 3), VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"needle\r\n                              needle");
+        let mut search = Search::new("needle");
+        search.step(&mut term, Direction::Left);
+        assert_eq!(search.current.as_ref().unwrap().start().column, Column(30));
+
+        term.resize(TermSize::new(10, 3));
+        search.step(&mut term, Direction::Left);
+        search.step(&mut term, Direction::Right);
+        assert!(search.current.is_some());
+
+        term.grid_mut().clear_history();
+        term.resize(TermSize::new(5, 2));
+        search.step(&mut term, Direction::Left);
+        search.step(&mut term, Direction::Right);
     }
 }

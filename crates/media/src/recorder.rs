@@ -104,9 +104,14 @@ fn encode(file: File, queue: smol::channel::Receiver<(Duration, Frame)>) -> Resu
     let mut sample: Vec<Frame> = Vec::new();
     let mut stride = 1;
     let mut pending: Option<(Duration, Frame)> = None;
+    // The GIF's size: its first frame's.
+    let mut canvas = (0, 0);
     let frames = std::iter::from_fn(|| queue.recv_blocking().ok());
     for (count, (at, frame)) in frames.enumerate() {
         let frame = frame.downscaled(MAX_SIDE);
+        if count == 0 {
+            canvas = (frame.width, frame.height);
+        }
         if count % stride == 0 {
             sample.push(frame.clone());
             // Too many: keep every other one and sample half as often.
@@ -116,11 +121,16 @@ fn encode(file: File, queue: smol::channel::Receiver<(Duration, Frame)>) -> Resu
             }
         }
         if let Some((previous_at, previous)) = pending.replace((at, frame)) {
-            write_frame(&mut encoder, &previous, at.saturating_sub(previous_at))?;
+            write_frame(
+                &mut encoder,
+                &previous,
+                canvas,
+                at.saturating_sub(previous_at),
+            )?;
         }
     }
     if let Some((_, last)) = &pending {
-        write_frame(&mut encoder, last, Duration::from_millis(500))?;
+        write_frame(&mut encoder, last, canvas, Duration::from_millis(500))?;
         // The last frame shows how the recording ended; always offer it.
         let id = last.render_image().id;
         if sample
@@ -133,10 +143,43 @@ fn encode(file: File, queue: smol::channel::Receiver<(Duration, Frame)>) -> Resu
     Ok(sample)
 }
 
-fn write_frame(encoder: &mut GifEncoder<File>, frame: &Frame, delay: Duration) -> Result<()> {
+fn write_frame(
+    encoder: &mut GifEncoder<File>,
+    frame: &Frame,
+    canvas: (u32, u32),
+    delay: Duration,
+) -> Result<()> {
     let delay = Delay::from_saturating_duration(delay);
-    encoder.encode_frame(image::Frame::from_parts(frame.to_image(), 0, 0, delay))?;
+    encoder.encode_frame(image::Frame::from_parts(
+        on_canvas(frame, canvas),
+        0,
+        0,
+        delay,
+    ))?;
     Ok(())
+}
+
+/// `frame` as a picture of the GIF's size: itself when it has that size,
+/// else scaled to fit and centred on black. Every frame of a GIF is written
+/// at the first one's size, so a frame of another shape (the phone was
+/// turned, the pane resized while recording) would be cut off at it.
+fn on_canvas(frame: &Frame, (width, height): (u32, u32)) -> image::RgbaImage {
+    let picture = frame.to_image();
+    if (frame.width, frame.height) == (width, height) || width == 0 || height == 0 {
+        return picture;
+    }
+    let scale = (width as f32 / frame.width as f32).min(height as f32 / frame.height as f32);
+    let fit = |side: u32, most: u32| ((side as f32 * scale) as u32).clamp(1, most);
+    let (w, h) = (fit(frame.width, width), fit(frame.height, height));
+    let scaled = image::imageops::resize(&picture, w, h, image::imageops::FilterType::Triangle);
+    let mut whole = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
+    image::imageops::replace(
+        &mut whole,
+        &scaled,
+        i64::from((width - w) / 2),
+        i64::from((height - h) / 2),
+    );
+    whole
 }
 
 /// `count` items spread evenly from first to last.
@@ -174,5 +217,19 @@ mod tests {
         assert_eq!(recording.keyframes.len(), 2);
         assert_eq!(recording.keyframes[1].bgra()[0], 240);
         assert!(std::fs::metadata(&recording.gif).unwrap().len() > 0);
+    }
+
+    #[test]
+    fn a_frame_of_another_shape_is_fitted_into_the_gif() {
+        // A wide white frame in a tall recording: scaled to the width and
+        // centred, black above and below.
+        let wide = Frame::from_rgba(4, 2, vec![255; 4 * 2 * 4]);
+        let fitted = on_canvas(&wide, (2, 4));
+        assert_eq!(fitted.dimensions(), (2, 4));
+        let rows: Vec<u8> = (0..4).map(|y| fitted.get_pixel(0, y).0[0]).collect();
+        assert_eq!(rows, [0, 255, 0, 0]);
+        // A frame of the recording's own size goes in as it is.
+        let same = on_canvas(&wide, (4, 2));
+        assert_eq!(same, wide.to_image());
     }
 }

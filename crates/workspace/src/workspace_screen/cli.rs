@@ -73,6 +73,19 @@ pub(crate) fn chat_of(
         .flatten()
 }
 
+/// Whether `session`'s messages in the store are a chat's own transcript:
+/// it is a chat, or one that went on in its agent's CLI (it has a mark) and
+/// gets what was said there added when it comes back. A session that was a
+/// CLI's from its start keeps there what it said as text, for Search, and
+/// that is written anew each time its terminal closes
+/// (`terminal_agents::keep_last_reply`): never over a chat's transcript.
+pub(crate) fn has_chat_transcript(store: &Store, session: &Session) -> bool {
+    session.kind != "terminal"
+        || store
+            .setting::<HashMap<String, usize>>(MARKS)
+            .contains_key(&session.id.to_string())
+}
+
 fn mark_of(store: &Store, session: SessionId) -> usize {
     store
         .setting::<HashMap<String, usize>>(MARKS)
@@ -154,7 +167,7 @@ impl WorkspaceScreen {
         // Asked for again while the first is on its way (the agent's side
         // takes a few seconds to let go): one conversation, one CLI. A
         // second press started a second program on it.
-        if self.cli_opening {
+        if self.cli_opening.is_some() {
             return Ok(());
         }
         let store = AppState::store(cx).clone();
@@ -167,14 +180,25 @@ impl WorkspaceScreen {
         // named by the first thing asked there.
         let (session, named) = match handover.session.clone() {
             Some(session) => (session, true),
-            None => (
-                store.create_session(
+            None => {
+                let session = store.create_session(
                     self.project.id,
                     &format!("{} session", agent.name),
                     agent.id,
-                )?,
-                false,
-            ),
+                )?;
+                // In the account picked for it: its CLI is started there,
+                // and its record is looked for in that account's files.
+                if !handover.account.is_empty() {
+                    store.set_session_account(session.id, &handover.account)?;
+                }
+                (
+                    Session {
+                        account: handover.account.clone(),
+                        ..session
+                    },
+                    false,
+                )
+            }
         };
         let cwd = handover.cwd.to_string_lossy().into_owned();
         store.set_session_place(session.id, "terminal", Some(&cwd))?;
@@ -217,7 +241,7 @@ impl WorkspaceScreen {
         self.chat.update(cx, |chat, cx| {
             chat.set_busy(Some(format!("Opening {}'s CLI…", agent.name)), cx)
         });
-        self.cli_opening = true;
+        self.cli_opening = Some(session.id);
         cx.spawn_in(window, async move |this, cx| {
             let mark = mark.await;
             // Never two programs on one conversation: the CLI starts once
@@ -225,7 +249,7 @@ impl WorkspaceScreen {
             // session closed).
             released.await;
             _ = this.update_in(cx, |this, window, cx| {
-                this.cli_opening = false;
+                this.cli_opening = None;
                 set_mark(&store, session.id, Some(mark));
                 this.chat.update(cx, |chat, cx| chat.set_busy(None, cx));
                 let started = this.start_cli(
@@ -266,14 +290,33 @@ impl WorkspaceScreen {
         self.show_as(Form::Cli, window, cx);
     }
 
-    /// A session in its CLI form whose program is not running goes on:
-    /// the CLI starts again and resumes it.
-    fn continue_cli(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<()> {
-        let session = self
+    /// The session in front as the store has it now. The panel holds it
+    /// as it was when it was shown, and a CLI's own session (which of the
+    /// agent's sessions it is in) becomes known, and is kept, after that:
+    /// going on from what the panel holds would start another
+    /// conversation, or take none of what was said back to the chat.
+    fn front_session(&self, cx: &App) -> Result<Session> {
+        let shown = self
             .chat
             .read(cx)
             .shown_session(cx)
             .ok_or_else(|| anyhow!("There is no session to go on with."))?;
+        Ok(AppState::store(cx)
+            .session(shown.id)
+            .ok()
+            .flatten()
+            .unwrap_or(shown))
+    }
+
+    /// A session in its CLI form whose program is not running goes on:
+    /// the CLI starts again and resumes it.
+    fn continue_cli(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<()> {
+        let session = self.front_session(cx)?;
+        // On its way there already (the agent's side is letting go of the
+        // conversation): started now, it would be a second program on it.
+        if self.cli_opening == Some(session.id) {
+            return Ok(());
+        }
         if cli_terminal(self.project.id, session.id, cx).is_some() {
             return Ok(());
         }
@@ -304,16 +347,28 @@ impl WorkspaceScreen {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        let session = self
-            .chat
-            .read(cx)
-            .shown_session(cx)
-            .ok_or_else(|| anyhow!("There is no session to go on with."))?;
+        let session = self.front_session(cx)?;
+        // Still on its way to its CLI: there is nothing to come back from
+        // yet, and its mark is not kept until the CLI starts.
+        if self.cli_opening == Some(session.id) {
+            return Ok(());
+        }
         let agent = ph_agent::agents::find(&session.agent_id)
             .ok_or_else(|| anyhow!("{} is not a known agent", session.agent_id))?;
         let running = TerminalAgents::of_session(session.id, cx).map(|running| {
+            // A program that ended badly keeps its terminal, to be read,
+            // and what it last said of itself: it is at work on nothing
+            // and waits for no one, whatever that was.
+            let ended = running
+                .terminal
+                .upgrade()
+                .is_none_or(|terminal| terminal.read(cx).has_exited());
             (
-                running.state,
+                if ended {
+                    ChatState::Idle
+                } else {
+                    running.state
+                },
                 // Something happened there: it works, waits, or said
                 // something (its name alone may be the chat's own).
                 running.state != ChatState::Idle || running.line.is_some(),
@@ -371,8 +426,11 @@ impl WorkspaceScreen {
         // thing asked gave it, its own session): the look that keeps it
         // every second may not have come by since.
         crate::terminal_agents::save_now(cx);
-        // The program ends first: never two on one conversation.
+        // The program ends first: never two on one conversation. It is
+        // let go of with that: the chat's transcript is its own from here,
+        // and what is kept of a CLI whose terminal went would replace it.
         self.close_cli(session.id, cx);
+        TerminalAgents::let_go(session.id, cx);
         let store = AppState::store(cx).clone();
         let mark = mark_of(&store, session.id);
         let cwd = session

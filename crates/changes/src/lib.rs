@@ -11,6 +11,7 @@ mod change_tree;
 mod changes_panel;
 mod commit_box;
 mod conflict_view;
+mod diff_list;
 pub mod file_dialogs;
 mod history_view;
 pub mod notes;

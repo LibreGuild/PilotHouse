@@ -110,7 +110,7 @@ From the editor (see [files.md](files.md)): *Explain*, *Find bugs* and *Write te
 
 ## Usage
 
-When an agent reports usage (ACP `usage_update`: context used and window, running cost; the prompt reply's `usage`: running token totals), the message box shows, beside Send, a small bar of how full the context is and its share (in a narrow pane the share alone, in amber or red as it fills); pointing at it says the tokens in and out and the cost so far. Reports are running totals per agent session, so the store keeps the last one and adds only the difference: a restarted agent adds on, a resumed one is not counted twice (`ph_store::usage`, migration 5). What each report adds is also kept by local day and model (`usage_days`, migration 14), and chats from before that keep their totals on the day they were last used.
+When an agent reports usage (ACP `usage_update`: context used and window, running cost; the prompt reply's `usage`: that turn's tokens for Claude Code, Codex and Gemini, which are added up; a running total for agents not known to count per turn), the message box shows, beside Send, a small bar of how full the context is and its share (in a narrow pane the share alone, in amber or red as it fills); pointing at it says the tokens in and out and the cost so far. Reports are running totals per agent session, so the store keeps the last one and adds only the difference: a restarted agent adds on, a resumed one is not counted twice (`ph_store::usage`, migration 5). What each report adds is also kept by local day and model (`usage_days`, migration 14), and chats from before that keep their totals on the day they were last used.
 
 **Usage** (the palette, the app menu) opens a compact dialog (`usage_view`), one page read top to bottom:
 

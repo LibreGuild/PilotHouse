@@ -157,6 +157,17 @@ pub struct Encoded {
 
 /// `image` written as `settings` say.
 pub fn encode(image: &RgbaImage, settings: &ExportSettings) -> Result<Encoded> {
+    encode_until(image, settings, &|| false)
+}
+
+/// [`encode`], given up once `stopped` says so: meeting a size limit takes
+/// many tries, each a whole encode, and an answer nobody waits for any more
+/// (the settings changed again) is not worth them.
+pub(crate) fn encode_until(
+    image: &RgbaImage,
+    settings: &ExportSettings,
+    stopped: &dyn Fn() -> bool,
+) -> Result<Encoded> {
     let Some(limit) = settings.max_kb.map(|kb| kb as usize * 1024) else {
         return Ok(Encoded {
             bytes: encode_once(image, settings.format, settings.quality, settings.palette)?,
@@ -165,16 +176,24 @@ pub fn encode(image: &RgbaImage, settings: &ExportSettings) -> Result<Encoded> {
             note: None,
         });
     };
-    fit(image, settings, limit)
+    fit(image, settings, limit, stopped)
 }
 
 /// Gives way, step by step, until the file is at most `limit` bytes.
-fn fit(image: &RgbaImage, settings: &ExportSettings, limit: usize) -> Result<Encoded> {
+fn fit(
+    image: &RgbaImage,
+    settings: &ExportSettings,
+    limit: usize,
+    stopped: &dyn Fn() -> bool,
+) -> Result<Encoded> {
     let mut picture = std::borrow::Cow::Borrowed(image);
     let mut palette = settings.palette;
     for _ in 0..6 {
+        if stopped() {
+            bail!("stopped");
+        }
         let (bytes, quality) = match settings.format {
-            Format::Jpeg => best_quality(&picture, settings.quality, limit)?,
+            Format::Jpeg => best_quality(&picture, settings.quality, limit, stopped)?,
             Format::Png => {
                 let bytes = encode_once(&picture, Format::Png, 0, palette)?;
                 if bytes.len() > limit && !palette {
@@ -231,18 +250,28 @@ fn fit(image: &RgbaImage, settings: &ExportSettings, limit: usize) -> Result<Enc
 
 /// The best JPEG quality up to `start` that fits in `limit` bytes, or the
 /// lowest tried when none does.
-fn best_quality(image: &RgbaImage, start: u8, limit: usize) -> Result<(Vec<u8>, Option<u8>)> {
+fn best_quality(
+    image: &RgbaImage,
+    start: u8,
+    limit: usize,
+    stopped: &dyn Fn() -> bool,
+) -> Result<(Vec<u8>, Option<u8>)> {
     let first = encode_once(image, Format::Jpeg, start, false)?;
-    if first.len() <= limit {
+    const LOWEST: u8 = 30;
+    // A quality asked for at or under the lowest tried has nothing below it
+    // to search: `LOWEST` would be a larger file, not a smaller one.
+    if first.len() <= limit || start <= LOWEST {
         return Ok((first, Some(start)));
     }
-    const LOWEST: u8 = 30;
     let lowest = encode_once(image, Format::Jpeg, LOWEST, false)?;
     if lowest.len() > limit {
         return Ok((lowest, Some(LOWEST)));
     }
     let (mut low, mut high, mut best) = (LOWEST, start, (lowest, LOWEST));
     while high - low > 2 {
+        if stopped() {
+            bail!("stopped");
+        }
         let middle = (low + high) / 2;
         let bytes = encode_once(image, Format::Jpeg, middle, false)?;
         if bytes.len() <= limit {
@@ -464,6 +493,31 @@ mod tests {
             assert!(encoded.bytes.len() <= 20 * 1024, "{format:?}");
             assert!(encoded.note.is_some(), "{format:?} says what gave way");
         }
+    }
+
+    #[test]
+    fn a_low_quality_asked_for_is_never_raised() {
+        // Too large at quality 10: the size gives way, not the quality (a
+        // higher one would only be larger).
+        let (_, quality) = best_quality(&photo(), 10, 1024, &|| false).unwrap();
+        assert_eq!(quality, Some(10));
+        let settings = ExportSettings {
+            quality: 10,
+            max_kb: Some(4),
+            ..ExportSettings::for_format(Format::Jpeg)
+        };
+        let encoded = encode(&photo(), &settings).unwrap();
+        assert!(encoded.bytes.len() <= 4 * 1024);
+        assert!(!encoded.note.unwrap_or_default().contains("quality"));
+    }
+
+    #[test]
+    fn a_stopped_encode_gives_up() {
+        let settings = ExportSettings {
+            max_kb: Some(20),
+            ..ExportSettings::for_format(Format::Jpeg)
+        };
+        assert!(encode_until(&photo(), &settings, &|| true).is_err());
     }
 
     #[test]

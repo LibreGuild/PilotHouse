@@ -157,13 +157,18 @@ pub struct WhyView {
     why: Why,
     /// The explanation read in full, once asked for.
     full: Option<Entity<Reply>>,
+    _reading: Option<gpui_kit::Task<()>>,
 }
 
 impl EventEmitter<WhyEvent> for WhyView {}
 
 impl WhyView {
     pub fn new(why: Why) -> Self {
-        Self { why, full: None }
+        Self {
+            why,
+            full: None,
+            _reading: None,
+        }
     }
 
     /// Opens the pop-up for `why`. The view is returned for its events
@@ -193,7 +198,17 @@ impl WhyView {
         let Some(found) = self.readable() else {
             return;
         };
-        let text = crate::linked(&self.why.top, &found.markdown);
+        // Which references name a file is asked of the file system, which
+        // can be a network drive: not on the UI thread.
+        let (markdown, top) = (found.markdown.clone(), self.why.top.clone());
+        let text = cx.background_spawn(async move { crate::linked(&top, &markdown) });
+        self._reading = Some(cx.spawn(async move |this, cx| {
+            let text = text.await;
+            _ = this.update(cx, |this, cx| this.show_all(&text, cx));
+        }));
+    }
+
+    fn show_all(&mut self, text: &str, cx: &mut Context<Self>) {
         let (this, top) = (cx.entity().downgrade(), self.why.top.clone());
         let on_link: OnLink = Arc::new(move |url, window, cx| match parse_file_link(url) {
             Some((path, line)) => {
@@ -204,7 +219,7 @@ impl WhyView {
             None if url.starts_with("https://") || url.starts_with("http://") => cx.open_url(url),
             None => {}
         });
-        self.full = Some(cx.new(|cx| Reply::new(&text, cx).on_link(on_link)));
+        self.full = Some(cx.new(|cx| Reply::new(text, cx).on_link(on_link)));
         cx.notify();
     }
 

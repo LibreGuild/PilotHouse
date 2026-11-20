@@ -177,9 +177,9 @@ pub struct WorkspaceScreen {
     _subscriptions: Vec<Subscription>,
     /// The views of the agent CLIs the chat shows (see `cli`).
     cli_views: cli::CliViews,
-    /// A chat is on its way to its agent's CLI (its side is letting go of
+    /// The chat on its way to its agent's CLI (its side is letting go of
     /// the conversation): asking again meanwhile starts nothing more.
-    cli_opening: bool,
+    cli_opening: Option<SessionId>,
     /// Watches the workspace's agent terminals, once one was started.
     _cli_watch: Option<Subscription>,
     /// Each shown agent transcript's "Continue in a chat", by terminal.
@@ -244,10 +244,12 @@ impl WorkspaceScreen {
                 ChatPanelEvent::SelectSession(None) => this.new_session_asked(window, cx),
                 ChatPanelEvent::TurnEnded => {
                     this.refresh_evidence(cx);
-                    // A UI test being recorded ends with the agent's turn.
-                    if ph_uitest::record::current(cx).is_some()
-                        && let Some(tests) = this.tests.clone()
-                    {
+                    // A UI test being recorded ends with its agent's turn,
+                    // not another chat's.
+                    let chat = this.chat.read(cx).active_session_id(cx);
+                    let ours = ph_uitest::record::current(cx)
+                        .is_some_and(|recording| recording.chat.is_none_or(|id| Some(id) == chat));
+                    if ours && let Some(tests) = this.tests.clone() {
                         tests.update(cx, |tests, cx| tests.finish_recording(cx));
                     }
                 }
@@ -364,7 +366,7 @@ impl WorkspaceScreen {
         let mut space = Self {
             cli_views,
             _cli_watch: None,
-            cli_opening: false,
+            cli_opening: None,
             layout,
             shown: HashSet::new(),
             _save_split: None,

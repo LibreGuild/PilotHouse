@@ -1244,8 +1244,9 @@ impl VideoEditor {
             }
             _ => notice("Opening…", cx),
         };
-        // Paused: an exact still of the result, when it is made.
-        if !playing && self.tool != Tool::Crop {
+        // Paused: an exact still of the result, when it is made. Not while
+        // dragging (scrubbing, moving a mark): it would not be shown.
+        if !playing && self.tool != Tool::Crop && self.drag.is_none() {
             let position = self.position;
             self.doc.update(cx, |doc, cx| doc.want_still(position, cx));
         }
@@ -1574,7 +1575,14 @@ impl VideoEditor {
                 return;
             };
             let result = match shot.await {
-                Ok(png) => std::fs::write(&path, png).map_err(anyhow::Error::from),
+                Ok(png) => {
+                    // Off the UI thread: the folder may be a slow one.
+                    let to = path.clone();
+                    cx.background_spawn(async move {
+                        std::fs::write(&to, png).map_err(anyhow::Error::from)
+                    })
+                    .await
+                }
                 Err(err) => Err(err),
             };
             _ = cx.update(|window, cx| {

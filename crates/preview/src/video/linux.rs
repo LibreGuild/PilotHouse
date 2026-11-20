@@ -3,7 +3,7 @@
 //! `videoflip` stands a phone's recording upright, as its metadata asks.
 
 use std::ffi::{c_char, c_uint, c_void};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui_kit::RenderImage;
@@ -28,9 +28,37 @@ pub struct Engine {
     preroll_taken: std::cell::Cell<bool>,
 }
 
+/// What opening needs that can take a while: GStreamer loaded and started
+/// (the first time it reads its plugin registry, for seconds after an
+/// install). Made on any thread by [`Engine::prepare`], then given to
+/// [`Engine::open_prepared`] on the UI thread. It holds no GStreamer
+/// object: those are all made, and used, on the UI thread.
+pub struct Prepared {
+    gst: Result<&'static Gst, String>,
+    path: PathBuf,
+}
+
 impl Engine {
+    /// Opens the video, waiting for GStreamer to load: [`Engine::prepare`]
+    /// off the UI thread and then [`Engine::open_prepared`] do not hold the
+    /// window up.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let gst = gst()?;
+        Self::open_prepared(Self::prepare(path))
+    }
+
+    /// Loads and starts GStreamer, if it is not yet. On any thread.
+    pub fn prepare(path: &Path) -> Prepared {
+        Prepared {
+            gst: gst(),
+            path: path.to_path_buf(),
+        }
+    }
+
+    /// The player for a video, once [`Engine::prepare`] is done. On the UI
+    /// thread.
+    pub fn open_prepared(prepared: Prepared) -> Result<Self, String> {
+        let gst = prepared.gst?;
+        let path = prepared.path;
         unsafe {
             let playbin = (gst.element_factory_make)(c("playbin").as_ptr(), std::ptr::null());
             let sink = (gst.element_factory_make)(c("appsink").as_ptr(), std::ptr::null());

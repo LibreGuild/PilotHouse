@@ -36,7 +36,7 @@ use ph_store::sessions::{Session, SessionId};
 use ph_ui::Icons;
 use ph_ui::MenuButton as _;
 
-use crate::agents::{self, AGENTS, AgentSpec, Availability};
+use crate::agents::{self, AGENTS, AgentSpec};
 use crate::attachment_view;
 use crate::attachments::{self, Attachment, LiveSources, PullBrief};
 use crate::chats::{ChatHub, DEFAULT_AGENT_KEY, WorkspaceChats, default_agent};
@@ -306,6 +306,10 @@ pub struct ChatPanel {
     /// workspace's chats keep them.
     sent_off: Vec<(Entity<ChatThread>, Subscription)>,
     failed: Option<SharedString>,
+    /// The agent was to be started before the agents had been looked for
+    /// (the message box got the keyboard right after launch): it is once
+    /// they are, see [`Self::warm_up`].
+    warm_up_due: bool,
     _prepare: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     _active_subscriptions: Vec<Subscription>,
@@ -409,6 +413,7 @@ impl ChatPanel {
             sent_off: Vec::new(),
             side: None,
             failed: None,
+            warm_up_due: false,
             _prepare: None,
             _subscriptions: vec![
                 subscription,
@@ -432,6 +437,15 @@ impl ChatPanel {
                 this.chats
                     .update(cx, |chats, cx| chats.set_preparing(None, cx));
             }
+            // Pictures attached and never sent are drawn nowhere else.
+            let unsent = this
+                .attachments
+                .iter()
+                .filter_map(|attachment| match attachment {
+                    Attachment::Image { path, .. } => Some(path.clone()),
+                    _ => None,
+                });
+            ph_ui::images::release_paths(unsent.collect(), cx);
         })
         .detach();
         panel
@@ -440,14 +454,16 @@ impl ChatPanel {
     /// Shows `session`, or a fresh draft for `None`.
     pub fn set_session(&mut self, session: Option<Session>, cx: &mut Context<Self>) {
         // A chat was picked (from the list, a tab, anywhere): it shows.
-        self.all_chats = false;
-        self.cli_pick = false;
-        self.terminal_session = None;
+        self.show_chat();
         if let Some(session) = session
             .as_ref()
             .filter(|session| session.kind == "terminal")
         {
             self.show_terminal_session(session.clone(), cx);
+            // The chat behind the CLI is not being looked at: it is told
+            // of (unread, a notification) when it ends a turn or asks.
+            self.chats
+                .update(cx, |chats, cx| chats.set_viewing(None, cx));
             cx.notify();
             return;
         }
@@ -474,6 +490,16 @@ impl ChatPanel {
         cx.notify();
     }
 
+    /// The chat in `active` is what shows from here: not the CLI of the
+    /// session that was in front, nor the list of chats or the question
+    /// that stood in the chat's place. Whatever puts a chat in front does
+    /// this, or the chat it started would go on unseen behind them.
+    fn show_chat(&mut self) {
+        self.all_chats = false;
+        self.cli_pick = false;
+        self.terminal_session = None;
+    }
+
     /// A new chat whose agent works in `folder`, a folder of the workspace.
     pub fn new_chat_in(
         &mut self,
@@ -481,6 +507,7 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.show_chat();
         let agent = default_agent(&self.store);
         let project = ThreadProject {
             path: folder,
@@ -816,6 +843,7 @@ impl ChatPanel {
     ) {
         self.clear_busy(cx);
         self.failed = None;
+        self.show_chat();
         let agent = agent.unwrap_or_else(|| default_agent(&self.store));
         let store = self.store.clone();
         // A review works in its worktree alone.
@@ -875,7 +903,7 @@ impl ChatPanel {
             thread.set_review(review_id);
             thread
         });
-        let connection = self.connection(agent, cx);
+        let connection = self.connection_of(&thread, cx);
         let blocks = vec![agent_client_protocol_schema::v1::ContentBlock::Text(
             agent_client_protocol_schema::v1::TextContent::new(prompt),
         )];
@@ -933,7 +961,7 @@ impl ChatPanel {
                 thread.set_parallel();
                 thread
             });
-            let connection = self.connection(agent, cx);
+            let connection = self.connection_of(&thread, cx);
             let blocks = vec![agent_client_protocol_schema::v1::ContentBlock::Text(
                 agent_client_protocol_schema::v1::TextContent::new(prompt.to_string()),
             )];
@@ -958,6 +986,7 @@ impl ChatPanel {
             first.get_or_insert(thread);
         }
         if let Some(first) = first {
+            self.show_chat();
             self.active = first;
             self.watch_active(cx);
         }
@@ -1159,6 +1188,22 @@ impl ChatPanel {
             .update(cx, |chats, cx| chats.connection(spec, &account, cx))
     }
 
+    /// The workspace's process for `thread`'s agent, in the account that
+    /// chat is in: for a chat started behind the one in front (a review, a
+    /// lane of a parallel run), which is not in the front chat's account.
+    fn connection_of(
+        &mut self,
+        thread: &Entity<ChatThread>,
+        cx: &mut Context<Self>,
+    ) -> Entity<AgentConnection> {
+        let (spec, account) = {
+            let thread = thread.read(cx);
+            (thread.agent(), thread.account().to_string())
+        };
+        self.chats
+            .update(cx, |chats, cx| chats.connection(spec, &account, cx))
+    }
+
     /// Starts the agent and its session now (a resumed session is loaded,
     /// with its history), rather than when the composer is first focused.
     pub fn start_agent(&mut self, cx: &mut Context<Self>) {
@@ -1183,6 +1228,10 @@ impl ChatPanel {
             self.active
                 .update(cx, |thread, cx| thread.set_agent(default, cx));
         }
+        // Asked for while the agents were still being looked for.
+        if std::mem::take(&mut self.warm_up_due) {
+            self.warm_up(cx);
+        }
         cx.notify();
     }
 
@@ -1196,7 +1245,18 @@ impl ChatPanel {
             return;
         }
         let spec = self.active.read(cx).agent();
-        if !matches!(spec.availability(), Availability::Ready { .. }) {
+        // Whether it can start is what the look in the background found.
+        // Asking here would search the PATH on the UI's thread and, until
+        // the login shell has answered, wait for it: seconds with the
+        // window frozen, for a click in the message box. Not looked for
+        // yet: it starts when the look is done (`agents_found`).
+        let Some(installed) = agents::installed() else {
+            self.warm_up_due = true;
+            return;
+        };
+        if !installed.iter().any(|known| known.id == spec.id) {
+            // A look under way may find it (it was installed just now).
+            self.warm_up_due = crate::installed::looking(cx);
             return;
         }
         let connection = self.connection(spec, cx);

@@ -14,10 +14,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
-use roxmltree::{Document, Node};
+use roxmltree::Node;
 
 use super::model::*;
-use super::pptx::rels_of;
+use super::pptx::{parse_xml, rels_of};
 use super::space::Space;
 
 /// English Metric Units a point.
@@ -46,6 +46,26 @@ fn pt(emu: &str) -> f32 {
         .map(|value| (value / EMU as f64) as f32)
         .unwrap_or(0.)
 }
+
+/// A text size in points from `sz` (hundredths of a point), as large or
+/// small as text is drawn: a size of 0 or less has no line to lay out.
+fn text_size(sz: &str) -> Option<f32> {
+    sz.parse_finite::<f32>()
+        .ok()
+        .map(|sz| (sz / 100.).clamp(1., 400.))
+}
+
+/// How deep shapes may sit in one another (groups in groups, a choice's
+/// fallback, a SmartArt's drawing): far deeper than PowerPoint writes. A
+/// crafted file would otherwise use up the stack, which ends the app.
+const MAX_DEPTH: usize = 32;
+/// The most elements one file gives, many times a large deck's: shapes that
+/// all name one drawing would otherwise fill the memory from a small file.
+const MAX_ELEMENTS: usize = 200_000;
+/// The most bytes of drawings and charts read for shapes that name them:
+/// what a whole file may unpack to, so each of its parts can be read once;
+/// a file whose shapes all name one large part is stopped here.
+const MAX_FOLLOWED: usize = super::pptx::MOST_UNPACKED as usize;
 
 /// What reading a file gave: the deck, and what was left out.
 pub struct Read {
@@ -184,6 +204,15 @@ struct Reader<'a> {
     /// Connectors waiting for their ends: element, start and end (shape
     /// id, PowerPoint site).
     connectors: Vec<(String, Option<End>, Option<End>)>,
+    /// How deep the shapes being read sit (see [`MAX_DEPTH`]).
+    depth: usize,
+    /// Elements made so far (see [`MAX_ELEMENTS`]).
+    elements: usize,
+    /// Bytes of drawings and charts read so far (see [`MAX_FOLLOWED`]).
+    followed: usize,
+    /// The SmartArt drawings being read, outermost first: one that names
+    /// itself is not read again.
+    drawings: Vec<String>,
 }
 
 /// A connector's end as PowerPoint gives it: the shape's id and the site.
@@ -204,6 +233,10 @@ pub fn read(files: &BTreeMap<String, Vec<u8>>, space: &Space, title: &str) -> Re
         notes: Vec::new(),
         shape_ids: HashMap::new(),
         connectors: Vec::new(),
+        depth: 0,
+        elements: 0,
+        followed: 0,
+        drawings: Vec::new(),
     };
     reader.read_all()?;
     Ok(Read {
@@ -230,7 +263,7 @@ impl Reader<'_> {
         let presentation = self
             .text("ppt/presentation.xml")
             .context("this is not a PowerPoint presentation (no ppt/presentation.xml)")?;
-        let document = Document::parse(&presentation).context("its presentation cannot be read")?;
+        let document = parse_xml(&presentation).context("its presentation cannot be read")?;
         let root = document.root_element();
         if let Some(size) = child(root, "sldSz") {
             let width = pt(size.attribute("cx").unwrap_or("12192000"));
@@ -323,7 +356,7 @@ impl Reader<'_> {
         all_places: &mut HashMap<String, Vec<Place>>,
     ) -> Result<()> {
         let text = self.text(master).context("missing")?;
-        let document = Document::parse(&text)?;
+        let document = parse_xml(&text)?;
         let root = document.root_element();
         let rels = rels_of(self.files, master);
         // The colour names slides use (`bg1`, `tx1`) and the theme's.
@@ -407,7 +440,7 @@ impl Reader<'_> {
         let Some(text) = self.text(part) else {
             return;
         };
-        let Ok(document) = Document::parse(&text) else {
+        let Ok(document) = parse_xml(&text) else {
             return;
         };
         let root = document.root_element();
@@ -462,11 +495,8 @@ impl Reader<'_> {
                 style.align = align_of(align);
             }
             if let Some(defaults) = child(level, "defRPr") {
-                if let Some(size) = defaults
-                    .attribute("sz")
-                    .and_then(|sz| sz.parse_finite::<f32>().ok())
-                {
-                    style.size = size / 100.;
+                if let Some(size) = defaults.attribute("sz").and_then(text_size) {
+                    style.size = size;
                 }
                 style.bold = defaults.attribute("b") == Some("1");
                 style.italic = defaults.attribute("i") == Some("1");
@@ -542,7 +572,7 @@ impl Reader<'_> {
         number: usize,
     ) -> Result<(Layout, Vec<Place>)> {
         let text = self.text(part_name).context("missing")?;
-        let document = Document::parse(&text)?;
+        let document = parse_xml(&text)?;
         let root = document.root_element();
         let rels = rels_of(self.files, part_name);
         let tree = path(root, &["cSld", "spTree"]).context("no shapes")?;
@@ -608,10 +638,7 @@ impl Reader<'_> {
                     kind: ours,
                     frame,
                     prompt,
-                    size: defaults
-                        .and_then(|d| d.attribute("sz"))
-                        .and_then(|sz| sz.parse_finite::<f32>().ok())
-                        .map(|sz| sz / 100.),
+                    size: defaults.and_then(|d| d.attribute("sz")).and_then(text_size),
                     color: defaults.and_then(|d| self.fill_color(d)),
                     bold: defaults.and_then(|d| d.attribute("b")).map(|b| b == "1"),
                     align: level.and_then(|l| l.attribute("algn")).map(align_of),
@@ -667,7 +694,7 @@ impl Reader<'_> {
         all_places: &HashMap<String, Vec<Place>>,
     ) -> Result<Slide> {
         let text = self.text(part_name).context("missing")?;
-        let document = Document::parse(&text)?;
+        let document = parse_xml(&text)?;
         let root = document.root_element();
         let rels = rels_of(self.files, part_name);
         let layout_part = rels
@@ -716,7 +743,7 @@ impl Reader<'_> {
             .iter()
             .find(|(_, kind, ..)| kind.ends_with("/notesSlide"))
             && let Some(text) = self.text(notes)
-            && let Ok(notes) = Document::parse(&text)
+            && let Ok(notes) = parse_xml(&text)
         {
             slide.notes = notes
                 .descendants()
@@ -867,7 +894,7 @@ impl Reader<'_> {
         let mut authors: HashMap<String, String> = HashMap::new();
         for part in ["ppt/commentAuthors.xml", "ppt/authors.xml"] {
             if let Some(text) = self.text(part)
-                && let Ok(document) = Document::parse(&text)
+                && let Ok(document) = parse_xml(&text)
             {
                 for author in document
                     .descendants()
@@ -891,7 +918,7 @@ impl Reader<'_> {
             let Some(text) = self.text(target) else {
                 continue;
             };
-            let Ok(document) = Document::parse(&text) else {
+            let Ok(document) = parse_xml(&text) else {
                 continue;
             };
             // Where each (author, number) went: a comment, or a reply to one.
@@ -1002,8 +1029,19 @@ impl Reader<'_> {
         layout: bool,
         offset: (f32, f32),
     ) -> Vec<Element> {
+        if self.depth >= MAX_DEPTH {
+            self.note(format!(
+                "shapes nested more than {MAX_DEPTH} deep were left out"
+            ));
+            return Vec::new();
+        }
+        self.depth += 1;
         let mut out = Vec::new();
         for node in tree.children().filter(Node::is_element) {
+            if self.elements >= MAX_ELEMENTS {
+                self.note(format!("only its first {MAX_ELEMENTS} shapes were read"));
+                break;
+            }
             let name = node.tag_name().name();
             let result = match name {
                 "sp" => self.sp(node, part, layout, offset),
@@ -1023,7 +1061,10 @@ impl Reader<'_> {
                 _ => continue,
             };
             match result {
-                Ok(Some(element)) => out.push(element),
+                Ok(Some(element)) => {
+                    self.elements += 1;
+                    out.push(element);
+                }
                 Ok(None) => {}
                 Err(err) => self.note(format!(
                     "a shape in {} could not be read: {err:#}",
@@ -1031,7 +1072,19 @@ impl Reader<'_> {
                 )),
             }
         }
+        self.depth -= 1;
         out
+    }
+
+    /// Whether another `bytes` of a drawing or a chart may be read for a
+    /// shape that names it (see [`MAX_FOLLOWED`]).
+    fn follow(&mut self, bytes: usize) -> bool {
+        self.followed = self.followed.saturating_add(bytes);
+        if self.followed > MAX_FOLLOWED {
+            self.note("some charts and SmartArt were not read: the file names them too often");
+            return false;
+        }
+        true
     }
 
     fn remember(&mut self, node: Node, element: &Element) {
@@ -1558,7 +1611,13 @@ impl Reader<'_> {
             .unwrap_or_else(|| "bin".into());
         let name = match extension.as_str() {
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" => {
-                self.space.add_media_bytes(bytes, &extension).ok()?
+                match self.space.add_media_bytes(bytes, &extension) {
+                    Ok(name) => name,
+                    Err(err) => {
+                        self.note(format!("a picture was left out: {err:#}"));
+                        return None;
+                    }
+                }
             }
             // Other files go in as they are.
             _ => {
@@ -1575,17 +1634,29 @@ impl Reader<'_> {
     }
 
     fn table(&mut self, table: Node, part: &Part) -> Table {
+        // A table is drawn cell by cell, in a grid of its rows by its longest
+        // row: one larger than a slide shows is cut, or a few long rows
+        // would ask for more memory than there is.
+        let most = super::svg::TABLE_MOST;
+        if children(table, "tr").count() > most
+            || children(table, "tr").any(|tr| children(tr, "tc").count() > most)
+        {
+            self.note(format!(
+                "a table was cut to its first {most} rows and columns"
+            ));
+        }
         let widths: Vec<f32> = path(table, &["tblGrid"])
             .into_iter()
             .flat_map(|grid| children(grid, "gridCol"))
+            .take(most)
             .map(|col| pt(col.attribute("w").unwrap_or("0")).max(1.))
             .collect();
         let properties = child(table, "tblPr");
         let mut font_size = None;
         let mut rows = Vec::new();
-        for tr in children(table, "tr") {
+        for tr in children(table, "tr").take(most) {
             let mut row = Vec::new();
-            for tc in children(tr, "tc") {
+            for tc in children(tr, "tc").take(most) {
                 let text = child(tc, "txBody")
                     .map(|body| self.text_body(body, part, None))
                     .unwrap_or_default();
@@ -1619,8 +1690,11 @@ impl Reader<'_> {
     }
 
     fn chart(&mut self, target: &str) -> Option<Chart> {
+        if !self.follow(self.files.get(target)?.len()) {
+            return None;
+        }
         let text = self.text(target)?;
-        let document = Document::parse(&text).ok()?;
+        let document = parse_xml(&text).ok()?;
         let plot = document
             .descendants()
             .find(|node| node.tag_name().name() == "plotArea")?;
@@ -1766,9 +1840,14 @@ impl Reader<'_> {
             .and_then(|ids| rel_attr(ids, "dm"))
             .and_then(|id| part.rel(id))
             .map(|(_, _, target, _)| target.clone());
+        if let Some(data_part) = &data_part
+            && !self.follow(self.files.get(data_part).map_or(0, Vec::len))
+        {
+            return None;
+        }
         let drawing_id = data_part.as_deref().and_then(|data_part| {
             let text = self.text(data_part)?;
-            let document = Document::parse(&text).ok()?;
+            let document = parse_xml(&text).ok()?;
             document
                 .descendants()
                 .find(|node| node.tag_name().name() == "dataModelExt")
@@ -1783,8 +1862,16 @@ impl Reader<'_> {
                     .find(|(_, kind, ..)| kind.ends_with("/diagramDrawing"))
                     .map(|(_, _, target, _)| target.clone())
             })?;
+        // A drawing that names itself (or one that is being read) would be
+        // read without end.
+        if drawing == part.name || self.drawings.contains(&drawing) {
+            return None;
+        }
+        if !self.follow(self.files.get(&drawing)?.len()) {
+            return None;
+        }
         let text = self.text(&drawing)?;
-        let document = Document::parse(&text).ok()?;
+        let document = parse_xml(&text).ok()?;
         let tree = document
             .descendants()
             .find(|node| node.tag_name().name() == "spTree")?;
@@ -1794,7 +1881,9 @@ impl Reader<'_> {
             rels: drawing_rels,
             places: &[],
         };
+        self.drawings.push(drawing);
         let children = self.shapes(tree, &drawing_part, false, (frame.x, frame.y));
+        self.drawings.pop();
         if children.is_empty() {
             return None;
         }
@@ -2162,10 +2251,7 @@ impl Reader<'_> {
         let Some(pr) = pr else {
             return run;
         };
-        run.size = pr
-            .attribute("sz")
-            .and_then(|sz| sz.parse_finite::<f32>().ok())
-            .map(|sz| sz / 100.);
+        run.size = pr.attribute("sz").and_then(text_size);
         run.bold = pr.attribute("b").map(|b| b == "1" || b == "true");
         run.italic = pr.attribute("i").map(|i| i == "1" || i == "true");
         run.underline = pr.attribute("u").map(|u| u != "none");
@@ -2538,5 +2624,174 @@ mod time_tests {
             super::parse_time("2026-10-31T09:30:00.000"),
             Some(1_793_439_000)
         );
+    }
+}
+
+#[cfg(test)]
+mod limits {
+    use super::*;
+    use crate::slides::ops::new_deck;
+
+    const NS: &str = r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main""#;
+
+    /// A package as written here with its slide's shapes replaced by
+    /// `shapes`: a PowerPoint file from somewhere else.
+    fn package(shapes: &str) -> BTreeMap<String, Vec<u8>> {
+        let deck = new_deck("Limits", "clean", SlideSize::default());
+        let mut files = crate::slides::pptx::package(&deck, None).unwrap();
+        files.insert(
+            "ppt/slides/slide1.xml".into(),
+            format!(r#"<p:sld {NS}><p:cSld><p:spTree>{shapes}</p:spTree></p:cSld></p:sld>"#)
+                .into_bytes(),
+        );
+        files
+    }
+
+    /// A scratch space for what `test` reads.
+    fn space(test: &str) -> (std::path::PathBuf, Space) {
+        let root =
+            std::env::temp_dir().join(format!("pilothouse-read-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let space = Space::create(&root, &Deck::default()).unwrap();
+        (root, space)
+    }
+
+    fn depth(elements: &[Element]) -> usize {
+        elements
+            .iter()
+            .map(|element| match &element.kind {
+                Kind::Group(group) => 1 + depth(&group.children),
+                _ => 1,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// `count` groups, each holding a shape with text and the next group.
+    fn nested_groups(count: usize) -> String {
+        let mut shapes = String::new();
+        for id in 0..count {
+            shapes.push_str(&format!(
+                r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="{}" name="g"/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="127000" cy="127000"/><a:chOff x="0" y="0"/><a:chExt cx="127000" cy="127000"/></a:xfrm></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="{}" name="s"/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="127000" cy="127000"/></a:xfrm><a:prstGeom prst="ellipse"/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="1800"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:rPr><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>"#,
+                id * 2 + 10,
+                id * 2 + 11
+            ));
+        }
+        shapes.push_str(&"</p:grpSp>".repeat(count));
+        shapes
+    }
+
+    /// `work` on a stack as small as the app's background threads have
+    /// (512 KB on macOS), where files are read.
+    fn on_a_small_stack<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(work)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn groups_nested_deeper_than_the_limit_are_cut() {
+        let files = package(&nested_groups(MAX_DEPTH * 2));
+        let (root, space) = space("groups");
+        let (read, space) = on_a_small_stack(move || {
+            let read = read(&files, &space, "Limits").unwrap();
+            // As an import does: saved where it was read.
+            space.save(&read.deck).unwrap();
+            (read, space)
+        });
+        assert!(read.notes.iter().any(|note| note.contains("nested")));
+        let deepest = depth(&read.deck.slides[0].elements);
+        assert!(deepest > 1 && deepest <= MAX_DEPTH, "{deepest}");
+        // What is kept opens again (JSON nests only so deep).
+        let (_, back) = Space::open(&space.path).unwrap();
+        assert_eq!(depth(&back.slides[0].elements), deepest);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_slide_nested_without_end_is_left_out() {
+        // 5000 groups deep: reading its XML alone used up the stack.
+        let files = package(&nested_groups(5000));
+        let (root, space) = space("deep");
+        let read = on_a_small_stack(move || read(&files, &space, "Limits").unwrap());
+        assert!(read.deck.slides.is_empty());
+        assert!(
+            read.notes
+                .iter()
+                .any(|note| note.contains("nested more than"))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_drawing_that_names_itself_is_read_once() {
+        let frame = r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="7" name="d"/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="127000" cy="127000"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"/></a:graphic></p:graphicFrame>"#;
+        let mut files = package(frame);
+        let layout = rels_of(&files, "ppt/slides/slide1.xml")
+            .into_iter()
+            .find(|(_, kind, ..)| kind.ends_with("/slideLayout"))
+            .map(|(_, _, target, _)| target)
+            .unwrap();
+        let drawing = r#"<Relationship Id="rId9" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="/ppt/diagrams/drawing1.xml"/>"#;
+        let rels = |inner: &str| {
+            format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{inner}</Relationships>"#).into_bytes()
+        };
+        files.insert(
+            "ppt/slides/_rels/slide1.xml.rels".into(),
+            rels(&format!(
+                r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="/{layout}"/>{drawing}"#
+            )),
+        );
+        // The drawing: a shape, and three SmartArt frames that name the
+        // drawing itself.
+        files.insert(
+            "ppt/diagrams/drawing1.xml".into(),
+            format!(
+                r#"<p:drawing {NS}><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="s"/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="127000" cy="127000"/></a:xfrm><a:prstGeom prst="ellipse"/></p:spPr></p:sp>{}</p:spTree></p:drawing>"#,
+                frame.repeat(3)
+            )
+            .into_bytes(),
+        );
+        files.insert("ppt/diagrams/_rels/drawing1.xml.rels".into(), rels(drawing));
+        let (root, space) = space("drawing");
+        let read = read(&files, &space, "Limits").unwrap();
+        let elements = &read.deck.slides[0].elements;
+        assert_eq!(elements.len(), 1);
+        // Its shape, and the three frames kept as they were, not followed.
+        match &elements[0].kind {
+            Kind::Group(group) => {
+                assert_eq!(group.children.len(), 4);
+                assert_eq!(depth(&group.children), 1);
+            }
+            other => panic!("{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_table_is_cut_to_what_is_drawn() {
+        let most = crate::slides::svg::TABLE_MOST;
+        let cell = "<a:tc><a:txBody><a:bodyPr/><a:p/></a:txBody></a:tc>";
+        let mut rows = format!("<a:tr>{}</a:tr>", cell.repeat(most + 50));
+        rows.push_str(&format!("<a:tr>{cell}</a:tr>").repeat(most + 50));
+        let files = package(&format!(
+            r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="7" name="t"/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="1270000" cy="1270000"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblGrid>{}</a:tblGrid>{rows}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+            r#"<a:gridCol w="12700"/>"#.repeat(most + 50)
+        ));
+        let (root, space) = space("table");
+        let read = read(&files, &space, "Limits").unwrap();
+        assert!(read.notes.iter().any(|note| note.contains("table was cut")));
+        match &read.deck.slides[0].elements[0].kind {
+            Kind::Table(table) => {
+                assert_eq!(table.rows.len(), most);
+                assert_eq!(table.rows[0].len(), most);
+                assert_eq!(table.columns.len(), most);
+            }
+            other => panic!("{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

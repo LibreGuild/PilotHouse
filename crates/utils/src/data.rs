@@ -42,6 +42,7 @@ pub fn yaml(input: &Input) -> Result<String> {
             .map_err(|err| anyhow::anyhow!("Not valid JSON: {err}"))?;
         return emit_yaml(&yaml_of(&value));
     }
+    within_yaml_limits(&input.text)?;
     let docs = YamlLoader::load_from_str(&input.text)
         .map_err(|err| anyhow::anyhow!("Not valid YAML: {err}"))?;
     if input.mode == 1 {
@@ -86,6 +87,119 @@ pub fn yaml(input: &Input) -> Result<String> {
             }
             Yaml::Alias(_) => bail!("YAML aliases (*name) are not supported."),
         })
+    }
+}
+
+/// How deep a YAML text may nest, and how much it may stand for once its
+/// aliases are copied out. It is read inside the app, also for agents: a
+/// few lines can nest deeper than the reader's stack, or through aliases
+/// (each `*name` is a copy of its anchor's whole node) stand for billions
+/// of nodes.
+const YAML_DEPTH: usize = 128;
+const YAML_NODES: usize = 1_000_000;
+const YAML_BYTES: usize = 64 << 20;
+
+/// Refuses a text over the limits above before it is loaded. The parser's
+/// events are walked one by one (it keeps its own stack, so this cannot
+/// overflow), counting each alias as what it copies.
+fn within_yaml_limits(text: &str) -> Result<()> {
+    use yaml_rust2::parser::{Event, Parser};
+
+    /// What a node stands for: nodes, bytes of text, and the levels of
+    /// lists and maps it holds.
+    #[derive(Clone, Copy)]
+    struct Size {
+        nodes: usize,
+        bytes: usize,
+        height: usize,
+    }
+    /// A list or map still open.
+    struct Open {
+        anchor: usize,
+        nodes: usize,
+        bytes: usize,
+        level: usize,
+        deepest: usize,
+    }
+
+    let too_big = || {
+        anyhow::anyhow!(
+            "This YAML stands for more than {YAML_NODES} values or {} MB once its aliases (*name) are copied out.",
+            YAML_BYTES >> 20
+        )
+    };
+    let too_deep = || anyhow::anyhow!("This YAML nests more than {YAML_DEPTH} levels deep.");
+    let mut parser = Parser::new_from_str(text);
+    let mut anchors: std::collections::HashMap<usize, Size> = std::collections::HashMap::new();
+    let mut open: Vec<Open> = Vec::new();
+    let (mut nodes, mut bytes) = (0usize, 0usize);
+    loop {
+        let (event, _) = parser
+            .next_token()
+            .map_err(|err| anyhow::anyhow!("Not valid YAML: {err}"))?;
+        match event {
+            Event::StreamEnd => return Ok(()),
+            Event::Scalar(value, _, anchor, _) => {
+                nodes += 1;
+                bytes += value.len();
+                if anchor != 0 {
+                    let size = Size {
+                        nodes: 1,
+                        bytes: value.len(),
+                        height: 0,
+                    };
+                    anchors.insert(anchor, size);
+                }
+            }
+            Event::Alias(anchor) => {
+                // An alias to no anchor is the loader's error to report.
+                let Some(size) = anchors.get(&anchor).copied() else {
+                    continue;
+                };
+                nodes = nodes.saturating_add(size.nodes);
+                bytes = bytes.saturating_add(size.bytes);
+                let reached = open.len() + size.height;
+                if reached > YAML_DEPTH {
+                    return Err(too_deep());
+                }
+                if let Some(parent) = open.last_mut() {
+                    parent.deepest = parent.deepest.max(reached);
+                }
+            }
+            Event::SequenceStart(anchor, _) | Event::MappingStart(anchor, _) => {
+                let level = open.len() + 1;
+                if level > YAML_DEPTH {
+                    return Err(too_deep());
+                }
+                open.push(Open {
+                    anchor,
+                    nodes,
+                    bytes,
+                    level,
+                    deepest: level,
+                });
+                nodes += 1;
+            }
+            Event::SequenceEnd | Event::MappingEnd => {
+                if let Some(done) = open.pop() {
+                    if done.anchor != 0 {
+                        let size = Size {
+                            nodes: nodes - done.nodes,
+                            bytes: bytes - done.bytes,
+                            height: done.deepest + 1 - done.level,
+                        };
+                        anchors.insert(done.anchor, size);
+                    }
+                    if let Some(parent) = open.last_mut() {
+                        parent.deepest = parent.deepest.max(done.deepest);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if nodes > YAML_NODES || bytes > YAML_BYTES {
+            return Err(too_big());
+        }
     }
 }
 
@@ -254,6 +368,28 @@ mod tests {
         let two = super::yaml(&Input::new("a: 1\n---\na: 2\n")).unwrap();
         assert!(two.trim_start().starts_with('['));
         assert!(super::yaml(&Input::new("a: [1")).is_err());
+    }
+
+    #[test]
+    fn yaml_that_would_grow_without_end_is_refused() {
+        // Each line ten copies of the one before: a billion values in nine.
+        let mut laughs = String::from("a0: &a0 [x, x, x, x, x, x, x, x, x, x]\n");
+        for level in 1..9 {
+            let copies = vec![format!("*a{}", level - 1); 10].join(", ");
+            laughs.push_str(&format!("a{level}: &a{level} [{copies}]\n"));
+        }
+        let err = super::yaml(&Input::new(laughs)).unwrap_err().to_string();
+        assert!(err.contains("aliases"), "{err}");
+        // Deeper than any stack, in one line.
+        let deep = "- ".repeat(20_000) + "x";
+        let err = super::yaml(&Input::new(deep)).unwrap_err().to_string();
+        assert!(err.contains("levels deep"), "{err}");
+        // An alias that reaches deeper than its own line.
+        let nested = format!("a: &a {}x{}\nb: [[*a]]\n", "[".repeat(127), "]".repeat(127));
+        assert!(super::yaml(&Input::new(nested)).is_err());
+        // Aliases within the limits still load.
+        let json = super::yaml(&Input::new("a: &a [1, 2]\nb: *a\n")).unwrap();
+        assert!(json.contains("\"b\": [\n    1,"), "{json}");
     }
 
     fn with(text: &str, mode: usize) -> Input {

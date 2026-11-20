@@ -103,6 +103,11 @@ pub struct Workspace {
     /// The branch, pull request and checks of the folders tasks work in
     /// (shared by the windows), for the cards and the title bar.
     facts: Entity<crate::task_facts::TaskFacts>,
+    /// The workspaces with a folder in a Git repository, as last looked.
+    repositories: HashSet<ProjectId>,
+    /// The folders that look was for.
+    repositories_of: Vec<(ProjectId, Vec<std::path::PathBuf>)>,
+    _repositories_look: Option<gpui_kit::Task<()>>,
 }
 
 impl Workspace {
@@ -219,7 +224,11 @@ impl Workspace {
                 let store = AppState::store(cx).clone();
                 crate::task_facts::hub(&store, cx)
             },
+            repositories: HashSet::new(),
+            repositories_of: Vec::new(),
+            _repositories_look: None,
         };
+        workspace.look_for_repositories(true, cx);
         // What a card says of its branch and pull request shows when found.
         let facts = workspace.facts.clone();
         cx.observe(&facts, |_, _, cx| cx.notify()).detach();
@@ -311,6 +320,52 @@ impl Workspace {
     /// What the Bridge shows.
     pub(crate) fn bridge(&self) -> &crate::bridge::BridgeState {
         &self.bridge
+    }
+
+    pub(crate) fn bridge_mut(&mut self) -> &mut crate::bridge::BridgeState {
+        &mut self.bridge
+    }
+
+    /// Whether workspace `id` has a folder in a Git repository, as last
+    /// looked (the Bridge asks while it draws; the disk is not).
+    pub(crate) fn is_repository(&self, id: ProjectId) -> bool {
+        self.repositories.contains(&id)
+    }
+
+    /// Looks again, off the UI thread, which workspaces have a folder in a
+    /// Git repository: when their folders changed since the last look, or
+    /// always with `again` (a folder can become one).
+    fn look_for_repositories(&mut self, again: bool, cx: &mut Context<Self>) {
+        let folders: Vec<(ProjectId, Vec<std::path::PathBuf>)> = self
+            .projects
+            .iter()
+            .map(|project| (project.id, project.folders()))
+            .collect();
+        // One look at a time: on a drive that does not answer, a look can
+        // take as long as the system waits for it.
+        if self._repositories_look.is_some() || (!again && folders == self.repositories_of) {
+            return;
+        }
+        self.repositories_of = folders.clone();
+        let look = cx.background_spawn(async move {
+            folders
+                .into_iter()
+                .filter(|(_, folders)| folders.iter().any(|folder| ph_git::is_repository(folder)))
+                .map(|(id, _)| id)
+                .collect::<HashSet<ProjectId>>()
+        });
+        self._repositories_look = Some(cx.spawn(async move |this, cx| {
+            let found = look.await;
+            _ = this.update(cx, |this, cx| {
+                this._repositories_look = None;
+                if found != this.repositories {
+                    this.repositories = found;
+                    cx.notify();
+                }
+                // Folders changed while it looked: once more for them.
+                this.look_for_repositories(false, cx);
+            });
+        }));
     }
 
     /// Narrows the Bridge to one workspace's tasks (`None`: all of them).
@@ -482,8 +537,11 @@ impl Workspace {
         let github = cx.new(|cx| GithubView::new(weak, folders, cx));
         let shown = !self.sidebar_collapsed;
         github.update(cx, |github, cx| github.set_sidebar_shown(shown, cx));
-        self._subscriptions
-            .push(cx.observe(&github, |_, _, cx| cx.notify()));
+        self._subscriptions.push(cx.observe(&github, |this, _, cx| {
+            // Reviews being readied are cards of the Bridge.
+            this.bridge.changed();
+            cx.notify()
+        }));
         self.github = Some(github.clone());
         github
     }
@@ -756,6 +814,9 @@ impl Workspace {
                 changed = true;
             }
         }
+        if changed {
+            self.bridge.changed();
+        }
         changed
     }
 
@@ -800,6 +861,7 @@ impl Workspace {
                     }
                 }
                 if changed {
+                    this.bridge.changed();
                     cx.notify();
                 }
             });
@@ -837,6 +899,7 @@ impl Workspace {
     ) {
         if self.settled.remove(&id) {
             self.save_settled(cx);
+            self.bridge.changed();
             cx.notify();
         } else {
             self.settle_all(&[(project, id)], cx);
@@ -866,6 +929,7 @@ impl Workspace {
         self.save_settled(cx);
         // The dots and counts follow at once, not at the next look.
         self.refresh_statuses(cx);
+        self.bridge.changed();
         cx.notify();
     }
 
@@ -890,6 +954,7 @@ impl Workspace {
             tracing::warn!("saving the pinned chats failed: {err:#}");
         }
         self.read_pinned(cx);
+        self.bridge.changed();
         cx.notify();
     }
 
@@ -943,6 +1008,7 @@ impl Workspace {
                         );
                     }
                     workspace.read_sessions(cx);
+                    workspace.bridge.changed();
                     cx.notify();
                 });
             },
@@ -1014,6 +1080,7 @@ impl Workspace {
             self.save_settled(cx);
         }
         self.read_sessions(cx);
+        self.bridge.changed();
         cx.notify();
     }
 
@@ -1131,6 +1198,8 @@ impl Workspace {
             .map(|project| project.id)
             .find(|id| store.is_scratch(*id));
         self.projects = projects;
+        self.bridge.changed();
+        self.look_for_repositories(false, cx);
         cx.notify();
     }
 
@@ -1205,6 +1274,9 @@ impl Workspace {
             self.poll_sessions(cx);
             self.want_facts(cx);
         }
+        // Workspaces added or given folders meanwhile are looked at within
+        // a second; every few, all again (`git init` makes one a repository).
+        self.look_for_repositories(self.status_ticks.is_multiple_of(5), cx);
         // The sidebar lists agent CLIs in terminals: redrawn when they change.
         let agents = {
             use std::hash::{Hash as _, Hasher as _};
@@ -1232,6 +1304,7 @@ impl Workspace {
         let sessions_changed = any && self.read_sessions(cx);
         if statuses != self.statuses || sessions_changed || agents_changed {
             self.statuses = statuses;
+            self.bridge.changed();
             cx.notify();
         }
     }
@@ -1248,6 +1321,7 @@ impl Workspace {
         if let Some(space) = self.spaces.get(&id) {
             space.update(cx, |space, cx| space.set_color(color, cx));
         }
+        self.bridge.changed();
         self.projects_changed(cx);
         cx.notify();
     }
@@ -1273,7 +1347,10 @@ impl Workspace {
             &space,
             window,
             move |this, _, event: &WorkspaceScreenEvent, window, cx| match event {
-                WorkspaceScreenEvent::SessionsChanged => cx.notify(),
+                WorkspaceScreenEvent::SessionsChanged => {
+                    this.bridge.changed();
+                    cx.notify()
+                }
                 WorkspaceScreenEvent::Agent { hosting, request } => {
                     let (hosting, request) = ((**hosting).clone(), request.clone());
                     if matches!(
@@ -1430,6 +1507,20 @@ impl Workspace {
             // A GitHub repository's chat.
             return self.show_session(pick.session_id, window, cx);
         }
+        // The window that shows that workspace shows the chat: opening the
+        // workspace here would only hand it over, without the message.
+        if let Some((handle, other)) =
+            crate::windows::shown_elsewhere(pick.project_id, self.handle, cx)
+        {
+            // Deferred: that window may be this one's caller.
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    window.activate_window();
+                    other.update(cx, |other, cx| other.show_message(pick, window, cx));
+                });
+            });
+            return;
+        }
         self.open_project(pick.project_id, window, cx);
         if let Some(space) = self.spaces.get(&pick.project_id) {
             space.update(cx, |space, cx| {
@@ -1552,6 +1643,8 @@ impl Workspace {
         if let Some(space) = self.spaces.get(&project.id) {
             space.update(cx, |space, cx| space.set_project(project, window, cx));
         }
+        self.bridge.changed();
+        self.look_for_repositories(false, cx);
         self.projects_changed(cx);
         cx.notify();
     }
@@ -1621,6 +1714,7 @@ impl Workspace {
             return;
         }
         self.projects.retain(|project| project.id != id);
+        self.bridge.changed();
         self.spaces.remove(&id);
         self.hidden_since.remove(&id);
         if self.bridge.filter == Some(id) {
@@ -2017,33 +2111,28 @@ impl Workspace {
         if let Err(err) = crate::tasks::remember(&store, task) {
             tracing::warn!("saving the task failed: {err:#}");
         }
-        let setup = crate::tasks::config(root)
+        let asked = crate::tasks::config(root)
             .ok()
             .and_then(|config| config.setup)
-            .unwrap_or_default();
-        let command = if setup.trim().is_empty() {
+            .filter(|setup| !setup.trim().is_empty());
+        // Only the user's own repository says what runs here. Someone
+        // else's (a GitHub clone, a folder that may hold a pull request
+        // author's files) has its command shown in a notice instead: text
+        // from it never reaches the shell, not even as a comment.
+        let own = crate::tasks::is_own(root);
+        let command = match asked.as_deref().filter(|_| own) {
+            Some(setup) => crate::tasks::setup_command(setup, port),
             // The number itself: every shell echoes that the same way.
-            crate::tasks::setup_command(&format!("echo \"Port for this task: {port}\""), port)
-        } else if ph_store::paths::is_untrusted_copy(root) {
-            // Someone else's repository says what to run: it is typed as a
-            // comment, to read first and then run by hand.
-            let remark = if cfg!(windows)
-                && ph_env::default_shell()
-                    .0
-                    .file_stem()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("cmd"))
-            {
-                "rem"
-            } else {
-                "#"
-            };
-            format!(
-                "{remark} pilothouse.toml asks to run this; read it, then run it yourself: {}",
-                setup.replace(['\n', '\r'], " ")
-            )
-        } else {
-            crate::tasks::setup_command(&setup, port)
+            None => {
+                crate::tasks::setup_command(&format!("echo \"Port for this task: {port}\""), port)
+            }
         };
+        if let Some(theirs) = asked.as_deref().filter(|_| !own) {
+            window.push_notification(
+                Notification::warning(crate::tasks::setup_notice(theirs)).autohide(false),
+                cx,
+            );
+        }
         if let Some(space) = self.spaces.get(&project).cloned() {
             space.update(cx, |space, cx| {
                 space.run_in_terminal("Setup", &command, window, cx)

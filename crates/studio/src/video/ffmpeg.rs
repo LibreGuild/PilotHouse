@@ -114,15 +114,51 @@ impl Ffmpeg {
         })
     }
 
+    /// Where `-ss` has to point for ffmpeg to begin with the frame showing
+    /// at `t`: just before that frame's start. ffmpeg begins with the
+    /// first frame starting at or after `-ss`; in a recording that has a
+    /// frame only when the screen changes, that one can be seconds later
+    /// than `t`, and past the last frame's start there is none. So the
+    /// frames' own times around `t` are read first (from the key frame
+    /// before, without decoding). None when they cannot be told.
+    fn seek_for(&self, path: &Path, t: f64) -> Option<f64> {
+        let listing = self
+            .run(
+                &self.ffprobe,
+                &[
+                    "-protocol_whitelist",
+                    "file,pipe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    // Some way past `t`: with B-frames the packets are not
+                    // stored in the order shown.
+                    "-read_intervals",
+                    &format!("{:.6}%{:.6}", (t - NEAR).max(0.), t + 2. * NEAR),
+                    "-show_entries",
+                    "packet=pts_time:format=start_time",
+                    "-of",
+                    "csv",
+                    &path.to_string_lossy(),
+                ],
+            )
+            .ok()?;
+        let shown = showing_at(&String::from_utf8_lossy(&listing), t)?;
+        Some((shown - SEEK_LEAD).max(0.))
+    }
+
     pub fn frame_at(&self, path: &Path, info: &Info, t: f64) -> Result<RgbaImage> {
         let (width, height) = info.size;
+        // Where it cannot be told, the first frame from `t` on.
+        let seek = self.seek_for(path, t).unwrap_or(t);
         let bytes = self.run(
             &self.ffmpeg,
             &[
                 "-v",
                 "error",
                 "-ss",
-                &format!("{t:.4}"),
+                &format!("{seek:.6}"),
                 // Files only: a ".mp4" that is really a playlist must not
                 // make ffmpeg fetch addresses or read other files.
                 "-protocol_whitelist",
@@ -138,6 +174,9 @@ impl Ffmpeg {
                 "-",
             ],
         )?;
+        if bytes.is_empty() {
+            bail!("ffmpeg found no frame at {t:.3}s");
+        }
         RgbaImage::from_raw(width, height, bytes).context("ffmpeg gave a frame of another size")
     }
 
@@ -177,12 +216,22 @@ impl Ffmpeg {
         to: f64,
         rate: f64,
     ) -> Result<FfmpegDecoder> {
+        // It begins with the frame showing at `from` (see `seek_for`), put
+        // at `from`. Where a part starts in a stretch with no new frame,
+        // the first frame from `from` on is later by the rest of that
+        // stretch, and every frame of the part would be given that much
+        // too early.
+        let seek = self
+            .seek_for(path, from)
+            .filter(|seek| *seek < from)
+            .unwrap_or(from);
+        let lead = from - seek;
         let mut child = ph_env::command(&self.ffmpeg)
             .args([
                 "-v",
                 "error",
                 "-ss",
-                &format!("{from:.4}"),
+                &format!("{seek:.6}"),
                 // Files only: a ".mp4" that is really a playlist must not
                 // make ffmpeg fetch addresses or read other files.
                 "-protocol_whitelist",
@@ -193,8 +242,12 @@ impl Ffmpeg {
                 &format!("{:.4}", (to - from).max(0.001)),
                 "-map",
                 "0:v:0",
+                // The frames from `seek` on, `lead` earlier (the first at
+                // 0, which is `from`), then at a steady rate from 0: a
+                // first frame that is later is repeated back to there, not
+                // taken as the start.
                 "-vf",
-                &format!("fps={rate:.4}"),
+                &format!("setpts=max(PTS-{lead:.6}/TB\\,0),fps={rate:.4}:start_time=0"),
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
@@ -363,6 +416,51 @@ impl Ffmpeg {
     }
 }
 
+/// How far before a frame's start `-ss` is sent for ffmpeg to begin with
+/// that frame: less than any frame lasts, more than a time loses when it
+/// is printed and rounded to the file's own clock.
+const SEEK_LEAD: f64 = 0.0005;
+/// How far a file's times may start from zero and still be worked out,
+/// in seconds: the packets around a moment are read from this much before
+/// it.
+const NEAR: f64 = 1.;
+
+/// The start of the frame showing at `t`, as `-ss` counts (from the
+/// file's start), out of ffprobe's list of the packets around `t`:
+/// `packet,<its time>` lines in the order stored, which with B-frames is
+/// not the order shown, and `format,<the file's start>`. None when no
+/// frame listed has started by `t`, or the file starts too far from zero
+/// for the list to hold the right packets.
+fn showing_at(listing: &str, t: f64) -> Option<f64> {
+    let mut starts = Vec::new();
+    let mut file_start = 0.;
+    for line in listing.lines() {
+        let Some((kind, rest)) = line.trim().split_once(',') else {
+            continue;
+        };
+        let Some(time) = rest
+            .split(',')
+            .next()
+            .and_then(|time| time.parse::<f64>().ok())
+        else {
+            continue;
+        };
+        match kind {
+            "packet" => starts.push(time),
+            "format" => file_start = time,
+            _ => {}
+        }
+    }
+    if file_start.abs() > NEAR {
+        return None;
+    }
+    starts
+        .into_iter()
+        .map(|start| start - file_start)
+        .filter(|start| *start <= t + 1e-4)
+        .max_by(f64::total_cmp)
+}
+
 /// `30000/1001` as a number.
 fn ratio(text: &str) -> Option<f64> {
     let (top, bottom) = text.split_once('/')?;
@@ -436,5 +534,36 @@ impl Encoder for FfmpegEncoder {
         drop(self.stdin.take());
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::showing_at;
+
+    #[test]
+    fn the_frame_showing_is_the_last_one_started() {
+        // A frame a second, stored as B-frames are: not in the order shown.
+        let listing = "packet,0.000000\npacket,3.000000\npacket,1.000000\n\
+                       packet,2.000000\npacket,4.000000\nformat,0.000000\n";
+        assert_eq!(showing_at(listing, 2.5), Some(2.));
+        assert_eq!(showing_at(listing, 2.), Some(2.));
+        assert_eq!(showing_at(listing, 1.99), Some(1.));
+        // Past the last frame's start it is the last frame.
+        assert_eq!(showing_at(listing, 9.), Some(4.));
+        // A file that starts a little after zero: counted from its start.
+        let late = "packet,0.250000\npacket,1.250000\npacket,2.250000\nformat,0.250000\n";
+        assert_eq!(showing_at(late, 1.5), Some(1.));
+        // More after the time on a line does not matter.
+        assert_eq!(showing_at("packet,1.000000,K__\n", 1.), Some(1.));
+        // Not told: a file starting far from zero, no frame started yet,
+        // times ffprobe does not know, nothing at all.
+        assert_eq!(
+            showing_at("packet,90.000000\nformat,90.000000\n", 0.5),
+            None
+        );
+        assert_eq!(showing_at("packet,2.000000\nformat,0.000000\n", 1.), None);
+        assert_eq!(showing_at("packet,N/A\nformat,N/A\n", 1.), None);
+        assert_eq!(showing_at("", 1.), None);
     }
 }

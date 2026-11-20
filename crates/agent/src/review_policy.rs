@@ -46,9 +46,61 @@ pub fn allows(kind: Option<ToolKind>, raw_input: Option<&Value>, root: &Path) ->
                         || inside(root, root, pattern)
                 })
         }
+        // A command is checked as run in `root`: one the agent runs from
+        // another folder is not what was checked, and asks.
         Some(ToolKind::Execute) => {
-            command(raw_input).is_some_and(|command| read_only_command(&command, root))
+            working_folders(raw_input)
+                .iter()
+                .all(|folder| is_root(root, folder))
+                && command(raw_input).is_some_and(|command| read_only_command(&command, root))
         }
+        _ => false,
+    }
+}
+
+/// The folders a command's input says to run it from (Codex `workdir`,
+/// Gemini `dir_path` or `directory`, Antigravity `Cwd`); one left empty
+/// is the agent's own.
+fn working_folders(raw_input: Option<&Value>) -> Vec<&str> {
+    let Some(input) = raw_input else {
+        return Vec::new();
+    };
+    [
+        "cwd",
+        "workdir",
+        "working_directory",
+        "dir_path",
+        "directory",
+        "Cwd",
+    ]
+    .iter()
+    .filter_map(|key| input.get(*key).and_then(Value::as_str))
+    .filter(|folder| !folder.is_empty())
+    .collect()
+}
+
+/// Whether `target` (from `root`) is `root` itself: written without `..`
+/// (a shell set to follow links goes to the real parent of one, which can
+/// be anywhere), or the same folder once links are followed (an agent may
+/// name its folder as it really is: `/private/tmp/x` for `/tmp/x`).
+fn is_root(root: &Path, target: &str) -> bool {
+    if target.is_empty() {
+        return false;
+    }
+    let written = Path::new(target);
+    let climbs = written
+        .components()
+        .any(|part| part == Component::ParentDir);
+    if !climbs && resolve(root, target).as_deref() == Some(root) {
+        return true;
+    }
+    let named = if rooted(written) {
+        written.to_path_buf()
+    } else {
+        root.join(written)
+    };
+    match (std::fs::canonicalize(named), std::fs::canonicalize(root)) {
+        (Ok(named), Ok(root)) => named == root,
         _ => false,
     }
 }
@@ -289,8 +341,8 @@ fn shell_steps(text: &str) -> Option<Vec<Vec<String>>> {
 
 /// A read-only command line in `root`: read-only commands joined by `&&`
 /// or `;`, or piped into one another with `|` (agents often write `cd <dir>
-/// && git log | head`), each step one of the allowed programs or `cd`
-/// within `root`. No other shell operator, no redirection and no
+/// && git log | head`), each step one of the allowed programs or `cd` to
+/// `root` itself. No other shell operator, no redirection and no
 /// substitution anywhere; paths named stay inside `root`.
 pub fn read_only_command(command: &str, root: &Path) -> bool {
     if command.contains(['>', '<', '`', '\n', '\r', '$']) {
@@ -299,25 +351,27 @@ pub fn read_only_command(command: &str, root: &Path) -> bool {
     let Some(steps) = shell_steps(command) else {
         return false;
     };
-    let mut cwd = root.to_path_buf();
     for words in &steps {
         let Some(first) = words.first() else {
             return false;
         };
         if first == "cd" {
-            // Only moves where the next steps run, within the folder.
+            // Only to the folder itself. An agent's shell can keep its
+            // folder from one command to the next, and each command is
+            // checked as if it ran here: after a move below, the next one
+            // would run where nothing was checked (a link out of the
+            // folder, a repository inside it). So any other move asks, by
+            // itself or in a chain; `pushd` and `popd` are no allowed
+            // programs and ask too.
             let [_, target] = words.as_slice() else {
                 return false;
             };
-            match resolve(&cwd, target)
-                .filter(|path| path.starts_with(root) && really_inside(root, path))
-            {
-                Some(path) => cwd = path,
-                None => return false,
+            if !is_root(root, target) {
+                return false;
             }
             continue;
         }
-        if !single_command(words, root, &cwd) {
+        if !single_command(words, root, root) {
             return false;
         }
     }
@@ -576,7 +630,7 @@ mod tests {
             "cd /work/pr && git diff --stat origin/main...HEAD | tail -n 80"
         ));
         assert!(read_only_command_here("git log --oneline | head -20"));
-        assert!(read_only_command_here("cd src && rg -n TODO | wc -l"));
+        assert!(read_only_command_here("rg -n TODO src | wc -l"));
         assert!(!read_only_command_here("cd src && rm -rf ."));
         assert!(!read_only_command_here("git log | sh"));
         assert!(!read_only_command_here("git log || rm -rf ."));
@@ -685,8 +739,63 @@ mod tests {
         assert!(!read_only_command_here("git -C evil diff HEAD~1 HEAD"));
         assert!(!read_only_command_here("cd evil && git log -p"));
         assert!(read_only_command_here("git -C /work/pr status"));
-        assert!(read_only_command_here("cd src && rg -n TODO"));
         assert!(!read_only_command_here("cd /tmp && ls"));
+    }
+
+    #[test]
+    fn a_command_that_moves_to_another_folder_asks() {
+        // The shell may stay there: the next command would then be checked
+        // as run in the folder, and run below it.
+        assert!(!read_only_command_here("cd evil"));
+        assert!(!read_only_command_here("cd src && rg -n TODO"));
+        assert!(!read_only_command_here("git log; cd src"));
+        assert!(!read_only_command_here("ls && cd src && ls"));
+        assert!(!read_only_command_here("pushd src"));
+        assert!(!read_only_command_here("pushd src && ls && popd"));
+        assert!(!read_only_command_here("popd"));
+        assert!(!read_only_command_here("cd -"));
+        assert!(!read_only_command_here("cd ''"));
+        // Up and down again is the folder only where no link is followed.
+        assert!(!read_only_command_here("cd evil/.. && ls"));
+        // To the folder itself is no move.
+        assert!(read_only_command_here("cd /work/pr"));
+        assert!(read_only_command_here("cd . && ls src"));
+        assert!(read_only_command_here("cd /work/pr/ && cat src/a.rs"));
+        // The same for a folder the call names to run the command from.
+        let root = Path::new(ROOT);
+        let run = |input: Value| allows(Some(ToolKind::Execute), Some(&input), root);
+        assert!(run(json!({ "command": "cat x" })));
+        assert!(run(json!({ "command": "cat x", "workdir": "/work/pr" })));
+        assert!(run(json!({ "command": ["cat", "x"], "cwd": "." })));
+        assert!(run(json!({ "command": "ls", "directory": "" })));
+        assert!(!run(
+            json!({ "command": "cat x", "workdir": "/work/pr/evil" })
+        ));
+        assert!(!run(json!({ "command": "ls", "dir_path": "evil" })));
+        assert!(!run(json!({ "CommandLine": "git status", "Cwd": "/tmp" })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_folder_by_its_real_name_is_the_folder() {
+        let dir = std::env::temp_dir().join(format!("ph-policy-real-{}", std::process::id()));
+        let (real, link) = (dir.join("real"), dir.join("link"));
+        std::fs::create_dir_all(real.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let named = |folder: &Path| {
+            allows(
+                Some(ToolKind::Execute),
+                Some(&json!({ "command": "ls", "cwd": folder })),
+                &link,
+            )
+        };
+        let results = (
+            named(&real),
+            read_only_command(&format!("cd '{}' && ls", real.display()), &link),
+            named(&real.join("sub")),
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(results, (true, true, false));
     }
 
     #[test]

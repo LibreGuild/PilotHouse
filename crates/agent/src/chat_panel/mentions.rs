@@ -54,7 +54,10 @@ impl ChatPanel {
             .as_ref()
             .map(|(_, files)| files)
             .unwrap_or(&empty);
-        if typing.trigger == '@' && typing.query.starts_with("pr") && !self.pulls_asked {
+        if typing.trigger == '@'
+            && mention_complete::asks_for_pulls(&typing.query)
+            && !self.pulls_asked
+        {
             self.pulls_asked = true;
             cx.emit(ChatPanelEvent::WantPulls);
         }

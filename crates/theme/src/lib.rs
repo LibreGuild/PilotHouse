@@ -15,7 +15,7 @@ pub mod preferences;
 pub mod themes;
 pub mod vscode;
 
-pub use appearance::{Appearance, apply_appearance, init, system_is_dark};
+pub use appearance::{Appearance, apply_appearance, before_init, init, system_is_dark};
 pub use preferences::{
     Accent, AutoSave, ChatWidth, Corners, DarkTheme, Density, EditorPreferences, Preferences,
     dense, density,

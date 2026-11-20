@@ -9,7 +9,7 @@
 
 use std::borrow::Cow;
 
-use gpui_kit::App;
+use gpui_kit::{App, Global};
 
 /// The interface font's family name.
 pub const INTERFACE: &str = "Inter";
@@ -35,11 +35,34 @@ const FILES: [&[u8]; 10] = [
     include_bytes!("../fonts/jetbrains-mono/JetBrainsMonoNL-BoldItalic.ttf"),
 ];
 
-/// Makes the bundled families known to the text system. Without them the
-/// defaults fall back to the system's fonts (see `preferences`).
-pub fn register(cx: &App) {
-    let fonts = FILES.iter().copied().map(Cow::Borrowed).collect();
-    if let Err(err) = cx.text_system().add_fonts(fonts) {
-        tracing::warn!("loading the bundled fonts failed: {err:#}");
+/// Whether this app's text system took the bundled families (set once, by
+/// [`register`]). Per app, not per process: each test has an app of its own.
+struct Registered(bool);
+
+impl Global for Registered {}
+
+/// Makes the bundled families known to the text system, once, and says
+/// whether it has them. Without them the defaults fall back to the system's
+/// fonts (see `preferences`).
+pub fn register(cx: &mut App) -> bool {
+    if let Some(registered) = cx.try_global::<Registered>() {
+        return registered.0;
     }
+    let fonts = FILES.iter().copied().map(Cow::Borrowed).collect();
+    let loaded = match cx.text_system().add_fonts(fonts) {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!("loading the bundled fonts failed: {err:#}");
+            false
+        }
+    };
+    cx.set_global(Registered(loaded));
+    loaded
+}
+
+/// The bundled families are there to draw with. `false` before [`register`]
+/// ran, or when it could not load them.
+pub fn registered(cx: &App) -> bool {
+    cx.try_global::<Registered>()
+        .is_some_and(|registered| registered.0)
 }

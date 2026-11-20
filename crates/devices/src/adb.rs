@@ -80,25 +80,23 @@ impl Adb {
     /// when adb takes too long (a device that went away mid-command): an
     /// agent waits on these.
     pub fn run(&self, serial: Option<&str>, args: &[&str]) -> Result<Vec<u8>> {
+        let output = self.output(serial, args)?;
+        if !output.status.success() {
+            bail!("{}", complaint(args, &output));
+        }
+        Ok(output.stdout)
+    }
+
+    /// Runs adb to its end, whatever its exit status; fails when it cannot
+    /// start or takes too long.
+    fn output(&self, serial: Option<&str>, args: &[&str]) -> Result<Output> {
         let limit = match args.first() {
             Some(&("install" | "push" | "pull")) => Duration::from_secs(10 * 60),
             _ => Duration::from_secs(60),
         };
         let mut command = self.command(serial);
         command.args(args);
-        let output = output_within(command, limit)
-            .with_context(|| format!("running adb {}", args.join(" ")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let message = if stderr.trim().is_empty() {
-                stdout
-            } else {
-                stderr
-            };
-            bail!("adb {}: {}", args.first().unwrap_or(&""), message.trim());
-        }
-        Ok(output.stdout)
+        output_within(command, limit).with_context(|| format!("running adb {}", args.join(" ")))
     }
 
     pub fn text(&self, serial: Option<&str>, args: &[&str]) -> Result<String> {
@@ -283,7 +281,10 @@ impl Adb {
 
     pub fn list_dir(&self, serial: &str, dir: &str) -> Result<Vec<RemoteFile>> {
         let dir = shell_quote(&format!("{}/", dir.trim_end_matches('/')));
-        Ok(parse_ls(&self.shell(serial, &format!("ls -la {dir}"))?))
+        let args = ["shell", &format!("ls -la {dir}")];
+        let output = self.output(Some(serial), &args)?;
+        let failed = (!output.status.success()).then(|| complaint(&args, &output));
+        listed(&String::from_utf8_lossy(&output.stdout), failed)
     }
 
     pub fn pull(&self, serial: &str, remote: &str, local: &Path) -> Result<()> {
@@ -306,6 +307,30 @@ impl Adb {
 
     pub fn kill_emulator(&self, serial: &str) -> Result<()> {
         self.run(Some(serial), &["emu", "kill"]).map(drop)
+    }
+}
+
+/// What adb said when it failed: its stderr, else its stdout.
+fn complaint(args: &[&str], output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let message = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    format!("adb {}: {}", args.first().unwrap_or(&""), message.trim())
+}
+
+/// The entries `ls` printed. It exits with an error when it could not read
+/// a single entry (`/metadata: Permission denied` in `/` on a phone that is
+/// not rooted) though it listed all the others: those are the folder, and
+/// `failed` (what it complained of) is the answer only when it listed none.
+fn listed(output: &str, failed: Option<String>) -> Result<Vec<RemoteFile>> {
+    let files = parse_ls(output);
+    match failed {
+        Some(complaint) if files.is_empty() => bail!("{complaint}"),
+        _ => Ok(files),
     }
 }
 
@@ -508,6 +533,30 @@ mod tests {
     #[test]
     fn quotes_text_for_input() {
         assert_eq!(input_text_command("it's ok"), r"input text 'it'\''s%sok'");
+    }
+
+    #[test]
+    fn a_folder_with_unreadable_entries_is_still_listed() {
+        // `ls -la /` on a phone that is not rooted: exit status 1.
+        let root = "ls: /metadata: Permission denied\ntotal 24\ndrwxr-xr-x 2 root root 4096 2026-10-24 10:00 acct\nls: /init: Permission denied\ndrwxrwx--x 2 root root 4096 2026-10-24 10:00 data\n";
+        let names: Vec<String> =
+            listed(root, Some("adb shell: ls: /init: Permission denied".into()))
+                .unwrap()
+                .into_iter()
+                .map(|file| file.name)
+                .collect();
+        assert_eq!(names, ["acct", "data"]);
+        // Nothing listed: the complaint is the answer.
+        let denied = listed(
+            "ls: /data/: Permission denied\n",
+            Some("adb shell: ls: /data/: Permission denied".into()),
+        );
+        assert_eq!(
+            denied.unwrap_err().to_string(),
+            "adb shell: ls: /data/: Permission denied"
+        );
+        // An empty folder is not a failure.
+        assert_eq!(listed("total 0\n", None).unwrap(), Vec::new());
     }
 
     #[test]

@@ -33,6 +33,9 @@ impl Client {
             .tls_config(tls)
             .timeout_global(Some(Duration::from_secs(60)))
             .http_status_as_error(false)
+            // Redirects are followed in `request`: ureq drops the token on
+            // every one and turns a write into a GET.
+            .max_redirects(0)
             .user_agent(concat!(ph_brand::stem!(), "/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
@@ -167,10 +170,50 @@ impl Client {
         accept: &str,
         body: Option<&Value>,
     ) -> Result<ureq::http::Response<ureq::Body>> {
-        let url = self.url(path);
+        let (mut method, mut body) = (method, body);
+        let mut url = self.url(path);
         if !self.same_host(&url) {
             bail!("refusing to send the token to another host: {url}");
         }
+        // GitHub answers for a repository that was renamed or moved with a
+        // redirect to its new place; it is followed with the token and the
+        // same request, but only within the account's API root.
+        for _ in 0..=MAX_REDIRECTS {
+            let response = self.send_once(method, &url, accept, body)?;
+            let status = response.status().as_u16();
+            if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+                return Ok(response);
+            }
+            let Some(next) = response
+                .headers()
+                .get("location")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|location| redirect_target(&url, location))
+            else {
+                return Ok(response);
+            };
+            if !self.same_host(&next) {
+                bail!(
+                    "GitHub sent the request on to {}; the token is sent only to {}",
+                    host_of(&next),
+                    host_of(&self.base)
+                );
+            }
+            if status == 303 {
+                (method, body) = ("GET", None);
+            }
+            url = next;
+        }
+        bail!("too many redirects from {}", host_of(&self.base))
+    }
+
+    fn send_once(
+        &self,
+        method: &str,
+        url: &str,
+        accept: &str,
+        body: Option<&Value>,
+    ) -> Result<ureq::http::Response<ureq::Body>> {
         let auth = format!("Bearer {}", self.token);
         macro_rules! with_headers {
             ($request:expr) => {
@@ -181,15 +224,32 @@ impl Client {
             };
         }
         let result = match (method, body) {
-            ("GET", _) => with_headers!(self.agent.get(&url)).call(),
-            ("POST", Some(body)) => with_headers!(self.agent.post(&url)).send_json(body),
-            ("PATCH", Some(body)) => with_headers!(self.agent.patch(&url)).send_json(body),
-            ("PUT", Some(body)) => with_headers!(self.agent.put(&url)).send_json(body),
-            ("DELETE", _) => with_headers!(self.agent.delete(&url)).call(),
+            ("GET", _) => with_headers!(self.agent.get(url)).call(),
+            ("POST", Some(body)) => with_headers!(self.agent.post(url)).send_json(body),
+            ("PATCH", Some(body)) => with_headers!(self.agent.patch(url)).send_json(body),
+            ("PUT", Some(body)) => with_headers!(self.agent.put(url)).send_json(body),
+            ("DELETE", _) => with_headers!(self.agent.delete(url)).call(),
             _ => bail!("unsupported request {method}"),
         };
         result.map_err(|err| anyhow!("could not reach {}: {err}", host_of(&self.base)))
     }
+}
+
+/// Most redirects followed for one request.
+const MAX_REDIRECTS: usize = 3;
+
+/// The URL a `Location` header names, from request `url`: absolute, or a
+/// path on the same scheme and host. Anything else is not followed.
+fn redirect_target(url: &str, location: &str) -> Option<String> {
+    if location.starts_with("https://") || location.starts_with("http://") {
+        return Some(location.to_string());
+    }
+    if !location.starts_with('/') || location.starts_with("//") {
+        return None;
+    }
+    let (scheme, rest) = url.split_once("://")?;
+    let host = rest.split('/').next()?;
+    Some(format!("{scheme}://{host}{location}"))
 }
 
 /// Turns error statuses into messages a person can act on.
@@ -290,5 +350,23 @@ mod tests {
         assert!(!client.same_host("https://github.example.com.evil.test/api/v3/x"));
         assert!(!client.same_host("https://evil.test/"));
         assert!(client.get::<Value>("https://evil.test/steal").is_err());
+    }
+
+    #[test]
+    fn redirects_stay_on_the_api_root() {
+        let from = "https://api.github.com/repos/old/name/pulls/4";
+        assert_eq!(
+            redirect_target(from, "/repositories/12/pulls/4").as_deref(),
+            Some("https://api.github.com/repositories/12/pulls/4")
+        );
+        assert_eq!(
+            redirect_target(from, "https://api.github.com/repositories/12").as_deref(),
+            Some("https://api.github.com/repositories/12")
+        );
+        assert_eq!(redirect_target(from, "//evil.test/x"), None);
+        assert_eq!(redirect_target(from, "pulls/4"), None);
+        let client = Client::new("https://api.github.com", "secret");
+        let to = redirect_target(from, "http://api.github.com/repositories/12").unwrap();
+        assert!(!client.same_host(&to));
     }
 }

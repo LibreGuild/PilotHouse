@@ -265,14 +265,39 @@ pub fn environment_text(environment: &BTreeMap<String, String>) -> String {
     environment
         .iter()
         .map(|(name, value)| {
-            if value.contains(char::is_whitespace) {
-                format!("{name}=\"{value}\"")
+            if value.is_empty() {
+                format!("{name}=")
             } else {
-                format!("{name}={value}")
+                format!("{name}={}", quoted(value))
             }
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `word` as text that [`words`] reads back as it is: in quotes when it
+/// has spaces or a quote character, in the kind of quote it does not hold.
+/// One that holds both kinds is written in pieces, as in a shell
+/// (`'it'"'"'s'`): the text then needs no escape character, so a backslash
+/// stays a backslash (a Windows path).
+pub fn quoted(word: &str) -> String {
+    let plain =
+        !word.is_empty() && !word.contains(|c: char| c.is_whitespace() || c == '"' || c == '\'');
+    if plain {
+        word.to_string()
+    } else if !word.contains('"') {
+        format!("\"{word}\"")
+    } else if !word.contains('\'') {
+        format!("'{word}'")
+    } else {
+        word.split('\'')
+            .map(|piece| match piece {
+                "" => String::new(),
+                piece => format!("'{piece}'"),
+            })
+            .collect::<Vec<_>>()
+            .join("\"'\"")
+    }
 }
 
 /// `text` as the words of a command line: split at spaces and line ends,
@@ -402,5 +427,31 @@ mod tests {
             vec!["--model", "opus", "--append-system-prompt", "be brief", ""]
         );
         assert!(words("  \n ").is_empty());
+    }
+
+    #[test]
+    fn values_with_quotes_come_back_as_they_were() {
+        let mut environment = BTreeMap::new();
+        for (name, value) in [
+            ("NAME", "O'Brien"),
+            ("EXTRA", r#"{"a": 1}"#),
+            ("BOTH", r#"it's "quoted""#),
+            ("QUOTES", r#"'""'"#),
+            ("WINDOWS", r"C:\Program Files\tool\"),
+            ("EMPTY", ""),
+            ("OTHER", "1"),
+        ] {
+            environment.insert(name.to_string(), value.to_string());
+        }
+        let text = environment_text(&environment);
+        // Every variable is still there, each on a line of its own.
+        assert_eq!(text.lines().count(), environment.len());
+        assert_eq!(parse_environment(&text), environment);
+        assert!(text.contains("NAME=\"O'Brien\""), "{text}");
+        assert!(text.contains(r#"EXTRA='{"a": 1}'"#), "{text}");
+        // Arguments the same way, an empty one included.
+        let arguments = ["say \"hi\" now", "", "don't", r#"a'b"c d"#, "--plain"];
+        let line = arguments.map(quoted).join(" ");
+        assert_eq!(words(&line), arguments);
     }
 }

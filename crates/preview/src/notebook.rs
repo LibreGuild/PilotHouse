@@ -131,12 +131,12 @@ fn text_of(value: &Value) -> String {
 
 fn parse(text: &str) -> Result<Notebook, String> {
     let root: Value = serde_json::from_str(text).map_err(|err| err.to_string())?;
-    let language = root
-        .pointer("/metadata/language_info/name")
-        .or_else(|| root.pointer("/metadata/kernelspec/language"))
-        .and_then(Value::as_str)
-        .unwrap_or("python")
-        .to_string();
+    let language = language_name(
+        root.pointer("/metadata/language_info/name")
+            .or_else(|| root.pointer("/metadata/kernelspec/language"))
+            .and_then(Value::as_str)
+            .unwrap_or("python"),
+    );
     let cells = root
         .get("cells")
         .and_then(Value::as_array)
@@ -224,6 +224,19 @@ fn output(value: &Value) -> Option<Output> {
         }
         _ => None,
     }
+}
+
+/// The notebook's language as the name of a code block's language: only
+/// what such names are made of. It is written after the fence of every
+/// code cell, and the notebook may say anything there: a line break or a
+/// backtick would end the fence and have the rest read as Markdown.
+fn language_name(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '#' | '.' | '-'))
+        .take(32)
+        .collect();
+    if name.is_empty() { "text".into() } else { name }
 }
 
 /// `source` as a Markdown code block, its fence longer than any run of
@@ -327,8 +340,15 @@ fn render_cell(
                 .child(
                     h_flex().items_start().child(gutter(label)).child(
                         div().flex_1().min_w_0().child(
+                            // A code cell is code and nothing else: should
+                            // anything in it ever be read as Markdown, it
+                            // loads no picture and follows no link.
                             gpui_kit::base::text::TextView::markdown(("notebook-code", ix), code)
-                                .selectable(true),
+                                .selectable(true)
+                                .image_source(|_: &gpui_kit::SharedUri| {
+                                    crate::markdown::refused_image()
+                                })
+                                .on_link_click(|_, _, _, _| {}),
                         ),
                     ),
                 )
@@ -384,6 +404,23 @@ fn render_output(output: &Output, cx: &App) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_language_cannot_close_the_fence() {
+        assert_eq!(language_name("python"), "python");
+        assert_eq!(language_name("c++"), "c++");
+        assert_eq!(language_name("F#"), "F#");
+        assert_eq!(language_name(""), "text");
+        assert_eq!(language_name("`x"), "text");
+        let hostile = "python\n```\n\n[Open](ms-msdt:x)\n\n```text";
+        let notebook = parse(&format!(
+            r#"{{"metadata": {{"language_info": {{"name": {}}}}}, "cells": []}}"#,
+            serde_json::to_string(hostile).unwrap()
+        ))
+        .unwrap();
+        assert_eq!(notebook.language, "python");
+        assert_eq!(fenced(&notebook.language, "x = 1"), "```python\nx = 1\n```");
+    }
 
     #[test]
     fn code_cannot_close_its_fence() {

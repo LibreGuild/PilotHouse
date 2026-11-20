@@ -80,8 +80,16 @@ fn look(cx: &mut App) {
     // For PilotHouse's Chrome extension: its badge and popup.
     let mut chrome_waiting = Vec::new();
     let mut chrome_working = Vec::new();
+    // A chat counts as watched only while the window it is on screen in is
+    // the one in front (a window behind another app's shows nobody news).
+    let active = cx.active_window();
     for (project, chats) in ChatHub::all(cx) {
         let workspace = name_of(project, cx);
+        let looked_at = match crate::windows::window_showing(project, cx) {
+            Some(window) => active == Some(window),
+            // The Chats space, a review: shown in whichever window.
+            None => active.is_some(),
+        };
         let chats = chats.read(cx);
         for (session, summary) in chats.live(cx) {
             let note = || ph_browser::ChatNote {
@@ -104,7 +112,11 @@ fn look(cx: &mut App) {
                 .get(&Watched::Chat(session))
                 .copied()
                 .unwrap_or(ChatState::Idle);
-            if let Some(title) = news(before, summary.state, chats.is_viewing(session)) {
+            if let Some(title) = news(
+                before,
+                summary.state,
+                looked_at && chats.is_viewing(session),
+            ) {
                 notes.push(SystemNotification {
                     tag: SharedString::from(format!("{TAG_PREFIX}{project}-{session}")),
                     title: format!("{}: {title}", summary.title).into(),
@@ -117,7 +129,7 @@ fn look(cx: &mut App) {
     }
     // Agents in terminals: watched when theirs is the terminal in front
     // and PilotHouse is.
-    let app_active = cx.active_window().is_some();
+    let app_active = active.is_some();
     for agent in crate::terminal_agents::TerminalAgents::all(cx) {
         if agent.state == ChatState::NeedsYou {
             waiting += 1;

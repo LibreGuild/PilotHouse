@@ -54,7 +54,8 @@ function renderStatus() {
   const on = status.connected;
   $('connection').textContent = on ? 'Connected' : 'Not connected';
   $('connection').classList.toggle('on', on);
-  $('offline').hidden = on;
+  $('offline').hidden = on || !!status.busy;
+  $('busy').hidden = on || !status.busy;
   renderCommands();
 
   const waiting = on ? status.waiting : [];

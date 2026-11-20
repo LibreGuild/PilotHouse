@@ -102,7 +102,13 @@ impl Session {
     }
 }
 
+/// The highest session id given out.
+const LAST_SESSION: &str = "sessions.last_id";
+
 impl Store {
+    /// A new chat. Its id was never another's: SQLite would give a deleted
+    /// last chat's id again, and what is kept by a chat's id (marked done,
+    /// pinned, a closed tab, its CLI's marks) would pass to the new one.
     pub fn create_session(
         &self,
         project_id: ProjectId,
@@ -110,13 +116,29 @@ impl Store {
         agent_id: &str,
     ) -> Result<Session> {
         let now = now_millis();
-        let conn = self.conn();
-        conn.execute(
-            "INSERT INTO sessions (project_id, title, agent_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![project_id, title, agent_id, now],
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let id: SessionId = tx.query_row(
+            "SELECT max(
+                coalesce((SELECT max(id) FROM sessions), 0),
+                coalesce((SELECT CAST(value AS INTEGER) FROM settings WHERE key = ?1), 0)
+             ) + 1",
+            params![LAST_SESSION],
+            |row| row.get(0),
         )?;
-        let id = conn.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO sessions (id, project_id, title, agent_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![id, project_id, title, agent_id, now],
+        )?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![LAST_SESSION, id.to_string()],
+        )?;
+        tx.commit()?;
+        drop(conn);
+        self.forget_setting(LAST_SESSION);
         Ok(Session {
             id,
             project_id,
@@ -361,6 +383,26 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ph-sessions-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         store.add_project(&dir).unwrap().id
+    }
+
+    #[test]
+    fn a_deleted_chats_id_is_never_given_again() {
+        let store = Store::open_in_memory().unwrap();
+        let home = project(&store);
+        let first = store.create_session(home, "One", "claude").unwrap();
+        let last = store.create_session(home, "Two", "claude").unwrap();
+        store.delete_session(last.id).unwrap();
+        let next = store.create_session(home, "Three", "claude").unwrap();
+        assert!(next.id > last.id);
+        assert!(first.id < last.id);
+
+        // Nor those of a removed workspace's chats.
+        let dir = std::env::temp_dir().join(format!("ph-sessions-gone-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = store.add_project(&dir).unwrap().id;
+        let theirs = store.create_session(gone, "Theirs", "claude").unwrap();
+        store.remove_project(gone).unwrap();
+        assert!(store.create_session(home, "Four", "claude").unwrap().id > theirs.id);
     }
 
     #[test]

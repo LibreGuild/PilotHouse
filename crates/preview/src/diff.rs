@@ -474,16 +474,229 @@ pub fn change_counts(added: usize, removed: usize, cx: &App) -> impl IntoElement
         })
 }
 
-/// A `.diff` or `.patch` file: each file's changes, tinted.
-#[derive(Default)]
+/// About how many rows one item of a patch's list lays out: a file longer
+/// than that is cut, between hunks, into several items (a hunk shows at
+/// most [`MAX_HUNK_LINES`] lines, so no item is much longer).
+const ROWS_PER_ITEM: usize = 400;
+
+/// A hunk as it is drawn, read once.
+#[derive(PartialEq)]
+struct ReadHunk {
+    /// The hunk's `@@` line alone (its lines are in `lines`).
+    header: Hunk,
+    lines: Vec<DiffLine>,
+    digits: usize,
+    /// Lines past [`MAX_HUNK_LINES`], not drawn.
+    hidden: usize,
+}
+
+/// A part of one file's card ([`file_diff`]'s look): the file's name on
+/// the first, then some of its hunks.
+#[derive(PartialEq)]
+struct PatchItem {
+    /// Which file of the patch, and the first of its hunks here: together
+    /// they name the item (a patch may change one path more than once).
+    file: usize,
+    from: usize,
+    /// The file's path, lines added and removed, and whether it is binary:
+    /// on the first item of its card.
+    head: Option<(SharedString, usize, usize, bool)>,
+    hunks: Vec<ReadHunk>,
+    last: bool,
+}
+
+/// The items a patch is drawn as. Slow for a large one (every line is
+/// read, replaced lines compared word by word), so called off the UI
+/// thread, once for a text.
+fn read_patch(text: &str) -> Vec<PatchItem> {
+    let mut items = Vec::new();
+    for (file, change) in ph_git::parse_diff(text).iter().enumerate() {
+        let mut head = Some((
+            SharedString::from(change.path.clone()),
+            change.added(),
+            change.removed(),
+            change.binary,
+        ));
+        let mut hunks = Vec::new();
+        let (mut from, mut rows) = (0, 0);
+        for (ix, hunk) in change.hunks.iter().enumerate() {
+            let lines = lines(hunk);
+            let size = 1 + lines.len() + usize::from(hunk.lines.len() > lines.len());
+            if rows > 0 && rows + size > ROWS_PER_ITEM {
+                items.push(PatchItem {
+                    file,
+                    from,
+                    head: head.take(),
+                    hunks: std::mem::take(&mut hunks),
+                    last: false,
+                });
+                (from, rows) = (ix, 0);
+            }
+            rows += size;
+            hunks.push(ReadHunk {
+                header: Hunk {
+                    header: hunk.header.clone(),
+                    lines: Vec::new(),
+                    raw: String::new(),
+                },
+                digits: number_digits(&lines),
+                hidden: hunk.lines.len() - lines.len(),
+                lines,
+            });
+        }
+        items.push(PatchItem {
+            file,
+            from,
+            head,
+            hunks,
+            last: true,
+        });
+    }
+    items
+}
+
+impl PatchItem {
+    /// The item's part of its file's card; `gap` leaves room under a
+    /// card's end, before the next one.
+    fn render(&self, gap: bool, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        let rows: Vec<AnyElement> = self
+            .hunks
+            .iter()
+            .enumerate()
+            .flat_map(|(ix, hunk)| {
+                let header = hunk_header(&hunk.header, cx)
+                    .when(self.from + ix > 0, |this| {
+                        this.border_t_1().border_color(theme.border)
+                    })
+                    .into_any_element();
+                let lines = hunk
+                    .lines
+                    .iter()
+                    .map(|line| line_row(line, hunk.digits, cx).into_any_element());
+                let more = (hunk.hidden > 0).then(|| more_lines(hunk.hidden, cx));
+                std::iter::once(header).chain(lines).chain(more)
+            })
+            .collect();
+        let card = v_flex()
+            .flex_none()
+            .border_l_1()
+            .border_r_1()
+            .border_color(theme.border)
+            .overflow_hidden()
+            .text_xs()
+            .when_some(
+                self.head.as_ref(),
+                |this, (path, added, removed, binary)| {
+                    let (icon, tint) = ph_ui::file_icon(path);
+                    this.border_t_1()
+                        .rounded_t(theme.radius)
+                        .child(
+                            h_flex()
+                                .px_2()
+                                .py_1()
+                                .gap_1p5()
+                                .bg(theme.secondary)
+                                .child(Icon::new(icon).text_color(tint))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_sm()
+                                        .child(path.clone()),
+                                )
+                                .child(change_counts(*added, *removed, cx)),
+                        )
+                        .when(*binary, |this| {
+                            this.child(
+                                div()
+                                    .px_3()
+                                    .py_1()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Binary file"),
+                            )
+                        })
+                },
+            )
+            .when(!rows.is_empty(), |this| {
+                this.child(
+                    div()
+                        .when(self.head.is_some(), |this| {
+                            this.border_t_1().border_color(theme.border)
+                        })
+                        .child(scroller(
+                            SharedString::from(format!("patch-{}-{}", self.file, self.from)),
+                            rows,
+                        )),
+                )
+            })
+            .when(self.last, |this| this.border_b_1().rounded_b(theme.radius));
+        div()
+            .px_3()
+            .when(self.last && gap, |this| this.pb_3())
+            .child(card)
+            .into_any_element()
+    }
+}
+
+/// A `.diff` or `.patch` file: each file's changes, tinted. A patch can be
+/// tens of thousands of lines: it is read once for a text, off the UI
+/// thread, and shown as a list that builds only the rows on screen
+/// (drawn whole and read again on every frame, scrolling one took seconds
+/// a step).
 pub struct DiffPreview {
-    files: Vec<FileChange>,
+    items: Vec<PatchItem>,
+    list: gpui_kit::ListState,
+    /// A text has been read (before that there is nothing to say of it).
+    read: bool,
+    _read: Option<gpui_kit::Task<()>>,
+}
+
+impl Default for DiffPreview {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            list: gpui_kit::ListState::new(0, gpui_kit::ListAlignment::Top, gpui_kit::px(1000.)),
+            read: false,
+            _read: None,
+        }
+    }
 }
 
 impl DiffPreview {
     pub fn set_text(&mut self, text: &str, cx: &mut gpui_kit::Context<Self>) {
-        self.files = ph_git::parse_diff(text);
-        cx.notify();
+        use gpui_kit::AppContext as _;
+        let text: std::sync::Arc<str> = text.into();
+        let read = cx.background_spawn(async move { read_patch(&text) });
+        // The newest text wins: an older one still being read is dropped.
+        self._read = Some(cx.spawn(async move |this, cx| {
+            let items = read.await;
+            _ = this.update(cx, |this, cx| {
+                // Only the items that changed are measured again, so the
+                // list stays where it is while the patch is edited.
+                let (old, new) = (this.items.len(), items.len());
+                let same_start = this
+                    .items
+                    .iter()
+                    .zip(&items)
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                let same_end = this
+                    .items
+                    .iter()
+                    .rev()
+                    .zip(items.iter().rev())
+                    .take(old.min(new) - same_start)
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                this.list
+                    .splice(same_start..old - same_end, new - same_end - same_start);
+                this.items = items;
+                this.read = true;
+                cx.notify();
+            });
+        }));
     }
 }
 
@@ -493,22 +706,25 @@ impl gpui_kit::Render for DiffPreview {
         _: &mut gpui_kit::Window,
         cx: &mut gpui_kit::Context<Self>,
     ) -> impl IntoElement {
-        use gpui_kit::{InteractiveElement as _, StatefulInteractiveElement as _};
-        if self.files.is_empty() {
-            return crate::notice("No changes in this patch.", cx);
+        if self.items.is_empty() {
+            let text = if self.read {
+                "No changes in this patch."
+            } else {
+                "Reading the patch…"
+            };
+            return crate::notice(text, cx);
         }
-        div()
-            .id("diff-preview")
-            .size_full()
-            .overflow_y_scroll()
-            .bg(cx.theme().background)
-            .p_3()
-            .child(
-                v_flex()
-                    .gap_3()
-                    .children(self.files.iter().map(|file| file_diff(file, cx))),
-            )
-            .into_any_element()
+        gpui_kit::list(
+            self.list.clone(),
+            cx.processor(|this, ix: usize, _, cx| match this.items.get(ix) {
+                Some(item) => item.render(ix + 1 < this.items.len(), cx),
+                None => div().into_any_element(),
+            }),
+        )
+        .size_full()
+        .py_3()
+        .bg(cx.theme().background)
+        .into_any_element()
     }
 }
 
@@ -522,6 +738,56 @@ mod tests {
             lines: lines.iter().map(|line| line.to_string()).collect(),
             raw: String::new(),
         }
+    }
+
+    #[test]
+    fn a_patch_is_read_into_items_a_file_or_part_of_one_each() {
+        let mut patch = String::new();
+        // One short file, one long (6 hunks of 150 lines), and the first
+        // path once more, as a patch of several commits has it.
+        for (path, hunks, lines) in [("a.rs", 2, 10), ("b.rs", 6, 150), ("a.rs", 1, 1)] {
+            patch.push_str(&format!(
+                "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+            ));
+            for hunk in 0..hunks {
+                let at = hunk * 1000 + 1;
+                patch.push_str(&format!("@@ -{at},0 +{at},{lines} @@\n"));
+                for line in 0..lines {
+                    patch.push_str(&format!("+line {line}\n"));
+                }
+            }
+        }
+        let items = read_patch(&patch);
+        let parts: Vec<(usize, usize, usize, bool, bool)> = items
+            .iter()
+            .map(|item| {
+                (
+                    item.file,
+                    item.from,
+                    item.hunks.len(),
+                    item.head.is_some(),
+                    item.last,
+                )
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                (0, 0, 2, true, true),
+                // Cut between hunks: two of them are 302 rows, a third
+                // would pass the 400 an item may be.
+                (1, 0, 2, true, false),
+                (1, 2, 2, false, false),
+                (1, 4, 2, false, true),
+                (2, 0, 1, true, true),
+            ]
+        );
+        assert_eq!(items[0].head.as_ref().unwrap().1, 20);
+        assert_eq!(items[1].hunks[0].lines.len(), 150);
+        // The same text read again is the same items: an edit elsewhere
+        // leaves them as they are in the list.
+        assert!(read_patch(&patch) == items);
+        assert!(read_patch("not a patch").is_empty());
     }
 
     #[test]

@@ -92,6 +92,10 @@ pub fn sync(store: &Store, pull: &PullRef) -> Result<Synced> {
     if let Some(comment) = store
         .summary_comment_of(pull)?
         .and_then(|id| post::read_summary(&target, id))
+        // Boxes printed for an earlier round were ticked before this
+        // round's check: one it reopened would read as fixed again. The
+        // next post prints fresh ones (and a new round syncs first).
+        .filter(|comment| ticks_count(&comment.body, round.round))
     {
         for (label, status) in post::new_ticks(&comment.body, &findings) {
             if let Some(finding) = findings.iter_mut().find(|f| f.label == label) {
@@ -582,4 +586,34 @@ pub fn check_watched(store: &Store, pull: &PullRef) -> Result<News> {
         news.talk = synced.talked;
     }
     Ok(news)
+}
+
+/// Whether the boxes of summary comment `body` count for round `round`:
+/// printed for it or a later one (a body without its data is taken as it
+/// always was).
+fn ticks_count(body: &str, round: u32) -> bool {
+    crate::comment::read_shared(body).is_none_or(|shared| shared.round >= round)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ticks_from_an_earlier_round_are_not_read_again() {
+        let body = crate::comment::render(&crate::comment::Summary {
+            round: 1,
+            sha: "abc123",
+            verdict: "request_changes",
+            summary: "One problem.",
+            reviewer: "me",
+            agents: "Claude",
+            repo_url: "https://github.com/o/r",
+            number: 7,
+            findings: &[],
+        });
+        assert!(ticks_count(&body, 1));
+        assert!(!ticks_count(&body, 2));
+        assert!(ticks_count("no data here", 2));
+    }
 }

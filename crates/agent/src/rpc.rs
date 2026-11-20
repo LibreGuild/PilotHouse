@@ -5,13 +5,20 @@
 //! into a short ring buffer, so a crashing agent's last words can be shown.
 //! Responses are matched to requests by id; everything else the agent sends
 //! (notifications and its own requests) is delivered as [`Incoming`].
+//!
+//! The reader's thread also reads each `session/update` into its type, and
+//! everything it routes goes through one queue of limited length
+//! ([`IncomingMessages`]), answers to our requests included: whoever takes
+//! the messages sees them, and whoever asked gets an answer, in the order
+//! the agent sent them, and an agent that sends faster than they are taken
+//! waits on its pipe.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{Context as _, Result, anyhow};
 use futures::channel::oneshot;
@@ -20,9 +27,17 @@ use serde_json::{Value, json};
 /// Lines of stderr kept for error messages.
 const STDERR_TAIL_LINES: usize = 40;
 
+/// Messages read from the agent and not taken yet. Past this the reader's
+/// thread waits for room, and the agent for its pipe: a flood is held back
+/// there, not kept in the app's memory.
+const QUEUED_MESSAGES: usize = 1024;
+
 /// Something the agent sent that is not a response to us.
 #[derive(Debug)]
 pub enum Incoming {
+    /// A `session/update`, read into its type already (one this build does
+    /// not know is left out).
+    Update(Box<crate::transcript::Update>),
     Notification {
         method: String,
         params: Value,
@@ -76,7 +91,88 @@ fn error_message(error: &Value) -> String {
     }
 }
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
+/// The agent's answer to one request.
+type Answer = Result<Value, RpcError>;
+
+type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Answer>>>>;
+
+/// What the reader's thread puts in the queue.
+enum Routed {
+    Message(Incoming),
+    /// The answer to a request of ours, kept in its place among the
+    /// agent's messages: whoever asked gets it only once the messages
+    /// before it were taken (a turn's answer must not overtake the last
+    /// of what the turn said).
+    Answer(oneshot::Sender<Answer>, Answer),
+}
+
+/// What the agent sends, in the order it sent it.
+pub struct IncomingMessages {
+    queue: smol::channel::Receiver<Routed>,
+}
+
+impl IncomingMessages {
+    /// The next message, waited for; `None` when the process is gone and
+    /// nothing is left. Answers to our requests go to whoever asked on the
+    /// way.
+    pub async fn next(&self) -> Option<Incoming> {
+        loop {
+            match self.queue.recv().await.ok()? {
+                Routed::Message(message) => return Some(message),
+                Routed::Answer(waiter, answer) => {
+                    let _ = waiter.send(answer);
+                    // Whoever asked acts on it before the next message
+                    // is taken.
+                    smol::future::yield_now().await;
+                }
+            }
+        }
+    }
+
+    /// The next message when it is here already. `None` also right after
+    /// an answer went to whoever asked: they act on it before what the
+    /// agent sent next is taken, so the caller lets others run before it
+    /// asks again.
+    pub fn next_now(&self) -> Option<Incoming> {
+        match self.queue.try_recv().ok()? {
+            Routed::Message(message) => Some(message),
+            Routed::Answer(waiter, answer) => {
+                let _ = waiter.send(answer);
+                None
+            }
+        }
+    }
+}
+
+impl Drop for IncomingMessages {
+    fn drop(&mut self) {
+        // Nobody takes messages any more. An answer that comes later fails
+        // its request as it cannot be queued; those queued already are
+        // handed over here, or their requests would wait for ever (and
+        // keep the process they hold).
+        self.queue.close();
+        while let Ok(routed) = self.queue.try_recv() {
+            if let Routed::Answer(waiter, answer) = routed {
+                let _ = waiter.send(answer);
+            }
+        }
+    }
+}
+
+/// Every agent process started and not let go of yet, for
+/// [`stop_all_before_exit`].
+static RUNNING: Mutex<Vec<Weak<RpcProcess>>> = Mutex::new(Vec::new());
+
+/// Ends every agent still running, for when the app quits: nothing is
+/// dropped then, so [`RpcProcess`]'s own `Drop` never runs, and an agent
+/// that does not end by itself when its input closes would stay behind
+/// with all it started.
+pub fn stop_all_before_exit() {
+    let running = std::mem::take(&mut *RUNNING.lock().unwrap_or_else(|e| e.into_inner()));
+    for process in running.iter().filter_map(Weak::upgrade) {
+        process.end(true);
+    }
+}
 
 /// A running agent process and its JSON-RPC plumbing.
 pub struct RpcProcess {
@@ -99,7 +195,7 @@ impl RpcProcess {
         args: &[String],
         cwd: &Path,
         env: &HashMap<String, String>,
-    ) -> Result<(Arc<Self>, smol::channel::Receiver<Incoming>)> {
+    ) -> Result<(Arc<Self>, IncomingMessages)> {
         // Said plainly: the system reports a missing folder as the program
         // missing ("npx: No such file or directory").
         if !cwd.is_dir() {
@@ -119,8 +215,7 @@ impl RpcProcess {
             .stderr(Stdio::piped());
         // A group of its own, so stopping it stops what it started too
         // (`npx` starts the adapter, which starts the agent's program).
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        own_group(&mut command);
         let mut child = command
             .spawn()
             .with_context(|| format!("starting {}", program.display()))?;
@@ -130,7 +225,7 @@ impl RpcProcess {
         let stderr = child.stderr.take().context("agent stderr")?;
 
         let (writer, write_queue) = smol::channel::unbounded::<String>();
-        let (incoming_sender, incoming) = smol::channel::unbounded::<Incoming>();
+        let (incoming_sender, incoming) = smol::channel::bounded::<Routed>(QUEUED_MESSAGES);
         let pending: Pending = Arc::default();
         let stderr_tail: Arc<Mutex<VecDeque<String>>> = Arc::default();
 
@@ -171,14 +266,20 @@ impl RpcProcess {
                 // Fail requests still waiting, so callers are not stuck forever.
                 let mut waiting = read_pending.lock().unwrap_or_else(|e| e.into_inner());
                 read_closed.store(true, Ordering::Relaxed);
-                for (_, waiter) in waiting.drain() {
-                    let _ = waiter.send(Err(RpcError {
+                let waiters: Vec<_> = waiting.drain().map(|(_, waiter)| waiter).collect();
+                drop(waiting);
+                // That it ended is said first, and in its place: after all
+                // it sent, and before the requests fail (which says less).
+                // Whoever stops taking messages there lets go of the queue,
+                // and a request whose answer goes with it fails as well.
+                let _ = incoming_sender.send_blocking(Routed::Message(Incoming::Closed));
+                for waiter in waiters {
+                    let failed = Err(RpcError {
                         code: -32000,
                         message: "the agent process exited".into(),
-                    }));
+                    });
+                    let _ = incoming_sender.send_blocking(Routed::Answer(waiter, failed));
                 }
-                drop(waiting);
-                let _ = incoming_sender.send_blocking(Incoming::Closed);
             })?;
 
         let tail = stderr_tail.clone();
@@ -203,7 +304,11 @@ impl RpcProcess {
             stderr_tail,
             child: Mutex::new(Some(child)),
         });
-        Ok((process, incoming))
+        let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        running.retain(|known| known.strong_count() > 0);
+        running.push(Arc::downgrade(&process));
+        drop(running);
+        Ok((process, IncomingMessages { queue: incoming }))
     }
 
     /// Sends a request; the future resolves with the agent's result.
@@ -283,39 +388,80 @@ impl RpcProcess {
     /// Ends the agent and everything it started, now (its output then
     /// closes, and waiting requests fail).
     pub fn stop(&self) {
-        let Some(mut child) = self.child.lock().ok().and_then(|mut child| child.take()) else {
+        self.end(false);
+    }
+
+    /// [`Self::stop`]; `exiting` when the app is about to be gone, and
+    /// nothing may be left to a thread that would be gone with it.
+    fn end(&self, exiting: bool) {
+        let Some(child) = self.child.lock().ok().and_then(|mut child| child.take()) else {
             return;
         };
-        // The whole group: its children too.
         #[cfg(unix)]
         {
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
-            }
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = exiting;
+            kill_tree(child);
         }
-        // The whole tree. `taskkill /T` finds it from the process at its
-        // top, so that one is killed only after (or the tree is left
-        // running: an agent's adapter, its MCP server, a copy of PilotHouse
-        // that keeps its program file open). It can take a while: on a
-        // thread of its own, not whichever one let the agent go.
+        // It can take a while: on a thread of its own, not whichever one
+        // let the agent go. When the app quits, `taskkill` is only started:
+        // it is a program of its own and ends the tree without the app.
         #[cfg(windows)]
-        std::thread::spawn(move || {
-            let _ = ph_env::command("taskkill")
-                .args(["/T", "/F", "/PID", &child.id().to_string()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            let _ = child.kill();
-            let _ = child.wait();
-        });
+        if exiting {
+            let _ = taskkill(child.id()).spawn();
+        } else {
+            std::thread::spawn(move || kill_tree(child));
+        }
     }
 }
 
+/// Makes `command` start a process group of its own, so that
+/// [`kill_tree`] ends what the program started too.
+pub(crate) fn own_group(command: &mut std::process::Command) {
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(command, 0);
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+/// Ends `child` (started with [`own_group`]) and everything it started,
+/// and waits until it is gone. On Windows that takes a moment.
+pub(crate) fn kill_tree(mut child: Child) {
+    // The whole group: its children too.
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    // The whole tree. `taskkill /T` finds it from the process at its top,
+    // so that one is killed only after (or the tree is left running: an
+    // agent's adapter, its MCP server, a copy of PilotHouse that keeps its
+    // program file open).
+    #[cfg(windows)]
+    let _ = taskkill(child.id()).status();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// `taskkill` for the process `pid` and all it started.
+#[cfg(windows)]
+fn taskkill(pid: u32) -> std::process::Command {
+    let mut command = ph_env::command("taskkill");
+    command
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// `message[key]`, taken out of it, not copied: an update can carry a whole
+/// file or a picture.
+fn taken(message: &mut Value, key: &str) -> Value {
+    message.get_mut(key).map(Value::take).unwrap_or(Value::Null)
+}
+
 /// Sorts one message: our response, the agent's request, or a notification.
-fn route(message: Value, pending: &Pending, incoming: &smol::channel::Sender<Incoming>) {
+/// Each goes into the queue, waiting while it is full.
+fn route(mut message: Value, pending: &Pending, incoming: &smol::channel::Sender<Routed>) {
     let method = message
         .get("method")
         .and_then(Value::as_str)
@@ -323,12 +469,22 @@ fn route(message: Value, pending: &Pending, incoming: &smol::channel::Sender<Inc
     let id = message.get("id").cloned();
     match (method, id) {
         (Some(method), Some(id)) => {
-            let params = message.get("params").cloned().unwrap_or(Value::Null);
-            let _ = incoming.send_blocking(Incoming::Request { id, method, params });
+            let params = taken(&mut message, "params");
+            let _ =
+                incoming.send_blocking(Routed::Message(Incoming::Request { id, method, params }));
+        }
+        // Read into its type here, on the reader's thread: the UI's only
+        // applies it.
+        (Some(method), None) if method == "session/update" => {
+            let params = taken(&mut message, "params");
+            if let Some(update) = crate::transcript::parse_update(params) {
+                let _ = incoming.send_blocking(Routed::Message(Incoming::Update(Box::new(update))));
+            }
         }
         (Some(method), None) => {
-            let params = message.get("params").cloned().unwrap_or(Value::Null);
-            let _ = incoming.send_blocking(Incoming::Notification { method, params });
+            let params = taken(&mut message, "params");
+            let _ =
+                incoming.send_blocking(Routed::Message(Incoming::Notification { method, params }));
         }
         (None, Some(id)) => {
             let Some(id) = id.as_u64() else { return };
@@ -344,9 +500,11 @@ fn route(message: Value, pending: &Pending, incoming: &smol::channel::Sender<Inc
                     code: error.get("code").and_then(Value::as_i64).unwrap_or(-32603),
                     message: error_message(error),
                 }),
-                None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
+                None => Ok(taken(&mut message, "result")),
             };
-            let _ = waiter.send(result);
+            // Nobody takes messages any more: the request fails as its
+            // waiter goes with what could not be queued.
+            let _ = incoming.send_blocking(Routed::Answer(waiter, result));
         }
         (None, None) => tracing::warn!("agent sent a message with neither method nor id"),
     }
@@ -370,12 +528,64 @@ mod tests {
         assert_eq!(error_message(&repeated), "Bad input");
     }
 
+    const UPDATE: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}}"#;
+
+    /// An answer is handed to whoever asked in its place among what the
+    /// agent sent: not before the messages ahead of it were taken, and
+    /// before those after it are.
+    #[test]
+    fn answers_keep_their_place_among_the_messages() {
+        let (sender, queue) = smol::channel::bounded(8);
+        let incoming = IncomingMessages { queue };
+        let pending: Pending = Arc::default();
+        let (waiter, mut asked) = oneshot::channel();
+        pending.lock().unwrap().insert(1, waiter);
+        let update: Value = serde_json::from_str(UPDATE).unwrap();
+        route(update.clone(), &pending, &sender);
+        route(
+            json!({ "jsonrpc": "2.0", "id": 1, "result": { "ok": true } }),
+            &pending,
+            &sender,
+        );
+        route(update, &pending, &sender);
+        // An update this build does not know is left out, here already.
+        route(
+            json!({ "method": "session/update", "params": { "x": 1 } }),
+            &pending,
+            &sender,
+        );
+
+        assert!(
+            matches!(incoming.next_now(), Some(Incoming::Update(update)) if update.session_id == "s1")
+        );
+        assert!(matches!(asked.try_recv(), Ok(None)), "answered too early");
+        // The answer: handed over, and nothing more is taken in this go.
+        assert!(incoming.next_now().is_none());
+        assert_eq!(asked.try_recv().unwrap().unwrap().unwrap()["ok"], true);
+        assert!(matches!(incoming.next_now(), Some(Incoming::Update(_))));
+        assert!(incoming.next_now().is_none());
+
+        // Nobody takes messages any more: an answer queued already still
+        // reaches its request, and one that comes later fails it.
+        let (waiter, mut queued) = oneshot::channel();
+        let (late_waiter, mut late) = oneshot::channel();
+        let mut waiting = pending.lock().unwrap();
+        waiting.insert(2, waiter);
+        waiting.insert(3, late_waiter);
+        drop(waiting);
+        route(json!({ "id": 2, "result": 7 }), &pending, &sender);
+        drop(incoming);
+        assert_eq!(queued.try_recv().unwrap().unwrap().unwrap(), 7);
+        route(json!({ "id": 3, "result": 8 }), &pending, &sender);
+        assert!(late.try_recv().is_err());
+    }
+
     /// A tiny "agent" in a shell script: answers the first request, then
     /// sends a notification and a request of its own.
     #[test]
     fn request_response_and_incoming_messages() {
         let answer = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
-        let update = r#"{"jsonrpc":"2.0","method":"session/update","params":{"x":1}}"#;
+        let update = UPDATE;
         let ask = r#"{"jsonrpc":"2.0","id":"a","method":"session/request_permission","params":{}}"#;
         let (program, args) = if cfg!(windows) {
             let script = format!(
@@ -397,13 +607,16 @@ mod tests {
         let (process, incoming) =
             RpcProcess::spawn(&program, &args, &std::env::temp_dir(), &env).unwrap();
 
-        let result = smol::block_on(process.request("initialize", json!({}))).unwrap();
-        assert_eq!(result["ok"], true);
-        match smol::block_on(incoming.recv()).unwrap() {
-            Incoming::Notification { method, .. } => assert_eq!(method, "session/update"),
-            other => panic!("expected a notification, got {other:?}"),
+        // The answer comes with the messages: it is handed over on the way
+        // to the first of them.
+        let request = process.request("initialize", json!({}));
+        let (result, first) = smol::block_on(futures::future::join(request, incoming.next()));
+        assert_eq!(result.unwrap()["ok"], true);
+        match first.unwrap() {
+            Incoming::Update(update) => assert_eq!(update.session_id, "s1"),
+            other => panic!("expected an update, got {other:?}"),
         }
-        match smol::block_on(incoming.recv()).unwrap() {
+        match smol::block_on(incoming.next()).unwrap() {
             Incoming::Request { id, method, .. } => {
                 assert_eq!(id, json!("a"));
                 assert_eq!(method, "session/request_permission");

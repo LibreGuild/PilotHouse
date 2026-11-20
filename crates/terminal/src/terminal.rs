@@ -160,9 +160,14 @@ impl Terminal {
     ) -> anyhow::Result<StartedShell> {
         if let Some(remote) = ph_remote::remote_of(&cwd) {
             let (program, args) = ph_remote::ssh::shell(&remote.mapping, &remote.path);
-            let mut shell = Self::start_program(&program, args, home_or(cwd))?;
+            let mut shell = Self::start_program(&program, args, home_or(cwd.clone()))?;
             shell.title = remote.mapping.host.clone().into();
             shell.shell = remote.mapping.host.clone().into();
+            // `ssh` runs in the home folder here; the shell is in the mapped
+            // folder on the server, and a split or a restart must open the
+            // server's shell there again, not a local one in home.
+            shell.cwd = cwd;
+            shell.pid = None;
             return Ok(shell);
         }
         match shell {
@@ -635,6 +640,21 @@ impl Terminal {
         let mut parser: alacritty_terminal::vte::ansi::Processor =
             alacritty_terminal::vte::ansi::Processor::new();
         parser.advance(&mut *self.term.lock(), &bytes);
+    }
+
+    /// Writes a dimmed "ended with code" line under what an ended program
+    /// left on screen, so a tab kept after it failed does not look alive.
+    pub(crate) fn show_ended(&self, code: i32) {
+        let mut term = self.term.lock();
+        let mut bytes = Vec::new();
+        if term.grid().cursor.point.column.0 > 0 {
+            bytes.extend_from_slice(b"\r\n");
+        }
+        let note = format!("\u{2500}\u{2500} Ended with code {code} \u{2500}\u{2500}");
+        bytes.extend_from_slice(format!("\x1b[0m\x1b[2m{note}\x1b[0m\r\n").as_bytes());
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut *term, &bytes);
     }
 
     /// The lines on screen now, without trailing blanks.

@@ -38,7 +38,9 @@ pub use file_index::{FileList, index_files};
 pub use file_view::{Ask, AskIntent, FileView, FileViewEvent, set_explains};
 pub use files_panel::{FileTree, FilesPanel, FilesPanelEvent};
 pub use tree_drag::DraggedFiles;
-pub use watcher::{FilesChanged, ProjectWatcher, WatcherHub};
+pub use watcher::{
+    FilesChanged, Follower, IgnoredChanged, ProjectWatcher, WatchLimitReached, WatcherHub,
+};
 
 use gpui_kit::{App, KeyBinding, actions};
 

@@ -55,20 +55,38 @@ pub(crate) fn open(
     window: &mut Window,
     cx: &mut App,
 ) {
-    // Listing fonts touches the OS font database: do it once per opening.
+    // The system's fonts, as listed once in this run (listing them takes
+    // about 100 ms on a Mac with many installed).
     let fonts = font_options(cx);
     let themes = theme_options(cx);
     let store = AppState::store(cx).clone();
-    let accounts = cx.new(|cx| ph_pulls::AccountsView::new(store.clone(), window, cx));
-    let templates = cx.new(|_| ph_pulls::TemplatesView::new(store.clone()));
-    let drives =
-        cx.new(|cx| crate::network_drives::NetworkDrivesView::new(store.clone(), window, cx));
+    // Each page's view is made when its page is first shown: several start
+    // work of their own (a walk of every clone's size, a request to each
+    // account's host, a search for MCP configs), for pages not opened.
+    let accounts = {
+        let store = store.clone();
+        Lazy::new(move |window, cx| cx.new(|cx| ph_pulls::AccountsView::new(store, window, cx)))
+    };
+    let templates = {
+        let store = store.clone();
+        Lazy::new(move |_, cx| cx.new(|_| ph_pulls::TemplatesView::new(store)))
+    };
+    let drives = {
+        let store = store.clone();
+        Lazy::new(move |window, cx| {
+            cx.new(|cx| crate::network_drives::NetworkDrivesView::new(store, window, cx))
+        })
+    };
     let open_file: ph_agent::tools_view::OpenFile = std::rc::Rc::new(|path, window, cx| {
         use gpui_kit::component::WindowExt as _;
         window.close_dialog(cx);
-        if let Err(err) = crate::open::open_paths(&[path], cx) {
-            tracing::warn!("opening the file failed: {err:#}");
-        }
+        // Once this window's handler is done: the file may open in it,
+        // which cannot be reached while it handles the click.
+        cx.defer(move |cx| {
+            if let Err(err) = crate::open::open_paths(&[path], cx) {
+                tracing::warn!("opening the file failed: {err:#}");
+            }
+        });
     });
     // An agent is installed where it can be watched: in a terminal of the
     // workspace in front, with Settings out of the way.
@@ -104,12 +122,15 @@ pub(crate) fn open(
         });
     let agents = {
         let store = store.clone();
-        cx.new(|cx| ph_agent::agents_view::AgentsView::new(store, install, window, cx))
+        Lazy::new(move |window, cx| {
+            cx.new(|cx| ph_agent::agents_view::AgentsView::new(store, install, window, cx))
+        })
     };
-    let tools =
-        cx.new(|cx| ph_agent::tools_view::ToolsView::new(store, project, open_file, window, cx));
-    let storage = cx.new(crate::storage::StorageView::new);
-    let chrome = cx.new(ph_browser::ChromeExtensionView::new);
+    let tools = Lazy::new(move |window, cx| {
+        cx.new(|cx| ph_agent::tools_view::ToolsView::new(store, project, open_file, window, cx))
+    });
+    let storage = Lazy::new(|_, cx| cx.new(crate::storage::StorageView::new));
+    let chrome = Lazy::new(|_, cx| cx.new(ph_browser::ChromeExtensionView::new));
     window.open_dialog(cx, move |dialog, window, cx| {
         // As large as the interface size asks for, within the window.
         // Worked out as it is drawn: the size is changed in this dialog.
@@ -218,6 +239,42 @@ pub(crate) fn open(
                     ),
             )
     });
+}
+
+/// A page's view, made the first time it is asked for (when its page is
+/// drawn) and kept while Settings is open.
+struct Lazy<V: 'static>(std::rc::Rc<std::cell::RefCell<LazyView<V>>>);
+
+type MakeView<V> = Box<dyn FnOnce(&mut Window, &mut App) -> gpui_kit::Entity<V>>;
+
+enum LazyView<V: 'static> {
+    Later(Option<MakeView<V>>),
+    Made(gpui_kit::Entity<V>),
+}
+
+impl<V: 'static> Clone for Lazy<V> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<V: 'static> Lazy<V> {
+    fn new(make: impl FnOnce(&mut Window, &mut App) -> gpui_kit::Entity<V> + 'static) -> Self {
+        Self(std::rc::Rc::new(std::cell::RefCell::new(LazyView::Later(
+            Some(Box::new(make)),
+        ))))
+    }
+
+    fn get(&self, window: &mut Window, cx: &mut App) -> Option<gpui_kit::Entity<V>> {
+        let make = match &mut *self.0.borrow_mut() {
+            LazyView::Made(view) => return Some(view.clone()),
+            // Being made (asked again from within its own making): none yet.
+            LazyView::Later(make) => make.take()?,
+        };
+        let view = make(window, cx);
+        *self.0.borrow_mut() = LazyView::Made(view.clone());
+        Some(view)
+    }
 }
 
 /// The accent choices as swatches: the theme's own, then each color in the
@@ -649,18 +706,20 @@ fn view_page<V: gpui_kit::Render>(
     title: &'static str,
     icon: Icons,
     keywords: &'static [&'static str],
-    view: gpui_kit::Entity<V>,
+    view: Lazy<V>,
 ) -> SettingPage {
     SettingPage::new(title).icon(Icon::new(icon)).group(
         SettingGroup::new().item(
-            SettingItem::render(move |_, _, _| div().w_full().py_1().child(view.clone()))
-                .keywords(keywords.iter().copied()),
+            SettingItem::render(move |_, window, cx| {
+                div().w_full().py_1().children(view.get(window, cx))
+            })
+            .keywords(keywords.iter().copied()),
         ),
     )
 }
 
 /// Settings → MCP & skills: what every agent is given to work with.
-fn tools_page(tools: gpui_kit::Entity<ph_agent::tools_view::ToolsView>) -> SettingPage {
+fn tools_page(tools: Lazy<ph_agent::tools_view::ToolsView>) -> SettingPage {
     view_page(
         "MCP & skills",
         Icons::Plug,
@@ -671,7 +730,7 @@ fn tools_page(tools: gpui_kit::Entity<ph_agent::tools_view::ToolsView>) -> Setti
 
 /// Settings → GitHub: GitHub and GitHub Enterprise accounts, for pull
 /// requests.
-fn github_page(accounts: gpui_kit::Entity<ph_pulls::AccountsView>) -> SettingPage {
+fn github_page(accounts: Lazy<ph_pulls::AccountsView>) -> SettingPage {
     view_page(
         "GitHub",
         Icons::GitPullRequest,
@@ -690,7 +749,7 @@ fn github_page(accounts: gpui_kit::Entity<ph_pulls::AccountsView>) -> SettingPag
 /// Settings → Review templates (see [`ph_pulls::TemplatesView`]). Named for
 /// what they are templates of: "Templates" alone said nothing in a list
 /// that also has themes and run configurations.
-fn templates_page(view: gpui_kit::Entity<ph_pulls::TemplatesView>) -> SettingPage {
+fn templates_page(view: Lazy<ph_pulls::TemplatesView>) -> SettingPage {
     view_page(
         "Review templates",
         Icons::ScrollText,
@@ -700,7 +759,7 @@ fn templates_page(view: gpui_kit::Entity<ph_pulls::TemplatesView>) -> SettingPag
 }
 
 /// Settings → Storage (see [`crate::storage`]).
-fn storage_page(view: gpui_kit::Entity<crate::storage::StorageView>) -> SettingPage {
+fn storage_page(view: Lazy<crate::storage::StorageView>) -> SettingPage {
     view_page(
         "Storage",
         Icons::HardDrive,
@@ -721,7 +780,7 @@ fn storage_page(view: gpui_kit::Entity<crate::storage::StorageView>) -> SettingP
 }
 
 /// Settings → Network drives (see [`crate::network_drives`]).
-fn drives_page(view: gpui_kit::Entity<crate::network_drives::NetworkDrivesView>) -> SettingPage {
+fn drives_page(view: Lazy<crate::network_drives::NetworkDrivesView>) -> SettingPage {
     view_page(
         "Network drives",
         Icons::Server,
@@ -733,7 +792,7 @@ fn drives_page(view: gpui_kit::Entity<crate::network_drives::NetworkDrivesView>)
 }
 
 /// Settings → Chrome extension (see [`ph_browser::ChromeExtensionView`]).
-fn chrome_page(view: gpui_kit::Entity<ph_browser::ChromeExtensionView>) -> SettingPage {
+fn chrome_page(view: Lazy<ph_browser::ChromeExtensionView>) -> SettingPage {
     view_page(
         "Chrome extension",
         Icons::Globe,
@@ -753,7 +812,7 @@ fn chrome_page(view: gpui_kit::Entity<ph_browser::ChromeExtensionView>) -> Setti
 /// what can be set for it) and those that are not, with how to install
 /// them. What was found is remembered for a few seconds; *Check again*
 /// asks anew.
-fn agents_page(agents: gpui_kit::Entity<ph_agent::agents_view::AgentsView>) -> SettingPage {
+fn agents_page(agents: Lazy<ph_agent::agents_view::AgentsView>) -> SettingPage {
     SettingPage::new("Agents")
         .icon(Icon::new(Icons::Bot))
         .title_suffix(|_, _| {
@@ -772,26 +831,28 @@ fn agents_page(agents: gpui_kit::Entity<ph_agent::agents_view::AgentsView>) -> S
         })
         .group(
             SettingGroup::new().item(
-                SettingItem::render(move |_, _, _| div().w_full().py_1().child(agents.clone()))
-                    .keywords(
-                        [
-                            "agent",
-                            "install",
-                            "sign in",
-                            "cli",
-                            "chat",
-                            "account",
-                            "command",
-                            "environment",
-                            "arguments",
-                        ]
-                        .into_iter()
-                        .chain(
-                            ph_agent::agents::AGENTS
-                                .iter()
-                                .flat_map(|spec| [spec.name, spec.id]),
-                        ),
+                SettingItem::render(move |_, window, cx| {
+                    div().w_full().py_1().children(agents.get(window, cx))
+                })
+                .keywords(
+                    [
+                        "agent",
+                        "install",
+                        "sign in",
+                        "cli",
+                        "chat",
+                        "account",
+                        "command",
+                        "environment",
+                        "arguments",
+                    ]
+                    .into_iter()
+                    .chain(
+                        ph_agent::agents::AGENTS
+                            .iter()
+                            .flat_map(|spec| [spec.name, spec.id]),
                     ),
+                ),
             ),
         )
         .groups(agent_updates_group())

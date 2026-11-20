@@ -27,20 +27,22 @@ use ph_theme::layout;
 /// handler closes the active window if it is a lone file's. In the main
 /// window the Files panel's own ⌘W comes first.
 pub fn bind_keys(cx: &mut App) {
+    let keys = ph_ui::keys("secondary-w");
     cx.bind_keys([gpui_kit::KeyBinding::new(
-        ph_ui::keys("secondary-w"),
+        keys,
         ph_files::CloseFile,
-        None,
+        // Ctrl+W deletes a word in a terminal (off a Mac).
+        crate::actions::context_for(keys, None, cfg!(target_os = "macos")),
     )]);
     cx.on_action(|_: &ph_files::CloseFile, cx| {
-        let Some(active) = cx.active_window() else {
-            return;
-        };
-        let lone = cx
-            .try_global::<LoneFiles>()
-            .is_some_and(|open| open.0.values().any(|window| *window == active));
-        if lone {
-            _ = active.update(cx, |_, window, _| window.remove_window());
+        let lone = cx.active_window().filter(|active| {
+            cx.try_global::<LoneFiles>()
+                .is_some_and(|open| open.0.values().any(|window| window == active))
+        });
+        match lone {
+            Some(active) => _ = active.update(cx, |_, window, _| window.remove_window()),
+            // Another window's: not taken from what else closes by it.
+            None => cx.propagate(),
         }
     });
 }

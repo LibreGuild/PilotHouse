@@ -130,63 +130,107 @@ pub struct SwitchToWorkspace {
     pub index: usize,
 }
 
-pub(crate) fn bind_keys(cx: &mut App) {
+/// The workspace's key context less a terminal's (`ph_terminal`'s
+/// "Terminal"), for keys a terminal keeps.
+const WORKSPACE_OUTSIDE_TERMINAL: &str = "Workspace && !Terminal";
+/// Anywhere but in a terminal.
+const OUTSIDE_TERMINAL: &str = "!Terminal";
+
+/// The context to bind `keys` (as GPUI reads them) in, for a binding meant
+/// for `context`, on a Mac when `mac`. Off a Mac the app's shortcuts are
+/// Ctrl keys, and Ctrl with a letter, digit or sign is what a shell and the
+/// agents' CLIs read (Ctrl+W deletes a word, Ctrl+B is tmux's prefix, Ctrl+J
+/// a new line): a binding acts before the terminal sees the key, so while a
+/// terminal has the keyboard those are left to it. Ctrl+` and Ctrl+Tab
+/// stay, as in VS Code: they mean nothing to a shell. On a Mac the app's
+/// keys are ⌘, which a terminal does not read.
+pub(crate) fn context_for(
+    keys: &str,
+    context: Option<&'static str>,
+    mac: bool,
+) -> Option<&'static str> {
+    let (modifiers, key) = match keys.strip_suffix("--") {
+        Some(modifiers) => (modifiers, "-"),
+        None => keys.rsplit_once('-').unwrap_or(("", keys)),
+    };
+    let shells = !mac && !keys.contains(' ') && modifiers == "ctrl" && !matches!(key, "`" | "tab");
+    match context {
+        _ if !shells => context,
+        None => Some(OUTSIDE_TERMINAL),
+        Some(WORKSPACE_CONTEXT) => Some(WORKSPACE_OUTSIDE_TERMINAL),
+        Some(other) => Some(other),
+    }
+}
+
+/// `binding` written with `secondary-` as GPUI reads it on a Mac when
+/// `mac`.
+fn resolve(binding: &'static str, mac: bool) -> &'static str {
+    if mac == cfg!(target_os = "macos") {
+        return ph_ui::keys(binding);
+    }
+    // Only the tests ask for the other systems' keys.
+    let key = if mac { "cmd" } else { "ctrl" };
+    Box::leak(binding.replace("secondary", key).into_boxed_str())
+}
+
+/// Binds `binding` (written with `secondary-`) to `action` in `context`,
+/// as it is on a Mac when `mac`.
+fn bind<A: Action>(
+    binding: &'static str,
+    action: A,
+    context: Option<&'static str>,
+    mac: bool,
+) -> KeyBinding {
+    let keys = resolve(binding, mac);
+    KeyBinding::new(keys, action, context_for(keys, context, mac))
+}
+
+/// The keys of the workspace's commands, on a Mac when `mac`.
+pub(crate) fn bindings(mac: bool) -> Vec<KeyBinding> {
     let context = Some(WORKSPACE_CONTEXT);
-    cx.bind_keys([
+    let mut bindings = vec![
         // The last binding for an action is the one menus and hints display.
-        KeyBinding::new(
-            ph_ui::keys("secondary-shift-p"),
-            ToggleCommandPalette,
-            context,
-        ),
-        KeyBinding::new(ph_ui::keys("secondary-k"), ToggleCommandPalette, context),
-        KeyBinding::new(ph_ui::keys("secondary-o"), AddProject, context),
-        KeyBinding::new(ph_ui::keys("secondary-n"), NewSession, context),
-        KeyBinding::new(ph_ui::keys("secondary-;"), SideChat, context),
-        KeyBinding::new(ph_ui::keys("secondary-shift-k"), SearchChats, context),
-        KeyBinding::new(ph_ui::keys("secondary-b"), ToggleSidebar, context),
+        bind("secondary-shift-p", ToggleCommandPalette, context, mac),
+        bind("secondary-k", ToggleCommandPalette, context, mac),
+        bind("secondary-o", AddProject, context, mac),
+        bind("secondary-n", NewSession, context, mac),
+        bind("secondary-;", SideChat, context, mac),
+        bind("secondary-shift-k", SearchChats, context, mac),
+        bind("secondary-b", ToggleSidebar, context, mac),
         // As in VS Code: ⌃` and ⌘J the terminal (⌘J last: it is the one
         // menus and hints show), ⌥⌘B the pane beside the chat.
-        KeyBinding::new(ph_ui::keys("ctrl-`"), ToggleTerminal, context),
-        KeyBinding::new(ph_ui::keys("secondary-j"), ToggleTerminal, context),
-        KeyBinding::new(ph_ui::keys("secondary-alt-b"), ToggleContextPanel, context),
-        KeyBinding::new(ph_ui::keys("secondary-shift-j"), ToggleZoom, context),
-        KeyBinding::new(ph_ui::keys("secondary-1"), ShowFiles, context),
-        KeyBinding::new(ph_ui::keys("secondary-2"), ShowChanges, context),
-        KeyBinding::new(ph_ui::keys("secondary-4"), ShowTerminal, context),
-        KeyBinding::new(ph_ui::keys("secondary-5"), ShowBrowser, context),
-        KeyBinding::new(ph_ui::keys("secondary-6"), ShowDevices, context),
-        KeyBinding::new(ph_ui::keys("secondary-7"), ShowRuns, context),
-        KeyBinding::new(ph_ui::keys("secondary-8"), ShowPulls, context),
-        KeyBinding::new(ph_ui::keys("secondary-9"), ShowTests, context),
-        KeyBinding::new(ph_ui::keys("secondary-shift-s"), CaptureToChat, context),
-        KeyBinding::new(ph_ui::keys("secondary-,"), OpenSettings, context),
-        KeyBinding::new(ph_ui::keys("secondary-/"), ShowShortcuts, context),
-        KeyBinding::new(ph_ui::keys("secondary-q"), Quit, None),
+        bind("ctrl-`", ToggleTerminal, context, mac),
+        bind("secondary-j", ToggleTerminal, context, mac),
+        bind("secondary-alt-b", ToggleContextPanel, context, mac),
+        bind("secondary-shift-j", ToggleZoom, context, mac),
+        bind("secondary-1", ShowFiles, context, mac),
+        bind("secondary-2", ShowChanges, context, mac),
+        bind("secondary-4", ShowTerminal, context, mac),
+        bind("secondary-5", ShowBrowser, context, mac),
+        bind("secondary-6", ShowDevices, context, mac),
+        bind("secondary-7", ShowRuns, context, mac),
+        bind("secondary-8", ShowPulls, context, mac),
+        bind("secondary-9", ShowTests, context, mac),
+        bind("secondary-shift-s", CaptureToChat, context, mac),
+        bind("secondary-,", OpenSettings, context, mac),
+        bind("secondary-/", ShowShortcuts, context, mac),
+        bind("secondary-q", Quit, None, mac),
         // Zoom, as in VS Code, everywhere in the window. ⌘+ is ⌘⇧= on most
         // keyboards; both work.
-        KeyBinding::new(ph_ui::keys("secondary-="), ZoomIn, None),
-        KeyBinding::new(ph_ui::keys("secondary-+"), ZoomIn, None),
-        KeyBinding::new(ph_ui::keys("secondary-shift-="), ZoomIn, None),
-        KeyBinding::new(ph_ui::keys("secondary--"), ZoomOut, None),
-        KeyBinding::new(ph_ui::keys("secondary-0"), ResetZoom, None),
-        KeyBinding::new(ph_ui::keys("ctrl-tab"), PreviousWorkspace, context),
+        bind("secondary-=", ZoomIn, None, mac),
+        bind("secondary-+", ZoomIn, None, mac),
+        bind("secondary-shift-=", ZoomIn, None, mac),
+        bind("secondary--", ZoomOut, None, mac),
+        bind("secondary-0", ResetZoom, None, mac),
+        bind("ctrl-tab", PreviousWorkspace, context, mac),
         // ⌘⇧A was the Agents pop-up's key; ⌘⇧E last, the one hints show.
-        KeyBinding::new(
-            ph_ui::keys("secondary-shift-a"),
-            ShowWorkspacesView,
-            context,
-        ),
-        KeyBinding::new(
-            ph_ui::keys("secondary-shift-e"),
-            ShowWorkspacesView,
-            context,
-        ),
-        KeyBinding::new(ph_ui::keys("secondary-shift-d"), ShowChatsView, context),
-        KeyBinding::new(ph_ui::keys("secondary-shift-g"), ShowGitHubView, context),
-    ]);
+        bind("secondary-shift-a", ShowWorkspacesView, context, mac),
+        bind("secondary-shift-e", ShowWorkspacesView, context, mac),
+        bind("secondary-shift-d", ShowChatsView, context, mac),
+        bind("secondary-shift-g", ShowGitHubView, context, mac),
+    ];
     // ⌘/Ctrl+digits show tools, so workspaces take the other modifier.
-    const KEYS: [&str; 9] = if cfg!(target_os = "macos") {
+    let keys: [&'static str; 9] = if mac {
         [
             "ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4", "ctrl-5", "ctrl-6", "ctrl-7", "ctrl-8",
             "ctrl-9",
@@ -196,11 +240,16 @@ pub(crate) fn bind_keys(cx: &mut App) {
             "alt-1", "alt-2", "alt-3", "alt-4", "alt-5", "alt-6", "alt-7", "alt-8", "alt-9",
         ]
     };
-    cx.bind_keys(
-        KEYS.iter()
+    bindings.extend(
+        keys.into_iter()
             .enumerate()
-            .map(|(index, keys)| KeyBinding::new(keys, SwitchToWorkspace { index }, context)),
+            .map(|(index, keys)| bind(keys, SwitchToWorkspace { index }, context, mac)),
     );
+    bindings
+}
+
+pub(crate) fn bind_keys(cx: &mut App) {
+    cx.bind_keys(bindings(cfg!(target_os = "macos")));
     cx.on_action(|_: &Quit, cx| {
         // Studio's unsaved work is saved, or asked about, first; once the
         // window the key came from is free to ask.
@@ -223,5 +272,90 @@ pub(crate) fn bind_keys(cx: &mut App) {
             ph_theme::ChatWidth::Wide => cx.on_action(move |_: &ChatWidthWide, cx| set(cx)),
             ph_theme::ChatWidth::Full => cx.on_action(move |_: &ChatWidthFull, cx| set(cx)),
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::{KeyContext, Keystroke};
+
+    use super::*;
+
+    /// Whether `keys` runs `action` with the keyboard in `stack` (the key
+    /// contexts from the window's root to what has the keyboard).
+    fn acts(
+        bindings: &[KeyBinding],
+        keys: &'static str,
+        action: &dyn Action,
+        stack: &[&'static str],
+    ) -> bool {
+        let typed = [Keystroke::parse(keys).unwrap()];
+        let stack: Vec<KeyContext> = stack
+            .iter()
+            .map(|context| KeyContext::parse(context).unwrap())
+            .collect();
+        bindings.iter().any(|binding| {
+            binding.match_keystrokes(&typed) == Some(false)
+                && binding.action().partial_eq(action)
+                && binding
+                    .predicate()
+                    .is_none_or(|predicate| predicate.depth_of(&stack).is_some())
+        })
+    }
+
+    #[test]
+    fn a_terminal_keeps_the_ctrl_keys_a_shell_reads() {
+        let bindings = bindings(false);
+        let workspace = ["Root", "Workspace"];
+        let terminal = ["Root", "Workspace", "Terminal"];
+        let file = ["Root"];
+        for (keys, action) in [
+            ("ctrl-k", &ToggleCommandPalette as &dyn Action),
+            ("ctrl-b", &ToggleSidebar),
+            ("ctrl-j", &ToggleTerminal),
+            ("ctrl-n", &NewSession),
+            ("ctrl-o", &AddProject),
+            ("ctrl-1", &ShowFiles),
+            ("ctrl--", &ZoomOut),
+        ] {
+            assert!(acts(&bindings, keys, action, &workspace), "{keys}");
+            assert!(!acts(&bindings, keys, action, &terminal), "{keys}");
+        }
+        // Quit works in any window, but not from a terminal.
+        assert!(acts(&bindings, "ctrl-q", &Quit, &file));
+        assert!(!acts(&bindings, "ctrl-q", &Quit, &terminal));
+        // What a shell does not read still works there.
+        assert!(acts(&bindings, "ctrl-`", &ToggleTerminal, &terminal));
+        assert!(acts(&bindings, "ctrl-tab", &PreviousWorkspace, &terminal));
+        assert!(acts(
+            &bindings,
+            "ctrl-shift-p",
+            &ToggleCommandPalette,
+            &terminal
+        ));
+        assert!(acts(
+            &bindings,
+            "alt-2",
+            &SwitchToWorkspace { index: 1 },
+            &terminal
+        ));
+    }
+
+    #[test]
+    fn on_a_mac_the_terminal_leaves_the_command_keys_alone() {
+        let bindings = bindings(true);
+        let terminal = ["Root", "Workspace", "Terminal"];
+        assert!(acts(&bindings, "cmd-k", &ToggleCommandPalette, &terminal));
+        assert!(acts(&bindings, "cmd-q", &Quit, &terminal));
+        assert!(acts(&bindings, "cmd-j", &ToggleTerminal, &terminal));
+        assert!(acts(
+            &bindings,
+            "ctrl-2",
+            &SwitchToWorkspace { index: 1 },
+            &terminal
+        ));
+        assert_eq!(context_for("cmd-w", None, true), None);
+        assert_eq!(context_for("ctrl-w", None, false), Some(OUTSIDE_TERMINAL));
+        assert_eq!(context_for("ctrl-shift-w", None, false), None);
     }
 }

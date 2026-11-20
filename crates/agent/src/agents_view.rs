@@ -554,17 +554,13 @@ impl AgentsView {
     }
 }
 
-/// Arguments as text to edit: one that has spaces in quotes.
+/// Arguments as text to edit, each written so that Save reads it back as
+/// it is: one with spaces or quote characters in quotes
+/// ([`profiles::quoted`]).
 fn arguments_text(arguments: &[String]) -> String {
     arguments
         .iter()
-        .map(|argument| {
-            if argument.is_empty() || argument.contains(char::is_whitespace) {
-                format!("\"{argument}\"")
-            } else {
-                argument.clone()
-            }
-        })
+        .map(|argument| profiles::quoted(argument))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -648,5 +644,15 @@ mod tests {
         let text = arguments_text(&arguments);
         assert_eq!(text, "--model opus \"be brief\"");
         assert_eq!(profiles::words(&text), arguments);
+        // Opening an agent's settings and saving them changes nothing, also
+        // for an argument that holds quote characters, or is empty.
+        let quoting = vec![
+            "--append-system-prompt".to_string(),
+            "say \"hi\" now".to_string(),
+            r#"{"x":"y"}"#.to_string(),
+            r#"it's "both""#.to_string(),
+            String::new(),
+        ];
+        assert_eq!(profiles::words(&arguments_text(&quoting)), quoting);
     }
 }

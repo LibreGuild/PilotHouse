@@ -128,9 +128,14 @@ pub fn lines_pending(root: &Path) -> usize {
     let new: usize = new
         .split('\0')
         .filter(|path| !path.is_empty())
-        .filter_map(|path| std::fs::read(root.join(path)).ok())
+        .map(|path| root.join(path))
+        // Too much to be something written by hand: asked of the file
+        // system, not found out by reading it all (a build's output or a
+        // database left untracked can be gigabytes).
+        .filter(|file| std::fs::metadata(file).is_ok_and(|file| file.len() < 2_000_000))
+        .filter_map(|file| std::fs::read(file).ok())
         // Not text: nothing a reader goes through line by line.
-        .filter(|bytes| bytes.len() < 2_000_000 && !bytes.iter().take(8_000).any(|b| *b == 0))
+        .filter(|bytes| !bytes.iter().take(8_000).any(|b| *b == 0))
         .map(|bytes| bytes.iter().filter(|b| **b == b'\n').count())
         .sum();
     tracked + new
@@ -233,13 +238,19 @@ pub fn changed_lines(root: &Path, commit: Option<&str>) -> Result<Vec<(String, V
     if commit.is_none() {
         let new = git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
         for path in new.split('\0').filter(|path| !path.is_empty()) {
-            let Ok(text) = std::fs::read_to_string(root.join(path)) else {
+            use std::io::BufRead as _;
+            let Ok(file) = std::fs::File::open(root.join(path)) else {
                 continue;
             };
-            changed.push((
-                path.to_string(),
-                text.lines().take(LINES).map(str::to_string).collect(),
-            ));
+            // Its first lines are all that is told: the rest is not read
+            // for it (a new file can be a log of any size). One that is
+            // not text is passed over, as before.
+            let lines: std::io::Result<Vec<String>> =
+                std::io::BufReader::new(file).lines().take(LINES).collect();
+            let Ok(lines) = lines else {
+                continue;
+            };
+            changed.push((path.to_string(), lines));
         }
     }
     Ok(changed)
@@ -496,6 +507,24 @@ mod tests {
         // The first commit has no parent: everything in it is its own.
         let first = git(&root, &["rev-list", "--max-parents=0", "HEAD"]).unwrap();
         assert_eq!(of_commit(&root, first.trim()).unwrap().len(), 1);
+    }
+
+    /// More paths than the pipes hold both ways: `hash-object` answers as
+    /// it reads, so the paths must go in while its answers are read.
+    #[test]
+    fn thousands_of_new_files_are_all_written_down() {
+        let root = temp_repo("content-many");
+        let folder = root.join("generated");
+        std::fs::create_dir_all(&folder).unwrap();
+        let count = 4000;
+        for n in 0..count {
+            let name = format!("{n:0>4}-a-file-name-long-enough-to-fill-the-pipe-quickly.txt");
+            std::fs::write(folder.join(name), n.to_string()).unwrap();
+        }
+        let content = pending(&root).unwrap();
+        assert_eq!(content.len(), count);
+        assert!(content.iter().all(|(_, id)| id.len() == 40 && id != GONE));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

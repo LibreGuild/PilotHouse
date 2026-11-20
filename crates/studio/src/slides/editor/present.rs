@@ -735,8 +735,11 @@ impl Render for Audience {
         let base_step = playing.as_ref().map_or(step, |(build, _, _)| *build);
         let picture = show.update(cx, |show, cx| {
             let picture = show.picture_at(0, base_step, cx);
+            // The small picture of the next slide is the presenter's to
+            // ask for: asked for here at another width, each window would
+            // find the other's out of date and have it made again, for
+            // as long as the slide is shown.
             show.prepare(cx);
-            let _ = show.next_picture(320, cx);
             picture
         });
         if let Some(picture) = &picture {

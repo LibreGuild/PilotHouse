@@ -49,6 +49,11 @@ const QUIET_AFTER: i64 = 7 * 24 * 60 * 60 * 1000;
 /// Cards a column lists before *Show all*.
 const SHOWN: usize = 12;
 
+/// How long the cards built for a draw are drawn again as they are. A card
+/// at work animates, and with it the window draws every frame: building
+/// every card of every stored chat each time cost milliseconds a frame.
+const CARDS_KEPT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// What the Bridge shows, kept while the window lives.
 #[derive(Default)]
 pub(crate) struct BridgeState {
@@ -56,6 +61,30 @@ pub(crate) struct BridgeState {
     pub filter: Option<ProjectId>,
     /// The columns listing every card of theirs.
     pub all: HashSet<&'static str>,
+    /// The cards as last built, by column.
+    built: Option<Built>,
+    /// Draws once the cards built are too old, so what changed without
+    /// telling the window still shows.
+    refresh: Option<gpui_kit::Task<()>>,
+}
+
+impl BridgeState {
+    /// What the cards come from changed: they are built again at the next
+    /// draw, not up to a second later.
+    pub(crate) fn changed(&mut self) {
+        self.built = None;
+    }
+}
+
+/// The cards of one draw, kept for the next ones.
+struct Built {
+    at: std::time::Instant,
+    dark: bool,
+    filter: Option<ProjectId>,
+    /// There is a card at all (whichever the filter).
+    any: bool,
+    /// The cards shown, in the order of [`Column::ALL`], each column sorted.
+    columns: std::rc::Rc<[Vec<Card>]>,
 }
 
 /// What a card opens.
@@ -566,25 +595,87 @@ pub(crate) fn unseen(workspace: &Workspace) -> usize {
         .sum()
 }
 
+/// The cards the Bridge shows by column (narrowed to `filter`), and whether
+/// there is any card at all: as built for an earlier draw when that is
+/// recent and nothing it comes from was said to change, else built now.
+fn built_columns(
+    workspace: &mut Workspace,
+    filter: Option<ProjectId>,
+    cx: &mut Context<Workspace>,
+) -> (bool, std::rc::Rc<[Vec<Card>]>) {
+    let dark = cx.theme().is_dark();
+    let state = workspace.bridge_mut();
+    if let Some(built) = &state.built
+        && built.dark == dark
+        && built.filter == filter
+        && built.at.elapsed() < CARDS_KEPT
+    {
+        let kept = (built.any, built.columns.clone());
+        // Whatever changed without a word shows when they are too old,
+        // also when nothing else draws the window by then.
+        if state.refresh.is_none() {
+            let wait = CARDS_KEPT.saturating_sub(built.at.elapsed());
+            state.refresh = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                _ = this.update(cx, |this, cx| {
+                    this.bridge_mut().refresh = None;
+                    cx.notify();
+                });
+            }));
+        }
+        return kept;
+    }
+    let now = jiff::Timestamp::now().as_millisecond();
+    let all = cards(workspace, false, cx);
+    let any = !all.is_empty();
+    let mut columns: Vec<Vec<Card>> = Column::ALL.iter().map(|_| Vec::new()).collect();
+    for card in all {
+        if filter.is_some_and(|id| card.project != id || card.github) {
+            continue;
+        }
+        let at = Column::ALL
+            .iter()
+            .position(|column| *column == Column::of(&card, now))
+            .unwrap_or_default();
+        columns[at].push(card);
+    }
+    for cards in &mut columns {
+        // What was not looked at yet leads the review column; pinned tasks
+        // lead theirs.
+        cards.sort_by_key(|card| {
+            (
+                !card.pinned,
+                card.summary.state != ChatState::Done,
+                std::cmp::Reverse(card.updated_at),
+            )
+        });
+    }
+    let columns: std::rc::Rc<[Vec<Card>]> = columns.into();
+    workspace.bridge_mut().built = Some(Built {
+        at: std::time::Instant::now(),
+        dark,
+        filter,
+        any,
+        columns: columns.clone(),
+    });
+    (any, columns)
+}
+
 /// The Bridge, filling the window between the column of icons and its
 /// right edge.
 pub(crate) fn render(
-    workspace: &Workspace,
+    workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let entity = cx.entity().downgrade();
+    let filter = workspace
+        .bridge()
+        .filter
+        .filter(|id| workspace.has_project(*id));
+    let (any, built) = built_columns(workspace, filter, cx);
+    let workspace = &*workspace;
     let state = workspace.bridge();
-    let now = jiff::Timestamp::now().as_millisecond();
-    let all = cards(workspace, false, cx);
-    let filter = state.filter.filter(|id| workspace.has_project(*id));
-    let shown: Vec<&Card> = all
-        .iter()
-        .filter(|card| match filter {
-            Some(id) => card.project == id && !card.github,
-            None => true,
-        })
-        .collect();
     // Two columns in a narrow window, one in a very narrow one: four cards
     // side by side need the room.
     let (width, probe) = ph_ui::measure::width_of("bridge-width", window, cx);
@@ -595,7 +686,7 @@ pub(crate) fn render(
         _ => 4,
     };
 
-    let nothing = workspace.projects().is_empty() && all.is_empty();
+    let nothing = workspace.projects().is_empty() && !any;
     let body = if nothing {
         welcome(window, cx).into_any_element()
     } else {
@@ -609,34 +700,26 @@ pub(crate) fn render(
             // Side by side each column scrolls alone; stacked, they scroll
             // as one.
             .when(columns < 4, |this| this.overflow_y_scroll())
-            .children(Column::ALL.into_iter().map(|column| {
-                let mut cards: Vec<&Card> = shown
-                    .iter()
-                    .copied()
-                    .filter(|card| Column::of(card, now) == column)
-                    .collect();
-                // What was not looked at yet leads the review column;
-                // pinned tasks lead theirs.
-                cards.sort_by_key(|card| {
-                    (
-                        !card.pinned,
-                        card.summary.state != ChatState::Done,
-                        std::cmp::Reverse(card.updated_at),
-                    )
-                });
-                let reviews = (column == Column::Review && filter.is_none())
-                    .then(|| reviews_card(workspace, &entity, cx))
-                    .flatten();
-                column_view(
-                    column,
-                    cards,
-                    reviews,
-                    state.all.contains(column.key()),
-                    columns == 4,
-                    &entity,
-                    cx,
-                )
-            }))
+            .children(
+                Column::ALL
+                    .into_iter()
+                    .zip(built.iter())
+                    .map(|(column, cards)| {
+                        let cards: Vec<&Card> = cards.iter().collect();
+                        let reviews = (column == Column::Review && filter.is_none())
+                            .then(|| reviews_card(workspace, &entity, cx))
+                            .flatten();
+                        column_view(
+                            column,
+                            cards,
+                            reviews,
+                            state.all.contains(column.key()),
+                            columns == 4,
+                            &entity,
+                            cx,
+                        )
+                    }),
+            )
             .into_any_element()
     };
 
@@ -758,17 +841,13 @@ fn new_task_button(workspace: &Workspace, entity: WeakEntity<Workspace>) -> impl
         .iter()
         .map(|project| (project.id, project.name.clone()))
         .collect();
-    // Those whose task can have a branch and worktree of its own. (A file
-    // is looked for, no `git` run: this is asked while the Bridge draws.)
+    // Those whose task can have a branch and worktree of its own, as last
+    // looked: the disk is not asked while the Bridge draws (a folder on a
+    // network drive that does not answer would hold the window up).
     let repositories: Vec<(ProjectId, String)> = workspace
         .projects()
         .iter()
-        .filter(|project| {
-            project
-                .folders()
-                .iter()
-                .any(|folder| ph_git::is_repository(folder))
-        })
+        .filter(|project| workspace.is_repository(project.id))
         .map(|project| (project.id, project.name.clone()))
         .collect();
     Button::new("bridge-new-task")
@@ -1037,6 +1116,7 @@ fn card_view(
                     .children(options.into_iter().enumerate().map(|(ix, option)| {
                         let request = request.clone();
                         let id = option.id.clone();
+                        let entity = entity.clone();
                         let button =
                             Button::new(SharedString::from(format!("bridge-choose-{key}-{ix}")))
                                 .small()
@@ -1044,6 +1124,11 @@ fn card_view(
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();
                                     request.update(cx, |request, cx| request.choose(&id, cx));
+                                    // Answered: the card leaves its column now.
+                                    _ = entity.update(cx, |workspace, cx| {
+                                        workspace.bridge_mut().changed();
+                                        cx.notify();
+                                    });
                                 });
                         // What lets the agent go on stands out; the first
                         // such option most.

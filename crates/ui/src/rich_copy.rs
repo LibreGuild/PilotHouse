@@ -62,12 +62,20 @@ fn add_html(markdown: &str) {
 /// `markdown` as HTML (GitHub's flavour: tables, task lists, strikethrough);
 /// HTML written in it is shown as text, not passed on.
 pub fn html(markdown: &str) -> Option<String> {
+    // A selection of text shown plain because it nests too deeply is that
+    // text again: it is not parsed here either.
+    if crate::markdown::nests_too_deep(markdown) {
+        return None;
+    }
     markdown::to_html_with_options(markdown, &markdown::Options::gfm()).ok()
 }
 
 /// `markdown` as a reader sees it: no marks, a list's markers kept, a
 /// table's cells apart by tabs (as a spreadsheet takes them).
 pub fn plain(markdown: &str) -> String {
+    if crate::markdown::nests_too_deep(markdown) {
+        return markdown.to_string();
+    }
     let Ok(root) = markdown::to_mdast(markdown, &markdown::ParseOptions::gfm()) else {
         return markdown.to_string();
     };

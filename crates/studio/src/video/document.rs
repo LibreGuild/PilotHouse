@@ -24,6 +24,11 @@ const STILL_SIDE: u32 = 1600;
 pub const THUMB_HEIGHT: u32 = 56;
 /// New timeline pictures show at most this often.
 const THUMB_BATCH: std::time::Duration = std::time::Duration::from_millis(700);
+/// A still is begun this long after it was asked for. Scrubbing, stepping
+/// with a key held and dragging a slider ask many times a second, and a
+/// decode once begun cannot be stopped: only the request that lasts
+/// begins one.
+const STILL_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 enum State {
     Loading,
@@ -50,11 +55,20 @@ pub struct VideoDocument {
     export: VideoExport,
     /// Timeline pictures by source time (in quarter seconds).
     thumbs: HashMap<i64, Frame>,
+    /// The pictures on the timeline now, made or not, in its order.
     thumbs_wanted: Vec<i64>,
     _thumbs: Option<Task<()>>,
-    /// An exact still of the result: source time, the edit it shows, the
-    /// picture and its pixels.
-    still: Option<(f64, VideoEdit, Frame, Arc<RgbaImage>)>,
+    /// An exact still of the result: source time, the edit it shows and
+    /// the picture.
+    still: Option<(f64, VideoEdit, Frame)>,
+    /// What the still last begun is for. It is asked for on every redraw:
+    /// one under way is left to finish, and one that failed is not tried
+    /// again until the moment or the edit changes.
+    still_wanted: Option<(f64, VideoEdit)>,
+    /// The source frame the last still was made from, so that a changed
+    /// edit at the same moment (a mark moved, a slider dragged) is only
+    /// drawn over it again, not decoded again.
+    still_source: Option<(f64, Arc<RgbaImage>)>,
     _still: Option<Task<()>>,
     job: Option<Job>,
     /// The last export's outcome, for the window to tell.
@@ -78,6 +92,8 @@ impl VideoDocument {
             thumbs_wanted: Vec::new(),
             _thumbs: None,
             still: None,
+            still_wanted: None,
+            still_source: None,
             _still: None,
             job: None,
             finished: None,
@@ -89,20 +105,26 @@ impl VideoDocument {
             let info = cx
                 .background_spawn(async move { media::probe(&probe_path) })
                 .await;
-            let frames = match &info {
-                Ok(info) => {
-                    let (path, info) = (path.clone(), info.clone());
-                    cx.background_spawn(async move { media::frame_times(&path, &info) })
-                        .await
-                        .unwrap_or_default()
-                }
-                Err(_) => Vec::new(),
-            };
+            let read = info.as_ref().ok().cloned();
+            // Open as soon as it is known what the video is. The frames'
+            // times take a pass over the whole file (minutes for a long
+            // recording on a slow disk), and only stepping and numbering
+            // frames use them: they come after.
             _ = this.update(cx, |this, cx| {
                 this.state = match info {
                     Ok(info) => State::Ready(info),
                     Err(err) => State::Failed(format!("{err:#}").into()),
                 };
+                cx.notify();
+            });
+            let Some(info) = read else {
+                return;
+            };
+            let frames = cx
+                .background_spawn(async move { media::frame_times(&path, &info) })
+                .await
+                .unwrap_or_default();
+            _ = this.update(cx, |this, cx| {
                 this.frames = frames;
                 cx.notify();
             });
@@ -282,25 +304,11 @@ impl VideoDocument {
     }
 
     /// Keeps the timeline pictures to a few hundred (zooming and trimming
-    /// asks for new times): those far from the ones last wanted go, freed
-    /// on the GPU.
+    /// asks for new times): those far from the ones on the timeline now
+    /// go, freed on the GPU.
     fn trim_thumbs(&mut self, cx: &mut Context<Self>) {
         const MOST: usize = 300;
-        if self.thumbs.len() <= MOST {
-            return;
-        }
-        let wanted = &self.thumbs_wanted;
-        let distance = |key: i64| {
-            wanted
-                .iter()
-                .map(|want| (want - key).abs())
-                .min()
-                .unwrap_or(i64::MAX)
-        };
-        let mut keys: Vec<i64> = self.thumbs.keys().copied().collect();
-        keys.sort_by_key(|key| std::cmp::Reverse(distance(*key)));
-        let extra = self.thumbs.len() - MOST;
-        for key in keys.into_iter().take(extra) {
+        for key in far_thumbs(self.thumbs.keys().copied(), &self.thumbs_wanted, MOST) {
             if let Some(frame) = self.thumbs.remove(&key) {
                 ph_ui::images::release_render_image(frame.render_image(), cx);
             }
@@ -313,15 +321,26 @@ impl VideoDocument {
         let Some(info) = self.info().cloned() else {
             return;
         };
-        let keys: Vec<i64> = times
-            .iter()
-            .map(|t| (t * 4.).round() as i64)
-            .filter(|key| !self.thumbs.contains_key(key))
-            .collect();
-        if keys.is_empty() || keys == self.thumbs_wanted {
+        // In the timeline's order, so a picture asked for twice (a clip
+        // shorter than a quarter second a picture) is beside itself.
+        let mut shown: Vec<i64> = times.iter().map(|t| (t * 4.).round() as i64).collect();
+        shown.dedup();
+        // Asked on every redraw: the same pictures again start nothing.
+        // Those being made are on their way (starting over would throw
+        // away the one half decoded), and one that could not be made is
+        // not tried again and again.
+        if shown == self.thumbs_wanted {
             return;
         }
-        self.thumbs_wanted = keys.clone();
+        let keys: Vec<i64> = shown
+            .iter()
+            .copied()
+            .filter(|key| !self.thumbs.contains_key(key))
+            .collect();
+        self.thumbs_wanted = shown;
+        if keys.is_empty() {
+            return;
+        }
         let path = self.path.clone();
         self._thumbs = Some(cx.spawn(async move |this, cx| {
             // Shown in batches: a redraw per picture would keep the window
@@ -372,31 +391,56 @@ impl VideoDocument {
     pub fn still(&self, t: f64) -> Option<&Frame> {
         self.still
             .as_ref()
-            .filter(|(at, edit, ..)| (*at - t).abs() < 1e-4 && *edit == self.edit)
-            .map(|(_, _, frame, _)| frame)
+            .filter(|(at, edit, _)| (*at - t).abs() < 1e-4 && *edit == self.edit)
+            .map(|(_, _, frame)| frame)
     }
 
     /// Makes the still at source time `t` (the one asked for last wins).
     pub fn want_still(&mut self, t: f64, cx: &mut Context<Self>) {
         if self.still(t).is_some() {
+            // Back at the still there is: one under way for another
+            // moment would only take its place.
+            self._still = None;
+            self.still_wanted = None;
+            return;
+        }
+        let under_way = self
+            .still_wanted
+            .as_ref()
+            .is_some_and(|(at, edit)| (*at - t).abs() < 1e-4 && *edit == self.edit);
+        if under_way {
             return;
         }
         let Some(info) = self.info().cloned() else {
             return;
         };
         let (path, edit) = (self.path.clone(), self.edit.clone());
+        self.still_wanted = Some((t, edit.clone()));
+        let decoded = self
+            .still_source
+            .as_ref()
+            .filter(|(at, _)| (*at - t).abs() < 1e-4)
+            .map(|(_, source)| source.clone());
         self._still = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(STILL_WAIT).await;
             let made_edit = edit.clone();
             let made = cx
-                .background_spawn(async move { still(&path, &info, &edit, t) })
+                .background_spawn(async move {
+                    let source = match decoded {
+                        Some(source) => source,
+                        None => Arc::new(media::frame_at(&path, &info, t)?),
+                    };
+                    let image = still(&source, &info, &edit, t, STILL_SIDE);
+                    // The picture for the window is made here too: it is a
+                    // pass over every pixel.
+                    let frame = Frame::from_rgba(image.width(), image.height(), image.into_raw());
+                    anyhow::Ok((frame, source))
+                })
                 .await;
             _ = this.update(cx, |this, cx| {
-                if let Ok(image) = made {
-                    let frame =
-                        Frame::from_rgba_slice(image.width(), image.height(), image.as_raw());
-                    if let Some((.., old, _)) =
-                        this.still.replace((t, made_edit, frame, Arc::new(image)))
-                    {
+                if let Ok((frame, source)) = made {
+                    this.still_source = Some((t, source));
+                    if let Some((.., old)) = this.still.replace((t, made_edit, frame)) {
                         this.stale.push(old.render_image());
                     }
                     cx.notify();
@@ -418,17 +462,8 @@ impl VideoDocument {
             self.edit.clone()
         };
         cx.background_spawn(async move {
-            let image = still(&path, &info, &edit, t)?;
-            let image = if image.width().max(image.height()) > side {
-                let scale = side as f32 / image.width().max(image.height()) as f32;
-                imageops::thumbnail(
-                    &image,
-                    ((image.width() as f32 * scale) as u32).max(1),
-                    ((image.height() as f32 * scale) as u32).max(1),
-                )
-            } else {
-                image
-            };
+            let source = media::frame_at(&path, &info, t)?;
+            let image = still(&source, &info, &edit, t, side);
             let mut bytes = Vec::new();
             image::ImageEncoder::write_image(
                 image::codecs::png::PngEncoder::new(&mut bytes),
@@ -511,14 +546,65 @@ impl VideoDocument {
     }
 }
 
-/// The result's frame at source time `t`, at most [`STILL_SIDE`] a side.
-fn still(path: &Path, info: &Info, edit: &VideoEdit, t: f64) -> Result<RgbaImage> {
-    let frame = media::frame_at(path, info, t)?;
+/// The result's frame at source time `t`, made from the source's frame
+/// there, at most `side` pixels a side.
+fn still(source: &RgbaImage, info: &Info, edit: &VideoEdit, t: f64, side: u32) -> RgbaImage {
     let (width, height) = edit.output_size(info.size);
-    let scale = (STILL_SIDE as f32 / width.max(height) as f32).min(1.);
+    let scale = (side as f32 / width.max(height) as f32).min(1.);
     let target = (
         ((width as f32 * scale).round() as u32).max(1),
         ((height as f32 * scale).round() as u32).max(1),
     );
-    Ok(Composer::new(edit.clone(), info.size).frame(&frame, t, target))
+    Composer::new(edit.clone(), info.size).frame(source, t, target)
+}
+
+/// Which of the timeline pictures `made` go so that at most `most` stay:
+/// the ones farthest from those on the timeline now (`shown`), and never
+/// one of those. A picture thrown away while it shows is asked for again
+/// at the next redraw, and making it throws away another: without end.
+fn far_thumbs(made: impl Iterator<Item = i64>, shown: &[i64], most: usize) -> Vec<i64> {
+    let distance = |key: i64| {
+        shown
+            .iter()
+            .map(|want| (want - key).abs())
+            .min()
+            .unwrap_or(i64::MAX)
+    };
+    let mut keys: Vec<i64> = made.collect();
+    let extra = keys.len().saturating_sub(most);
+    keys.sort_by_key(|key| std::cmp::Reverse(distance(*key)));
+    keys.truncate(extra);
+    keys.retain(|key| distance(*key) > 0);
+    keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::far_thumbs;
+
+    #[test]
+    fn pictures_on_the_timeline_are_kept_when_old_ones_go() {
+        // Every picture on the timeline is made already, as after many
+        // cuts: the ones that go are the farthest from them, none of them.
+        let shown = [0, 100, 200, 310];
+        let mut gone = far_thumbs(0..=310, &shown, 300);
+        gone.sort_unstable();
+        assert_eq!(gone.len(), 11);
+        assert!(gone.iter().all(|key| !shown.contains(key)));
+        assert!(
+            gone.iter().all(|key| (44..=56).contains(key)
+                || (144..=156).contains(key)
+                || (249..=261).contains(key)),
+            "{gone:?}"
+        );
+        // Few enough: all stay.
+        assert!(far_thumbs(0..=299, &shown, 300).is_empty());
+        // More on the timeline than may be kept: they stay all the same.
+        assert!(far_thumbs(0..5, &[0, 1, 2, 3, 4], 3).is_empty());
+        // Pictures not made yet count as on the timeline: what is far
+        // from them goes.
+        let mut gone = far_thumbs(0..=310, &[1000], 300);
+        gone.sort_unstable();
+        assert_eq!(gone, (0..=10).collect::<Vec<i64>>());
+    }
 }

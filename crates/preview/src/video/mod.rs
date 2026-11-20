@@ -87,6 +87,9 @@ pub struct VideoPlayer {
     /// The window showing the video full screen, while it does.
     fullscreen: Option<AnyWindowHandle>,
     _tick: Option<Task<()>>,
+    /// The file being read for its engine, off the UI thread.
+    #[cfg(not(windows))]
+    _open: Option<Task<()>>,
 }
 
 impl Focusable for VideoPlayer {
@@ -109,6 +112,8 @@ impl VideoPlayer {
             focus: cx.focus_handle(),
             fullscreen: None,
             _tick: None,
+            #[cfg(not(windows))]
+            _open: None,
         };
         this.reload(window, cx);
         // Closing the tab lets the last frames' textures go.
@@ -125,8 +130,30 @@ impl VideoPlayer {
         this
     }
 
+    /// Opens the file (again, when it changed). What can take long (reading
+    /// the file's tracks, loading the system's media framework) is done off
+    /// the UI thread first; the video before, if any, stays until then.
+    #[cfg(not(windows))]
     pub fn reload(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.engine = Some(Engine::open(&self.path).map_err(Into::into));
+        let path = self.path.clone();
+        let prepare = cx.background_spawn(async move { Engine::prepare(&path) });
+        self._open = Some(cx.spawn(async move |this, cx| {
+            let prepared = prepare.await;
+            _ = this.update(cx, |this, cx| {
+                this.opened(Engine::open_prepared(prepared), cx);
+            });
+        }));
+    }
+
+    /// Opens the file (again, when it changed). Media Foundation's objects
+    /// belong to the thread that made them, so this is done here.
+    #[cfg(windows)]
+    pub fn reload(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.opened(Engine::open(&self.path), cx);
+    }
+
+    fn opened(&mut self, engine: Result<Engine, String>, cx: &mut Context<Self>) {
+        self.engine = Some(engine.map_err(Into::into));
         // The old frame's texture goes with the others.
         if let Some(Frame::Image(old)) = self.frame.take() {
             self.old_images.push(old);

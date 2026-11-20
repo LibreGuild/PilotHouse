@@ -164,6 +164,8 @@ pub struct SlidesEditor {
     /// Screen pixels the zoomed slide is moved by.
     pub(crate) pan: [f32; 2],
     pub(crate) editing: Option<Editing>,
+    /// The typing field last left for something else that took the focus.
+    pub(crate) left_field: Option<FocusHandle>,
     pub(crate) notes: Entity<TextareaState>,
     pub(crate) notes_shown: bool,
     pub(crate) rail: UniformListScrollHandle,
@@ -226,6 +228,19 @@ impl SlidesEditor {
                 }
             },
         ));
+        // A menu opened while text was being typed gives the focus back to
+        // that field when it closes. The field is gone by then (typing ended
+        // as the menu took the focus), so the editor takes the keys.
+        subscriptions.push(cx.on_focus_lost(window, |this, window, cx| {
+            if this
+                .left_field
+                .as_ref()
+                .is_some_and(|field| field.is_focused(window))
+            {
+                this.left_field = None;
+                this.focus.focus(window, cx);
+            }
+        }));
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let current_id = doc
@@ -247,6 +262,7 @@ impl SlidesEditor {
             zoom: 1.,
             pan: [0., 0.],
             editing: None,
+            left_field: None,
             notes,
             notes_shown: true,
             rail: UniformListScrollHandle::new(),
@@ -270,6 +286,12 @@ impl SlidesEditor {
 
     pub fn document(&self) -> &Entity<DeckDocument> {
         &self.doc
+    }
+
+    /// Before the window closes: text being typed in place is only in its
+    /// field until typing ends, so it ends here and is in the deck to save.
+    pub fn finish_typing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_editing(window, cx);
     }
 
     pub(crate) fn deck<'a>(&self, cx: &'a App) -> &'a Deck {
@@ -568,8 +590,8 @@ impl SlidesEditor {
             .into_iter()
             .map(|element| {
                 let mut element = element.clone();
-                element.frame.x += offset;
-                element.frame.y += offset;
+                // A group's children go with it.
+                super::ops::move_by(&mut element, offset, offset);
                 element.placeholder = None;
                 serde_json::to_value(&element).unwrap_or_default()
             })
@@ -641,8 +663,26 @@ impl SlidesEditor {
                         .iter()
                         .any(|o| (o.0 - at.0).abs() < 0.5 && (o.1 - at.1).abs() < 0.5)
                     {
-                        element["frame"]["x"] = json!(at.0 + 12.);
-                        element["frame"]["y"] = json!(at.1 + 12.);
+                        // A group's children are placed on the slide: they
+                        // move with it.
+                        let group = (element["kind"]["type"] == "group")
+                            .then(|| serde_json::from_value::<Element>(element.clone()).ok())
+                            .flatten();
+                        if let Some(mut group) = group {
+                            super::ops::move_by(&mut group, 12., 12.);
+                            if let Ok(moved) = serde_json::to_value(&group) {
+                                *element = moved;
+                            }
+                        } else if let Some(frame) = element
+                            .get_mut("frame")
+                            .and_then(serde_json::Value::as_object_mut)
+                        {
+                            // Only what has a frame: the clipboard can hold
+                            // any JSON list, and writing into an item that
+                            // is no object would end the app.
+                            frame.insert("x".into(), json!(at.0 + 12.));
+                            frame.insert("y".into(), json!(at.1 + 12.));
+                        }
                     }
                 }
                 self.paste_elements(elements, window, cx);
@@ -826,10 +866,7 @@ impl SlidesEditor {
         }
         self.change_selected(
             "nudge",
-            move |element| {
-                element.frame.x += dx;
-                element.frame.y += dy;
-            },
+            move |element| super::ops::move_by(element, dx, dy),
             cx,
         );
     }

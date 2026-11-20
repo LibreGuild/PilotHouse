@@ -188,7 +188,11 @@ impl AndroidRun {
         }
         let manager = self.manager.read(cx);
         let Some(adb) = manager.adb().cloned() else {
-            self.stage = Stage::Failed("The Android SDK was not found.".into());
+            self.stage = Stage::Failed(if manager.looking_for_sdk() {
+                "Still looking for the Android SDK; try again in a moment.".into()
+            } else {
+                "The Android SDK was not found.".into()
+            });
             cx.notify();
             return;
         };

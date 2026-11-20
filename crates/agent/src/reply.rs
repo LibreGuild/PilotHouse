@@ -124,6 +124,9 @@ impl Reply {
             .unwrap_or(self.text.len());
         let fence_near = self.text[tail_from..].contains('`') || chunk.contains('`');
         if !fence_near
+            // (Text that would nest too deeply is built again, as plain
+            // text.)
+            && !ph_ui::markdown::deepens(&self.text, chunk)
             && self.parts.len() == 1
             && let Some(Part::Markdown { text, view, breaks }) = self.parts.last_mut()
             // (The one part is all of it: same length is enough to know.)
@@ -164,7 +167,15 @@ impl Reply {
                     }
                     _ => false,
                 });
-        if same_shape {
+        // Markdown nested too deeply to parse is never added to a view:
+        // the reply is built again below, that part as plain text.
+        let deepens = matches!(
+            (wanted.last(), self.parts.last()),
+            (Some(Piece::Markdown(new)), Some(Part::Markdown { text, .. }))
+                if new.starts_with(text.as_str())
+                    && ph_ui::markdown::deepens(text, &new[text.len()..])
+        );
+        if same_shape && !deepens {
             if let (Some(Piece::Markdown(new)), Some(Part::Markdown { text, view, breaks })) =
                 (wanted.last(), self.parts.last_mut())
                 && new.len() > text.len()
@@ -194,7 +205,7 @@ impl Reply {
                 Piece::Markdown(text) => {
                     let mut breaks = ph_ui::markdown::LineBreaks::default();
                     let mut shown = String::with_capacity(text.len() + text.len() / 16);
-                    breaks.push(&text, &mut shown);
+                    breaks.push(&ph_ui::markdown::guarded(&text), &mut shown);
                     let view = cx.new(|cx| TextViewState::markdown(&shown, cx));
                     Part::Markdown { text, view, breaks }
                 }

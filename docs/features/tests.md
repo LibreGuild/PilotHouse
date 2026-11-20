@@ -24,7 +24,7 @@ For that turn the agent may use PilotHouse's own app tools without asking (by th
 
 ## How it looks
 
-Each step's screenshot is compared with the **baseline** for that size or device (`visual.rs`). **Save as baseline** (after a run whose steps worked) keeps its screens; later runs mark a step **looks different** when more than 1% of its pixels changed, and the run fails. Click the step to see the screen and the changes in red; **Accept new look** makes the new screens the baseline. Baselines live per machine in `<data dir>/test-baselines/<workspace>/<test>/<size or device>/`, not in the project, because fonts and rendering differ between machines.
+Each step's screenshot is compared with the **baseline** for that size or device (`visual.rs`). **Save as baseline** (after a run whose steps worked) keeps its screens; later runs mark a step **looks different** when more than 1% of its pixels changed, and the run fails. Click the step to see the screen and the changes in red; **Accept new look** makes the new screens the baseline. Baselines live per machine in `<data dir>/test-baselines/<workspace>/<test>/<size or device>/`, not in the project, because fonts and rendering differ between machines. The newest 20 runs of a test are kept; removing a workspace deletes its runs and baselines.
 
 ## When it breaks
 

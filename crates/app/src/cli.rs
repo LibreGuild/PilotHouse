@@ -90,22 +90,54 @@ fn open(args: &[String]) -> Launch {
 /// the database and run every schedule twice. With none running, this
 /// launch becomes the app.
 fn hand_over(paths: Vec<PathBuf>) -> Launch {
-    let Ok(mut client) = ControlClient::connect(&paths::control_socket_path()) else {
+    let Ok(client) = ControlClient::connect(&paths::control_socket_path()) else {
         return Launch::App(paths);
     };
+    Launch::Exit(open_in(client, &paths))
+}
+
+/// Asks the running app to open `paths`; the exit code.
+fn open_in(mut client: ControlClient, paths: &[PathBuf]) -> i32 {
     let listed: Vec<String> = paths
         .iter()
         .map(|path| path.to_string_lossy().into_owned())
         .collect();
     match client.call("app.open", serde_json::json!({ "paths": listed })) {
-        Ok(_) => Launch::Exit(0),
+        Ok(_) => 0,
         Err(err) => {
             eprintln!(
                 "{} is running but could not open that: {err:#}",
                 ph_brand::NAME
             );
-            Launch::Exit(1)
+            1
         }
+    }
+}
+
+/// Another launch on this data folder is the app, still starting: once it
+/// answers, it gets what this launch was for (as [`hand_over`] and
+/// [`quick_chat`] give it), and this one exits with the returned code.
+pub fn hand_over_once_started(paths: &[PathBuf], quick_chat: bool) -> i32 {
+    // Its endpoint opens at the end of its start-up, after its first window.
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+    let started = std::time::Instant::now();
+    let endpoint = paths::control_socket_path();
+    loop {
+        if let Ok(client) = ControlClient::connect(&endpoint) {
+            return if quick_chat {
+                quick_chat_in(client)
+            } else {
+                open_in(client, paths)
+            };
+        }
+        if started.elapsed() > WAIT {
+            eprintln!(
+                "{} is starting with this data folder but does not answer yet; try again in a moment",
+                ph_brand::NAME
+            );
+            return 1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
@@ -114,14 +146,19 @@ fn hand_over(paths: Vec<PathBuf>) -> Launch {
 /// with the window open. For a shortcut set in the system's keyboard
 /// settings, which is the only kind there is on Wayland.
 fn quick_chat() -> Launch {
-    let Ok(mut client) = ControlClient::connect(&paths::control_socket_path()) else {
+    let Ok(client) = ControlClient::connect(&paths::control_socket_path()) else {
         return Launch::QuickChat;
     };
+    Launch::Exit(quick_chat_in(client))
+}
+
+/// Asks the running app to show (or hide) its quick chat; the exit code.
+fn quick_chat_in(mut client: ControlClient) -> i32 {
     match client.call("app.quick_chat", serde_json::json!({})) {
-        Ok(_) => Launch::Exit(0),
+        Ok(_) => 0,
         Err(err) => {
             eprintln!("{} could not show the quick chat: {err:#}", ph_brand::NAME);
-            Launch::Exit(1)
+            1
         }
     }
 }

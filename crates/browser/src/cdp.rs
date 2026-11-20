@@ -13,7 +13,7 @@
 //! browser; page commands carry the page's `sessionId` (see
 //! [`Cdp::for_session`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,14 @@ pub type Sink = Arc<dyn Fn(String) -> std::io::Result<()> + Send + Sync>;
 
 /// The longest a command may take.
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Most events kept for the UI thread to take. A page that logs in a tight
+/// loop sends tens of thousands a second; past this, the oldest console and
+/// network events go, so memory stays bounded and the reader never waits.
+const MAX_WAITING: usize = 4096;
+/// Most events handed over at once: the UI thread then gets to draw and
+/// answer the user before it takes more.
+const BATCH: usize = 256;
 
 /// A DevTools event: `Page.loadEventFired`, `Runtime.consoleAPICalled`…
 #[derive(Debug, Clone)]
@@ -47,10 +55,103 @@ pub struct Cdp {
 }
 
 /// Where a transport delivers what the browser sends: answers go to the
-/// calls waiting for them, events to the event channel.
+/// calls waiting for them, events to the event queue.
 pub struct CdpInbox {
     replies: Replies,
-    events: smol::channel::Sender<CdpEvent>,
+    events: Arc<EventQueue>,
+}
+
+#[derive(Default)]
+struct Waiting {
+    events: VecDeque<CdpEvent>,
+    /// Console and network events let go since the last batch.
+    dropped: usize,
+    closed: bool,
+}
+
+struct EventQueue {
+    waiting: Mutex<Waiting>,
+    /// Holds at most one wake-up: any number of events is one batch to take.
+    wake: smol::channel::Sender<()>,
+}
+
+/// Only what is shown in the logs: losing one under a flood loses a line,
+/// not the state of a page, a dialog or a request someone waits on.
+fn droppable(event: &CdpEvent) -> bool {
+    event.method.starts_with("Network.")
+        || matches!(
+            event.method.as_str(),
+            "Runtime.consoleAPICalled" | "Runtime.exceptionThrown" | "Log.entryAdded"
+        )
+}
+
+impl EventQueue {
+    /// Never waits: it runs on the UI thread for the extension's link.
+    fn push(&self, event: CdpEvent) -> bool {
+        if self.wake.receiver_count() == 0 {
+            return false;
+        }
+        let mut waiting = self.waiting.lock().expect("cdp events");
+        if waiting.closed {
+            return false;
+        }
+        if waiting.events.len() >= MAX_WAITING
+            && let Some(index) = waiting.events.iter().position(droppable)
+        {
+            waiting.events.remove(index);
+            waiting.dropped += 1;
+        }
+        waiting.events.push_back(event);
+        drop(waiting);
+        let _ = self.wake.try_send(());
+        true
+    }
+
+    fn close(&self) {
+        self.waiting.lock().expect("cdp events").closed = true;
+        self.wake.close();
+    }
+}
+
+/// A connection's events, for one reader to take in batches.
+pub struct CdpEvents {
+    queue: Arc<EventQueue>,
+    woken: smol::channel::Receiver<()>,
+}
+
+/// Events taken at once, and how many console and network events were let
+/// go before them because they came faster than they were taken.
+pub struct CdpBatch {
+    pub events: Vec<CdpEvent>,
+    pub dropped: usize,
+}
+
+impl CdpEvents {
+    /// The next events (at most [`BATCH`]); `None` once the connection
+    /// closed and everything it sent was taken.
+    pub async fn next_batch(&self) -> Option<CdpBatch> {
+        loop {
+            {
+                let mut waiting = self.queue.waiting.lock().expect("cdp events");
+                if !waiting.events.is_empty() || waiting.dropped > 0 {
+                    let take = waiting.events.len().min(BATCH);
+                    return Some(CdpBatch {
+                        events: waiting.events.drain(..take).collect(),
+                        dropped: std::mem::take(&mut waiting.dropped),
+                    });
+                }
+                if waiting.closed {
+                    return None;
+                }
+            }
+            if self.woken.recv().await.is_err() {
+                let waiting = self.queue.waiting.lock().expect("cdp events");
+                if waiting.events.is_empty() {
+                    return None;
+                }
+            }
+        }
+    }
 }
 
 impl CdpInbox {
@@ -84,16 +185,22 @@ impl CdpInbox {
                 .and_then(Value::as_str)
                 .map(str::to_string),
         };
-        self.events.send_blocking(event).is_ok()
+        self.events.push(event)
     }
 
     /// The transport closed: everything still waiting fails, so callers do
-    /// not hang, and the event channel ends.
+    /// not hang, and the events end once taken.
     pub fn close(&self) {
         for (_, reply) in self.replies.lock().expect("cdp replies").drain() {
             let _ = reply.try_send(Err(anyhow!("the browser closed")));
         }
         self.events.close();
+    }
+}
+
+impl Drop for CdpInbox {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -103,7 +210,7 @@ impl Cdp {
     pub fn connect(
         reader: std::io::PipeReader,
         writer: std::io::PipeWriter,
-    ) -> Result<(Self, smol::channel::Receiver<CdpEvent>)> {
+    ) -> Result<(Self, CdpEvents)> {
         let writer = Mutex::new(writer);
         let sink: Sink = Arc::new(move |text: String| {
             let mut bytes = text.into_bytes();
@@ -122,9 +229,17 @@ impl Cdp {
 
     /// A client that sends through `sink`; the transport delivers what comes
     /// back to the returned inbox.
-    pub fn with_sink(sink: Sink) -> (Self, CdpInbox, smol::channel::Receiver<CdpEvent>) {
+    pub fn with_sink(sink: Sink) -> (Self, CdpInbox, CdpEvents) {
         let replies: Replies = Arc::default();
-        let (events, receiver) = smol::channel::unbounded();
+        let (wake, woken) = smol::channel::bounded(1);
+        let events = Arc::new(EventQueue {
+            waiting: Mutex::default(),
+            wake,
+        });
+        let receiver = CdpEvents {
+            queue: events.clone(),
+            woken,
+        };
         (
             Self {
                 sink,
@@ -265,7 +380,8 @@ mod tests {
                 json!({ "method": "Page.loadEventFired", "params": {}, "sessionId": "42" })
             )
         );
-        let event = smol::block_on(events.recv()).unwrap();
+        let batch = smol::block_on(events.next_batch()).unwrap();
+        let event = &batch.events[0];
         assert_eq!(
             (event.method.as_str(), event.session.as_deref()),
             ("Page.loadEventFired", Some("42"))
@@ -280,5 +396,30 @@ mod tests {
         }
         inbox.close();
         assert!(smol::block_on(waiting).is_err());
+    }
+
+    #[test]
+    fn a_flood_of_console_events_keeps_the_rest_and_counts_what_it_left_out() {
+        let sink: Sink = Arc::new(|_| Ok(()));
+        let (_cdp, inbox, events) = Cdp::with_sink(sink);
+        let console = || json!({ "method": "Runtime.consoleAPICalled", "params": {} });
+        assert!(inbox.deliver(json!({ "method": "Page.loadEventFired", "params": {} })));
+        for _ in 0..MAX_WAITING + 100 {
+            assert!(inbox.deliver(console()));
+        }
+        let mut taken = Vec::new();
+        let mut dropped = 0;
+        let first = smol::block_on(events.next_batch()).unwrap();
+        assert!(first.events.len() <= BATCH);
+        dropped += first.dropped;
+        taken.extend(first.events);
+        inbox.close();
+        while let Some(batch) = smol::block_on(events.next_batch()) {
+            dropped += batch.dropped;
+            taken.extend(batch.events);
+        }
+        assert_eq!(taken[0].method, "Page.loadEventFired");
+        assert_eq!(taken.len(), MAX_WAITING);
+        assert_eq!(dropped, 101);
     }
 }

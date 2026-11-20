@@ -12,6 +12,10 @@ use ::markdown::mdast::Node;
 /// The Markdown in `source` that `copied` (text copied from its formatted
 /// view) shows, or `None` when it is not found or has no formatting.
 pub fn as_markdown(source: &str, copied: &str) -> Option<String> {
+    // (A document nested too deeply to parse is shown plain, and copied so.)
+    if ph_ui::markdown::nests_too_deep(source) {
+        return None;
+    }
     let tree = ::markdown::to_mdast(source, &::markdown::ParseOptions::gfm()).ok()?;
     let mut shown = Shown::default();
     shown.walk(&tree, source);
@@ -121,7 +125,8 @@ impl Shown {
             let last = shown.iter().flatten().last().copied();
             if let (Some(first), Some(last)) = (first, last) {
                 // `last` is the start of the last character: to its end.
-                let end = last + source[last..].chars().next().map_or(0, char::len_utf8);
+                let ch = source.get(last..).and_then(|rest| rest.chars().next());
+                let end = last + ch.map_or(0, char::len_utf8);
                 self.blocks.push(Block {
                     start,
                     first,
@@ -151,7 +156,17 @@ impl Shown {
             self.chars.push(ch);
             self.at.push(Some(match base {
                 Some(base) => base + offset,
-                None => start + (offset * (end - start)) / value.len().max(1),
+                None => {
+                    // A guess (the text is not there as it is: an escape, a
+                    // quote's `> ` on a second line), which may fall inside
+                    // a character of several bytes: back to its start, as
+                    // the source is cut at these.
+                    let mut at = start + (offset * (end - start)) / value.len().max(1);
+                    while !source.is_char_boundary(at) {
+                        at -= 1;
+                    }
+                    at
+                }
             }));
         }
     }
@@ -264,5 +279,29 @@ mod tests {
         assert!(table.ends_with("| Tea  | 3     |"), "{table}");
         // Not from this document: left as copied.
         assert_eq!(as_markdown(DOC, "something else"), None);
+    }
+
+    #[test]
+    fn text_not_found_as_it_is_never_cuts_a_character() {
+        // A second line in a quote or a list item is not in the source as
+        // shown (`> `, the indent), so its characters' places are guessed:
+        // a guess inside `é` once ended the app.
+        for source in [
+            "> a\n> é.",
+            "- a\n  é.",
+            "- 一二\n  三四。",
+            "# caf\\_é &amp; Straße",
+        ] {
+            let mut shown = Shown::default();
+            let tree = ::markdown::to_mdast(source, &::markdown::ParseOptions::gfm()).unwrap();
+            shown.walk(&tree, source);
+            for at in shown.at.iter().flatten() {
+                assert!(source.is_char_boundary(*at), "{source:?} at {at}");
+            }
+            // All of it copied, and a part: Markdown or the text as it was.
+            let all: String = shown.chars.iter().collect();
+            _ = as_markdown(source, &all);
+            _ = as_markdown(source, "a");
+        }
     }
 }

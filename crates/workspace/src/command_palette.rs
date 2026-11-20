@@ -29,6 +29,8 @@ enum Run {
     Action(Box<dyn Action>),
     OpenProject(ProjectId),
     OpenChat(ProjectId, ph_store::sessions::SessionId),
+    /// A review's chat, shown in Reviews (its repository is no workspace).
+    OpenReview(ph_store::sessions::SessionId),
     /// Start an agent CLI without a chat in a terminal.
     /// Open the Utilities dialog at one utility.
     Utility(&'static str),
@@ -94,7 +96,11 @@ fn chats(workspace: &Workspace, cx: &App) -> Vec<Entry> {
             label: format!("{} · {} · {state}", card.title, card.place).into(),
             icon: Icons::MessageSquare.into(),
             keywords: &["chat", "agent"],
-            run: Run::OpenChat(card.project, session),
+            run: if card.github {
+                Run::OpenReview(session)
+            } else {
+                Run::OpenChat(card.project, session)
+            },
         });
     }
     let mut stored: Vec<(String, ph_store::sessions::Session)> = workspace
@@ -529,7 +535,7 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         entries.retain(|entry| match &entry.run {
             Run::Action(action) => crate::features::allows(action.as_ref()),
             Run::Utility(_) => ph_brand::enabled(ph_brand::Feature::Utilities),
-            Run::OpenProject(_) | Run::OpenChat(..) | Run::Custom(_) => true,
+            Run::OpenProject(_) | Run::OpenChat(..) | Run::OpenReview(_) | Run::Custom(_) => true,
         });
     }
     groups.retain(|(_, entries)| !entries.is_empty());
@@ -542,7 +548,11 @@ fn row(entry: &Entry) -> CommandItem {
     let icon = entry.icon.clone();
     let action = match &entry.run {
         Run::Action(action) => Some(action.boxed_clone()),
-        Run::OpenProject(_) | Run::OpenChat(..) | Run::Utility(_) | Run::Custom(_) => None,
+        Run::OpenProject(_)
+        | Run::OpenChat(..)
+        | Run::OpenReview(_)
+        | Run::Utility(_)
+        | Run::Custom(_) => None,
     };
     CommandItem::new()
         .label(entry.label.clone())
@@ -619,6 +629,12 @@ pub(crate) fn open(
                         let (project, session) = (*project, *session);
                         workspace.update(cx, |workspace, cx| {
                             workspace.open_chat(project, session, window, cx)
+                        });
+                    }
+                    Run::OpenReview(session) => {
+                        let session = *session;
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.show_session(session, window, cx)
                         });
                     }
                     Run::Utility(id) => crate::utilities::open(Some(id), window, cx),

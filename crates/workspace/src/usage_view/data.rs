@@ -329,29 +329,59 @@ impl Dashboard {
                 .clone()
         };
         let from_files: HashSet<&str> = scan.sources.iter().map(|(agent, _)| *agent).collect();
-        let mut rows = Vec::new();
+        let mut rows: Vec<Row> = Vec::new();
+        // The files give a line per reply: several hundred thousand a year
+        // for someone whose agents work all day. They are added up into a
+        // row per session, day, model and place (what a row is), and each
+        // session's name is made once: every sum goes over the rows.
+        let mut names: HashMap<(&'static str, Arc<str>), Arc<str>> = HashMap::new();
+        // Agent, day, model, place and session: a row's place in `rows`.
+        type RowKey = (&'static str, Date, Arc<str>, Place, Arc<str>);
+        let mut row_of: HashMap<RowKey, usize> = HashMap::new();
         for entry in scan.entries {
             let Ok(at) = jiff::Timestamp::from_millisecond(entry.at) else {
                 continue;
             };
-            rows.push(Row {
-                agent: entry.agent,
-                day: at.to_zoned(tz.clone()).date(),
-                place: place_of(&entry.cwd),
-                model: entry.model.clone(),
-                session: Some(Arc::from(format!("{}:{}", entry.agent, entry.session))),
-                tally: priced(
-                    prices,
-                    &entry.model,
-                    Tally {
-                        input: entry.input,
-                        cached: entry.cached,
-                        output: entry.output,
-                        ..Tally::default()
-                    },
-                    entry.cache_write,
-                ),
-            });
+            let day = at.to_zoned(tz.clone()).date();
+            let place = place_of(&entry.cwd);
+            let session = names
+                .entry((entry.agent, entry.session.clone()))
+                .or_insert_with(|| Arc::from(format!("{}:{}", entry.agent, entry.session)))
+                .clone();
+            let tally = priced(
+                prices,
+                &entry.model,
+                Tally {
+                    input: entry.input,
+                    cached: entry.cached,
+                    output: entry.output,
+                    ..Tally::default()
+                },
+                entry.cache_write,
+            );
+            let key = (
+                entry.agent,
+                day,
+                entry.model.clone(),
+                place.clone(),
+                session.clone(),
+            );
+            match row_of.entry(key) {
+                std::collections::hash_map::Entry::Occupied(at) => {
+                    rows[*at.get()].tally.add(&tally)
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(rows.len());
+                    rows.push(Row {
+                        agent: entry.agent,
+                        day,
+                        place,
+                        model: entry.model.clone(),
+                        session: Some(session),
+                        tally,
+                    });
+                }
+            }
         }
         let workspace_ids: HashSet<ProjectId> =
             workspaces.iter().map(|project| project.id).collect();
@@ -763,6 +793,48 @@ mod tests {
             quarter.bars.len()
         );
         assert_eq!(quarter.bars.iter().map(Bar::tokens).sum::<u64>(), 383);
+    }
+
+    #[test]
+    fn a_sessions_replies_of_a_day_are_one_row() {
+        let today = date(2026, 11, 5);
+        let reply = |session: &str, day: Date| {
+            entry("claude", day, "claude-opus-5-5", "/elsewhere", session, 10)
+        };
+        let dashboard = Dashboard::build(
+            today,
+            &jiff::tz::TimeZone::UTC,
+            scan(
+                vec![
+                    reply("s1", today),
+                    reply("s1", today),
+                    reply("s1", today),
+                    reply("s2", today),
+                    reply("s1", date(2026, 11, 4)),
+                ],
+                &["claude"],
+            ),
+            Vec::new(),
+            &[],
+            &opus_priced(),
+            |_| true,
+        );
+        assert_eq!(dashboard.rows.len(), 3);
+        let week = dashboard.summary(Range::Week, Group::Agent);
+        assert_eq!(week.total.tokens(), 5 * 30);
+        assert_eq!(week.sessions, 2);
+        let one = Dashboard::build(
+            today,
+            &jiff::tz::TimeZone::UTC,
+            scan(vec![reply("s1", today)], &["claude"]),
+            Vec::new(),
+            &[],
+            &opus_priced(),
+            |_| true,
+        );
+        let sum = dashboard.summary(Range::Week, Group::Model);
+        let alone = one.summary(Range::Week, Group::Model).total.estimate;
+        assert!((sum.total.estimate - 5.0 * alone).abs() < 1e-9);
     }
 
     #[test]

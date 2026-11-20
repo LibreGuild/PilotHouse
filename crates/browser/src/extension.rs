@@ -219,8 +219,12 @@ fn launcher_script(layout: &Layout) -> String {
     if cfg!(windows) {
         // In a batch file `%` starts a variable; doubled, it is itself.
         let escape = |path: &Path| path.display().to_string().replace('%', "%%");
+        // The file is UTF-8, and cmd.exe reads a batch file in the console's
+        // code page, a line at a time: after `chcp 65001` the paths (a user
+        // folder named `José` or `山田`) are read as written. Should it fail,
+        // the lines are read as they were without it.
         format!(
-            "@echo off\r\nrem Written by PilotHouse: Chrome runs this to reach the PilotHouse app.\r\nset \"{}={}\"\r\n\"{}\" chrome-host %*\r\n",
+            "@echo off\r\nchcp 65001 >nul\r\nrem Written by PilotHouse: Chrome runs this to reach the PilotHouse app.\r\nset \"{}={}\"\r\n\"{}\" chrome-host %*\r\n",
             ph_store::paths::DATA_DIR_ENV,
             escape(&layout.data),
             escape(&layout.program),

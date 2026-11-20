@@ -156,9 +156,20 @@ pub struct Document {
 
 impl Document {
     pub fn parse(text: &str) -> Self {
+        // Nested too deeply to parse (it would freeze the app, then
+        // overflow the stack): one block, kept as it is.
+        if ph_ui::markdown::nests_too_deep(text) {
+            return Self::raw(text);
+        }
         let mut options = markdown::ParseOptions::gfm();
         options.constructs.frontmatter = true;
-        let Ok(root) = markdown::to_mdast(text, &options) else {
+        // The parser panics on a few texts (`---`, a blank line and a list
+        // marker, as when a list is typed under a rule at the top of a
+        // file): such a text is one block too.
+        let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            markdown::to_mdast(text, &options)
+        }));
+        let Ok(Ok(root)) = parsed else {
             return Self::raw(text);
         };
         let Some(children) = root.children() else {
@@ -352,7 +363,7 @@ pub fn classify(source: &str) -> (Kind, String) {
         && !source.contains('\n')
         && trimmed[hashes..].starts_with([' ', '\t'])
     {
-        let body = trimmed[hashes..].trim().trim_end_matches('#').trim_end();
+        let body = heading_text(&trimmed[hashes..]);
         return (Kind::Heading(hashes as u8), body.to_string());
     }
     if matches!(
@@ -388,6 +399,19 @@ pub fn classify(source: &str) -> (Kind, String) {
         return (Kind::Raw, source.to_string());
     }
     (Kind::Paragraph, source.to_string())
+}
+
+/// A heading's text, without a closing run of `#`. Such a run closes the
+/// heading only after a space (`# Title ##`): in `# C#` the `#` is part of
+/// the title, and so is an escaped one (`\#`).
+fn heading_text(content: &str) -> &str {
+    let content = content.trim();
+    let text = content.trim_end_matches('#');
+    if text.is_empty() || text.ends_with([' ', '\t']) {
+        text.trim_end()
+    } else {
+        content
+    }
 }
 
 /// A list item: its marker and the rest.
@@ -599,6 +623,43 @@ mod tests {
         assert_eq!(document.blocks[4].body, "todo\n  - nested");
         assert_eq!(document.blocks[7].body, "quote\nmore");
         assert_eq!(document.blocks[8].body, "fn main() {}");
+    }
+
+    #[test]
+    fn a_heading_keeps_the_hash_of_its_last_word() {
+        let heading = |source: &str| match classify(source) {
+            (Kind::Heading(level), body) => (level, body),
+            other => panic!("a heading: {other:?}"),
+        };
+        assert_eq!(
+            heading("## Building with C#"),
+            (2, "Building with C#".into())
+        );
+        assert_eq!(heading("# F#"), (1, "F#".into()));
+        assert_eq!(heading("# Title ##"), (1, "Title".into()));
+        assert_eq!(heading("# Title #  "), (1, "Title".into()));
+        assert_eq!(heading("# An escaped \\#"), (1, "An escaped \\#".into()));
+        assert_eq!(heading("### ###"), (3, String::new()));
+        // Edited, such a heading is written back with its `#`.
+        let mut document = Document::parse("# C#\n\nText\n");
+        document.blocks[0].set_body("Why C#".into());
+        assert_eq!(document.text(), "# Why C#\n\nText\n");
+    }
+
+    #[test]
+    fn text_the_parser_cannot_take_is_one_block() {
+        // Deep enough to freeze the parser and overflow the stack.
+        for deep in [">".repeat(5000), "- ".repeat(5000)] {
+            let document = Document::parse(&deep);
+            assert_eq!(document.blocks.len(), 1);
+            assert_eq!(document.blocks[0].kind, Kind::Raw);
+            assert_eq!(document.text(), deep);
+        }
+        // The parser panics on these.
+        for text in ["---\n\n- ", "---\n\n>", "---\n\n1. "] {
+            let document = Document::parse(text);
+            assert_eq!(document.text(), text);
+        }
     }
 
     #[test]

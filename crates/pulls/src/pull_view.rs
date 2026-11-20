@@ -335,6 +335,8 @@ impl PullView {
                 match result {
                     Ok(data) => {
                         let text = data.pull.body.clone().unwrap_or_default();
+                        // (Text nested too deeply to parse is shown plain.)
+                        let text = ph_ui::markdown::guarded(&text);
                         this.description = Some(cx.new(|cx| TextViewState::markdown(&text, cx)));
                         let mut bodies = HashMap::new();
                         for (id, body) in data
@@ -348,6 +350,7 @@ impl PullView {
                                     .map(|r| (r.id, r.body.clone().unwrap_or_default())),
                             )
                         {
+                            let body = ph_ui::markdown::guarded(&body);
                             bodies.insert(id, cx.new(|cx| TextViewState::markdown(&body, cx)));
                         }
                         this.bodies = bodies;
@@ -382,6 +385,7 @@ impl PullView {
         &mut self,
         label: &'static str,
         done: &'static str,
+        sent: Option<String>,
         work: impl FnOnce(&Hosting) -> anyhow::Result<()> + Send + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -400,8 +404,13 @@ impl PullView {
                 match result {
                     Ok(()) => {
                         window.push_notification(Notification::success(done), cx);
-                        this.composer
-                            .update(cx, |input, cx| input.set_value("", window, cx));
+                        // Only the text that went out: a reply or a merge
+                        // leaves a comment being written alone, and so does
+                        // what was typed while this one was sent.
+                        if sent.is_some_and(|sent| this.composer.read(cx).value().trim() == sent) {
+                            this.composer
+                                .update(cx, |input, cx| input.set_value("", window, cx));
+                        }
                     }
                     Err(err) => window.push_notification(
                         Notification::error(format!("{err:#}")).title("GitHub"),
@@ -422,6 +431,7 @@ impl PullView {
         self.act(
             "Commenting",
             "Comment posted",
+            Some(body.clone()),
             move |h| pulls::comment(&h.client, &h.repo, number, &body).map(|_| ()),
             window,
             cx,
@@ -443,6 +453,7 @@ impl PullView {
         self.act(
             "Replying",
             "Reply posted",
+            None,
             move |h| pulls::reply(&h.client, &h.repo, number, thread, &body).map(|_| ()),
             window,
             cx,
@@ -463,6 +474,7 @@ impl PullView {
         self.act(
             label,
             done,
+            Some(body.clone()),
             move |h| {
                 pulls::submit_review(&h.client, &h.repo, number, &head, event, &body, &[])
                     .map(|_| ())
@@ -479,11 +491,15 @@ impl PullView {
             return;
         }
         self.confirm_merge = false;
+        let Some(head) = self.data.as_ref().map(|data| data.pull.head.sha.clone()) else {
+            return;
+        };
         let (number, method) = (self.number, self.merge_method);
         self.act(
             "Merging",
             "Merged",
-            move |h| pulls::merge(&h.client, &h.repo, number, method).map(|_| ()),
+            None,
+            move |h| pulls::merge(&h.client, &h.repo, number, &head, method).map(|_| ()),
             window,
             cx,
         );

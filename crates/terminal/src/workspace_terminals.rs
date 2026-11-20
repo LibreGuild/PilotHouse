@@ -455,10 +455,15 @@ impl WorkspaceTerminals {
                 &terminal,
                 |this, terminal, event: &TerminalEvent, cx| match event {
                     // A program that failed (an `ssh` that could not connect)
-                    // keeps its tab, so what it said can be read.
+                    // keeps its tab, so what it said can be read; it says
+                    // that it ended, as a shell left with `exit` after a
+                    // failed command ends the same way.
                     TerminalEvent::Exited
                         if terminal.read(cx).exit_code().is_some_and(|code| code != 0) =>
                     {
+                        if let Some(code) = terminal.read(cx).exit_code() {
+                            terminal.read(cx).show_ended(code);
+                        }
                         cx.notify()
                     }
                     TerminalEvent::Exited => this.close(&terminal, cx),

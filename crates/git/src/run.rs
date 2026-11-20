@@ -2,7 +2,7 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 
 use anyhow::{Context as _, Result, bail};
 
@@ -69,22 +69,47 @@ pub fn git_env(root: &Path, args: &[&str], env: &[(String, String)]) -> Result<S
 pub fn git_with_input(root: &Path, args: &[&str], input: &str) -> Result<String> {
     let mut command = command(root);
     command.args(args);
-    let mut child = ready(command)
+    let child = ready(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .context("running git (is it installed?)")?;
-    child
-        .stdin
-        .take()
-        .context("git stdin")?
-        .write_all(input.as_bytes())?;
-    let output = child.wait_with_output()?;
+    let output = finish_with_input(child, input.as_bytes())?;
     if !output.status.success() {
         bail!("{}", failure(root, args.first().unwrap_or(&""), &output));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Waits for `child` while `input` goes to its stdin from a thread of its
+/// own. Writing everything first and reading after would hang for good on a
+/// command that answers as it reads (`hash-object --stdin-paths`): once its
+/// stdout pipe is full it stops reading, and the write never returns. The
+/// child is always waited for, also when the write fails.
+pub(crate) fn finish_with_input(mut child: Child, input: &[u8]) -> Result<Output> {
+    let stdin = child.stdin.take();
+    let (output, written) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || match stdin {
+            // Dropping `stdin` at the end closes it, so the child sees the end.
+            Some(mut stdin) => stdin.write_all(input),
+            None => Err(std::io::Error::other("git stdin is not piped")),
+        });
+        let output = child.wait_with_output();
+        let written = writer
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("writing to git panicked")));
+        (output, written)
+    });
+    let output = output.context("waiting for git")?;
+    // A command that failed often stops reading early: its own error says
+    // more than the broken pipe.
+    if let Err(error) = written
+        && output.status.success()
+    {
+        return Err(error).context("writing to git");
+    }
+    Ok(output)
 }
 
 /// `command`, made to run on the server when its folder is on a mapped
@@ -127,12 +152,18 @@ pub fn null_device(root: &Path) -> &'static str {
 /// A `git` command in `root` with the safe settings. Network commands
 /// (fetch, pull, push) never wait on a terminal password prompt; credential
 /// helpers still work.
+///
+/// No optional locks: the app reads the repository in the background on
+/// every change (`git status` would otherwise take `index.lock` to refresh
+/// the index), and an agent's own `git add` or `commit` must not fail on
+/// that lock. Commands that write the index still lock it.
 pub fn command(root: &Path) -> std::process::Command {
     let mut command = ph_env::command("git");
     command
         .args(SAFE_CONFIG)
         .current_dir(root)
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0");
     command
 }
 

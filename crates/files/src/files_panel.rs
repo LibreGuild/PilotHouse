@@ -31,7 +31,7 @@ use crate::file_index::FileList;
 use crate::file_view::FileView;
 use crate::roots::Roots;
 use crate::search::SearchResults;
-use crate::watcher::{FilesChanged, ProjectWatcher};
+use crate::watcher::{FilesChanged, Follower, IgnoredChanged, ProjectWatcher, WatchLimitReached};
 use crate::{CloseFile, quick_open};
 
 pub const FILES_PANEL_CONTEXT: &str = "FilesPanel";
@@ -181,6 +181,11 @@ pub struct FilesPanel {
     index_stale: bool,
     /// The tree is read again from disk when it is next drawn.
     refresh_due: bool,
+    /// Tell the watchers (one of each per watcher) which ignored folders
+    /// the tree lists and which files are open: of what the project
+    /// ignores, the watchers report only these.
+    shown_dirs: Vec<Follower>,
+    shown_files: Vec<Follower>,
     /// Git's changes, marked in the tree.
     pub(crate) changes: Rc<TreeChanges>,
     /// Tree paths with staged changes.
@@ -244,7 +249,51 @@ impl FilesPanel {
                     this.on_files_changed(event.paths.clone(), window, cx);
                 },
             ));
+            // Ignored paths on screen (an open log, an ignored folder open
+            // in the tree): the tree and the tabs follow them. Search, the
+            // finder and Git's marks never look at ignored files.
+            subscriptions.push(cx.subscribe_in(
+                watcher,
+                window,
+                |this, _, event: &IgnoredChanged, window, cx| {
+                    let changed: Vec<String> = event
+                        .paths
+                        .iter()
+                        .filter_map(|path| this.roots.path_of(path))
+                        .collect();
+                    this.refresh_shown(&changed, window, cx);
+                },
+            ));
+            subscriptions.push(cx.subscribe_in(
+                watcher,
+                window,
+                |_, _, _: &WatchLimitReached, window, cx| {
+                    use gpui_kit::component::WindowExt as _;
+                    use gpui_kit::component::notification::Notification;
+                    use std::sync::atomic::{AtomicBool, Ordering};
+                    // Said once, however many folders run into the limit.
+                    static SAID: AtomicBool = AtomicBool::new(false);
+                    if !SAID.swap(true, Ordering::Relaxed) {
+                        window.push_notification(
+                            Notification::warning(
+                                "This workspace has more folders than the system follows \
+                                 at once (fs.inotify.max_user_watches). Changes in some of \
+                                 them show when you come back to the window.",
+                            ),
+                            cx,
+                        );
+                    }
+                },
+            ));
         }
+        let shown_dirs = watchers
+            .iter()
+            .map(|watcher| watcher.read(cx).follower())
+            .collect();
+        let shown_files = watchers
+            .iter()
+            .map(|watcher| watcher.read(cx).follower())
+            .collect();
         let lsps = roots
             .list()
             .iter()
@@ -299,6 +348,8 @@ impl FilesPanel {
             index: None,
             index_stale: true,
             refresh_due: false,
+            shown_dirs,
+            shown_files,
             changes: Rc::default(),
             _subscriptions: subscriptions,
         };
@@ -414,6 +465,7 @@ impl FilesPanel {
                 self.file_subscriptions
                     .insert(view.entity_id(), [observe, events]);
                 self.open_files.push(view);
+                self.follow_open_files(cx);
                 self.open_files.len() - 1
             }
         };
@@ -426,6 +478,18 @@ impl FilesPanel {
                 (file.relative_path().to_string(), file.cursor_line(cx))
             };
             self.remember(path, at);
+        } else if let Some(line) = line
+            && self.active == Some(ix)
+        {
+            // To another line of the file in front (a definition, a search
+            // match): Back returns to the line left.
+            let (path, at) = {
+                let file = self.open_files[ix].read(cx);
+                (file.relative_path().to_string(), file.cursor_line(cx))
+            };
+            if at != line {
+                self.remember(path, at);
+            }
         }
         if let Some(line) = line {
             self.open_files[ix].update(cx, |file, cx| file.go_to_line(line, window, cx));
@@ -781,6 +845,7 @@ impl FilesPanel {
         self.file_subscriptions.remove(&id);
         self.recent.retain(|recent| *recent != id);
         closed.update(cx, |file, cx| file.detach_lsp(cx));
+        self.follow_open_files(cx);
         self.active = match self.active {
             _ if self.open_files.is_empty() => None,
             // The tab in front closed: the one used before it comes back.
@@ -812,22 +877,25 @@ impl FilesPanel {
             let path = path.to_string();
             _ = panel.update(cx, |panel, cx| panel.open_file(&path, None, window, cx));
         };
-        match (&self.index, self.index_stale) {
-            (Some(index), false) => quick_open::open(index.clone(), on_open, window, cx),
-            _ => {
-                let roots = self.roots.clone();
-                let build = cx.background_spawn(async move { roots.index() });
-                cx.spawn_in(window, async move |this, cx| {
-                    let index = build.await;
-                    _ = this.update_in(cx, |this, window, cx| {
-                        this.index = Some(index.clone());
-                        this.index_stale = false;
-                        quick_open::open(index, on_open, window, cx);
-                    });
-                })
-                .detach();
-            }
+        // At once, with the last list (or none yet), so the finder takes
+        // the keys typed while a new list is made: walking a large project
+        // takes seconds.
+        let shown = self.index.clone().unwrap_or_default();
+        let finder = quick_open::open(shown, on_open, window, cx);
+        if self.index.is_some() && !self.index_stale {
+            return;
         }
+        let roots = self.roots.clone();
+        let build = cx.background_spawn(async move { roots.index() });
+        cx.spawn_in(window, async move |this, cx| {
+            let index = build.await;
+            _ = this.update_in(cx, |this, window, cx| {
+                this.index = Some(index.clone());
+                this.index_stale = false;
+                quick_open::replace_files(&finder, index, window, cx);
+            });
+        })
+        .detach();
     }
 
     /// ⌘T: a function, class or type by name, in every folder.
@@ -1159,7 +1227,37 @@ impl FilesPanel {
         .detach();
     }
 
+    /// Tells the watchers which ignored folders the tree lists: a change to
+    /// an entry of one of them is reported, though ignored.
+    fn follow_ignored_dirs(&self) {
+        let ignored = self.tree.ignored();
+        let dirs: HashSet<PathBuf> = self
+            .tree
+            .shown_dirs()
+            .iter()
+            .filter(|dir| ignored.contains(*dir))
+            .filter_map(|dir| self.roots.absolute(dir))
+            .collect();
+        for follower in &self.shown_dirs {
+            follower.set(dirs.clone());
+        }
+    }
+
+    /// Tells the watchers which files are open: one of them may be an
+    /// ignored file (a log, `.env`), which is followed like any other.
+    fn follow_open_files(&self, cx: &gpui_kit::App) {
+        let files: HashSet<PathBuf> = self
+            .open_files
+            .iter()
+            .map(|file| file.read(cx).absolute_path().to_path_buf())
+            .collect();
+        for follower in &self.shown_files {
+            follower.set(files.clone());
+        }
+    }
+
     pub(crate) fn rebuild_tree(&mut self, cx: &mut Context<Self>) {
+        self.follow_ignored_dirs();
         let items = self.tree.items();
         let pending = self.pending_select.clone();
         let found = self.tree_state.update(cx, |state, cx| {
@@ -1168,7 +1266,12 @@ impl FilesPanel {
             let pending = pending.and_then(|id| state.index_of(&id.into()));
             if let Some(ix) = pending.or_else(|| selected.and_then(|id| state.index_of(&id))) {
                 state.set_selected_index(Some(ix), cx);
-                state.scroll_to_item(ix, gpui_kit::ScrollStrategy::Center);
+                // Only a row just made, renamed or revealed is brought
+                // into view: a listing that changed by itself (an agent
+                // writing files) leaves the tree where the user scrolled.
+                if pending.is_some() {
+                    state.scroll_to_item(ix, gpui_kit::ScrollStrategy::Center);
+                }
             }
             pending.is_some()
         });
@@ -1217,7 +1320,12 @@ impl FilesPanel {
         {
             self.search_soon(window, cx);
         }
+        self.refresh_shown(&relative, window, cx);
+    }
 
+    /// Reads again the listed folders and the open files among the changed
+    /// tree paths `relative`.
+    fn refresh_shown(&mut self, relative: &[String], window: &mut Window, cx: &mut Context<Self>) {
         let mut dirs: Vec<String> = relative
             .iter()
             .map(|path| {

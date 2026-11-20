@@ -192,6 +192,10 @@ impl WorkspaceScreen {
                     this.chat.update(cx, |chat, cx| {
                         chat.start_tool_task(title, prompt, window, cx)
                     });
+                    // Only this chat's turn ends the recording it does.
+                    if let Some(chat) = this.chat.read(cx).active_session_id(cx) {
+                        ph_uitest::record::set_chat(chat, cx);
+                    }
                 }
                 ph_uitest::TestsPanelEvent::OpenFile(path) => {
                     if let Ok(relative) = path.strip_prefix(&this.project.path) {

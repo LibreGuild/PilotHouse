@@ -19,7 +19,10 @@ pub struct Transport {
     child: Mutex<Child>,
     next_id: AtomicI64,
     pending: Pending,
-    /// Server notifications: `(method, params)`.
+    /// Why the server stopped, once its output has ended.
+    stopped: Arc<Mutex<Option<String>>>,
+    /// Server notifications: `(method, params)`. Closed once the server
+    /// has stopped and [`Transport::stopped`] says why.
     pub notifications: smol::channel::Receiver<(String, Value)>,
 }
 
@@ -43,6 +46,8 @@ impl Transport {
         let last_words: Arc<Mutex<Option<String>>> = Arc::default();
         let (reader_pending, reader_stdin) = (pending.clone(), stdin.clone());
         let words = last_words.clone();
+        let stopped: Arc<Mutex<Option<String>>> = Arc::default();
+        let reader_stopped = stopped.clone();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             while let Some(message) = read_message(&mut reader) {
@@ -58,6 +63,8 @@ impl Transport {
             for (_, waiter) in reader_pending.lock().unwrap().drain() {
                 let _ = waiter.try_send(Err(anyhow!(reason.clone())));
             }
+            // Set before `sender` is dropped, which closes `notifications`.
+            *reader_stopped.lock().unwrap() = Some(reason);
         });
         std::thread::spawn(move || {
             for line in ph_env::lossy_lines(stderr) {
@@ -73,8 +80,14 @@ impl Transport {
             child: Mutex::new(child),
             next_id: AtomicI64::new(1),
             pending,
+            stopped,
             notifications,
         }))
+    }
+
+    /// Why the server stopped; `None` while it runs.
+    pub fn stopped(&self) -> Option<String> {
+        self.stopped.lock().unwrap().clone()
     }
 
     /// Sends a request now and returns where its reply will arrive, so
