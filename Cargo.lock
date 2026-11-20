@@ -6107,7 +6107,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "ph-agent"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "agent-client-protocol-schema",
  "anyhow",
@@ -6139,7 +6139,7 @@ dependencies = [
 
 [[package]]
 name = "ph-agy"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "agent-client-protocol-schema",
  "anyhow",
@@ -6149,23 +6149,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "ph-board"
-version = "0.6.4"
-dependencies = [
- "anyhow",
- "gpui-kit",
- "ph-control",
- "ph-store",
- "ph-ui",
- "ph-uitest",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
 name = "ph-brand"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "serde",
  "toml 1.1.8+spec-1.1.0",
@@ -6173,7 +6158,7 @@ dependencies = [
 
 [[package]]
 name = "ph-browser"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6191,16 +6176,16 @@ dependencies = [
  "sha2 0.11.1",
  "smol",
  "tracing",
+ "url",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "ph-changes"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
- "ph-env",
  "ph-files",
  "ph-git",
  "ph-preview",
@@ -6211,7 +6196,7 @@ dependencies = [
 
 [[package]]
 name = "ph-control"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -6227,7 +6212,7 @@ dependencies = [
 
 [[package]]
 name = "ph-custom"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "gpui-kit",
  "ph-store",
@@ -6237,7 +6222,7 @@ dependencies = [
 
 [[package]]
 name = "ph-devices"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6256,14 +6241,29 @@ dependencies = [
 
 [[package]]
 name = "ph-env"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "tracing",
 ]
 
 [[package]]
+name = "ph-explain"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "gpui-kit",
+ "ph-agent",
+ "ph-git",
+ "ph-review",
+ "ph-store",
+ "ph-theme",
+ "ph-ui",
+ "tracing",
+]
+
+[[package]]
 name = "ph-files"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -6290,7 +6290,7 @@ dependencies = [
 
 [[package]]
 name = "ph-git"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "ph-env",
@@ -6300,7 +6300,7 @@ dependencies = [
 
 [[package]]
 name = "ph-github"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6309,21 +6309,19 @@ dependencies = [
  "security-framework",
  "serde",
  "serde_json",
- "tracing",
  "ureq",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "ph-lsp"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "futures",
  "gpui-kit",
  "lsp-types",
  "ph-env",
- "serde",
  "serde_json",
  "smol",
  "tracing",
@@ -6331,18 +6329,17 @@ dependencies = [
 
 [[package]]
 name = "ph-mcp"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "ph-brand",
  "ph-control",
- "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "ph-media"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -6355,14 +6352,13 @@ dependencies = [
 
 [[package]]
 name = "ph-preview"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
  "calamine",
  "csv",
  "flate2",
- "futures",
  "gpui-kit",
  "hayro",
  "image",
@@ -6395,26 +6391,26 @@ dependencies = [
 
 [[package]]
 name = "ph-pulls"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
  "ph-agent",
  "ph-brand",
  "ph-changes",
+ "ph-env",
  "ph-git",
  "ph-github",
  "ph-review",
  "ph-store",
  "ph-theme",
  "ph-ui",
- "serde_json",
  "tracing",
 ]
 
 [[package]]
 name = "ph-remote"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6430,10 +6426,11 @@ dependencies = [
 
 [[package]]
 name = "ph-review"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "jiff",
  "ph-brand",
  "ph-git",
  "ph-github",
@@ -6445,7 +6442,7 @@ dependencies = [
 
 [[package]]
 name = "ph-runs"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -6462,7 +6459,7 @@ dependencies = [
 
 [[package]]
 name = "ph-store"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "dirs 7.0.0",
@@ -6478,7 +6475,7 @@ dependencies = [
 
 [[package]]
 name = "ph-studio"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6486,6 +6483,7 @@ dependencies = [
  "color_quant",
  "cosmic-text",
  "dirs 7.0.0",
+ "dunce",
  "fontdb",
  "futures",
  "gpui-kit",
@@ -6519,12 +6517,13 @@ dependencies = [
 
 [[package]]
 name = "ph-terminal"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
  "base64 0.23.1",
  "gpui-kit",
+ "libc",
  "ph-brand",
  "ph-env",
  "ph-remote",
@@ -6534,16 +6533,14 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
- "tracing",
 ]
 
 [[package]]
 name = "ph-theme"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
- "image",
  "ph-brand",
  "serde",
  "serde_json",
@@ -6552,24 +6549,24 @@ dependencies = [
 
 [[package]]
 name = "ph-ui"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
  "futures",
  "gpui-kit",
  "image",
+ "jiff",
  "markdown",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "ph-brand",
- "tracing",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "ph-uitest"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6581,16 +6578,15 @@ dependencies = [
  "ph-ui",
  "serde",
  "serde_json",
- "smol",
- "tracing",
 ]
 
 [[package]]
 name = "ph-utils"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "dunce",
  "getrandom 0.4.3",
  "hex",
  "hmac 0.13.0",
@@ -6613,7 +6609,7 @@ dependencies = [
 
 [[package]]
 name = "ph-workspace"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6627,7 +6623,6 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "ph-agent",
- "ph-board",
  "ph-brand",
  "ph-browser",
  "ph-changes",
@@ -6635,6 +6630,7 @@ dependencies = [
  "ph-custom",
  "ph-devices",
  "ph-env",
+ "ph-explain",
  "ph-files",
  "ph-git",
  "ph-github",
@@ -6652,7 +6648,6 @@ dependencies = [
  "ph-utils",
  "raw-window-handle",
  "ring",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -6762,13 +6757,12 @@ checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
 
 [[package]]
 name = "pilothouse"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "embed-resource",
  "gpui-kit",
  "ph-agy",
- "ph-board",
  "ph-brand",
  "ph-browser",
  "ph-control",

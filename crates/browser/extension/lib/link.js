@@ -17,6 +17,10 @@ const RETRY_MAX = 60000;
 const BUSY_PAUSE = 5 * 60 * 1000;
 /** How long `ask` waits for the app's answer. */
 const ASK_TIMEOUT = 15000;
+/** Something the user asked for tries again after this, whatever the backoff. */
+const ASKED_RETRY = 2000;
+const NOT_RUNNING = 'PilotHouse is not running. Open PilotHouse, then try again.';
+const BUSY = 'PilotHouse is working with another browser (another Chrome profile, or another browser with this extension): it takes one at a time. Try again in a few minutes.';
 
 let port = null;
 /** The app itself answered on `port` (not only the host saying it is not
@@ -25,6 +29,24 @@ let linked = false;
 let retryDelay = RETRY_MIN;
 let lastAttempt = 0;
 let pausedUntil = 0;
+/** The app said another browser is connected; the popup says so until the
+ * pause is over. */
+let busy = false;
+/** This browser profile's own id, kept in its storage: the app tells two
+ * profiles apart by it (both say the same browser name), and knows the same
+ * profile again after its worker restarted. */
+let instance = null;
+const instanceLoaded = chrome.storage.local.get('instance').then(async ({ instance: kept }) => {
+  if (typeof kept === 'string' && kept) return kept;
+  const made = crypto.randomUUID();
+  await chrome.storage.local.set({ instance: made });
+  return made;
+}).catch(() => crypto.randomUUID()).then((id) => {
+  instance = id;
+  return id;
+});
+/** What was posted while the hello waits for `instance`: the hello goes first. */
+let queued = null;
 /** Chunks of large messages from the app, by message. */
 const chunks = new Map();
 const notes = new Map();
@@ -54,9 +76,16 @@ export function connected() {
   return port !== null && linked;
 }
 
-export function connect() {
+/** Opens the link to the app. Tab events and the timer wait out the backoff;
+ * what the user asked for (`asked`) tries again after a moment. */
+export function connect({ asked = false } = {}) {
   const now = Date.now();
-  if (port || now < pausedUntil || now - lastAttempt < retryDelay) return;
+  if (port || now < pausedUntil) return;
+  if (busy) {
+    busy = false;
+    tell(false);
+  }
+  if (now - lastAttempt < (asked ? Math.min(retryDelay, ASKED_RETRY) : retryDelay)) return;
   lastAttempt = now;
   try {
     port = chrome.runtime.connectNative(HOST);
@@ -64,10 +93,13 @@ export function connect() {
     port = null;
     return;
   }
+  const opened = port;
   port.onMessage.addListener(fromApp);
   port.onDisconnect.addListener(() => {
     void chrome.runtime.lastError;
+    if (port !== opened) return;
     port = null;
+    queued = null;
     chunks.clear();
     for (const [, waiting] of answers) waiting.reject(new Error('PilotHouse is not running'));
     answers.clear();
@@ -81,16 +113,28 @@ export function connect() {
   });
   // Connected once the app speaks (it sends its status for the hello): the
   // host starts even when the app is not running, only to say so and quit.
-  post({
+  const hello = (id) => ({
     method: 'PilotHouse.hello',
-    params: { browser: browserName(), extension: chrome.runtime.getManifest().version },
+    params: { browser: browserName(), extension: chrome.runtime.getManifest().version, instance: id },
+  });
+  if (instance) {
+    post(hello(instance));
+    return;
+  }
+  queued = [];
+  void instanceLoaded.then((id) => {
+    if (port !== opened || queued === null) return;
+    const waiting = queued;
+    queued = null;
+    post(hello(id));
+    for (const message of waiting) post(message);
   });
 }
 
 function tell(isConnected) {
   for (const listener of listeners) {
     try {
-      listener(isConnected);
+      listener(isConnected, busy);
     } catch (error) {
       // One listener's failure does not stop the others.
     }
@@ -99,6 +143,10 @@ function tell(isConnected) {
 
 export function post(message) {
   if (!port) return false;
+  if (queued) {
+    queued.push(message);
+    return true;
+  }
   try {
     port.postMessage(message);
     return true;
@@ -110,15 +158,15 @@ export function post(message) {
 
 /** Sends a note to the app, connecting first when needed. */
 export function send(method, params) {
-  connect();
+  connect({ asked: true });
   if (!post({ method, params: params ?? {} })) {
-    throw new Error('PilotHouse is not running. Open PilotHouse, then try again.');
+    throw new Error(busy ? BUSY : NOT_RUNNING);
   }
 }
 
 /** Asks the app something; resolves with its answer. */
 export function ask(method, params) {
-  connect();
+  connect({ asked: true });
   const ref = nextRef++;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -136,7 +184,7 @@ export function ask(method, params) {
       },
     });
     if (!post({ method: 'PilotHouse.ask', params: { ref, method, params: params ?? {} } })) {
-      answers.get(ref)?.reject(new Error('PilotHouse is not running. Open PilotHouse, then try again.'));
+      answers.get(ref)?.reject(new Error(busy ? BUSY : NOT_RUNNING));
       answers.delete(ref);
     }
   });
@@ -220,7 +268,9 @@ async function handle(message) {
       pausedUntil = Date.now() + BUSY_PAUSE;
       port?.disconnect();
       port = null;
+      queued = null;
       linked = false;
+      busy = true;
       tell(false);
       return;
     }

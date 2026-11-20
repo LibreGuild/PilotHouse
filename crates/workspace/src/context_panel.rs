@@ -6,7 +6,7 @@ use gpui_kit::Action;
 use ph_ui::Icons;
 
 use crate::actions::{
-    ShowBoard, ShowBrowser, ShowChanges, ShowDevices, ShowFiles, ShowLogcat, ShowPulls, ShowRuns,
+    ShowBrowser, ShowChanges, ShowDevices, ShowFiles, ShowLogcat, ShowPulls, ShowRuns,
     ShowTerminal, ShowTests,
 };
 
@@ -17,7 +17,6 @@ pub enum ContextTab {
     Files,
     Changes,
     Pulls,
-    Board,
     Terminal,
     Browser,
     Devices,
@@ -30,11 +29,10 @@ pub enum ContextTab {
 impl ContextTab {
     /// In the icon bar's order: the column's tools, then the bottom
     /// panel's.
-    pub const ALL: [ContextTab; 10] = [
+    pub const ALL: [ContextTab; 9] = [
         ContextTab::Files,
         ContextTab::Changes,
         ContextTab::Pulls,
-        ContextTab::Board,
         ContextTab::Browser,
         ContextTab::Devices,
         ContextTab::Runs,
@@ -43,18 +41,11 @@ impl ContextTab {
         ContextTab::Logcat,
     ];
 
-    /// Its home is the bottom panel, where long lines have the window's
-    /// width (the others' is the column beside the chat).
-    pub fn in_bottom_panel(self) -> bool {
-        matches!(self, ContextTab::Terminal | ContextTab::Logcat)
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             ContextTab::Files => "Files",
             ContextTab::Changes => "Git",
             ContextTab::Pulls => "PRs",
-            ContextTab::Board => "Board",
             ContextTab::Terminal => "Terminal",
             ContextTab::Browser => "Browser",
             ContextTab::Devices => "Devices",
@@ -64,12 +55,26 @@ impl ContextTab {
         }
     }
 
+    /// What the tool is, in a line (Settings → Features).
+    pub fn about(self) -> &'static str {
+        match self {
+            ContextTab::Files => "The folder tree and the editor.",
+            ContextTab::Changes => "Changes to review, branches, history and stashes.",
+            ContextTab::Pulls => "The repository's pull requests.",
+            ContextTab::Terminal => "Terminals in the workspace's folder.",
+            ContextTab::Browser => "A browser agents can drive, in Preview.",
+            ContextTab::Devices => "Android emulators and phones, in Preview.",
+            ContextTab::Runs => "Run configurations and the ports they open.",
+            ContextTab::Tests => "UI tests in plain words, run in the browser or on a device.",
+            ContextTab::Logcat => "The log of the Android device in use.",
+        }
+    }
+
     pub fn icon(self) -> Icons {
         match self {
             ContextTab::Files => Icons::Files,
             ContextTab::Changes => Icons::GitBranch,
             ContextTab::Pulls => Icons::GitPullRequest,
-            ContextTab::Board => Icons::SquareKanban,
             ContextTab::Terminal => Icons::Terminal,
             ContextTab::Browser => Icons::Globe,
             ContextTab::Devices => Icons::TabletSmartphone,
@@ -85,7 +90,6 @@ impl ContextTab {
             ContextTab::Files => "files",
             ContextTab::Changes => "changes",
             ContextTab::Pulls => "pulls",
-            ContextTab::Board => "board",
             ContextTab::Terminal => "terminal",
             ContextTab::Browser => "browser",
             ContextTab::Devices => "devices",
@@ -105,7 +109,6 @@ impl ContextTab {
             ContextTab::Files => Box::new(ShowFiles),
             ContextTab::Changes => Box::new(ShowChanges),
             ContextTab::Pulls => Box::new(ShowPulls),
-            ContextTab::Board => Box::new(ShowBoard),
             ContextTab::Terminal => Box::new(ShowTerminal),
             ContextTab::Browser => Box::new(ShowBrowser),
             ContextTab::Devices => Box::new(ShowDevices),
@@ -113,13 +116,6 @@ impl ContextTab {
             ContextTab::Tests => Box::new(ShowTests),
             ContextTab::Logcat => Box::new(ShowLogcat),
         }
-    }
-
-    pub fn index(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|tab| *tab == self)
-            .unwrap_or_default()
     }
 
     /// The brand's feature that is this tool (`[features]` in
@@ -130,7 +126,6 @@ impl ContextTab {
             ContextTab::Files => Feature::Files,
             ContextTab::Changes => Feature::Changes,
             ContextTab::Pulls => Feature::Pulls,
-            ContextTab::Board => Feature::Board,
             ContextTab::Terminal => Feature::Terminal,
             ContextTab::Browser => Feature::Browser,
             ContextTab::Devices => Feature::Devices,

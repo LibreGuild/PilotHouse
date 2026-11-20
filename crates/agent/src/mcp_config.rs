@@ -1,5 +1,5 @@
 //! MCP servers PilotHouse hands to every agent session, besides its own
-//! (board, browser, devices): set up once here instead of in each agent's
+//! (browser, devices, tests): set up once here instead of in each agent's
 //! settings. The servers agents already have in their own settings are
 //! found too, to see them and copy them over.
 //!
@@ -109,21 +109,27 @@ pub fn validate(server: &McpServerConfig, existing: &[McpServerConfig]) -> Resul
     Ok(())
 }
 
-/// Splits a command line into words: spaces separate, quotes group, a
-/// backslash escapes the next character.
+/// Splits a command line into words: spaces separate, quotes group, and
+/// a backslash escapes a quote, a space or another backslash, as in a
+/// shell. Any other backslash is part of the word, so that a Windows path
+/// (`C:\tools\server.exe`) keeps its folders; in single quotes everything
+/// is as written.
 pub fn split_command(line: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut in_word = false;
     let mut quote = None;
-    let mut chars = line.chars();
+    let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
         match (quote, c) {
+            (Some('\''), c) if c != '\'' => word.push(c),
             (_, '\\') => {
-                if let Some(next) = chars.next() {
-                    word.push(next);
-                    in_word = true;
-                }
+                let escaped = |next: &char| {
+                    matches!(next, '\\' | '"')
+                        || (quote.is_none() && (*next == '\'' || next.is_whitespace()))
+                };
+                word.push(chars.next_if(escaped).unwrap_or('\\'));
+                in_word = true;
             }
             (Some(open), c) if c == open => quote = None,
             (Some(_), c) => word.push(c),
@@ -349,6 +355,25 @@ mod tests {
             split_command(r#"run """#),
             ["run", ""],
             "an empty quoted word is a word"
+        );
+        // A backslash that escapes nothing is kept: a Windows path.
+        assert_eq!(
+            split_command(r"C:\tools\server.exe --root C:\work\repo\"),
+            [r"C:\tools\server.exe", "--root", r"C:\work\repo\"]
+        );
+        assert_eq!(
+            split_command(r#""C:\Program Files\nodejs\node.exe" server.js"#),
+            [r"C:\Program Files\nodejs\node.exe", "server.js"]
+        );
+        // One that does escape is taken away, as a shell does.
+        assert_eq!(
+            split_command(r#"say \"hi\" "a \"b\" c" it\'s a\\b"#),
+            ["say", r#""hi""#, r#"a "b" c"#, "it's", r"a\b"]
+        );
+        // In single quotes everything is as written.
+        assert_eq!(
+            split_command(r#"'C:\my dir\' 'a\"b'"#),
+            [r"C:\my dir\", r#"a\"b"#]
         );
         assert_eq!(
             parse_env("TOKEN=abc\n# note\n\nURL = http://x=y\nFLAG"),

@@ -143,6 +143,14 @@ impl DeckDocument {
             used: Instant::now(),
         };
         super::control::register(cx.entity().downgrade(), cx);
+        // However it is closed, a change still waiting for its save (the
+        // timer goes with the document) is written.
+        cx.on_release(|this, _| {
+            if let Err(err) = this.save_now() {
+                tracing::warn!("the presentation's last changes were not saved: {err:#}");
+            }
+        })
+        .detach();
         this
     }
 
@@ -577,8 +585,17 @@ impl DeckDocument {
     /// The pictures let go since last asked; the caller frees them on the
     /// GPU in every window (`cx.drop_image(image, Some(window))`), as any
     /// window showing the deck may have drawn them.
+    ///
+    /// One a window still holds (the slide going out in a transition, the
+    /// last picture shown while the next is made) waits here until it is
+    /// let go: freed now, it would be drawn again, put back on the GPU and
+    /// never freed.
     pub fn take_stale(&mut self) -> Vec<Arc<RenderImage>> {
-        std::mem::take(&mut self.stale)
+        let (free, held) = std::mem::take(&mut self.stale)
+            .into_iter()
+            .partition(|image| Arc::strong_count(image) == 1);
+        self.stale = held;
+        free
     }
 
     /// The canvas shows one slide: pictures of it are kept for that slide
@@ -604,8 +621,14 @@ impl DeckDocument {
         const KEEP: usize = 6;
         if self.stale.len() > KEEP {
             let extra = self.stale.len() - KEEP;
-            for image in self.stale.drain(..extra) {
-                ph_ui::images::release_render_image(image, cx);
+            let stale = std::mem::take(&mut self.stale);
+            for (ix, image) in stale.into_iter().enumerate() {
+                // Never one a window still holds (see `take_stale`).
+                if ix < extra && Arc::strong_count(&image) == 1 {
+                    ph_ui::images::release_render_image(image, cx);
+                } else {
+                    self.stale.push(image);
+                }
             }
         }
     }

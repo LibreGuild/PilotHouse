@@ -39,10 +39,12 @@ pub fn detect(root: &Path) -> Vec<RunConfig> {
     let has = |name: &str| root.join(name).exists();
 
     if let Ok(text) = std::fs::read_to_string(root.join("package.json")) {
+        // Always `run`: pnpm and yarn take their own command over a script
+        // of the same name (`pnpm publish` publishes the package).
         let runner = if has("pnpm-lock.yaml") {
-            "pnpm"
+            "pnpm run"
         } else if has("yarn.lock") {
-            "yarn"
+            "yarn run"
         } else if has("bun.lockb") || has("bun.lock") {
             "bun run"
         } else {
@@ -298,9 +300,9 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "pnpm dev",
-                "pnpm lint",
-                "pnpm build:prod",
+                "pnpm run dev",
+                "pnpm run lint",
+                "pnpm run build:prod",
                 "make all",
                 "make build"
             ]

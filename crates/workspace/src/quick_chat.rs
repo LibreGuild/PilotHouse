@@ -322,7 +322,10 @@ impl gpui_kit::RenderOnce for ShortcutRecorder {
                             .ghost()
                             .small()
                             .label("Reset")
-                            .tooltip(format!("Back to {}", shortcut_label(default_shortcut())))
+                            .tooltip(ph_ui::tip(format!(
+                                "Back to {}",
+                                shortcut_label(default_shortcut())
+                            )))
                             .on_click(|_, _, cx| {
                                 let _ =
                                     AppState::store(cx).set_setting(SHORTCUT_KEY, &None::<String>);
@@ -533,7 +536,7 @@ pub(crate) fn deliver(
     Ok(())
 }
 
-/// Hides the window; its chat goes on (in the Chats space).
+/// Hides the window; its chat goes on (in the Scratch workspace).
 fn close(cx: &mut App) {
     if let Some((handle, _)) = cx.default_global::<QuickChat>().window.take() {
         let _ = handle.update(cx, |_, window, _| window.remove_window());
@@ -581,7 +584,20 @@ fn bounds(store: &Store, cx: &App) -> Bounds<Pixels> {
 
 fn open(cx: &mut App) -> anyhow::Result<()> {
     let store = AppState::store(cx).clone();
-    let project = store.chats_space(&ph_store::paths::scratch_root())?;
+    let project = store.scratch_workspace(&ph_store::paths::scratch_root())?;
+    // A window that does not list that workspace yet (it was made just
+    // now) reads its workspaces again, so the chat started here has its
+    // badge and its card there. Later: a window may be the one that asked.
+    let scratch = project.id;
+    cx.defer(move |cx| {
+        for workspace in crate::windows::all(cx) {
+            workspace.update(cx, |workspace, cx| {
+                if !workspace.has_project(scratch) {
+                    workspace.reload_projects(cx);
+                }
+            });
+        }
+    });
     let mut options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds(&store, cx))),
         window_min_size: Some(Size::new(px(MIN_SIZE.0), px(MIN_SIZE.1))),
@@ -645,7 +661,8 @@ fn stay_on_top(window: &Window) {
 #[cfg(not(windows))]
 fn stay_on_top(_: &Window) {}
 
-/// The quick chat window: a chat of the Chats space.
+/// The quick chat window: a chat of the workspace for chats that need no
+/// folder (Scratch).
 pub(crate) struct QuickChatWindow {
     store: Store,
     project: Project,
@@ -671,7 +688,7 @@ impl QuickChatWindow {
                 ChatPanelEvent::SessionsChanged => {
                     let shown = chat.read(cx).active_session_id(cx);
                     let _ = this.store.set_setting(SESSION_KEY, &shown);
-                    // The Chats list in the main window shows it.
+                    // The main window's tabs and the Bridge show it.
                     crate::session_changes::note(this.project.id, cx);
                 }
                 ChatPanelEvent::SelectSession(id) => {
@@ -737,10 +754,25 @@ impl QuickChatWindow {
         }
     }
 
-    /// The keyboard goes to the composer.
+    /// The keyboard goes to the composer (of a new chat, when the one it
+    /// showed was deleted in the main window meanwhile).
     fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_deleted_chat(cx);
         self.chat
             .update(cx, |chat, cx| chat.focus_composer(window, cx));
+    }
+
+    /// The chat on show was deleted elsewhere (from its card or tab in the
+    /// main window): the window shows a new one, or a message sent here
+    /// would go to a chat that is not there.
+    fn drop_deleted_chat(&mut self, cx: &mut Context<Self>) {
+        let Some(shown) = self.chat.read(cx).active_session_id(cx) else {
+            return;
+        };
+        if matches!(self.store.session(shown), Ok(None)) {
+            self.chat.update(cx, |chat, cx| chat.set_session(None, cx));
+            let _ = self.store.set_setting(SESSION_KEY, &None::<SessionId>);
+        }
     }
 
     fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -751,13 +783,21 @@ impl QuickChatWindow {
         let _ = self.store.set_setting(SESSION_KEY, &None::<SessionId>);
     }
 
-    /// The chat in the main window, under Chats.
+    /// The chat in the main window, in the Scratch workspace: the chat
+    /// itself where it has been sent (the window reads the workspace's
+    /// chats again for it), else a new one there.
     fn open_in_app(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.drop_deleted_chat(cx);
         let session = self.chat.read(cx).active_session_id(cx);
         let project = self.project.id;
         cx.defer(move |cx| {
-            let Some((handle, workspace)) = crate::open::main_workspace(cx) else {
-                return;
+            // With no window left open (macOS), one is opened for it.
+            let (handle, workspace) = match crate::open::main_workspace_or_open(cx) {
+                Ok(main) => main,
+                Err(err) => {
+                    tracing::warn!("opening a window for the quick chat failed: {err:#}");
+                    return;
+                }
             };
             let _ = handle.update(cx, |_, window, cx| {
                 workspace.update(cx, |workspace, cx| match session {
@@ -807,7 +847,7 @@ impl Render for QuickChatWindow {
                         .small()
                         .icon(Icons::ExternalLink)
                         .accessibility_label(format!("Open in {}", ph_brand::NAME))
-                        .tooltip(format!("Open in {}", ph_brand::NAME))
+                        .tooltip(ph_ui::tip(format!("Open in {}", ph_brand::NAME)))
                         .on_click(cx.listener(|this, _, window, cx| this.open_in_app(window, cx))),
                 ),
         );

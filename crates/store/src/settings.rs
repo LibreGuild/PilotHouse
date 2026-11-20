@@ -1,4 +1,14 @@
 //! App-wide preferences as typed JSON values.
+//!
+//! A value read is remembered for a moment. Views read settings while they
+//! draw, and a view with something moving in it draws sixty times a second:
+//! each read was a query behind the one lock every writer shares, so a slow
+//! write (or just the count of reads) could hold the window up. What is
+//! written here is remembered at once; a write by another process (the MCP
+//! bridge, a hook) is seen after [`KEPT`].
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use rusqlite::{OptionalExtension as _, params};
@@ -6,10 +16,32 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::Store;
 
+/// How long a setting read is remembered: short enough that nobody sees
+/// another process's write arrive late.
+const KEPT: Duration = Duration::from_millis(250);
+
+/// The settings read lately: the stored JSON (or that there is none) and
+/// when it was read.
+pub(crate) type Recent = HashMap<String, (Instant, Option<String>)>;
+
 impl Store {
-    /// Reads a setting, falling back to `T::default()` when it is missing or
-    /// no longer parses (for example after a type changed between versions).
-    pub fn setting<T: DeserializeOwned + Default>(&self, key: &str) -> T {
+    /// The settings read lately. (A poisoned lock only means a reader
+    /// panicked mid-way; what it holds is still whole.)
+    fn recent(&self) -> std::sync::MutexGuard<'_, Recent> {
+        self.settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The stored JSON of setting `key`, from the last moment's reads when
+    /// it is among them.
+    fn setting_json(&self, key: &str) -> Option<String> {
+        let now = Instant::now();
+        if let Some((at, raw)) = self.recent().get(key)
+            && now.duration_since(*at) < KEPT
+        {
+            return raw.clone();
+        }
         let raw: Option<String> = self
             .conn()
             .query_row(
@@ -20,7 +52,15 @@ impl Store {
             .optional()
             .ok()
             .flatten();
-        raw.and_then(|raw| serde_json::from_str(&raw).ok())
+        self.recent().insert(key.to_string(), (now, raw.clone()));
+        raw
+    }
+
+    /// Reads a setting, falling back to `T::default()` when it is missing or
+    /// no longer parses (for example after a type changed between versions).
+    pub fn setting<T: DeserializeOwned + Default>(&self, key: &str) -> T {
+        self.setting_json(key)
+            .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default()
     }
 
@@ -54,7 +94,14 @@ impl Store {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, raw],
         )?;
+        self.recent()
+            .insert(key.to_string(), (Instant::now(), Some(raw)));
         Ok(())
+    }
+
+    /// Forgets what was read of `key`: it was written past [`Self::set_setting`].
+    pub(crate) fn forget_setting(&self, key: &str) {
+        self.recent().remove(key);
     }
 }
 

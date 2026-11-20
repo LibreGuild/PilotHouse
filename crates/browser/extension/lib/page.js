@@ -1,4 +1,4 @@
-// Reading a tab the user pointed at (a menu, a shortcut, the side panel):
+// Reading a tab the user pointed at (the page's menu, a shortcut, the popup):
 // the page scripts in `page/`, run in the extension's isolated world, and
 // screenshots of the visible part of the tab.
 
@@ -42,14 +42,14 @@ export async function inMainWorld(tab, func, args = []) {
 function access(error) {
   const message = String(error?.message ?? error);
   if (/Cannot access|cannot be scripted|permission/i.test(message)) {
-    return 'PilotHouse may not read this page yet. Use the PilotHouse menu (right-click) or its shortcut on the page, or allow this site in the PilotHouse panel.';
+    return 'PilotHouse may not read this page yet. Click PilotHouse in the toolbar, or right-click the page and use the PilotHouse menu.';
   }
   return message;
 }
 
 /** Whether Chrome refused a screenshot or a tab's video because the user did
- * not ask from the page itself (its menu or a shortcut grant that; the side
- * panel and a site's access do not). */
+ * not ask for this tab (the toolbar button, the page's menu and a shortcut
+ * are asking). */
 export function notInvoked(error) {
   return /activeTab|all_urls|not been invoked/i.test(String(error?.message ?? error));
 }

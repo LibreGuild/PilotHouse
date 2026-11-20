@@ -3,6 +3,7 @@
 //! saving a theme, a custom size, sections, renaming and earlier versions.
 
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -68,20 +69,89 @@ fn rows_of(text: &str) -> Vec<Vec<String>> {
     text.lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            let line = line.trim().trim_start_matches('|').trim_end_matches('|');
-            let split: Vec<&str> = if line.contains('\t') {
-                line.split('\t').collect()
-            } else if line.contains('|') {
-                line.split('|').collect()
-            } else {
-                line.split(',').collect()
-            };
-            split
-                .into_iter()
-                .map(|cell| cell.trim().to_string())
-                .collect()
+            // A tab is a cell's end also where the line starts: an empty
+            // first cell pasted from a spreadsheet stays a cell.
+            if line.contains('\t') {
+                let cells = line.trim_end().split('\t');
+                return cells.map(|cell| cell.trim().to_string()).collect();
+            }
+            let line = line.trim();
+            // A Markdown row (`| a | b |`) loses one bar at each end, and
+            // only when it has both: ` | a | b` starts with an empty cell.
+            let inner = line
+                .strip_prefix('|')
+                .and_then(|rest| rest.strip_suffix('|'))
+                .filter(|rest| !rest.ends_with('\\'));
+            let cells = split_bars(inner.unwrap_or(line));
+            if inner.is_none() && cells.len() == 1 {
+                return line
+                    .split(',')
+                    .map(|cell| cell.trim().to_string())
+                    .collect();
+            }
+            cells
         })
         .collect()
+}
+
+/// The cells of a row written with bars; `\|` is a bar in a cell.
+fn split_bars(line: &str) -> Vec<String> {
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'|') => {
+                chars.next();
+                cell.push('|');
+            }
+            '|' => cells.push(std::mem::take(&mut cell).trim().to_string()),
+            c => cell.push(c),
+        }
+    }
+    cells.push(cell.trim().to_string());
+    cells
+}
+
+/// A cell's text as a row shows it: on one line.
+fn cell_shown(text: &str) -> String {
+    text.replace(['\n', '\t'], " ").trim().to_string()
+}
+
+/// A row as [`rows_of`] reads it back: cells apart by ` | `, a bar in a
+/// cell as `\|`. It is wrapped in bars where it would otherwise read as
+/// something else (one cell alone, or an empty cell at both ends).
+fn row_text(cells: &[String]) -> String {
+    let row = cells
+        .iter()
+        .map(|cell| cell_shown(cell).replace('|', "\\|"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let ends_empty = cells.first().is_none_or(|cell| cell.trim().is_empty())
+        && cells.last().is_none_or(|cell| cell.trim().is_empty());
+    if cells.len() < 2 || ends_empty {
+        format!("| {row} |")
+    } else {
+        row
+    }
+}
+
+/// A cell's text typed anew, as plain text (`# of seats` is what it says)
+/// in the look its text began with.
+fn retyped(old: &TextBody, typed: &str) -> TextBody {
+    let was = old.paragraphs.first().cloned().unwrap_or_default();
+    let run = Run {
+        text: typed.to_string(),
+        link: None,
+        ..was.runs.first().cloned().unwrap_or_default()
+    };
+    TextBody {
+        paragraphs: vec![Paragraph {
+            runs: vec![run],
+            ..was
+        }],
+        ..old.clone()
+    }
 }
 
 impl SlidesEditor {
@@ -128,12 +198,7 @@ impl SlidesEditor {
         let text = table
             .rows
             .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|cell| cell.text.plain().replace('\n', " "))
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            })
+            .map(|row| row_text(&row.iter().map(|cell| cell.text.plain()).collect::<Vec<_>>()))
             .collect::<Vec<_>>()
             .join("\n");
         let input = self.textarea(text, 6, window, cx);
@@ -158,14 +223,19 @@ impl SlidesEditor {
                         .map(|(r, row)| {
                             (0..columns)
                                 .map(|c| {
-                                    // Cells kept where they were keep their fill.
-                                    let mut cell = table
-                                        .rows
-                                        .get(r)
-                                        .and_then(|row| row.get(c))
+                                    // Cells kept where they were keep their
+                                    // fill; one whose text was not touched
+                                    // keeps all of it (styles, lines, links).
+                                    let old = table.rows.get(r).and_then(|row| row.get(c));
+                                    let typed = row.get(c).map(String::as_str).unwrap_or_default();
+                                    let mut cell = old
                                         .map(|cell| serde_json::to_value(cell).unwrap_or_default())
                                         .unwrap_or_else(|| json!({}));
-                                    cell["text"] = json!(row.get(c).cloned().unwrap_or_default());
+                                    let was = old.map(|cell| &cell.text);
+                                    if was.is_none_or(|text| cell_shown(&text.plain()) != typed) {
+                                        let text = retyped(was.unwrap_or(&TextBody::default()), typed);
+                                        cell["text"] = serde_json::to_value(text).unwrap_or_default();
+                                    }
                                     cell
                                 })
                                 .collect()
@@ -205,15 +275,10 @@ impl SlidesEditor {
                 .max()
                 .unwrap_or(0),
         );
-        let mut lines = vec![format!(
-            "{} | {}",
-            if scatter { "x" } else { "" },
-            chart
-                .series
-                .iter()
-                .map(|series| series.name.clone())
-                .collect::<Vec<_>>()
-                .join(" | ")
+        let corner = if scatter { "x" } else { "" }.to_string();
+        let names = chart.series.iter().map(|series| series.name.clone());
+        let mut lines = vec![row_text(
+            &std::iter::once(corner).chain(names).collect::<Vec<_>>(),
         )];
         for ix in 0..count {
             let first = if scatter {
@@ -226,18 +291,16 @@ impl SlidesEditor {
             } else {
                 chart.categories.get(ix).cloned().unwrap_or_default()
             };
-            let values: Vec<String> = chart
-                .series
-                .iter()
-                .map(|series| {
-                    series
-                        .values
-                        .get(ix)
-                        .map(|v| v.to_string())
-                        .unwrap_or_default()
-                })
-                .collect();
-            lines.push(format!("{first} | {}", values.join(" | ")));
+            let values = chart.series.iter().map(|series| {
+                series
+                    .values
+                    .get(ix)
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            });
+            lines.push(row_text(
+                &std::iter::once(first).chain(values).collect::<Vec<_>>(),
+            ));
         }
         let data = self.textarea(lines.join("\n"), 6, window, cx);
         let title = self.input(chart.title.clone(), "No title", window, cx);
@@ -267,7 +330,9 @@ impl SlidesEditor {
                         return;
                     };
                     let names: Vec<String> = head.iter().skip(1).cloned().collect();
-                    let number = |text: &str| text.replace([',', '%', '$', '€', '£'], "").trim().parse::<f64>().ok();
+                    // `NaN` and `inf` parse as numbers but cannot be kept: they
+                    // read as any other text does.
+                    let number = |text: &str| text.replace([',', '%', '$', '€', '£'], "").trim().parse::<f64>().ok().filter(|value| value.is_finite());
                     let categories: Vec<String> = body.iter().map(|row| row.first().cloned().unwrap_or_default()).collect();
                     let series: Vec<Value> = names
                         .iter()
@@ -364,7 +429,7 @@ impl SlidesEditor {
                         .hover(move |style| style.bg(hover))
                         .cursor_pointer()
                         .tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(title.clone())
+                            gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(title.clone()))
                                 .build(window, cx)
                         })
                         .child(img(picture).size_full().object_fit(ObjectFit::Contain))
@@ -510,7 +575,11 @@ impl SlidesEditor {
                                             let Ok(Ok(Some(paths))) = chosen.await else {
                                                 return;
                                             };
-                                            let Some(text) = paths.first().and_then(|path| std::fs::read_to_string(path).ok()) else {
+                                            // Read off the UI thread: the file can be of any size, on any disk.
+                                            let read = cx.background_spawn(async move {
+                                                paths.first().and_then(|path| std::fs::read_to_string(path).ok())
+                                            });
+                                            let Some(text) = read.await else {
                                                 return;
                                             };
                                             _ = cx.update(|window, cx| {
@@ -551,19 +620,34 @@ impl SlidesEditor {
                 );
             }
             None => {
-                // As wide as tall as the drawing says.
-                let aspect =
-                    resvg::usvg::Tree::from_str(&source, &crate::slides::raster::inert_options())
+                // As wide as tall as the drawing says, which takes reading
+                // all of it: off the UI thread.
+                let parsed = source.clone();
+                let aspect = cx.background_spawn(async move {
+                    // One that nests too deeply is not read (it would use
+                    // up this thread's stack); adding it is refused with
+                    // the reason a moment later.
+                    if crate::slides::raster::too_deep(parsed.as_bytes()) {
+                        return 1.;
+                    }
+                    resvg::usvg::Tree::from_str(&parsed, &crate::slides::raster::inert_options())
                         .map(|tree| tree.size().width() / tree.size().height().max(1.))
-                        .unwrap_or(1.);
-                let size = &self.deck(cx).size;
-                let fit = (size.width * 0.5 / aspect).min(size.height * 0.5);
-                let frame = self.centered(fit * aspect, fit, cx);
-                self.insert(
-                    json!({ "type": "svg", "source": source, "frame": frame }),
-                    window,
-                    cx,
-                );
+                        .unwrap_or(1.)
+                });
+                cx.spawn_in(window, async move |this, cx| {
+                    let aspect = aspect.await;
+                    _ = this.update_in(cx, |this, window, cx| {
+                        let size = &this.deck(cx).size;
+                        let fit = (size.width * 0.5 / aspect).min(size.height * 0.5);
+                        let frame = this.centered(fit * aspect, fit, cx);
+                        this.insert(
+                            json!({ "type": "svg", "source": source, "frame": frame }),
+                            window,
+                            cx,
+                        );
+                    });
+                })
+                .detach();
             }
         }
     }
@@ -616,7 +700,21 @@ impl SlidesEditor {
                     let slides = match scope.get() {
                         0 => Vec::new(),
                         1 => vec![current],
-                        _ => parse_range(range.read(cx).value().as_ref(), count),
+                        _ => {
+                            let slides = parse_range(range.read(cx).value().as_ref(), count);
+                            // An empty list is every slide to the export:
+                            // a range that names none is refused instead.
+                            if slides.is_empty() {
+                                window.push_notification(
+                                    Notification::error(format!(
+                                        "Not exported: no slide is in that range. Give slides from 1 to {count}, as in 1-3, 5."
+                                    )),
+                                    cx,
+                                );
+                                return;
+                            }
+                            slides
+                        }
                     };
                     let (format, notes, width) = (format.get(), notes.get(), width.get());
                     editor.update(cx, |this, cx| this.export_with(format, slides, notes, width, window, cx));
@@ -731,12 +829,24 @@ impl SlidesEditor {
                         return;
                     }
                     let deck = editor.read(cx).doc.read(cx).deck();
-                    let result = crate::slides::space::save_theme(&crate::slides::space::themes_dir(), &name, &deck.theme, &deck.size);
-                    let notification = match result {
-                        Ok(_) => Notification::success(format!("Saved the theme {name}.")),
-                        Err(err) => Notification::error(format!("Not saved: {err:#}")),
-                    };
-                    window.push_notification(notification, cx);
+                    // Written off the UI thread.
+                    let (theme, size, saved) = (deck.theme.clone(), deck.size.clone(), name.clone());
+                    let written = cx.background_spawn(async move {
+                        crate::slides::space::save_theme(&crate::slides::space::themes_dir(), &saved, &theme, &size).map(|_| ())
+                    });
+                    let said = name.clone();
+                    window
+                        .spawn(cx, async move |cx| {
+                            let result = written.await;
+                            _ = cx.update(|window, cx| {
+                                let notification = match result {
+                                    Ok(()) => Notification::success(format!("Saved the theme {said}.")),
+                                    Err(err) => Notification::error(format!("Not saved: {err:#}")),
+                                };
+                                window.push_notification(notification, cx);
+                            });
+                        })
+                        .detach();
                     // The deck now uses it by that name.
                     editor.update(cx, |this, cx| this.change("theme name", |deck| deck.theme.name = name.clone(), cx));
                 }))
@@ -1010,7 +1120,24 @@ impl SlidesEditor {
 
     /// The versions kept as the deck was saved, to go back to one.
     pub(crate) fn open_versions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let versions = self.doc.read(cx).space().versions();
+        // The folder is listed off the UI thread; then the dialog opens.
+        let space = self.doc.read(cx).space().clone();
+        let listed = cx.background_spawn(async move { space.versions() });
+        cx.spawn_in(window, async move |this, cx| {
+            let versions = listed.await;
+            _ = this.update_in(cx, |this, window, cx| {
+                this.show_versions(versions, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn show_versions(
+        &mut self,
+        versions: Vec<(PathBuf, std::time::SystemTime)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let editor = cx.entity();
         window.open_dialog(cx, move |dialog, window, cx| {
             let rows: Vec<AnyElement> = if versions.is_empty() {
@@ -1039,24 +1166,33 @@ impl SlidesEditor {
                                     .label("Go back to this")
                                     .on_click(move |_, window, cx| {
                                         window.close_dialog(cx);
-                                        let read = std::fs::read(&path)
-                                            .map_err(anyhow::Error::from)
-                                            .and_then(|bytes| {
-                                                Ok(serde_json::from_slice::<Deck>(&bytes)?)
-                                            });
-                                        match read {
-                                            Ok(deck) => editor.update(cx, |this, cx| {
-                                                this.doc.update(cx, |doc, cx| {
-                                                    doc.settle();
-                                                    doc.commit("restore", deck, cx);
-                                                    doc.settle();
+                                        // Read off the UI thread: a deck
+                                        // can be several megabytes.
+                                        let (editor, path) = (editor.clone(), path.clone());
+                                        let read = cx.background_spawn(async move {
+                                            let bytes = std::fs::read(&path)?;
+                                            anyhow::Ok(serde_json::from_slice::<Deck>(&bytes)?)
+                                        });
+                                        window
+                                            .spawn(cx, async move |cx| {
+                                                let read = read.await;
+                                                _ = cx.update(|window, cx| match read {
+                                                    Ok(deck) => editor.update(cx, |this, cx| {
+                                                        this.doc.update(cx, |doc, cx| {
+                                                            doc.settle();
+                                                            doc.commit("restore", deck, cx);
+                                                            doc.settle();
+                                                        });
+                                                    }),
+                                                    Err(err) => window.push_notification(
+                                                        Notification::error(format!(
+                                                            "Not read: {err:#}"
+                                                        )),
+                                                        cx,
+                                                    ),
                                                 });
-                                            }),
-                                            Err(err) => window.push_notification(
-                                                Notification::error(format!("Not read: {err:#}")),
-                                                cx,
-                                            ),
-                                        }
+                                            })
+                                            .detach();
                                     }),
                             )
                             .into_any_element()
@@ -1129,19 +1265,7 @@ impl SlidesEditor {
                     next_editor.update(cx, |this, cx| {
                         // The next after the selection, slide by slide.
                         let here = (this.current, this.selected.first().cloned());
-                        let start = found
-                            .iter()
-                            .position(|(slide, id)| (*slide, Some(id.clone())) == here)
-                            .map_or(0, |ix| ix + 1);
-                        let pick = found
-                            .iter()
-                            .cycle()
-                            .skip(start)
-                            .find(|(slide, id)| {
-                                (*slide, Some(id.clone())) != here || found.len() == 1
-                            })
-                            .cloned();
-                        if let Some((slide, id)) = pick {
+                        if let Some((slide, id)) = next_found(&found, &here) {
                             this.go_to(slide, window, cx);
                             this.select(vec![id], cx);
                         }
@@ -1199,6 +1323,30 @@ impl SlidesEditor {
     }
 }
 
+/// The place after `here` (a slide and its selected element) among `found`,
+/// which has an entry for each time the text occurs: the next other element,
+/// round to the first again; `here` itself when it is the only one.
+fn next_found(
+    found: &[(usize, String)],
+    here: &(usize, Option<String>),
+) -> Option<(usize, String)> {
+    let is_here = |(slide, id): &&(usize, String)| *slide == here.0 && Some(id) == here.1.as_ref();
+    let start = found
+        .iter()
+        .position(|entry| is_here(&entry))
+        .map_or(0, |ix| ix + 1);
+    found
+        .iter()
+        .cycle()
+        .skip(start)
+        // Once round at most: with every entry in the one element (the
+        // text twice in it) there is no other to come to.
+        .take(found.len())
+        .find(|entry| !is_here(entry))
+        .or(found.first())
+        .cloned()
+}
+
 /// Every text an element holds (its tables' cells, its group's too).
 fn collect_text(element: &Element, out: &mut Vec<String>) {
     match &element.kind {
@@ -1226,7 +1374,8 @@ fn collect_text(element: &Element, out: &mut Vec<String>) {
 fn parse_range(text: &str, count: usize) -> Vec<usize> {
     let mut out = Vec::new();
     for part in text.split([',', ' ']).filter(|part| !part.is_empty()) {
-        let (from, to) = match part.split_once('-') {
+        // Also the dashes a keyboard puts in place of a hyphen.
+        let (from, to) = match part.split_once(['-', '–', '—']) {
             Some((from, to)) => (
                 from.trim().parse::<usize>().ok(),
                 to.trim().parse::<usize>().ok(),
@@ -1277,5 +1426,68 @@ mod tests {
             vec![vec!["a", "b"], vec!["1", "2"]]
         );
         assert_eq!(super::parse_range("1-3, 5, 9", 6), vec![0, 1, 2, 4]);
+        assert_eq!(super::parse_range("2–4", 6), vec![1, 2, 3]);
+        assert!(super::parse_range("9", 6).is_empty());
+    }
+
+    #[test]
+    fn an_empty_first_cell_stays_a_cell() {
+        use super::{row_text, rows_of};
+        // The chart's header: an empty corner, then the series.
+        assert_eq!(
+            rows_of(" | Sales | Costs"),
+            vec![vec!["", "Sales", "Costs"]]
+        );
+        assert_eq!(rows_of("\tSales\tCosts"), vec![vec!["", "Sales", "Costs"]]);
+        // A Markdown row has a bar at both ends, which are not cells.
+        assert_eq!(rows_of("| a | b |"), vec![vec!["a", "b"]]);
+        // Every row comes back as it was written.
+        for row in [
+            vec!["", "Sales", "Costs"],
+            vec!["Q1", "1", ""],
+            vec!["", "b", ""],
+            vec!["", "", ""],
+            vec![""],
+            vec!["one, with a comma"],
+            vec!["a|b", "c\\", "|"],
+            vec!["", "x|"],
+        ] {
+            let cells: Vec<String> = row.iter().map(|cell| cell.to_string()).collect();
+            assert_eq!(rows_of(&row_text(&cells)), vec![cells], "{row:?}");
+        }
+    }
+
+    #[test]
+    fn a_cell_typed_anew_is_plain_and_keeps_its_look() {
+        use crate::slides::model::{Align, Color, TextBody};
+        let mut old: TextBody = crate::slides::markdown::to_text("**Region**\nEMEA");
+        old.paragraphs[0].align = Some(Align::Right);
+        old.paragraphs[0].runs[0].color = Some(Color::from("accent2"));
+        // Shown on one line, so a cell not touched compares equal.
+        assert_eq!(super::cell_shown(&old.plain()), "Region EMEA");
+        let typed = super::retyped(&old, "# of seats");
+        assert_eq!(typed.plain(), "# of seats");
+        let run = &typed.paragraphs[0].runs[0];
+        assert_eq!(
+            (run.bold, run.color.clone()),
+            (Some(true), Some(Color::from("accent2")))
+        );
+        assert_eq!(typed.paragraphs[0].align, Some(Align::Right));
+    }
+
+    #[test]
+    fn find_next_ends_when_the_text_is_twice_in_one_element() {
+        let found = |ids: &[&str]| -> Vec<(usize, String)> {
+            ids.iter().map(|id| (0, id.to_string())).collect()
+        };
+        let at = |id: &str| (0, Some(id.to_string()));
+        let next =
+            |ids: &[&str], here: &str| super::next_found(&found(ids), &at(here)).map(|(_, id)| id);
+        // Nothing else to go to: it stays (this once never returned).
+        assert_eq!(next(&["a", "a"], "a").as_deref(), Some("a"));
+        assert_eq!(next(&["a", "a", "b"], "a").as_deref(), Some("b"));
+        assert_eq!(next(&["a", "a", "b"], "b").as_deref(), Some("a"));
+        assert_eq!(next(&["a", "b"], "elsewhere").as_deref(), Some("a"));
+        assert_eq!(next(&[], "a"), None);
     }
 }

@@ -219,7 +219,7 @@ impl StorageView {
                     .ghost()
                     .xsmall()
                     .icon(Icons::FolderOpen)
-                    .tooltip(ph_ui::platform::reveal_label())
+                    .tooltip(ph_ui::tip(ph_ui::platform::reveal_label()))
                     .accessibility_label("Show the folder")
                     .on_click({
                         let path = item.path.clone();
@@ -522,11 +522,7 @@ fn measure(store: &ph_store::Store) -> Vec<Group> {
             Removal::Contents,
         ),
         other("unsaved", "Unsaved edits kept after a quit", Removal::Never),
-        other(
-            "pilothouse.db",
-            "Chats, boards and settings",
-            Removal::Never,
-        ),
+        other("pilothouse.db", "Chats and settings", Removal::Never),
     ]
     .into_iter()
     .flatten()

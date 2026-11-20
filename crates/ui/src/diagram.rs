@@ -281,7 +281,7 @@ impl RenderOnce for DiagramCard {
                 .xsmall()
                 .icon(icon)
                 .accessibility_label(label)
-                .tooltip(label)
+                .tooltip(crate::tip(label))
         };
         let zoom_button = |id, icon: Icons, label, factor: f32| {
             let zoom = zoom.clone();

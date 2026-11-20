@@ -53,22 +53,31 @@ const FILES: &[(&str, &[u8])] = extension_files![
     "lib/tabs.js",
     "features/record.js",
     "features/send.js",
-    "features/sites.js",
     "features/status.js",
     "page/area.js",
-    "page/buttons.js",
     "page/clip.js",
     "page/picker.js",
     "page/recorder.js",
     "offscreen.html",
     "offscreen.js",
-    "sidepanel.html",
-    "sidepanel.css",
-    "sidepanel.js",
+    "popup.html",
+    "popup.css",
+    "popup.js",
     "icons/icon16.png",
     "icons/icon32.png",
     "icons/icon48.png",
     "icons/icon128.png",
+];
+
+/// Files of the extension before 0.7 (its side panel, its buttons on
+/// GitHub, Jira and Linear pages), taken out of the folder a user loaded it
+/// from: Chrome would list them as part of the extension still.
+const REMOVED: &[&str] = &[
+    "sidepanel.html",
+    "sidepanel.css",
+    "sidepanel.js",
+    "features/sites.js",
+    "page/buttons.js",
 ];
 
 /// Where the extension is written for the user to load.
@@ -94,6 +103,10 @@ fn write_files(dir: &Path) -> Result<()> {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
+    }
+    for name in REMOVED {
+        // Missing already, or not removable: neither stops the extension.
+        let _ = std::fs::remove_file(dir.join(name));
     }
     Ok(())
 }
@@ -206,8 +219,12 @@ fn launcher_script(layout: &Layout) -> String {
     if cfg!(windows) {
         // In a batch file `%` starts a variable; doubled, it is itself.
         let escape = |path: &Path| path.display().to_string().replace('%', "%%");
+        // The file is UTF-8, and cmd.exe reads a batch file in the console's
+        // code page, a line at a time: after `chcp 65001` the paths (a user
+        // folder named `José` or `山田`) are read as written. Should it fail,
+        // the lines are read as they were without it.
         format!(
-            "@echo off\r\nrem Written by PilotHouse: Chrome runs this to reach the PilotHouse app.\r\nset \"{}={}\"\r\n\"{}\" chrome-host %*\r\n",
+            "@echo off\r\nchcp 65001 >nul\r\nrem Written by PilotHouse: Chrome runs this to reach the PilotHouse app.\r\nset \"{}={}\"\r\n\"{}\" chrome-host %*\r\n",
             ph_store::paths::DATA_DIR_ENV,
             escape(&layout.data),
             escape(&layout.program),
@@ -667,9 +684,10 @@ mod tests {
         assert_eq!(id, EXTENSION_ID);
         // The extension's version is the app's.
         assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
-        // Only what it needs. No site is reachable by default: pages are read
-        // only when the user asks (activeTab), sites the user allows one by
-        // one (optional), and nothing runs in pages by itself.
+        // Only what it needs. No site is reachable, by default or by asking:
+        // a page is read only when the user points at its tab (activeTab:
+        // the popup, the page's menu, a shortcut), and nothing runs in
+        // pages by itself.
         assert_eq!(
             manifest["permissions"],
             json!([
@@ -681,7 +699,6 @@ mod tests {
                 "scripting",
                 "contextMenus",
                 "notifications",
-                "sidePanel",
                 "storage",
                 "offscreen",
                 "tabCapture"
@@ -689,7 +706,31 @@ mod tests {
         );
         assert!(manifest.get("host_permissions").is_none());
         assert!(manifest.get("content_scripts").is_none());
-        assert_eq!(manifest["optional_host_permissions"], json!(["<all_urls>"]));
+        assert!(manifest.get("optional_host_permissions").is_none());
+        // The toolbar button opens the popup: opening it is what lets the
+        // extension read the tab in front.
+        assert_eq!(manifest["action"]["default_popup"], "popup.html");
+        assert!(manifest.get("side_panel").is_none());
+    }
+
+    #[test]
+    fn writing_the_extension_takes_an_older_version_s_files_away() {
+        let dir = std::env::temp_dir().join(format!("ph-extension-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("page")).unwrap();
+        std::fs::write(dir.join("sidepanel.js"), "old").unwrap();
+        std::fs::write(dir.join("page/buttons.js"), "old").unwrap();
+        write_files(&dir).unwrap();
+        assert!(!dir.join("sidepanel.js").exists());
+        assert!(!dir.join("page/buttons.js").exists());
+        assert!(dir.join("popup.html").exists());
+        assert!(dir.join("manifest.json").exists());
+        for name in REMOVED {
+            assert!(
+                !FILES.iter().any(|(file, _)| file == name),
+                "{name} is shipped and removed"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

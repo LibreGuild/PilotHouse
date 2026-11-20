@@ -32,7 +32,7 @@ struct Attention {
     seen: HashMap<Watched, ChatState>,
     /// The badge on the Dock icon, as last set.
     badge: usize,
-    /// Workspaces' names, for Chrome's side panel (read once each, again
+    /// Workspaces' names, for the Chrome extension's popup (read once each, again
     /// after a rename: [`forget_names`]).
     names: HashMap<ProjectId, String>,
     _poll: Task<()>,
@@ -77,12 +77,19 @@ fn look(cx: &mut App) {
     let mut notes = Vec::new();
     let mut now = HashMap::new();
     let mut waiting = 0;
-    // For PilotHouse's Chrome extension: its badge, side panel and news.
+    // For PilotHouse's Chrome extension: its badge and popup.
     let mut chrome_waiting = Vec::new();
     let mut chrome_working = Vec::new();
-    let mut chrome_news = Vec::new();
+    // A chat counts as watched only while the window it is on screen in is
+    // the one in front (a window behind another app's shows nobody news).
+    let active = cx.active_window();
     for (project, chats) in ChatHub::all(cx) {
         let workspace = name_of(project, cx);
+        let looked_at = match crate::windows::window_showing(project, cx) {
+            Some(window) => active == Some(window),
+            // The Chats space, a review: shown in whichever window.
+            None => active.is_some(),
+        };
         let chats = chats.read(cx);
         for (session, summary) in chats.live(cx) {
             let note = || ph_browser::ChatNote {
@@ -105,13 +112,11 @@ fn look(cx: &mut App) {
                 .get(&Watched::Chat(session))
                 .copied()
                 .unwrap_or(ChatState::Idle);
-            if let Some(title) = news(before, summary.state, chats.is_viewing(session)) {
-                chrome_news.push(ph_browser::ChatNews {
-                    tag: format!("{TAG_PREFIX}{project}-{session}"),
-                    title: format!("{}: {title}", summary.title),
-                    body: summary.line.clone().unwrap_or_default(),
-                    kind: kind(summary.state),
-                });
+            if let Some(title) = news(
+                before,
+                summary.state,
+                looked_at && chats.is_viewing(session),
+            ) {
                 notes.push(SystemNotification {
                     tag: SharedString::from(format!("{TAG_PREFIX}{project}-{session}")),
                     title: format!("{}: {title}", summary.title).into(),
@@ -124,7 +129,7 @@ fn look(cx: &mut App) {
     }
     // Agents in terminals: watched when theirs is the terminal in front
     // and PilotHouse is.
-    let app_active = cx.active_window().is_some();
+    let app_active = active.is_some();
     for agent in crate::terminal_agents::TerminalAgents::all(cx) {
         if agent.state == ChatState::NeedsYou {
             waiting += 1;
@@ -161,12 +166,6 @@ fn look(cx: &mut App) {
                 .title
                 .clone()
                 .unwrap_or_else(|| agent.agent.name.to_string());
-            chrome_news.push(ph_browser::ChatNews {
-                tag: tag.clone(),
-                title: format!("{name}: {title}"),
-                body: agent.line.clone().unwrap_or_default(),
-                kind: kind(agent.state),
-            });
             notes.push(SystemNotification {
                 tag: SharedString::from(format!(
                     "{TERMINAL_TAG_PREFIX}{}-{}",
@@ -189,11 +188,11 @@ fn look(cx: &mut App) {
     for note in notes {
         cx.show_system_notification(note);
     }
-    crate::browser_inbox::report(chrome_waiting, chrome_working, chrome_news, cx);
+    crate::browser_inbox::report(chrome_waiting, chrome_working, cx);
 }
 
 /// Workspaces were renamed (or added, or removed): their names are read
-/// again, so Chrome's side panel does not show old ones.
+/// again, so the Chrome extension's popup does not show old ones.
 pub(crate) fn forget_names(cx: &mut App) {
     if cx.has_global::<Attention>() {
         cx.global_mut::<Attention>().names.clear();
@@ -216,15 +215,6 @@ fn name_of(project: ProjectId, cx: &mut App) -> String {
         .names
         .insert(project, name.clone());
     name
-}
-
-/// What kind of news a new state is, for Chrome's notifications.
-fn kind(state: ChatState) -> &'static str {
-    match state {
-        ChatState::NeedsYou => "needs",
-        ChatState::Failed => "failed",
-        _ => "done",
-    }
 }
 
 /// What to say when a chat goes from `before` to `after`, if anything: a

@@ -132,6 +132,11 @@ impl PullView {
             .new(|cx| InputState::new(window, cx).placeholder("12-30: why is this retried twice?"));
         let findings =
             cx.new(|cx| FindingsView::new(store.clone(), hosting.clone(), number, window, cx));
+        let first_tab = if findings.read(cx).has_review() {
+            Tab::Findings
+        } else {
+            Tab::Overview
+        };
         let walkthrough =
             cx.new(|cx| WalkthroughView::new(store.clone(), hosting.clone(), number, cx));
         let subscriptions = vec![
@@ -168,7 +173,10 @@ impl PullView {
             files_list: ListState::new(0, ListAlignment::Top, gpui_kit::px(800.)),
             unfolded: std::collections::HashSet::new(),
             error: None,
-            tab: Tab::Overview,
+            // Findings first: with an agent's review of it at hand, what
+            // it found is what the reviewer came for; the conversation is a
+            // tab away. Without one the page opens as the host's does.
+            tab: first_tab,
             description: None,
             bodies: HashMap::new(),
             composer,
@@ -327,6 +335,8 @@ impl PullView {
                 match result {
                     Ok(data) => {
                         let text = data.pull.body.clone().unwrap_or_default();
+                        // (Text nested too deeply to parse is shown plain.)
+                        let text = ph_ui::markdown::guarded(&text);
                         this.description = Some(cx.new(|cx| TextViewState::markdown(&text, cx)));
                         let mut bodies = HashMap::new();
                         for (id, body) in data
@@ -340,6 +350,7 @@ impl PullView {
                                     .map(|r| (r.id, r.body.clone().unwrap_or_default())),
                             )
                         {
+                            let body = ph_ui::markdown::guarded(&body);
                             bodies.insert(id, cx.new(|cx| TextViewState::markdown(&body, cx)));
                         }
                         this.bodies = bodies;
@@ -374,6 +385,7 @@ impl PullView {
         &mut self,
         label: &'static str,
         done: &'static str,
+        sent: Option<String>,
         work: impl FnOnce(&Hosting) -> anyhow::Result<()> + Send + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -392,8 +404,13 @@ impl PullView {
                 match result {
                     Ok(()) => {
                         window.push_notification(Notification::success(done), cx);
-                        this.composer
-                            .update(cx, |input, cx| input.set_value("", window, cx));
+                        // Only the text that went out: a reply or a merge
+                        // leaves a comment being written alone, and so does
+                        // what was typed while this one was sent.
+                        if sent.is_some_and(|sent| this.composer.read(cx).value().trim() == sent) {
+                            this.composer
+                                .update(cx, |input, cx| input.set_value("", window, cx));
+                        }
                     }
                     Err(err) => window.push_notification(
                         Notification::error(format!("{err:#}")).title("GitHub"),
@@ -414,6 +431,7 @@ impl PullView {
         self.act(
             "Commenting",
             "Comment posted",
+            Some(body.clone()),
             move |h| pulls::comment(&h.client, &h.repo, number, &body).map(|_| ()),
             window,
             cx,
@@ -435,6 +453,7 @@ impl PullView {
         self.act(
             "Replying",
             "Reply posted",
+            None,
             move |h| pulls::reply(&h.client, &h.repo, number, thread, &body).map(|_| ()),
             window,
             cx,
@@ -455,6 +474,7 @@ impl PullView {
         self.act(
             label,
             done,
+            Some(body.clone()),
             move |h| {
                 pulls::submit_review(&h.client, &h.repo, number, &head, event, &body, &[])
                     .map(|_| ())
@@ -471,11 +491,15 @@ impl PullView {
             return;
         }
         self.confirm_merge = false;
+        let Some(head) = self.data.as_ref().map(|data| data.pull.head.sha.clone()) else {
+            return;
+        };
         let (number, method) = (self.number, self.merge_method);
         self.act(
             "Merging",
             "Merged",
-            move |h| pulls::merge(&h.client, &h.repo, number, method).map(|_| ()),
+            None,
+            move |h| pulls::merge(&h.client, &h.repo, number, &head, method).map(|_| ()),
             window,
             cx,
         );
@@ -592,9 +616,9 @@ impl PullView {
                             .primary()
                             .icon(Icons::Sparkles)
                             .label("Review with agent")
-                            .tooltip(
+                            .tooltip(ph_ui::tip(
                                 "Opens a review chat in the GitHub view, on its own copy of the PR",
-                            )
+                            ))
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(PullViewEvent::Agent(crate::AgentRequest::Review {
                                     pull: Box::new(review_pull.clone()),
@@ -611,7 +635,7 @@ impl PullView {
                                 .icon(IconName::Eye)
                                 .label("Watching")
                                 .selected(true)
-                                .tooltip("You are told when the author pushes or answers a finding. Click to stop.")
+                                .tooltip(ph_ui::tip("You are told when the author pushes or answers a finding. Click to stop."))
                                 .on_click(cx.listener(|this, _, _, cx| this.toggle_watch(cx))),
                         )
                     })
@@ -735,11 +759,13 @@ impl PullView {
             (true, 0) => "Findings ✓".to_string(),
             (true, open) => format!("Findings {open}"),
         };
+        // What an agent found and how to read the change come before the
+        // conversation about it.
         let tabs = [
-            (Tab::Overview, "Overview".to_string()),
             (Tab::Findings, findings_label),
             (Tab::Walkthrough, "Walkthrough".to_string()),
             (Tab::Files, format!("Files {}", data.files.len())),
+            (Tab::Overview, "Conversation".to_string()),
             (Tab::Commits, format!("Commits {}", data.commits.len())),
             (
                 Tab::Checks,
@@ -758,7 +784,7 @@ impl PullView {
             tabs.into_iter()
                 .map(|(tab, label)| {
                     let (name, icon) = match tab {
-                        Tab::Overview => ("Overview", Icons::ScrollText),
+                        Tab::Overview => ("Conversation", Icons::ScrollText),
                         Tab::Findings => ("Findings", Icons::ShieldCheck),
                         Tab::Walkthrough => ("Walkthrough", Icons::ListOrdered),
                         Tab::Files => ("Files", Icons::Files),
@@ -1112,7 +1138,7 @@ impl PullView {
                             .ghost()
                             .icon(Icons::Sparkles)
                             .label(if asking { "Cancel" } else { "Ask about lines" })
-                            .tooltip("Ask an agent about some lines of this file: type `start-end: question`")
+                            .tooltip(ph_ui::tip("Ask an agent about some lines of this file: type `start-end: question`"))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.asking = if this.asking == Some(ix) { None } else { Some(ix) };
                                 if this.asking.is_some() {

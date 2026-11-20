@@ -79,6 +79,14 @@ impl InstructionsView {
 
 /// What a file holds, in a few words.
 fn status(file: &InstructionFile) -> String {
+    // A link is left as it is: said, so that no change for it is no puzzle.
+    match file.link {
+        Some(instructions::Link::To(name)) => return format!("A link to {name}"),
+        Some(instructions::Link::Elsewhere) => {
+            return "A link to another file, left as it is".into();
+        }
+        None => {}
+    }
     match file.text.as_deref() {
         None => "Missing".into(),
         Some(text) if file.imports_shared() => {
@@ -128,7 +136,7 @@ impl Render for InstructionsView {
                     .py_2()
                     .rounded(cx.theme().radius)
                     .bg(cx.theme().secondary)
-                    .child(Icon::new(Icons::FileText).small().text_color(if exists { cx.theme().info } else { muted }))
+                    .child(Icon::new(Icons::FileText).small().text_color(if exists { cx.theme().link } else { muted }))
                     .child(
                         v_flex()
                             .flex_1()
@@ -149,9 +157,15 @@ impl Render for InstructionsView {
                                 .label("Open")
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
-                                    if let Err(err) = crate::open::open_paths(std::slice::from_ref(&path), cx) {
-                                        tracing::warn!("opening {} failed: {err:#}", path.display());
-                                    }
+                                    // Once this window's handler is done: the
+                                    // file may open in it, which cannot be
+                                    // reached while it handles the click.
+                                    let path = path.clone();
+                                    cx.defer(move |cx| {
+                                        if let Err(err) = crate::open::open_paths(std::slice::from_ref(&path), cx) {
+                                            tracing::warn!("opening {} failed: {err:#}", path.display());
+                                        }
+                                    });
                                 }),
                         )
                     })
@@ -204,8 +218,14 @@ mod tests {
         let file = |text: Option<&str>| InstructionFile {
             name: "CLAUDE.md",
             text: text.map(str::to_string),
+            link: None,
         };
         assert_eq!(status(&file(None)), "Missing");
+        let linked = InstructionFile {
+            link: Some(instructions::Link::To("AGENTS.md")),
+            ..file(None)
+        };
+        assert_eq!(status(&linked), "A link to AGENTS.md");
         assert_eq!(status(&file(Some("@AGENTS.md\n"))), "Imports AGENTS.md");
         assert_eq!(
             status(&file(Some("@AGENTS.md\n\nUse tabs.\n"))),

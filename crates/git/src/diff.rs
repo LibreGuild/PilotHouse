@@ -146,7 +146,8 @@ pub fn parse_diff(diff: &str) -> Vec<FileChange> {
                 file.binary = true;
             }
             if let Some(path) = line.strip_prefix("+++ b/") {
-                file.path = path.to_string();
+                // Git ends a name that has a space in it with a tab.
+                file.path = path.trim_end_matches('\t').to_string();
             }
             file.header.push_str(line);
             file.header.push('\n');

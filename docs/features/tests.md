@@ -24,20 +24,19 @@ For that turn the agent may use PilotHouse's own app tools without asking (by th
 
 ## How it looks
 
-Each step's screenshot is compared with the **baseline** for that size or device (`visual.rs`). **Save as baseline** (after a run whose steps worked) keeps its screens; later runs mark a step **looks different** when more than 1% of its pixels changed, and the run fails. Click the step to see the screen and the changes in red; **Accept new look** makes the new screens the baseline. Baselines live per machine in `<data dir>/test-baselines/<workspace>/<test>/<size or device>/`, not in the project, because fonts and rendering differ between machines.
+Each step's screenshot is compared with the **baseline** for that size or device (`visual.rs`). **Save as baseline** (after a run whose steps worked) keeps its screens; later runs mark a step **looks different** when more than 1% of its pixels changed, and the run fails. Click the step to see the screen and the changes in red; **Accept new look** makes the new screens the baseline. Baselines live per machine in `<data dir>/test-baselines/<workspace>/<test>/<size or device>/`, not in the project, because fonts and rendering differ between machines. The newest 20 runs of a test are kept; removing a workspace deletes its runs and baselines.
 
 ## When it breaks
 
 - **Repair with agent**: the steps before the broken one are kept; the agent continues the scenario from where it broke, adapting to how the app looks now, and what it does is offered as a **proposed fix** to keep or discard.
-- **Make a card**: puts the failure (or the steps that look different) on the board, with the size or device, the error and the report's folder.
 - **Edit steps** (in **⋯**, with **Record again**): opens the JSON file.
 
 ## Asking about results
 
 `@test-run` in a chat attaches every test's newest result (per size or device), with the error of a failing step and its report folder, plus the screen of the first failing step.
 
-## Tests and the board
+## Tests for agents
 
-A card linked to tests can only be Done once they pass (see [board.md](board.md)). Agents check their own work with two tools: `test_list` (the tests and how each last went) and `test_run` (runs one like **Run**, at the desktop size for web tests, and says which step failed or which screens look different).
+Agents check their own work with two tools: `test_list` (the tests and how each last went) and `test_run` (runs one like **Run**, at the desktop size for web tests, and says which step failed or which screens look different).
 
 Not yet: schedules, and running a matrix in parallel (variants run one after another).

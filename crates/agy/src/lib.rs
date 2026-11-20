@@ -153,6 +153,9 @@ impl Bridge {
                 "agentCapabilities": {
                     "loadSession": true,
                     "promptCapabilities": { "image": false, "audio": false, "embeddedContext": true },
+                    // A session can be ended by itself: its agy stops,
+                    // and with it its hold on the conversation.
+                    "sessionCapabilities": { "close": {} },
                 },
                 "authMethods": [],
                 "agentInfo": { "name": "pilothouse-agy", "version": env!("CARGO_PKG_VERSION") },
@@ -175,6 +178,21 @@ impl Bridge {
                 let session = self.session(params)?;
                 let prompt = params.get("prompt").unwrap_or(&Value::Null);
                 Ok(session.prompt(self, prompt)?)
+            }
+            // Ends the session here: agy for it stops, so nothing of ours
+            // holds the conversation any more (agy keeps a lock on one it
+            // has open, and another agy that opens it says "already open
+            // in another CLI instance"). The conversation stays agy's;
+            // `session/load` takes it up again.
+            "session/close" => {
+                let id = params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if let Some(session) = self.sessions.lock().unwrap().remove(id) {
+                    session.stop();
+                }
+                Ok(json!({}))
             }
             "session/set_config_option" => {
                 let session = self.session(params)?;

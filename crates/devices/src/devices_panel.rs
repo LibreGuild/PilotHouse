@@ -2,6 +2,7 @@
 //! screen, mark it up, and read logcat, the UI hierarchy and files.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
@@ -14,7 +15,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, DragMoveEvent, Entity, EventEmitter,
     InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Pixels, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
+    px, uniform_list,
 };
 use ph_media::annotate::Shape;
 use ph_media::{Frame, LiveTools, SurfaceEvent, SurfaceView, ToChat};
@@ -67,13 +69,20 @@ pub struct DevicesPanel {
     tools: Entity<LiveTools>,
     drawer: Option<Drawer>,
     drawer_height: Pixels,
-    ui_nodes: Vec<UiNode>,
+    ui_nodes: Rc<[UiNode]>,
+    /// Which of `ui_nodes` the Layout drawer lists (those with something
+    /// to tell them by), sorted out once per layout: the pane draws again
+    /// with every frame of the screen.
+    ui_listed: Rc<[usize]>,
     /// The Layout row outlined on the screen (by its bounds): clicked
     /// again, its outline goes.
     outlined: Option<(i32, i32, i32, i32)>,
     files_dir: String,
-    files: Vec<RemoteFile>,
-    packages: Vec<String>,
+    files: Rc<[RemoteFile]>,
+    /// The folder being listed: the one asked for last replaces it, so an
+    /// answer that comes late never shows in place of a newer one.
+    _listing: Option<Task<()>>,
+    packages: Rc<[String]>,
     /// A short message about the last action ("Installed", an error…).
     status: Option<SharedString>,
     screen_error: Option<SharedString>,
@@ -127,11 +136,13 @@ impl DevicesPanel {
             tools,
             drawer: None,
             drawer_height: px(DRAWER_HEIGHT),
-            ui_nodes: Vec::new(),
+            ui_nodes: Rc::default(),
+            ui_listed: Rc::default(),
             outlined: None,
             files_dir: "/sdcard".into(),
-            files: Vec::new(),
-            packages: Vec::new(),
+            files: Rc::default(),
+            _listing: None,
+            packages: Rc::default(),
             status: None,
             screen_error: None,
             active: false,
@@ -201,8 +212,13 @@ impl DevicesPanel {
         &self.tools
     }
 
-    /// The device screen with the user's marks, for `@screenshot`.
+    /// The device screen with the user's marks, for `@screenshot`: only
+    /// while it is mirrored and streaming (the last picture of a screen
+    /// that failed is not the device's screen now).
     pub fn composite(&self, cx: &App) -> Option<Frame> {
+        if self.screen.is_none() || self.screen_error.is_some() {
+            return None;
+        }
         self.surface.read(cx).composite()
     }
 
@@ -241,9 +257,20 @@ impl DevicesPanel {
         self._screen_subscription = None;
         self.screen_error = None;
         self.outlined = None;
+        // The last picture and the outline on it were the old screen's:
+        // kept, they would show (and take clicks) as the new one's until
+        // its first frame.
+        self.surface.update(cx, |surface, cx| {
+            surface.clear_frame(cx);
+            surface.set_highlight(None, cx);
+        });
         if !same_device {
-            self.ui_nodes.clear();
-            self.files.clear();
+            self.set_ui_nodes(Vec::new());
+            self.files = Rc::default();
+            self.packages = Rc::default();
+            // What was asked of the old device: its answers are dropped.
+            self._listing = None;
+            self.status = None;
         }
         let (Some(serial), Some(adb)) = (wanted, self.adb(cx)) else {
             cx.notify();
@@ -290,13 +317,18 @@ impl DevicesPanel {
     }
 
     fn load_packages(&mut self, adb: Adb, serial: String, cx: &mut Context<Self>) {
+        let session = self.session.clone();
         cx.spawn(async move |this, cx| {
             let packages = cx
                 .background_spawn(async move { adb.packages(&serial) })
                 .await
                 .unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
-                this.packages = packages;
+                // Another device was chosen meanwhile: these are not its apps.
+                if this.session != session {
+                    return;
+                }
+                this.packages = packages.into();
                 cx.notify();
             });
         })
@@ -311,7 +343,7 @@ impl DevicesPanel {
             SurfaceEvent::Pointer(pointer) => {
                 screen.update(cx, |screen, _| screen.pointer(*pointer))
             }
-            SurfaceEvent::Key(keystroke) if keystroke.modifiers.platform => {
+            SurfaceEvent::Key(keystroke) if ph_media::editing_shortcut(keystroke, cx) => {
                 if keystroke.key == "v"
                     && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
                 {
@@ -357,6 +389,7 @@ impl DevicesPanel {
             .unwrap_or_default();
         self.status = Some("Reading the screen…".into());
         cx.notify();
+        let session = self.session.clone();
         cx.spawn(async move |this, cx| {
             let nodes = cx
                 .background_spawn(
@@ -364,6 +397,10 @@ impl DevicesPanel {
                 )
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // Another device was chosen meanwhile: not its layout.
+                if this.session != session {
+                    return;
+                }
                 this.status = None;
                 let nodes = match nodes {
                     Ok(nodes) => nodes,
@@ -377,7 +414,7 @@ impl DevicesPanel {
                 let scale = frame_width / device_width;
                 let (dx, dy) = ((x / scale) as i32, (y / scale) as i32);
                 if let Some(node) = ui_tree::node_at(&nodes, dx, dy).cloned() {
-                    this.outline(&node, scale, cx);
+                    this.outline(node.bounds, scale, cx);
                     cx.emit(ToChat::Text {
                         label: format!(
                             "{} element",
@@ -389,32 +426,47 @@ impl DevicesPanel {
                         ),
                     });
                 }
-                this.ui_nodes = nodes;
+                this.set_ui_nodes(nodes);
                 cx.notify();
             });
         })
         .detach();
     }
 
-    /// Outlines `node` on the screen, in place of the one outlined before;
-    /// the outlined one again takes its outline away.
-    fn outline(&mut self, node: &UiNode, scale: f32, cx: &mut Context<Self>) {
-        let again = self.outlined == Some(node.bounds);
-        if self.outlined.take().is_some() {
-            self.surface
-                .update(cx, |surface, cx| surface.undo_annotation(cx));
-        }
-        if !again {
-            let (l, t, r, b) = node.bounds;
-            let shape = Shape::Rect {
+    /// Outlines the element with these `bounds` on the screen, in place of
+    /// the one outlined before; the outlined one again takes its outline
+    /// away. The outline is the surface's highlight, apart from the user's
+    /// own marks: their Undo and Clear neither take it nor are taken for it.
+    fn outline(&mut self, bounds: (i32, i32, i32, i32), scale: f32, cx: &mut Context<Self>) {
+        let again = self.outlined == Some(bounds);
+        self.outlined = (!again).then_some(bounds);
+        let shape = (!again).then(|| {
+            let (l, t, r, b) = bounds;
+            Shape::Rect {
                 from: (l as f32 * scale, t as f32 * scale),
                 to: (r as f32 * scale, b as f32 * scale),
-            };
-            self.surface
-                .update(cx, |surface, cx| surface.add_annotation(shape, cx));
-            self.outlined = Some(node.bounds);
-        }
+            }
+        });
+        self.surface
+            .update(cx, |surface, cx| surface.set_highlight(shape, cx));
         cx.notify();
+    }
+
+    /// Takes the device's layout, and sorts out the elements the Layout
+    /// drawer lists.
+    fn set_ui_nodes(&mut self, nodes: Vec<UiNode>) {
+        self.ui_listed = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                !node.text.is_empty()
+                    || !node.resource_id.is_empty()
+                    || !node.description.is_empty()
+                    || node.clickable
+            })
+            .map(|(ix, _)| ix)
+            .collect();
+        self.ui_nodes = nodes.into();
     }
 
     fn refresh_ui(&mut self, cx: &mut Context<Self>) {
@@ -426,7 +478,7 @@ impl DevicesPanel {
             "Reading the screen…",
             move || adb.ui_dump(&serial).map(|xml| ui_tree::parse(&xml)),
             |this, nodes, _| {
-                this.ui_nodes = nodes;
+                this.set_ui_nodes(nodes);
                 None
             },
         );
@@ -437,16 +489,24 @@ impl DevicesPanel {
             return;
         };
         let list_dir = dir.clone();
-        self.run(
-            cx,
-            "Listing files…",
-            move || adb.list_dir(&serial, &list_dir),
-            move |this, files, _| {
-                this.files_dir = dir;
-                this.files = files;
-                None
-            },
-        );
+        self.status = Some("Listing files…".into());
+        cx.notify();
+        self._listing = Some(cx.spawn(async move |this, cx| {
+            let listed = cx
+                .background_spawn(async move { adb.list_dir(&serial, &list_dir) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.status = match listed {
+                    Ok(files) => {
+                        this.files_dir = dir;
+                        this.files = files.into();
+                        None
+                    }
+                    Err(err) => Some(format!("{err:#}").into()),
+                };
+                cx.notify();
+            });
+        }));
     }
 
     fn pull(&mut self, file: &RemoteFile, cx: &mut Context<Self>) {
@@ -564,9 +624,15 @@ impl DevicesPanel {
     ) {
         self.status = Some(working.into());
         cx.notify();
+        let session = self.session.clone();
         cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move { job() }).await;
             let _ = this.update(cx, |this, cx| {
+                // The device was changed (or the pane hidden) while the job
+                // ran: its answer is not about the device shown now.
+                if this.session != session {
+                    return;
+                }
                 this.status = match result {
                     Ok(value) => done(this, value, cx).map(Into::into),
                     Err(err) => Some(format!("{err:#}").into()),
@@ -616,7 +682,7 @@ impl DevicesPanel {
                 .ghost()
                 .small()
                 .icon(icon)
-                .tooltip(label)
+                .tooltip(ph_ui::tip(label))
                 .accessibility_label(label)
         };
         let panel = cx.entity().downgrade();
@@ -777,7 +843,9 @@ impl DevicesPanel {
     /// What covers the screen when there is nothing to show.
     fn render_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let manager = self.manager.read(cx);
-        let content: AnyElement = if manager.adb().is_none() {
+        let content: AnyElement = if manager.looking_for_sdk() {
+            loading("Looking for the Android SDK…".into(), cx)
+        } else if manager.adb().is_none() {
             EmptyState::new("Android SDK not found")
                 .icon(Icons::Smartphone)
                 .description(crate::sdk::Sdk::missing_message())
@@ -1018,17 +1086,9 @@ impl DevicesPanel {
 
     fn render_ui_tree(&self, cx: &mut Context<Self>) -> AnyElement {
         let scale = self.frame_scale(cx);
-        let nodes: Vec<UiNode> = self
-            .ui_nodes
-            .iter()
-            .filter(|node| {
-                !node.text.is_empty()
-                    || !node.resource_id.is_empty()
-                    || !node.description.is_empty()
-                    || node.clickable
-            })
-            .cloned()
-            .collect();
+        let (nodes, listed) = (self.ui_nodes.clone(), self.ui_listed.clone());
+        let outlined = self.outlined;
+        let panel = cx.entity().downgrade();
         v_flex()
             .size_full()
             .min_h_0()
@@ -1044,7 +1104,7 @@ impl DevicesPanel {
                             .text_color(cx.theme().muted_foreground)
                             .child(format!(
                                 "{} elements · click one to outline it, again to clear",
-                                nodes.len()
+                                listed.len()
                             )),
                     )
                     .child(
@@ -1058,85 +1118,99 @@ impl DevicesPanel {
             )
             .child(
                 v_flex()
-                    .id("ui-rows")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
                     .px_3()
                     .font_family(cx.theme().mono_font_family.clone())
                     .text_xs()
-                    .children(
-                        nodes
-                            .into_iter()
-                            .take(DRAWER_ROWS)
-                            .enumerate()
-                            .map(|(ix, node)| {
-                                let class = node
-                                    .class
-                                    .rsplit('.')
-                                    .next()
-                                    .unwrap_or(&node.class)
-                                    .to_string();
-                                let label = if !node.text.is_empty() {
-                                    format!("“{}”", node.text)
-                                } else if !node.description.is_empty() {
-                                    node.description.clone()
-                                } else {
-                                    String::new()
-                                };
-                                let id = node
-                                    .resource_id
-                                    .rsplit('/')
-                                    .next()
-                                    .unwrap_or_default()
-                                    .to_string();
-                                let picked = self.outlined == Some(node.bounds);
-                                h_flex()
-                                    .id(("ui-node", ix))
-                                    .h_6()
-                                    .px_2()
-                                    .gap_2()
-                                    .rounded(cx.theme().radius)
-                                    .cursor_pointer()
-                                    .when(picked, |this| this.bg(cx.theme().list_active))
-                                    .hover(|style| style.bg(cx.theme().list_hover))
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .px_1p5()
+                    .child(
+                        // Only the rows in view are built: the pane draws
+                        // again with every frame of the screen.
+                        uniform_list(
+                            "ui-rows",
+                            listed.len().min(DRAWER_ROWS),
+                            move |rows, _, cx| {
+                                rows.filter_map(|ix| {
+                                    let node = nodes.get(*listed.get(ix)?)?;
+                                    let class = node
+                                        .class
+                                        .rsplit('.')
+                                        .next()
+                                        .unwrap_or(&node.class)
+                                        .to_string();
+                                    let label = if !node.text.is_empty() {
+                                        format!("“{}”", node.text)
+                                    } else if !node.description.is_empty() {
+                                        node.description.clone()
+                                    } else {
+                                        String::new()
+                                    };
+                                    let id = node
+                                        .resource_id
+                                        .rsplit('/')
+                                        .next()
+                                        .unwrap_or_default()
+                                        .to_string();
+                                    let bounds = node.bounds;
+                                    let picked = outlined == Some(bounds);
+                                    let panel = panel.clone();
+                                    Some(
+                                        h_flex()
+                                            .id(("ui-node", ix))
+                                            .h_6()
+                                            .px_2()
+                                            .gap_2()
                                             .rounded(cx.theme().radius)
-                                            .bg(cx.theme().info.opacity(0.14))
-                                            .text_color(cx.theme().info)
-                                            .child(class),
+                                            .cursor_pointer()
+                                            .when(picked, |this| this.bg(cx.theme().list_active))
+                                            .hover(|style| style.bg(cx.theme().list_hover))
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .px_1p5()
+                                                    .rounded(cx.theme().radius)
+                                                    .bg(cx.theme().link.opacity(0.14))
+                                                    .text_color(cx.theme().link)
+                                                    .child(class),
+                                            )
+                                            .child(div().min_w_0().truncate().child(label))
+                                            .when(!id.is_empty(), |this| {
+                                                this.child(
+                                                    div()
+                                                        .flex_none()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(format!("#{id}")),
+                                                )
+                                            })
+                                            .child(div().flex_1())
+                                            .when(node.clickable, |this| {
+                                                this.child(
+                                                    Icon::new(Icons::Pointer)
+                                                        .xsmall()
+                                                        .text_color(cx.theme().muted_foreground),
+                                                )
+                                            })
+                                            .tooltip({
+                                                let line = ph_ui::tip(node.describe());
+                                                move |window, cx| {
+                                                    gpui_kit::component::tooltip::Tooltip::new(
+                                                        line.clone(),
+                                                    )
+                                                    .build(window, cx)
+                                                }
+                                            })
+                                            .on_click(move |_, _, cx| {
+                                                _ = panel.update(cx, |this, cx| {
+                                                    this.outline(bounds, scale, cx)
+                                                });
+                                            }),
                                     )
-                                    .child(div().min_w_0().truncate().child(label))
-                                    .when(!id.is_empty(), |this| {
-                                        this.child(
-                                            div()
-                                                .flex_none()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!("#{id}")),
-                                        )
-                                    })
-                                    .child(div().flex_1())
-                                    .when(node.clickable, |this| {
-                                        this.child(
-                                            Icon::new(Icons::Pointer)
-                                                .xsmall()
-                                                .text_color(cx.theme().muted_foreground),
-                                        )
-                                    })
-                                    .tooltip({
-                                        let line = node.describe();
-                                        move |window, cx| {
-                                            gpui_kit::component::tooltip::Tooltip::new(line.clone())
-                                                .build(window, cx)
-                                        }
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.outline(&node, scale, cx)
-                                    }))
-                            }),
+                                })
+                                .collect()
+                            },
+                        )
+                        .flex_1()
+                        .min_h_0(),
                     ),
             )
             .into_any_element()
@@ -1150,6 +1224,8 @@ impl DevicesPanel {
                 parent.to_string()
             }
         });
+        let (files, dir) = (self.files.clone(), self.files_dir.clone());
+        let panel = cx.entity().downgrade();
         v_flex()
             .size_full()
             .min_h_0()
@@ -1190,91 +1266,92 @@ impl DevicesPanel {
                     ),
             )
             .child(
-                v_flex()
-                    .id("file-rows")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px_2()
-                    .text_sm()
-                    .children(
-                        self.files
-                            .iter()
-                            .take(DRAWER_ROWS)
-                            .enumerate()
-                            .map(|(ix, file)| {
-                                let file = file.clone();
-                                let path = format!(
-                                    "{}/{}",
-                                    self.files_dir.trim_end_matches('/'),
-                                    file.name
-                                );
-                                h_flex()
-                                    .id(("remote-file", ix))
-                                    .group("remote-file")
-                                    .h_7()
-                                    .gap_2()
-                                    .px_2()
-                                    .rounded(cx.theme().radius)
-                                    .hover(|style| style.bg(cx.theme().list_hover))
-                                    .child(if file.is_dir {
-                                        ph_ui::folder_icon_element(
-                                            &file.name,
-                                            ph_ui::rems_from_px(16.),
-                                        )
-                                    } else {
-                                        ph_ui::file_icon_element(
-                                            &file.name,
-                                            ph_ui::rems_from_px(16.),
-                                        )
-                                    })
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(file.name.clone()),
-                                    )
-                                    .map(|this| {
-                                        if file.is_dir {
-                                            this.cursor_pointer().on_click(cx.listener(
-                                                move |this, _, _, cx| {
-                                                    this.open_dir(path.clone(), cx)
-                                                },
-                                            ))
+                v_flex().flex_1().min_h_0().px_2().text_sm().child(
+                    // Only the rows in view are built, as in the Layout list.
+                    uniform_list(
+                        "file-rows",
+                        files.len().min(DRAWER_ROWS),
+                        move |rows, _, cx| {
+                            rows.filter_map(|ix| {
+                                let file = files.get(ix)?.clone();
+                                let path = format!("{}/{}", dir.trim_end_matches('/'), file.name);
+                                let panel = panel.clone();
+                                Some(
+                                    h_flex()
+                                        .id(("remote-file", ix))
+                                        .group("remote-file")
+                                        .h_7()
+                                        .gap_2()
+                                        .px_2()
+                                        .rounded(cx.theme().radius)
+                                        .hover(|style| style.bg(cx.theme().list_hover))
+                                        .child(if file.is_dir {
+                                            ph_ui::folder_icon_element(
+                                                &file.name,
+                                                ph_ui::rems_from_px(16.),
+                                            )
                                         } else {
-                                            this.child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(human_size(file.size)),
+                                            ph_ui::file_icon_element(
+                                                &file.name,
+                                                ph_ui::rems_from_px(16.),
                                             )
-                                            .child(
-                                                div()
-                                                    .invisible()
-                                                    .group_hover("remote-file", |style| {
-                                                        style.visible()
-                                                    })
-                                                    .child(
-                                                        Button::new(("pull-file", ix))
-                                                            .ghost()
-                                                            .xsmall()
-                                                            .icon(Icons::FolderDown)
-                                                            .tooltip("Save to Downloads")
-                                                            .accessibility_label(
-                                                                "Save to Downloads",
-                                                            )
-                                                            .on_click(cx.listener(
-                                                                move |this, _, _, cx| {
-                                                                    this.pull(&file, cx)
-                                                                },
-                                                            )),
-                                                    ),
-                                            )
-                                        }
-                                    })
-                            }),
-                    ),
+                                        })
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(file.name.clone()),
+                                        )
+                                        .map(|this| {
+                                            if file.is_dir {
+                                                this.cursor_pointer().on_click(move |_, _, cx| {
+                                                    _ = panel.update(cx, |this, cx| {
+                                                        this.open_dir(path.clone(), cx)
+                                                    });
+                                                })
+                                            } else {
+                                                this.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(human_size(file.size)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .invisible()
+                                                        .group_hover("remote-file", |style| {
+                                                            style.visible()
+                                                        })
+                                                        .child(
+                                                            Button::new(("pull-file", ix))
+                                                                .ghost()
+                                                                .xsmall()
+                                                                .icon(Icons::FolderDown)
+                                                                .tooltip("Save to Downloads")
+                                                                .accessibility_label(
+                                                                    "Save to Downloads",
+                                                                )
+                                                                .on_click(move |_, _, cx| {
+                                                                    _ = panel.update(
+                                                                        cx,
+                                                                        |this, cx| {
+                                                                            this.pull(&file, cx)
+                                                                        },
+                                                                    );
+                                                                }),
+                                                        ),
+                                                )
+                                            }
+                                        }),
+                                )
+                            })
+                            .collect()
+                        },
+                    )
+                    .flex_1()
+                    .min_h_0(),
+                ),
             )
             .into_any_element()
     }

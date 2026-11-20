@@ -305,6 +305,11 @@ enum Drag {
     Resize {
         id: u32,
         handle: Handle,
+        /// Where the press was, and where the handle was then: the handle
+        /// moves as far as the pointer does, so catching it a little off
+        /// does not make it jump.
+        from: [f32; 2],
+        at: [f32; 2],
         to: [f32; 2],
     },
     Crop {
@@ -339,6 +344,9 @@ pub struct ImageEditor {
     comparing: bool,
     /// The proportions a crop keeps (width over height).
     pub(crate) crop_aspect: Option<f32>,
+    /// The crop last drawn or dragged by hand: a proportion is fitted in
+    /// it, so trying one after another never shrinks the crop further.
+    pub(crate) hand_crop: Option<Rect>,
     /// Under the pointer: its pixel in the shown picture and the color.
     hover: Option<([u32; 2], [u8; 4])>,
     pub(crate) controls: bar::Controls,
@@ -367,6 +375,7 @@ impl ImageEditor {
             placement: None,
             comparing: false,
             crop_aspect: None,
+            hand_crop: None,
             hover: None,
             controls,
             _subscriptions: subscriptions,
@@ -626,24 +635,27 @@ impl ImageEditor {
         })
     }
 
-    /// The handle of the selected mark under `p`.
-    fn handle_at(&self, p: [f32; 2], reach: f32, cx: &App) -> Option<Handle> {
+    /// The handle of the selected mark under `p`, and where that handle is.
+    fn handle_at(&self, p: [f32; 2], reach: f32, cx: &App) -> Option<(Handle, [f32; 2])> {
         let mark = self.doc.read(cx).edit().mark(self.selected?)?;
         let near =
             |q: [f32; 2]| (q[0] - p[0]).abs() <= reach * 1.5 && (q[1] - p[1]).abs() <= reach * 1.5;
         match &mark.kind {
             MarkKind::Arrow { from, to, .. } | MarkKind::Line { from, to, .. } => {
                 if near(*to) {
-                    Some(Handle::To)
+                    Some((Handle::To, *to))
                 } else if near(*from) {
-                    Some(Handle::From)
+                    Some((Handle::From, *from))
                 } else {
                     None
                 }
             }
             kind => {
                 let area = kind.area()?;
-                CORNERS.into_iter().find(|handle| near(handle.at(area)))
+                CORNERS
+                    .into_iter()
+                    .map(|handle| (handle, handle.at(area)))
+                    .find(|(_, at)| near(*at))
             }
         }
     }
@@ -672,8 +684,14 @@ impl ImageEditor {
             || shown[1] > placement.size.1;
         match self.tool {
             Tool::Select | Tool::Adjust | Tool::Resize | Tool::Frame => {
-                if let Some((id, handle)) = self.selected.zip(self.handle_at(p, reach, cx)) {
-                    self.drag = Some(Drag::Resize { id, handle, to: p });
+                if let Some((id, (handle, at))) = self.selected.zip(self.handle_at(p, reach, cx)) {
+                    self.drag = Some(Drag::Resize {
+                        id,
+                        handle,
+                        from: p,
+                        at,
+                        to: p,
+                    });
                 } else if let Some(id) = self.mark_at(p, reach, cx) {
                     if self.selected != Some(id) {
                         self.select(Some(id), window, cx);
@@ -797,14 +815,21 @@ impl ImageEditor {
                 to,
                 points,
             } => {
-                let tiny = (to[0] - from[0]).hypot(to[1] - from[1]) < reach;
+                let tiny = match kind {
+                    // A stroke may end where it began (a circle around
+                    // something): what it covers says whether it is one.
+                    MarkType::Pen => extent(&points) < reach,
+                    _ => (to[0] - from[0]).hypot(to[1] - from[1]) < reach,
+                };
                 if tiny {
                     cx.notify();
                     return;
                 }
                 let mark = match kind {
                     MarkType::Pen => MarkKind::Pen {
-                        points,
+                        // A long scribble has more points than a mark may:
+                        // thinned, it is kept rather than refused whole.
+                        points: thinned(points, crate::edit::MAX_POINTS),
                         color: self.color,
                         stroke: 0.,
                     },
@@ -830,7 +855,17 @@ impl ImageEditor {
                     });
                 }
             }
-            Drag::Resize { id, handle, to } => {
+            // A press on a handle let go where it was is a click: nothing
+            // is resized, and no step is added to undo.
+            Drag::Resize { from, to, .. } | Drag::Crop { from, to, .. } if from == to => {}
+            Drag::Resize {
+                id,
+                handle,
+                from,
+                at,
+                to,
+            } => {
+                let to = pulled(at, from, to);
                 self.doc.update(cx, |doc, cx| {
                     doc.settle();
                     doc.update(
@@ -843,10 +878,14 @@ impl ImageEditor {
             }
             Drag::Crop { .. } => {
                 let crop = self.dragged_crop(&drag, cx);
-                if let Some(crop) = crop.filter(|crop| crop.width >= 4. && crop.height >= 4.) {
+                let current = self.crop_rect(cx);
+                if let Some(crop) =
+                    crop.filter(|crop| crop.width >= 4. && crop.height >= 4. && *crop != current)
+                {
+                    self.hand_crop = Some(crop);
                     self.doc.update(cx, |doc, cx| {
                         doc.settle();
-                        doc.update("crop", |edit, _| edit.crop = Some(crop), cx);
+                        doc.update("crop", |edit, size| edit.set_crop(Some(crop), size), cx);
                         doc.settle();
                     });
                 }
@@ -895,14 +934,16 @@ impl ImageEditor {
             }
             Rect::from_corners(*from, to)
         } else if let Some(handle) = handle {
-            handle.drag(*start, *to, self.crop_aspect)
+            handle.drag(
+                *start,
+                pulled(handle.at(*start), *from, *to),
+                self.crop_aspect,
+            )
         } else {
-            let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
-            Rect::new(
-                (start.x + dx).clamp(0., width as f32 - start.width),
-                (start.y + dy).clamp(0., height as f32 - start.height),
-                start.width,
-                start.height,
+            moved_crop(
+                *start,
+                (to[0] - from[0], to[1] - from[1]),
+                (width as f32, height as f32),
             )
         };
         Some(rect.clamped(width as f32, height as f32))
@@ -1005,6 +1046,9 @@ impl ImageEditor {
             _ = this.update_in(cx, |this, window, cx| {
                 this.select(None, window, cx);
                 let notification = match result {
+                    Ok(replaced) if replaced.changed_since => Notification::warning(format!(
+                        "Replaced {name}. Changes made while it was saved are not in the file yet."
+                    )),
                     Ok(_) => Notification::success(format!("Replaced {name}.")),
                     Err(err) => Notification::error(format!("Not saved: {err:#}")),
                 };
@@ -1155,7 +1199,7 @@ impl ImageEditor {
                     .small()
                     .icon(Icons::Undo2)
                     .disabled(!can_undo)
-                    .tooltip(format!("Undo ({undo_key})"))
+                    .tooltip(ph_ui::tip(format!("Undo ({undo_key})")))
                     .on_click(cx.listener(|this, _, window, cx| this.undo(&Undo, window, cx))),
             )
             .child(
@@ -1202,7 +1246,9 @@ impl ImageEditor {
                     .icon(Icons::Download)
                     .label("Export")
                     .disabled(!ready)
-                    .tooltip(format!("Save the result as a new file ({export_key})"))
+                    .tooltip(ph_ui::tip(format!(
+                        "Save the result as a new file ({export_key})"
+                    )))
                     .on_click(cx.listener(|this, _, window, cx| this.open_export(window, cx))),
             )
             .into_any_element()
@@ -1236,11 +1282,11 @@ impl ImageEditor {
                             .small()
                             .icon(*icon)
                             .selected(current == tool)
-                            .tooltip(if key.is_empty() {
+                            .tooltip(ph_ui::tip(if key.is_empty() {
                                 name.to_string()
                             } else {
                                 format!("{name} ({key})")
-                            })
+                            }))
                             .accessibility_label(*name)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.set_tool(tool, cx);
@@ -1341,6 +1387,18 @@ impl ImageEditor {
                 };
                 let local = |p: Point<Pixels>| p - bounds.origin;
                 let at = local(placement.origin);
+                // The box has the shape the picture will have. Until the
+                // preview of that is made, the one in hand may be of
+                // another shape (before the turn, the crop, the frame): it
+                // is then shown whole in the box, not stretched to it.
+                let (preview_w, preview_h) = preview.image.dimensions();
+                let shape = (preview_w as f32 * placement.size.1)
+                    / (preview_h as f32 * placement.size.0).max(1.);
+                let fit = if self.comparing || (shape - 1.).abs() < 0.01 {
+                    ObjectFit::Fill
+                } else {
+                    ObjectFit::Contain
+                };
                 let picture = div()
                     .absolute()
                     .left(at.x)
@@ -1349,9 +1407,7 @@ impl ImageEditor {
                     .h(px(placement.size.1 * placement.scale))
                     .bg(theme.secondary)
                     .shadow_md()
-                    .children(
-                        image.map(|image| img(image).size_full().object_fit(ObjectFit::Fill)),
-                    );
+                    .children(image.map(|image| img(image).size_full().object_fit(fit)));
                 div()
                     .size_full()
                     .child(picture)
@@ -1541,7 +1597,13 @@ impl ImageEditor {
                 to,
                 points,
             }) => {
-                let color = to_hsla(self.color);
+                // A highlight is made yellow whatever color is picked (see
+                // `MarkType::mark`), so its drag shows yellow too.
+                let color = to_hsla(if *kind == MarkType::Highlight {
+                    Color::YELLOW
+                } else {
+                    self.color
+                });
                 match kind {
                     MarkType::Arrow | MarkType::Line | MarkType::Pen => {
                         let line: Vec<Point<Pixels>> = if *kind == MarkType::Pen {
@@ -1603,9 +1665,15 @@ impl ImageEditor {
                     out.push(outline(moved.bounds().grow(1.), ring));
                 }
             }
-            Some(Drag::Resize { id, handle: h, to }) => {
+            Some(Drag::Resize {
+                id,
+                handle: h,
+                from,
+                at,
+                to,
+            }) => {
                 let mut edit = self.doc.read(cx).edit().clone();
-                resize_mark(&mut edit, *id, *h, *to);
+                resize_mark(&mut edit, *id, *h, pulled(*at, *from, *to));
                 if let Some(mark) = edit.mark(*id) {
                     match &mark.kind {
                         MarkKind::Arrow { from, to, .. } | MarkKind::Line { from, to, .. } => {
@@ -1798,6 +1866,53 @@ pub(crate) fn near_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     (p[0] - (a[0] + t * dx)).hypot(p[1] - (a[1] + t * dy))
 }
 
+/// How much room a stroke takes: the diagonal of the box around it.
+fn extent(points: &[[f32; 2]]) -> f32 {
+    let (mut min, mut max) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for p in points {
+        min = [min[0].min(p[0]), min[1].min(p[1])];
+        max = [max[0].max(p[0]), max[1].max(p[1])];
+    }
+    if points.is_empty() {
+        0.
+    } else {
+        (max[0] - min[0]).hypot(max[1] - min[1])
+    }
+}
+
+/// `points` with at most `most` left, evenly, the last one kept.
+fn thinned(points: Vec<[f32; 2]>, most: usize) -> Vec<[f32; 2]> {
+    if points.len() <= most || most < 2 {
+        return points;
+    }
+    let step = points.len().div_ceil(most - 1);
+    let last = points[points.len() - 1];
+    let mut kept: Vec<[f32; 2]> = points.into_iter().step_by(step).collect();
+    if kept.last() != Some(&last) {
+        kept.push(last);
+    }
+    kept
+}
+
+/// Where a handle that was `at` when the pointer pressed at `from` is now
+/// that the pointer is at `to`: it moves as far as the pointer did.
+fn pulled(at: [f32; 2], from: [f32; 2], to: [f32; 2]) -> [f32; 2] {
+    [at[0] + (to[0] - from[0]), at[1] + (to[1] - from[1])]
+}
+
+/// A crop of `start`'s size moved by `by`, kept inside a picture of
+/// `size`. The picture may have got smaller than the crop since the drag
+/// began (an agent turned it): then it starts at the edge (and a `clamp`
+/// with its bounds crossed would end the app).
+fn moved_crop(start: Rect, by: (f32, f32), size: (f32, f32)) -> Rect {
+    Rect::new(
+        (start.x + by.0).clamp(0., (size.0 - start.width).max(0.)),
+        (start.y + by.1).clamp(0., (size.1 - start.height).max(0.)),
+        start.width,
+        start.height,
+    )
+}
+
 /// Mark `id` with its `handle` dragged to `to`.
 fn resize_mark(edit: &mut ImageEdit, id: u32, handle: Handle, to: [f32; 2]) {
     let Some(mark) = edit.mark_mut(id) else {
@@ -1868,5 +1983,46 @@ impl Render for ImageEditor {
                     .child(bar)
                     .child(self.render_status(cx)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stroke_that_ends_where_it_began_has_a_size() {
+        // A circle drawn with the pen: its ends meet, it is not tiny.
+        let circle: Vec<[f32; 2]> = (0..=40)
+            .map(|step| {
+                let angle = step as f32 / 40. * std::f32::consts::TAU;
+                [100. + 50. * angle.cos(), 100. + 50. * angle.sin()]
+            })
+            .collect();
+        assert!(extent(&circle) > 100.);
+        assert_eq!(extent(&[[3., 4.], [3., 4.]]), 0.);
+        assert_eq!(extent(&[]), 0.);
+    }
+
+    #[test]
+    fn a_long_stroke_is_thinned_not_lost() {
+        let stroke: Vec<[f32; 2]> = (0..13_001).map(|x| [x as f32, 0.]).collect();
+        let kept = thinned(stroke.clone(), 5_000);
+        assert!(kept.len() <= 5_000 && kept.len() > 2_500, "{}", kept.len());
+        assert_eq!(kept[0], stroke[0]);
+        assert_eq!(kept.last(), stroke.last());
+        let short = vec![[0., 0.], [1., 1.], [2., 2.]];
+        assert_eq!(thinned(short.clone(), 5_000), short);
+    }
+
+    #[test]
+    fn a_crop_larger_than_the_picture_is_moved_without_a_panic() {
+        // The picture was turned under a crop being dragged: 300 wide, the
+        // crop from before is 400.
+        let start = Rect::new(50., 20., 400., 100.);
+        let moved = moved_crop(start, (30., 500.), (300., 600.));
+        assert_eq!((moved.x, moved.y), (0., 500.));
+        let inside = moved_crop(Rect::new(10., 10., 100., 100.), (-50., 20.), (300., 600.));
+        assert_eq!((inside.x, inside.y), (0., 30.));
     }
 }

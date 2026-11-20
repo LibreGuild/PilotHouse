@@ -33,13 +33,6 @@ pub enum TestsPanelEvent {
     /// meanwhile); stop recording with [`TestsPanel::finish_recording`]
     /// when its turn ends.
     Agent { title: String, prompt: String },
-    /// Put a failure on the board; the card needs `test` (its file name) to
-    /// pass before it is Done.
-    Card {
-        title: String,
-        description: String,
-        test: String,
-    },
     /// Open the test's file.
     OpenFile(PathBuf),
 }
@@ -206,7 +199,11 @@ impl TestsPanel {
         else {
             return;
         };
-        record::start(self.project_id, path, Vec::new(), cx);
+        if let Err(err) = record::start(self.project_id, path, Vec::new(), cx) {
+            self.message = Some((err.to_string().into(), true));
+            cx.notify();
+            return;
+        }
         self.repairing = false;
         self.watch_recording(cx);
         let (start, tools) = match &test.target {
@@ -248,9 +245,22 @@ impl TestsPanel {
             return;
         };
         let plan = run::plan(&test);
+        // The report can be of an older, longer version of the test.
+        if failed >= plan.len() {
+            self.message = Some((
+                "That failure is from an older version of the test: run it again first.".into(),
+                true,
+            ));
+            cx.notify();
+            return;
+        }
         let kept = plan[..failed].to_vec();
         let remaining: Vec<String> = plan[failed..].iter().map(Step::describe).collect();
-        record::start(self.project_id, path, kept, cx);
+        if let Err(err) = record::start(self.project_id, path, kept, cx) {
+            self.message = Some((err.to_string().into(), true));
+            cx.notify();
+            return;
+        }
         self.repairing = true;
         self.watch_recording(cx);
         let prompt = format!(
@@ -297,6 +307,10 @@ impl TestsPanel {
 
     /// Ends the recording: a new one is saved, a repair becomes a proposal.
     pub fn finish_recording(&mut self, cx: &mut Context<Self>) {
+        // Another workspace's recording is its panel's to end.
+        if !record::current(cx).is_some_and(|recording| recording.project_id == self.project_id) {
+            return;
+        }
         let Some(recording) = record::stop(cx) else {
             return;
         };
@@ -386,41 +400,6 @@ impl TestsPanel {
             false,
         ));
         cx.notify();
-    }
-
-    fn card(&self, path: &PathBuf, cx: &mut Context<Self>) {
-        let (Some((_, test)), Some((dir, report))) = (
-            self.tests.iter().find(|(p, _)| p == path),
-            self.shown_report(path),
-        ) else {
-            return;
-        };
-        let on = report
-            .variant
-            .as_ref()
-            .map(|variant| format!(" on {}", variant.label()))
-            .unwrap_or_default();
-        let what = match report.failure() {
-            Some((ix, failure)) => format!(
-                "Step {} (“{}”) failed{on}: {}",
-                ix + 1,
-                failure.step.describe(),
-                failure.error.clone().unwrap_or_default()
-            ),
-            None => format!(
-                "{} steps look different from the accepted screens{on}.",
-                report.looks_different()
-            ),
-        };
-        cx.emit(TestsPanelEvent::Card {
-            test: model::slug(&test.name),
-            title: format!("UI test failing: {}", test.name),
-            description: format!(
-                "{what}\n\nScenario: {}\nReport: {}",
-                test.description,
-                dir.display()
-            ),
-        });
     }
 
     fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -542,7 +521,6 @@ impl TestsPanel {
         let report = self.shown_report(path);
         let recording = record::current(cx).filter(|recording| &recording.path == path);
         let busy = recording.is_some() || self.runs.read(cx).running().is_some();
-        let failed = runs.iter().any(|(_, report)| !report.passed());
         let broken = report.is_some_and(|(_, report)| report.failure().is_some());
         // Saving the look only makes sense for runs whose steps worked.
         let usable: Vec<&Report> = runs
@@ -562,13 +540,8 @@ impl TestsPanel {
         };
         let (matrix_path, look_path) = (path.clone(), path.clone());
         let muted = cx.theme().muted_foreground;
-        let (run_path, record_path, repair_path, card_path, open_path) = (
-            path.clone(),
-            path.clone(),
-            path.clone(),
-            path.clone(),
-            path.clone(),
-        );
+        let (run_path, record_path, repair_path, open_path) =
+            (path.clone(), path.clone(), path.clone(), path.clone());
         let proposal = self
             .proposal
             .as_ref()
@@ -606,7 +579,7 @@ impl TestsPanel {
                         .small()
                         .ghost()
                         .label(label)
-                        .tooltip("Later runs compare each step's screen with this run's")
+                        .tooltip(ph_ui::tip("Later runs compare each step's screen with this run's"))
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, _, cx| this.accept_look(&look_path, cx))),
                 )
@@ -630,17 +603,8 @@ impl TestsPanel {
                         .ghost()
                         .label("Repair with agent")
                         .disabled(busy)
-                        .tooltip("The agent redoes the scenario from the broken step; you keep or discard what it records")
+                        .tooltip(ph_ui::tip("The agent redoes the scenario from the broken step; you keep or discard what it records"))
                         .on_click(cx.listener(move |this, _, _, cx| this.repair(repair_path.clone(), cx))),
-                )
-            })
-            .when(failed, |this| {
-                this.child(
-                    Button::new("test-card")
-                        .small()
-                        .ghost()
-                        .label("Make a card")
-                        .on_click(cx.listener(move |this, _, _, cx| this.card(&card_path, cx))),
                 )
             })
             .child({

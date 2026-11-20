@@ -1,4 +1,4 @@
-//! The tool panels of a workspace (Git, board, browser, devices, tests,
+//! The tool panels of a workspace (Git, browser, devices, tests,
 //! pull requests, runs, terminals): each made the first time it is shown,
 //! and how their events reach the rest of the screen.
 
@@ -41,17 +41,12 @@ impl WorkspaceScreen {
                         .unwrap_or_else(|| path.clone());
                     this.open_file(&path, Some(*line), window, cx);
                 }
-                ChangesPanelEvent::OpenDiff(path) => {
-                    let root = this
-                        .roots()
-                        .list()
-                        .get(this.git_folder)
-                        .map(|root| root.path.clone());
-                    if let Some(root) = root {
-                        this.open_diff(root, path.clone(), false, window, cx);
-                    }
-                }
                 ChangesPanelEvent::ReviewChanges => this.review_changes(window, cx),
+                ChangesPanelEvent::ExplainChanges => this.explain_changes(window, cx),
+                ChangesPanelEvent::ChangesRead => this.changes_read(cx),
+                ChangesPanelEvent::CommitShown(commit) => {
+                    this.commit_shown(commit.clone(), window, cx)
+                }
                 ChangesPanelEvent::SendNotes(text) => {
                     this.reveal_chat(cx);
                     let attachment = Attachment::Text {
@@ -75,32 +70,23 @@ impl WorkspaceScreen {
             },
         ));
         self.changes.insert(self.git_folder, changes.clone());
+        self.attach_explanation(&changes, window, cx);
         self.update_live_panes(cx);
+        self.refresh_evidence(cx);
         changes
     }
 
-    /// The board panel, created on first use.
-    pub fn board(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<BoardPanel> {
-        if let Some(board) = &self.board {
-            return board.clone();
+    /// Says over the changes what the chat in front did to check its work
+    /// (tests, commands, screenshots): after its turn, and when another
+    /// chat comes in front.
+    pub(super) fn refresh_evidence(&mut self, cx: &mut Context<Self>) {
+        if self.changes.is_empty() {
+            return;
         }
-        let store = AppState::store(cx).clone();
-        let project_id = self.project.id;
-        let board = cx.new(|cx| BoardPanel::new(store, project_id, cx));
-        self._subscriptions.push(cx.subscribe_in(
-            &board,
-            window,
-            |this, _, event: &BoardPanelEvent, window, cx| match event {
-                BoardPanelEvent::SendToAgent { prompt, title } => {
-                    let (prompt, title) = (prompt.clone(), title.clone());
-                    this.chat.update(cx, |chat, cx| {
-                        chat.send_text(prompt, Some(title), window, cx)
-                    });
-                }
-            },
-        ));
-        self.board = Some(board.clone());
-        board
+        let evidence = evidence_chips(&self.chat.read(cx).evidence(cx));
+        for changes in self.changes.values() {
+            changes.update(cx, |changes, cx| changes.set_evidence(evidence.clone(), cx));
+        }
     }
 
     /// The browser pane, created on first use (Chrome starts when it is shown).
@@ -206,34 +192,10 @@ impl WorkspaceScreen {
                     this.chat.update(cx, |chat, cx| {
                         chat.start_tool_task(title, prompt, window, cx)
                     });
-                }
-                ph_uitest::TestsPanelEvent::Card {
-                    title,
-                    description,
-                    test,
-                } => {
-                    let card = ph_store::board::NewCard {
-                        title: title.clone(),
-                        description: description.clone(),
-                        acceptance: "The UI test passes again.".into(),
-                    };
-                    let store = AppState::store(cx).clone();
-                    // The card can only be Done once the test passes again.
-                    let added = store.add_cards(this.project.id, &[card]).and_then(|cards| {
-                        cards
-                            .first()
-                            .map_or(Ok(()), |card| store.link_card_test(card.id, test, true))
-                    });
-                    let note = match added {
-                        Ok(()) => {
-                            ph_board::BoardHub::notify(this.project.id, cx);
-                            Notification::success(
-                                "Added a card to the board; it is Done once the test passes.",
-                            )
-                        }
-                        Err(err) => Notification::error(format!("Could not add the card: {err:#}")),
-                    };
-                    window.push_notification(note, cx);
+                    // Only this chat's turn ends the recording it does.
+                    if let Some(chat) = this.chat.read(cx).active_session_id(cx) {
+                        ph_uitest::record::set_chat(chat, cx);
+                    }
                 }
                 ph_uitest::TestsPanelEvent::OpenFile(path) => {
                     if let Ok(relative) = path.strip_prefix(&this.project.path) {
@@ -320,12 +282,6 @@ impl WorkspaceScreen {
                     this.chat
                         .update(cx, |chat, cx| chat.ask_about(attachment, None, window, cx));
                     cx.notify();
-                }
-                ph_terminal::TerminalPanelEvent::StartAgent { agent, cwd } => {
-                    this.start_terminal_agent(agent, cwd.clone(), None, window, cx)
-                }
-                ph_terminal::TerminalPanelEvent::ResumeAgent { agent, cwd } => {
-                    this.pick_agent_session(agent, cwd.clone(), window, cx)
                 }
                 ph_terminal::TerminalPanelEvent::Open { link, cwd } => {
                     this.open_link(link, Some(cwd), window, cx)
@@ -461,9 +417,6 @@ impl WorkspaceScreen {
                     self.files(window, cx);
                 }
             }
-            ContextTab::Board => {
-                self.board(window, cx);
-            }
             ContextTab::Terminal => {
                 if self.terminal.is_none() {
                     // The first time a workspace's Terminal tab opens, a
@@ -537,40 +490,9 @@ impl WorkspaceScreen {
         self.make_terminal_panel(window, cx)
     }
 
-    /// Starts agent `agent`'s CLI in a new terminal in `cwd`, followed by
-    /// PilotHouse (`resume`: one of its sessions), and shows it.
-    pub(crate) fn start_terminal_agent(
-        &mut self,
-        agent: &str,
-        cwd: std::path::PathBuf,
-        resume: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let panel = self.terminal_panel(window, cx);
-        let terminals = panel.read(cx).terminals().clone();
-        let started = crate::terminal_agents::launch(
-            agent,
-            self.project.id,
-            &terminals,
-            cwd,
-            resume.as_deref(),
-            cx,
-        );
-        match started {
-            Ok(terminal) => {
-                self.show_tab(ContextTab::Terminal, window, cx);
-                panel.update(cx, |panel, cx| panel.focus(&terminal, window, cx));
-            }
-            Err(err) => {
-                use gpui_kit::component::WindowExt as _;
-                window.push_notification(format!("Could not start the agent: {err:#}"), cx);
-            }
-        }
-    }
-
-    /// Lists Claude Code's past sessions in `cwd`; the one picked resumes
-    /// in a new terminal.
+    /// Lists an agent's own past sessions in `cwd` (those started outside
+    /// PilotHouse too: in another terminal, another editor); the one
+    /// picked goes on here, as a session of the workspace.
     pub(crate) fn pick_agent_session(
         &mut self,
         agent: &'static str,
@@ -582,16 +504,13 @@ impl WorkspaceScreen {
         let list =
             cx.background_spawn(async move { ph_agent::cli_sessions::sessions(agent, &folder) });
         let name = ph_agent::agents::find(agent).map_or(agent, |spec| spec.name);
-        let loads_sessions =
-            ph_agent::agents::find(agent).is_some_and(|spec| !spec.quirks.no_session_load);
         cx.spawn_in(window, async move |this, cx| {
             let sessions = list.await;
             _ = this.update_in(cx, |_, window, cx| {
                 let screen = cx.entity().downgrade();
                 window.open_dialog(cx, move |dialog, window, cx| {
                     let rows = sessions.iter().map(|session| {
-                        let (screen, cwd, id) = (screen.clone(), cwd.clone(), session.id.clone());
-                        let (chat_screen, past) = (screen.clone(), session.clone());
+                        let (screen, past) = (screen.clone(), session.clone());
                         let group = SharedString::from(format!("agent-session-row-{}", session.id));
                         gpui_kit::component::h_flex()
                             .id(SharedString::from(format!("agent-session-{}", session.id)))
@@ -612,56 +531,22 @@ impl WorkspaceScreen {
                                     .text_sm()
                                     .child(session.title.clone()),
                             )
-                            // The row resumes in a terminal; this, in a chat
-                            // (for agents that can take a session back).
-                            .when(loads_sessions, |row| {
-                                row.child(
-                                    gpui_kit::div()
-                                        .invisible()
-                                        .group_hover(group, |style| style.visible())
-                                        .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .child(
-                                            Button::new(SharedString::from(format!(
-                                                "agent-session-chat-{}",
-                                                session.id
-                                            )))
-                                            .ghost()
-                                            .xsmall()
-                                            .label("Open in chat")
-                                            .on_click(move |_, window, cx| {
-                                                cx.stop_propagation();
-                                                window.close_dialog(cx);
-                                                _ = chat_screen.update(cx, |screen, cx| {
-                                                    screen.resume_in_chat(agent, &past, window, cx)
-                                                });
-                                            }),
-                                        ),
-                                )
-                            })
                             .child(
                                 gpui_kit::div()
                                     .flex_none()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(crate::sidebar::age(session.updated_at)),
+                                    .child(ph_ui::time::age(session.updated_at)),
                             )
                             .on_click(move |_, window, cx| {
                                 window.close_dialog(cx);
                                 _ = screen.update(cx, |screen, cx| {
-                                    screen.start_terminal_agent(
-                                        agent,
-                                        cwd.clone(),
-                                        Some(id.clone()),
-                                        window,
-                                        cx,
-                                    )
+                                    screen.open_outside_session(agent, &past, window, cx)
                                 });
                             })
                     });
                     dialog
-                        .title(format!("Resume a {name} session"))
+                        .title(format!("Go on with a {name} session"))
                         .w(ph_ui::scaled_px(560., window))
                         .child(if sessions.is_empty() {
                             gpui_kit::div()
@@ -687,7 +572,7 @@ impl WorkspaceScreen {
     /// Opens a link ⌘-clicked in a terminal: a dev server's page in the
     /// Browser tool, another web page in the system browser, a file of the
     /// workspace in the editor at its line.
-    fn open_link(
+    pub(super) fn open_link(
         &mut self,
         link: &ph_terminal::links::Link,
         cwd: Option<&std::path::Path>,
@@ -781,6 +666,41 @@ impl WorkspaceScreen {
         }
     }
 
+    /// Goes on here with one of an agent's own sessions that did not start
+    /// here: in a chat, which takes the session back and plays its history
+    /// in; for an agent that cannot do that (Cline), in its CLI. The
+    /// header's switch then offers the other form.
+    pub(crate) fn open_outside_session(
+        &mut self,
+        agent: &'static str,
+        past: &ph_agent::cli_sessions::PastSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let loads = ph_agent::agents::find(agent).is_some_and(|spec| !spec.quirks.no_session_load);
+        if loads || !ph_brand::enabled(ph_brand::Feature::Terminal) {
+            return self.resume_in_chat(agent, past, window, cx);
+        }
+        let store = AppState::store(cx).clone();
+        let cwd = self.project.path.to_string_lossy().into_owned();
+        let made = store
+            .create_session(self.project.id, &past.title, agent)
+            .and_then(|session| {
+                store.set_session_acp_id(session.id, Some(&past.id))?;
+                store.set_session_place(session.id, "terminal", Some(&cwd))?;
+                Ok(session.id)
+            });
+        match made {
+            Ok(id) => {
+                self.reload_sessions(cx);
+                self.reveal_chat(cx);
+                self.select_session(id, cx);
+                self.show_as(ph_agent::Form::Cli, window, cx);
+            }
+            Err(err) => tracing::warn!("going on with the session failed: {err:#}"),
+        }
+    }
+
     /// Shows `terminal` in the Terminal tool, with the keyboard in it.
     pub(crate) fn show_terminal(
         &mut self,
@@ -788,6 +708,11 @@ impl WorkspaceScreen {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A chat's CLI shows in its chat, not among the Terminal tab's.
+        if let Some(session) = super::cli::chat_of(self.project.id, terminal, cx) {
+            self.select_session(session, cx);
+            return;
+        }
         let panel = self.terminal_panel(window, cx);
         let terminals = panel.read(cx).terminals().clone();
         terminals.update(cx, |terminals, cx| {
@@ -861,6 +786,62 @@ pub(crate) fn briefs(pulls: &[ph_github::models::PullRequest]) -> Vec<ph_agent::
             body: pull.body.clone().unwrap_or_default(),
         })
         .collect()
+}
+
+/// What a chat did to check its work, as the Git tool says it over the
+/// changes.
+fn evidence_chips(evidence: &ph_agent::evidence::Evidence) -> Vec<ph_changes::Evidence> {
+    use ph_changes::{Evidence, EvidenceKind};
+    let plural = |count: usize, one: &str| {
+        if count == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{count} {one}s")
+        }
+    };
+    let mut chips = Vec::new();
+    for run in &evidence.tests {
+        let label = match (run.ok, run.passed, run.failed) {
+            (true, Some(passed), _) => format!("{} passed", plural(passed, "test")),
+            (true, None, _) => "Tests passed".to_string(),
+            (false, _, Some(failed)) if failed > 0 => {
+                format!("{} failed", plural(failed, "test"))
+            }
+            (false, ..) => "Tests failed".to_string(),
+        };
+        chips.push(Evidence {
+            kind: EvidenceKind::Tests,
+            label: label.into(),
+            detail: Some(run.command.clone().into()),
+            ok: Some(run.ok),
+        });
+    }
+    if evidence.commands > 0 {
+        let failed = evidence.failed_commands;
+        chips.push(Evidence {
+            kind: EvidenceKind::Commands,
+            label: if failed > 0 {
+                format!(
+                    "{} run, {failed} failed",
+                    plural(evidence.commands, "command")
+                )
+                .into()
+            } else {
+                format!("{} run", plural(evidence.commands, "command")).into()
+            },
+            detail: Some("Commands the agent ran in this chat, besides tests".into()),
+            ok: (failed > 0).then_some(false),
+        });
+    }
+    if evidence.screenshots > 0 {
+        chips.push(Evidence {
+            kind: EvidenceKind::Screenshots,
+            label: plural(evidence.screenshots, "screenshot").into(),
+            detail: Some("Screenshots the agent took to look at its work".into()),
+            ok: None,
+        });
+    }
+    chips
 }
 
 #[cfg(test)]

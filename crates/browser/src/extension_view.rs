@@ -2,6 +2,10 @@
 //! through PilotHouse's extension ([`crate::extension`]). It shows whether
 //! the extension is connected, where its folder is, how to load it, and
 //! sets up (or removes) the native messaging host it talks to the app with.
+//!
+//! The way there is a guide in steps, each a sentence beside a drawing of
+//! where in Chrome it happens ([`crate::extension_guide`]). Once Chrome is
+//! connected the steps fold away, and what the extension does stays.
 
 use std::collections::HashSet;
 
@@ -25,6 +29,9 @@ use crate::{AgentChrome, AgentChromeStatus, WorkflowUse};
 
 pub struct ChromeExtensionView {
     registration: Registration,
+    /// Whether the setup steps show, once the user has said: they show by
+    /// themselves until Chrome is connected, and fold away then.
+    steps_open: Option<bool>,
     /// What the last Set up or Remove said.
     message: Option<(bool, SharedString)>,
     /// Saved workflows, and the version they were read at: read again only
@@ -66,6 +73,7 @@ impl ChromeExtensionView {
             .unwrap_or_default();
         Self {
             registration: registration(),
+            steps_open: None,
             message: None,
             workflows,
             workflows_version,
@@ -137,7 +145,7 @@ impl ChromeExtensionView {
         let mut list = v_flex().gap_2();
         if self.workflows.is_empty() {
             list = list.child(div().text_xs().text_color(muted).child(
-                "None yet. In Chrome, right-click a page → PilotHouse → Record a workflow, do the steps, then press Stop and save.",
+                "None yet. In Chrome, click PilotHouse in the toolbar, then Record → A workflow; do the steps and press Stop and save.",
             ));
         }
         for workflow in &self.workflows {
@@ -235,7 +243,9 @@ impl ChromeExtensionView {
                             .small()
                             .ghost()
                             .label("Make a test")
-                            .tooltip("A chat drafts a Playwright test of it, for you to send")
+                            .tooltip(ph_ui::tip(
+                                "A chat drafts a Playwright test of it, for you to send",
+                            ))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.use_workflow(&test, WorkflowUse::Test, window, cx)
                             })),
@@ -246,7 +256,9 @@ impl ChromeExtensionView {
                                 .small()
                                 .ghost()
                                 .label("Schedule")
-                                .tooltip("A schedule runs it with an agent and reports what it saw")
+                                .tooltip(ph_ui::tip(
+                                    "A schedule runs it with an agent and reports what it saw",
+                                ))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.use_workflow(&schedule, WorkflowUse::Schedule, window, cx)
                                 })),
@@ -349,6 +361,113 @@ fn registration() -> Registration {
         .unwrap_or_default()
 }
 
+/// The address of Chrome's extensions page.
+const EXTENSIONS_PAGE: &str = "chrome://extensions";
+
+/// A step of the guide: its number (a tick once it is done), what to do in
+/// a sentence, and a drawing of where. The drawing goes under the words
+/// where the page is too narrow for both.
+fn guide_step(
+    number: Option<usize>,
+    done: bool,
+    title: impl Into<SharedString>,
+    body: impl IntoElement,
+    drawing: AnyElement,
+    cx: &gpui_kit::App,
+) -> gpui_kit::Div {
+    let theme = cx.theme();
+    let mark = match number {
+        Some(_) if done => Some(
+            gpui_kit::component::Icon::new(gpui_kit::component::IconName::CircleCheck)
+                .small()
+                .text_color(theme.success)
+                .into_any_element(),
+        ),
+        Some(number) => Some(
+            h_flex()
+                .flex_none()
+                .size(ph_ui::rems_from_px(18.))
+                .justify_center()
+                .rounded_full()
+                .border_1()
+                .border_color(theme.border)
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(number.to_string())
+                .into_any_element(),
+        ),
+        None => None,
+    };
+    h_flex()
+        .w_full()
+        .flex_wrap()
+        .items_start()
+        .gap_x_4()
+        .gap_y_2()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w(ph_ui::rems_from_px(240.))
+                .gap_1p5()
+                .child(
+                    h_flex().gap_2().children(mark).child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(title.into()),
+                    ),
+                )
+                .child(body),
+        )
+        .child(drawing)
+}
+
+/// A sentence of the guide.
+fn guide_text(text: impl Into<SharedString>, cx: &gpui_kit::App) -> gpui_kit::Div {
+    div()
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .child(text.into())
+}
+
+/// A shortcut of the extension's and what it does.
+fn shortcut(key: &'static str, does: &'static str, cx: &gpui_kit::App) -> gpui_kit::Div {
+    let theme = cx.theme();
+    // Chrome's own names for the keys, as its shortcuts page shows them.
+    let keys = if cfg!(target_os = "macos") {
+        format!("⌥⇧{key}")
+    } else {
+        format!("Alt+Shift+{key}")
+    };
+    h_flex()
+        .gap_2()
+        .child(
+            div()
+                .flex_none()
+                .min_w(ph_ui::rems_from_px(if cfg!(target_os = "macos") {
+                    40.
+                } else {
+                    84.
+                }))
+                .px_1p5()
+                .rounded(theme.radius)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.secondary)
+                .text_xs()
+                .font_family(theme.mono_font_family.clone())
+                .child(keys),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(does),
+        )
+}
+
 impl Render for ChromeExtensionView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -357,6 +476,7 @@ impl Render for ChromeExtensionView {
             .map(|chrome| chrome.read(cx).status().clone())
             .unwrap_or(AgentChromeStatus::Disconnected);
         let set_up = !self.registration.browsers.is_empty();
+        let connected = matches!(status, AgentChromeStatus::Connected { .. });
         let (dot, headline): (gpui_kit::Hsla, String) = match (&status, set_up) {
             (AgentChromeStatus::Connected { browser }, _) => {
                 (theme.success, format!("Connected to {browser}"))
@@ -367,166 +487,286 @@ impl Render for ChromeExtensionView {
             ),
             (AgentChromeStatus::Disconnected, true) => (
                 theme.warning,
-                "Set up: waiting for Chrome (load the extension, and keep Chrome open)".into(),
+                "Waiting for Chrome: load the extension, and keep Chrome open".into(),
             ),
             (AgentChromeStatus::Disconnected, false) => (muted, "Not set up".into()),
         };
+        // The steps are for getting there: once Chrome is connected they
+        // fold away, unless asked for.
+        let steps_open = self.steps_open.unwrap_or(!connected);
         let folder = extension::extension_dir();
         let folder_text = folder.display().to_string();
-        let step = |number: usize, text: &'static str| {
-            h_flex()
-                .gap_2()
-                .items_start()
-                .child(
-                    div()
-                        .w_4()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(format!("{number}.")),
-                )
-                .child(div().flex_1().min_w_0().text_sm().child(text))
-        };
-        v_flex()
-            .w_full()
-            .gap_4()
+
+        let header = v_flex()
+            .gap_1()
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().size_2().flex_none().rounded_full().bg(dot))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(headline),
-                            ),
-                    )
-                    .child(div().text_xs().text_color(muted).child(format!(
-                        "Agents can use your own Chrome, with your sign-ins, but only the tabs in its PilotHouse tab group: tabs they open, and tabs you put in the group (in the PilotHouse panel: “Let agents use this tab”). And you can send pages, screenshots, elements and bug reports from Chrome to a chat. Your other tabs are read only when you ask.{}",
-                        if ph_brand::enabled(ph_brand::Feature::Browser) {
-                            concat!(" Without the extension, agents use ", ph_brand::name!(), "'s built-in browser.")
-                        } else {
-                            ""
-                        }
-                    ))),
-            )
-            .child(
-                v_flex()
-                    .gap_1()
+                h_flex()
+                    .gap_2()
+                    .child(div().size_2().flex_none().rounded_full().bg(dot))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
-                            .child(concat!("1. Let Chrome reach ", ph_brand::name!())),
+                            .child(headline),
                     )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().flex_1().min_w_0().text_xs().text_color(muted).child(if set_up {
-                                format!("Set up for {}.", self.registration.browsers.join(", "))
-                            } else {
-                                format!("Registers {} with Chrome, Chromium, Edge and Brave for your user, so that only its extension can talk to the app. Nothing is installed in the browser.", ph_brand::NAME)
-                            }))
-                            .child(
-                                Button::new("chrome-extension-set-up")
-                                    .small()
-                                    .when(set_up, |button| button.outline())
-                                    .when(!set_up, |button| button.primary())
-                                    .label(if set_up { "Set up again" } else { "Set up" })
-                                    .on_click(cx.listener(|this, _, _, cx| this.set_up(cx))),
-                            )
-                            .when(set_up, |row| {
-                                row.child(
-                                    Button::new("chrome-extension-remove")
-                                        .small()
-                                        .ghost()
-                                        .label("Remove")
-                                        .on_click(cx.listener(|this, _, _, cx| this.remove(cx))),
-                                )
-                            }),
-                    )
-                    .when(self.registration.elsewhere, |this| {
-                        this.child(div().text_xs().text_color(theme.warning).child(
-                            concat!("Another ", ph_brand::name!(), " data folder is set up in a browser too: Set up here to use this one."),
-                        ))
-                    })
-                    .when_some(self.message.clone(), |this, (ok, message)| {
+                    .when(connected, |this| {
                         this.child(
-                            div()
-                                .text_xs()
-                                .text_color(if ok { theme.success } else { theme.danger })
-                                .child(message),
+                            Button::new("chrome-extension-steps")
+                                .xsmall()
+                                .ghost()
+                                .label(if steps_open {
+                                    "Hide the setup steps"
+                                } else {
+                                    "Show the setup steps"
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.steps_open = Some(!steps_open);
+                                    cx.notify();
+                                })),
                         )
                     }),
             )
+            .child(guide_text(
+                format!(
+                    "Agents can use your own Chrome, with your sign-ins, but only the tabs in the PilotHouse tab group. Your other tabs are read only when you ask.{}",
+                    if ph_brand::enabled(ph_brand::Feature::Browser) {
+                        concat!(" Without the extension, agents use ", ph_brand::name!(), "'s built-in browser.")
+                    } else {
+                        ""
+                    }
+                ),
+                cx,
+            ));
+
+        // 1. The native messaging host.
+        let reach = v_flex()
+            .gap_2()
+            .child(guide_text(
+                if set_up {
+                    format!("Set up for {}.", self.registration.browsers.join(", "))
+                } else {
+                    format!(
+                        "Registers {} with Chrome, Chromium, Edge and Brave for your user, so that only its extension can talk to the app. Nothing is installed in the browser.",
+                        ph_brand::NAME
+                    )
+                },
+                cx,
+            ))
             .child(
-                v_flex()
-                    .gap_1()
+                h_flex()
+                    .gap_2()
                     .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("2. Load the extension in Chrome"),
+                        Button::new("chrome-extension-set-up")
+                            .small()
+                            .when(set_up, |button| button.outline())
+                            .when(!set_up, |button| button.primary())
+                            .label(if set_up { "Set up again" } else { "Set up" })
+                            .on_click(cx.listener(|this, _, _, cx| this.set_up(cx))),
                     )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_xs()
-                                    .font_family(theme.mono_font_family.clone())
-                                    .text_color(muted)
-                                    .child(folder_text.clone()),
+                    .when(set_up, |row| {
+                        row.child(
+                            Button::new("chrome-extension-remove")
+                                .small()
+                                .ghost()
+                                .label("Remove")
+                                .on_click(cx.listener(|this, _, _, cx| this.remove(cx))),
+                        )
+                    }),
+            )
+            .when(self.registration.elsewhere, |this| {
+                this.child(div().text_xs().text_color(theme.warning).child(concat!(
+                    "Another ",
+                    ph_brand::name!(),
+                    " data folder is set up in a browser too: Set up here to use this one."
+                )))
+            })
+            .when_some(self.message.clone(), |this, (ok, message)| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(if ok { theme.success } else { theme.danger })
+                        .child(message),
+                )
+            });
+
+        // 2. Developer mode.
+        let developer = v_flex()
+            .gap_2()
+            .child(guide_text(
+                "In Chrome, open chrome://extensions and switch on Developer mode, at the top right. In Edge and Brave it is edge://extensions and brave://extensions.",
+                cx,
+            ))
+            .child(
+                h_flex().child(
+                    Button::new("chrome-extension-copy-address")
+                        .small()
+                        .outline()
+                        .icon(Icons::Copy)
+                        .label("Copy the address")
+                        .on_click(|_, _, cx| {
+                            ph_ui::copy_with_toast(
+                                EXTENSIONS_PAGE.to_string(),
+                                "the address",
+                                cx,
                             )
-                            .child(
-                                Button::new("chrome-extension-copy")
-                                    .small()
-                                    .ghost()
-                                    .icon(Icons::Copy)
-                                    .label("Copy")
-                                    .on_click(move |_, _, cx| {
-                                        ph_ui::copy_with_toast(
-                                            folder_text.clone(),
-                                            "the extension's folder",
-                                            cx,
-                                        )
-                                    }),
-                            )
-                            .child(
-                                Button::new("chrome-extension-reveal")
-                                    .small()
-                                    .ghost()
-                                    .icon(Icons::FolderOpen)
-                                    .label("Reveal")
-                                    .on_click(move |_, _, cx| ph_ui::platform::reveal(&folder, cx)),
-                            ),
-                    )
-                    .child(step(1, "Open chrome://extensions in Chrome (or edge://extensions, brave://extensions)."))
-                    .child(step(2, "Turn on Developer mode (top right)."))
-                    .child(step(3, "Click Load unpacked and choose the folder above."))
-                    .child(step(4, "Pin PilotHouse from the puzzle-piece menu: its button opens the PilotHouse panel (what waits for you, agents in Chrome, sharing the tab, sending from it, recording)."))
-                    .child(step(5, "When an agent opens a page, a purple PilotHouse tab group appears. While an agent acts, its tab glows; Chrome also shows that PilotHouse is debugging the browser.")),
+                        }),
+                ),
+            );
+
+        // 3. Load unpacked.
+        let load = v_flex()
+            .gap_2()
+            .child(guide_text(
+                "Click Load unpacked and choose this folder:",
+                cx,
+            ))
+            .child(
+                div()
+                    .text_xs()
+                    .font_family(theme.mono_font_family.clone())
+                    .text_color(theme.foreground)
+                    .child(folder_text.clone()),
             )
             .child(
-                v_flex()
-                    .gap_1()
+                h_flex()
+                    .gap_2()
                     .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("In Chrome"),
+                        Button::new("chrome-extension-copy")
+                            .small()
+                            .outline()
+                            .icon(Icons::Copy)
+                            .label("Copy")
+                            .on_click(move |_, _, cx| {
+                                ph_ui::copy_with_toast(
+                                    folder_text.clone(),
+                                    "the extension's folder",
+                                    cx,
+                                )
+                            }),
                     )
-                    .child(step(1, "Right-click a page → PilotHouse: send the selection, the page, a link, an image, an area or an element to a chat; record a bug report or a workflow."))
-                    .child(step(2, "Shortcuts: ⌥⇧P (Alt+Shift+P) sends the selection or the page, ⌥⇧S an area, ⌥⇧E an element, ⌥⇧O opens the panel. Change them at chrome://extensions/shortcuts."))
-                    .child(step(3, "What you send waits in the chat's message box (the chat on screen, a new chat or quick chat: the panel's “Send to”) until you send it.")),
+                    .child(
+                        Button::new("chrome-extension-reveal")
+                            .small()
+                            .ghost()
+                            .icon(Icons::FolderOpen)
+                            .label("Reveal")
+                            .on_click(move |_, _, cx| ph_ui::platform::reveal(&folder, cx)),
+                    ),
+            );
+
+        let steps = v_flex()
+            .gap_5()
+            .child(guide_step(
+                Some(1),
+                set_up,
+                concat!("Let Chrome reach ", ph_brand::name!()),
+                reach,
+                crate::extension_guide::link(cx),
+                cx,
+            ))
+            .child(guide_step(
+                Some(2),
+                connected,
+                "Turn on Developer mode",
+                developer,
+                crate::extension_guide::developer_mode(cx),
+                cx,
+            ))
+            .child(guide_step(
+                Some(3),
+                connected,
+                "Load the extension",
+                load,
+                crate::extension_guide::load_unpacked(cx),
+                cx,
+            ))
+            .child(guide_step(
+                Some(4),
+                connected,
+                "Pin it",
+                guide_text(
+                    "Open the puzzle-piece menu beside the address and pin PilotHouse, so that its button is always there.",
+                    cx,
+                ),
+                crate::extension_guide::pin(cx),
+                cx,
+            ));
+
+        let in_chrome = v_flex()
+            .gap_5()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("In Chrome"),
             )
+            .child(guide_step(
+                None,
+                false,
+                "Everything is under its button",
+                guide_text(
+                    "Click PilotHouse in the toolbar to send the page, a screenshot or an element to a chat, to record a bug report or a workflow, and to let agents use the tab in front. Where what you send goes is chosen there too.",
+                    cx,
+                ),
+                crate::extension_guide::popup(cx),
+                cx,
+            ))
+            .child(guide_step(
+                None,
+                false,
+                "Agents work in a tab group of their own",
+                guide_text(
+                    "When an agent opens a page, a purple PilotHouse tab group appears. A tab glows while an agent acts in it, and Chrome says that PilotHouse is debugging the browser. Agents never see a tab outside the group.",
+                    cx,
+                ),
+                crate::extension_guide::tab_group(cx),
+                cx,
+            ))
+            .child(guide_step(
+                None,
+                false,
+                "Right-click what you want to send",
+                guide_text(
+                    "A page's menu sends what you point at: the selection, a link, an image or the page, a screenshot of an area, or an element.",
+                    cx,
+                ),
+                crate::extension_guide::context_menu(cx),
+                cx,
+            ))
+            .child(guide_step(
+                None,
+                false,
+                "What you send waits for you",
+                v_flex()
+                    .gap_2()
+                    .child(guide_text(
+                        "It is put in the chat's message box and goes when you send it.",
+                        cx,
+                    ))
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(shortcut("P", "Send the selection, or the page", cx))
+                            .child(shortcut("S", "Screenshot an area", cx))
+                            .child(shortcut("E", "Pick an element", cx))
+                            .child(shortcut("O", "Open PilotHouse's menu", cx)),
+                    )
+                    .child(div().text_xs().text_color(muted).child(
+                        "The shortcuts are changed at chrome://extensions/shortcuts.",
+                    )),
+                crate::extension_guide::waiting(cx),
+                cx,
+            ));
+
+        v_flex()
+            .w_full()
+            .gap_5()
+            .child(header)
+            .when(steps_open, |this| this.child(steps))
+            .child(div().h(gpui_kit::px(1.)).bg(theme.border))
+            .child(in_chrome)
             .child(self.render_workflows(cx))
             .child(div().text_xs().text_color(muted).child(concat!(
                 "For agents to upload files, turn on “Allow access to file URLs” in the extension's Details. After ", ph_brand::name!(), " updates, click the reload arrow on the extension in chrome://extensions."),

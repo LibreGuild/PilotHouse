@@ -164,7 +164,7 @@ pub fn copies_dirs() -> Vec<PathBuf> {
 /// (language servers start without running its build scripts, agents start
 /// outside it).
 pub fn is_untrusted_copy(path: &Path) -> bool {
-    copies_dirs()
+    copy_roots()
         .iter()
         .any(|dir| path.starts_with(dir.join("github")))
 }
@@ -172,7 +172,48 @@ pub fn is_untrusted_copy(path: &Path) -> bool {
 /// Whether `path` is any copy PilotHouse made (GitHub clones and task
 /// folders, which may hold a pull request author's files).
 pub fn is_copy(path: &Path) -> bool {
-    copies_dirs().iter().any(|dir| path.starts_with(dir))
+    copy_roots().iter().any(|dir| path.starts_with(dir))
+}
+
+/// [`copies_dirs`] as written and also in their canonical form. The paths
+/// asked about were mostly made canonical when they were stored, while the
+/// data folder's own path may go through a link (`/tmp` on macOS, a home
+/// folder on another disk): compared with one form only, a copy of someone
+/// else's code would pass for the user's own. Worked out once per set of
+/// folders, as these are asked often.
+fn copy_roots() -> Vec<PathBuf> {
+    static KNOWN: std::sync::Mutex<Option<(Vec<PathBuf>, Vec<PathBuf>)>> =
+        std::sync::Mutex::new(None);
+    let dirs = copies_dirs();
+    let mut known = KNOWN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((written, roots)) = known.as_ref()
+        && *written == dirs
+    {
+        return roots.clone();
+    }
+    let (roots, complete) = with_canonical(&dirs);
+    // A folder not made yet is looked at again next time, once it exists.
+    if complete {
+        *known = Some((dirs, roots.clone()));
+    }
+    roots
+}
+
+/// `dirs` followed by the canonical form of each that differs, and whether
+/// every one could be made canonical.
+fn with_canonical(dirs: &[PathBuf]) -> (Vec<PathBuf>, bool) {
+    let mut roots = dirs.to_vec();
+    let mut complete = true;
+    for dir in dirs {
+        match canonical(dir) {
+            Ok(real) if !roots.contains(&real) => roots.push(real),
+            Ok(_) => {}
+            Err(_) => complete = false,
+        }
+    }
+    (roots, complete)
 }
 
 /// The absolute, symlink-free form of `path`. Unlike `fs::canonicalize`, it
@@ -362,6 +403,28 @@ pub fn verify_private_parent(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn copies_are_known_through_a_link_in_the_data_folders_path() {
+        let base = std::env::temp_dir().join(format!("ph-copies-{}", std::process::id()));
+        _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("real/github/owner/repo")).unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("link")).unwrap();
+        let (roots, complete) = with_canonical(&[base.join("link")]);
+        assert!(complete);
+        // The clone as the store records it: canonical, not through the link.
+        let clone = canonical(&base.join("link/github/owner/repo")).unwrap();
+        assert!(
+            roots
+                .iter()
+                .any(|dir| clone.starts_with(dir.join("github")))
+        );
+        assert!(roots.contains(&base.join("link")), "the written form stays");
+        let (_, complete) = with_canonical(&[base.join("missing")]);
+        assert!(!complete);
+        _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn helpers_run_under_their_own_name() {

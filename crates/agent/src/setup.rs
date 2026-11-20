@@ -39,8 +39,44 @@ pub enum Fix {
     },
 }
 
-/// Everything `spec` needs, in the order to fix it.
+/// How long [`checks`] remembers what it found for an agent. Views list
+/// the checks while they draw (an empty chat, Settings), and finding them
+/// looks on `PATH`, in npm's cache and at sign-in files: on every frame
+/// that held the window up. *Check again* forgets them ([`forget`]).
+const CHECKS_KEPT: std::time::Duration = std::time::Duration::from_secs(5);
+
+type Found = std::collections::HashMap<&'static str, (std::time::Instant, Vec<Check>)>;
+
+static FOUND: std::sync::Mutex<Option<Found>> = std::sync::Mutex::new(None);
+
+/// Forgets what [`checks`] found: the next call looks again.
+pub fn forget() {
+    if let Ok(mut found) = FOUND.lock() {
+        *found = None;
+    }
+}
+
+/// Everything `spec` needs, in the order to fix it (as found in the last
+/// few seconds).
 pub fn checks(spec: &AgentSpec) -> Vec<Check> {
+    let now = std::time::Instant::now();
+    if let Ok(found) = FOUND.lock()
+        && let Some((at, checks)) = found.as_ref().and_then(|found| found.get(spec.id))
+        && now.duration_since(*at) < CHECKS_KEPT
+    {
+        return checks.clone();
+    }
+    let checks = look(spec);
+    if let Ok(mut found) = FOUND.lock() {
+        found
+            .get_or_insert_with(Default::default)
+            .insert(spec.id, (now, checks.clone()));
+    }
+    checks
+}
+
+/// Looks for everything `spec` needs.
+fn look(spec: &AgentSpec) -> Vec<Check> {
     let mut checks = vec![match ph_env::which(spec.cli) {
         Some(path) => Check {
             title: format!("{} is installed", spec.name),

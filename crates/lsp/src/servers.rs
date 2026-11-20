@@ -29,7 +29,10 @@ pub const SERVERS: &[ServerSpec] = &[
         language: "rust",
         install: "rustup component add rust-analyzer",
         extensions: &["rs"],
-        safe_untrusted: true,
+        // Even without build scripts and proc macros it runs `cargo` and
+        // `rustc`, which follow the folder's `.cargo/config.toml` (a
+        // `rustc-wrapper`) and `rust-toolchain.toml`.
+        safe_untrusted: false,
     },
     ServerSpec {
         name: "TypeScript",
@@ -216,6 +219,31 @@ pub fn candidates(path: &Path) -> impl Iterator<Item = &'static ServerSpec> {
         .filter(move |spec| spec.extensions.contains(&extension.as_str()))
 }
 
+/// The LSP `languageId` of `path` on `spec`'s server. One server reads
+/// several languages (TypeScript and JavaScript, with or without JSX; CSS,
+/// SCSS and Less) and picks its parser by this id, so one id per server
+/// would show errors on correct code.
+pub fn language_id(path: &Path, spec: &ServerSpec) -> &'static str {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match extension.as_str() {
+        "ts" | "mts" | "cts" => "typescript",
+        "tsx" => "typescriptreact",
+        "js" | "mjs" | "cjs" => "javascript",
+        "jsx" => "javascriptreact",
+        "scss" => "scss",
+        "less" => "less",
+        "jsonc" => "jsonc",
+        "c" => "c",
+        "m" => "objective-c",
+        "mm" => "objective-cpp",
+        _ => spec.language,
+    }
+}
+
 /// The first installed server for `path`, with its program.
 pub fn find(path: &Path) -> Option<(&'static ServerSpec, PathBuf)> {
     candidates(path).find_map(|spec| ph_env::which(spec.program).map(|program| (spec, program)))
@@ -234,5 +262,23 @@ mod tests {
         let python: Vec<_> = candidates(Path::new("a.py")).map(|s| s.name).collect();
         assert_eq!(python, ["Pyright", "Python LSP"]);
         assert_eq!(candidates(Path::new("notes.txt")).count(), 0);
+    }
+
+    #[test]
+    fn each_file_says_its_own_language() {
+        let id = |path: &str| {
+            let path = Path::new(path);
+            language_id(path, candidates(path).next().unwrap())
+        };
+        assert_eq!(id("src/App.TSX"), "typescriptreact");
+        assert_eq!(id("src/index.ts"), "typescript");
+        assert_eq!(id("src/old.jsx"), "javascriptreact");
+        assert_eq!(id("src/old.mjs"), "javascript");
+        assert_eq!(id("style.scss"), "scss");
+        assert_eq!(id("style.css"), "css");
+        assert_eq!(id(".vscode/settings.jsonc"), "jsonc");
+        assert_eq!(id("main.c"), "c");
+        assert_eq!(id("main.cpp"), "cpp");
+        assert_eq!(id("main.rs"), "rust");
     }
 }

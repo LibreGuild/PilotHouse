@@ -13,20 +13,26 @@
 //! - [`ApprovalInbox`]: permission requests from every agent, in one place.
 //!
 //! Every new agent session is given the PilotHouse MCP server, so agents can
-//! read and update the project board.
+//! use the app's browser, devices and tests.
 
 pub mod agents;
+pub mod agents_view;
+mod antigravity_store;
 pub mod approvals;
 mod attachment_view;
 pub mod attachments;
 mod chat_panel;
 pub mod chats;
+pub mod claude_rules;
 pub mod cli_sessions;
 pub mod cli_transcript;
 pub mod cline;
 mod connection;
 mod entry_view;
+pub mod evidence;
+pub mod explanations;
 pub mod form;
+mod gemini_trust;
 pub mod installed;
 pub mod instructions;
 pub mod mcp_config;
@@ -36,6 +42,7 @@ pub mod oneshot;
 pub mod options;
 mod permission;
 pub mod preload;
+pub mod profiles;
 pub mod rate_limits;
 pub mod reply;
 pub mod review_card;
@@ -54,10 +61,13 @@ pub mod usage_meter;
 pub mod view_mode;
 
 pub use attachments::{Attachment, LiveSources, PullBrief};
-pub use chat_panel::{ChatContext, ChatPanel, ChatPanelEvent, Instructions, Prepare, Starter};
+pub use chat_panel::{
+    ChatAction, ChatContext, ChatMarks, ChatPanel, ChatPanelEvent, CliView, Form, HeaderTabs,
+    Instructions, Prepare, Starter,
+};
 pub use chats::{
     ChatHub, ChatState, ChatSummary, ChatsActivity, Preparing, WorkspaceChats, WorkspaceChatsEvent,
 };
 pub use connection::AgentConnection;
 pub use permission::{ApprovalInbox, PermissionRequest};
-pub use thread::{ChatThread, ReviewTurn, ThreadStatus};
+pub use thread::{ChatThread, Handover, ReviewTurn, ThreadStatus, own_tools_command};

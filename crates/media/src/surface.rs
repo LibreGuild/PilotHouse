@@ -77,6 +77,9 @@ pub struct SurfaceView {
     stale: Vec<Arc<RenderImage>>,
     mode: SurfaceMode,
     shapes: Vec<Shape>,
+    /// A mark of the owner's (the outline of a picked element): drawn and
+    /// captured with the user's marks, but not theirs to undo or clear.
+    highlight: Option<Shape>,
     drawing: Option<Shape>,
     focus_handle: FocusHandle,
     /// The element's laid-out bounds, recorded during prepaint.
@@ -84,24 +87,63 @@ pub struct SurfaceView {
     placeholder: SharedString,
     /// Frames shown in the last second, for the frame-rate readout.
     frame_times: Vec<Instant>,
-    pointer_down: bool,
+    /// The press being forwarded to the device or page, until it is let go.
+    press: Option<Press>,
+}
+
+#[derive(Clone, Copy)]
+struct Press {
+    /// Where the pointer last was inside the picture (frame pixels): a
+    /// press let go anywhere else ends here.
+    at: (f32, f32),
+    right_button: bool,
 }
 
 impl EventEmitter<SurfaceEvent> for SurfaceView {}
 
+/// Whether `keystroke` is copy, paste, cut, select all or undo: C, V, X, A
+/// or Z with the system's command key (⌘ on macOS, Ctrl on Windows and
+/// Linux). A [`SurfaceEvent::Key`] that is one is for the owner to map
+/// through the system clipboard; any other goes to the device or page as a
+/// key.
+pub fn editing_shortcut(keystroke: &Keystroke, cx: &App) -> bool {
+    is_editing_shortcut(keystroke, cx.platform_info().is_mac())
+}
+
+fn is_editing_shortcut(keystroke: &Keystroke, mac: bool) -> bool {
+    let modifiers = &keystroke.modifiers;
+    let command = if mac {
+        modifiers.platform
+    } else {
+        // Ctrl with Alt is AltGr there, which types a letter (ą, ć…).
+        modifiers.control && !modifiers.alt
+    };
+    command && matches!(keystroke.key.as_str(), "c" | "v" | "x" | "a" | "z")
+}
+
 impl SurfaceView {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
+        // Closed: the picture it still holds leaves the GPU atlas too
+        // (GPUI keeps a texture until told).
+        cx.on_release(|this, cx| {
+            let held = this.frame.take().map(|frame| frame.render_image());
+            for image in this.stale.drain(..).chain(held) {
+                ph_ui::images::release_render_image(image, cx);
+            }
+        })
+        .detach();
         Self {
             frame: None,
             stale: Vec::new(),
             mode: SurfaceMode::Interact,
             shapes: Vec::new(),
+            highlight: None,
             drawing: None,
             focus_handle: cx.focus_handle(),
             bounds: Rc::default(),
             placeholder: placeholder.into(),
             frame_times: Vec::new(),
-            pointer_down: false,
+            press: None,
         }
     }
 
@@ -129,6 +171,19 @@ impl SurfaceView {
         cx.notify();
     }
 
+    /// Shows no picture: the source is gone, or another one is coming, and
+    /// the last frame is not its screen. The texture is released as in
+    /// [`Self::set_frame`]; a press or a shape being drawn on it ends.
+    pub fn clear_frame(&mut self, cx: &mut Context<Self>) {
+        if let Some(old) = self.frame.take() {
+            self.stale.push(old.render_image());
+        }
+        self.frame_times.clear();
+        self.press = None;
+        self.drawing = None;
+        cx.notify();
+    }
+
     pub fn set_placeholder(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.placeholder = text.into();
         cx.notify();
@@ -141,10 +196,6 @@ impl SurfaceView {
     /// The pane's size as laid out in the last frame.
     pub fn view_size(&self) -> gpui_kit::Size<Pixels> {
         self.bounds.get().size
-    }
-
-    pub fn frames_per_second(&self) -> usize {
-        self.frame_times.len()
     }
 
     pub fn mode(&self) -> SurfaceMode {
@@ -177,13 +228,27 @@ impl SurfaceView {
         cx.notify();
     }
 
+    /// Shows `shape` as the owner's own mark (the outline of a picked
+    /// element), in place of the one before; `None` takes it away. Undo and
+    /// Clear leave it alone: they are for the user's marks.
+    pub fn set_highlight(&mut self, shape: Option<Shape>, cx: &mut Context<Self>) {
+        self.highlight = shape;
+        cx.notify();
+    }
+
+    /// What a capture burns in: the user's marks and the owner's highlight.
+    pub fn marks(&self) -> Vec<Shape> {
+        self.shapes.iter().chain(&self.highlight).cloned().collect()
+    }
+
     /// The current frame with the annotations burned in.
     pub fn composite(&self) -> Option<Frame> {
         let frame = self.frame.as_ref()?;
-        Some(if self.shapes.is_empty() {
+        let marks = self.marks();
+        Some(if marks.is_empty() {
             frame.clone()
         } else {
-            annotate::render(frame, &self.shapes)
+            annotate::render(frame, &marks)
         })
     }
 
@@ -224,15 +289,23 @@ impl SurfaceView {
         let Some((x, y)) = self.to_frame(event.position) else {
             return;
         };
-        self.pointer_down = true;
         match self.mode {
-            SurfaceMode::Interact => cx.emit(SurfaceEvent::Pointer(SurfacePointer {
-                kind: PointerKind::Down,
-                x,
-                y,
-                right_button: event.button == MouseButton::Right,
-                click_count: event.click_count,
-            })),
+            SurfaceMode::Interact => {
+                let right_button = event.button == MouseButton::Right;
+                self.press = Some(Press {
+                    at: (x, y),
+                    right_button,
+                });
+                cx.emit(SurfaceEvent::Pointer(SurfacePointer {
+                    kind: PointerKind::Down,
+                    x,
+                    y,
+                    right_button,
+                    click_count: event.click_count,
+                }))
+            }
+            // The click that picks is not a press on the device or page:
+            // its release must not reach them as one.
             SurfaceMode::Pick => {
                 cx.emit(SurfaceEvent::Picked { x, y });
                 self.mode = SurfaceMode::Interact;
@@ -259,13 +332,38 @@ impl SurfaceView {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // No button is down, so the release was never heard (it happened
+        // outside the window): what was pressed or drawn ends where it
+        // last was, instead of following a pointer that only hovers.
+        if event.pressed_button.is_none() {
+            if let Some(shape) = self.drawing.take() {
+                self.shapes.push(shape);
+                cx.notify();
+            }
+            if let Some(press) = self.press.take()
+                && self.mode == SurfaceMode::Interact
+            {
+                cx.emit(SurfaceEvent::Pointer(SurfacePointer {
+                    kind: PointerKind::Up,
+                    x: press.at.0,
+                    y: press.at.1,
+                    right_button: press.right_button,
+                    click_count: 1,
+                }));
+            }
+            return;
+        }
         let Some((x, y)) = self.to_frame(event.position) else {
             return;
         };
         match (&mut self.drawing, self.mode) {
             (Some(Shape::Rect { to, .. } | Shape::Arrow { to, .. }), _) => *to = (x, y),
             (Some(Shape::Pen { points }), _) => points.push((x, y)),
-            (None, SurfaceMode::Interact) if self.pointer_down => {
+            (None, SurfaceMode::Interact) => {
+                let Some(press) = &mut self.press else {
+                    return;
+                };
+                press.at = (x, y);
                 cx.emit(SurfaceEvent::Pointer(SurfacePointer {
                     kind: PointerKind::Move,
                     x,
@@ -280,15 +378,20 @@ impl SurfaceView {
         cx.notify();
     }
 
+    /// A button was let go, over the picture or anywhere else in the
+    /// window (the toolbar, the letterbox, another pane).
     fn mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let was_down = std::mem::replace(&mut self.pointer_down, false);
+        let press = self.press.take();
         if let Some(shape) = self.drawing.take() {
             self.shapes.push(shape);
             cx.notify();
             return;
         }
-        if self.mode == SurfaceMode::Interact && was_down {
-            let (x, y) = self.to_frame(event.position).unwrap_or((0.0, 0.0));
+        if self.mode == SurfaceMode::Interact
+            && let Some(press) = press
+        {
+            // Outside the picture, the press ends where it last was in it.
+            let (x, y) = self.to_frame(event.position).unwrap_or(press.at);
             cx.emit(SurfaceEvent::Pointer(SurfacePointer {
                 kind: PointerKind::Up,
                 x,
@@ -325,9 +428,10 @@ impl SurfaceView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // ⌘ shortcuts stay with the app, except the editing ones (copy,
-        // paste, cut, select all, undo), which the owner maps for the target.
-        let editing = matches!(event.keystroke.key.as_str(), "c" | "v" | "x" | "a" | "z");
+        // ⌘ (and the Windows key) shortcuts stay with the app, except the
+        // editing ones (copy, paste, cut, select all, undo), which the owner
+        // maps for the target: with ⌘ on macOS, with Ctrl elsewhere.
+        let editing = editing_shortcut(&event.keystroke, cx);
         if self.mode != SurfaceMode::Interact || (event.keystroke.modifiers.platform && !editing) {
             return;
         }
@@ -357,7 +461,7 @@ impl Render for SurfaceView {
             .fit()
             .zip(self.frame.as_ref().map(|f| (f.width, f.height)))
             .map(|(fit, (fw, fh))| {
-                let mut shapes = self.shapes.clone();
+                let mut shapes = self.marks();
                 shapes.extend(self.drawing.clone());
                 let to_view = move |(x, y): (f32, f32)| -> Point<Pixels> {
                     point(
@@ -427,6 +531,7 @@ impl Render for SurfaceView {
                 let bounds = self.bounds.get();
                 self.shapes
                     .iter()
+                    .chain(&self.highlight)
                     .filter_map(|shape| match shape {
                         Shape::Pin { at, number } => {
                             let x = fit.origin.x - bounds.origin.x
@@ -472,6 +577,10 @@ impl Render for SurfaceView {
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
+            // A release is heard only over the picture otherwise, and a
+            // drag often ends on the toolbar or outside the pane.
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up))
             .on_scroll(cx.listener(Self::scroll))
             .on_key_down(cx.listener(Self::key_down))
             .child(measure)
@@ -498,5 +607,50 @@ impl Render for SurfaceView {
             })
             .children(overlay)
             .children(pins)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keystroke(key: &str, modifiers: gpui_kit::Modifiers) -> Keystroke {
+        Keystroke {
+            key: key.into(),
+            modifiers,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn editing_shortcuts_use_each_systems_command_key() {
+        let command = gpui_kit::Modifiers {
+            platform: true,
+            ..Default::default()
+        };
+        let control = gpui_kit::Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        let alt_gr = gpui_kit::Modifiers {
+            control: true,
+            alt: true,
+            ..Default::default()
+        };
+        for key in ["c", "v", "x", "a", "z"] {
+            assert!(is_editing_shortcut(&keystroke(key, command), true));
+            assert!(!is_editing_shortcut(&keystroke(key, control), true));
+            assert!(is_editing_shortcut(&keystroke(key, control), false));
+            // The Windows key is not the command key there, and AltGr
+            // types a letter.
+            assert!(!is_editing_shortcut(&keystroke(key, command), false));
+            assert!(!is_editing_shortcut(&keystroke(key, alt_gr), false));
+        }
+        assert!(!is_editing_shortcut(&keystroke("left", control), false));
+        assert!(!is_editing_shortcut(&keystroke("s", command), true));
+        assert!(!is_editing_shortcut(
+            &keystroke("v", gpui_kit::Modifiers::default()),
+            false
+        ));
     }
 }

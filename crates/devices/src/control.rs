@@ -5,7 +5,7 @@
 
 use anyhow::{Context as _, Result, anyhow};
 use base64::Engine as _;
-use gpui_kit::{App, AppContext as _, Task};
+use gpui_kit::{App, AppContext as _, Entity, Task};
 use ph_control::ControlServer;
 use serde_json::{Value, json};
 
@@ -22,28 +22,29 @@ pub fn register(cx: &mut App) {
     ControlServer::handle_async(
         "device.list",
         |_, cx| {
-            let manager = DeviceManager::global(cx);
-            manager.update(cx, |manager, cx| manager.ensure_tracking(cx));
-            let Some(adb) = manager.read(cx).adb().cloned() else {
-                return Task::ready(Err(anyhow!(crate::sdk::Sdk::missing_message())));
-            };
-            let avds = manager.read(cx).avds().to_vec();
-            let emulator = manager.read(cx).emulator_tool();
-            cx.background_spawn(async move {
-                let devices = adb.devices()?;
-                // The list may still be loading on the first call.
-                let avds = if avds.is_empty() {
-                    crate::manager::list_avds(emulator.as_deref())
-                } else {
-                    avds
+            with_manager(cx, |manager, cx| {
+                manager.update(cx, |manager, cx| manager.ensure_tracking(cx));
+                let Some(adb) = manager.read(cx).adb().cloned() else {
+                    return Task::ready(Err(anyhow!(crate::sdk::Sdk::missing_message())));
                 };
-                Ok(json!({
-                    "devices": devices.iter().map(|device| json!({
-                        "serial": device.serial, "name": device.name,
-                        "state": device.state, "emulator": device.emulator,
-                    })).collect::<Vec<_>>(),
-                    "avds": avds,
-                }))
+                let avds = manager.read(cx).avds().to_vec();
+                let emulator = manager.read(cx).emulator_tool();
+                cx.background_spawn(async move {
+                    let devices = adb.devices()?;
+                    // The list may still be loading on the first call.
+                    let avds = if avds.is_empty() {
+                        crate::manager::list_avds(emulator.as_deref())
+                    } else {
+                        avds
+                    };
+                    Ok(json!({
+                        "devices": devices.iter().map(|device| json!({
+                            "serial": device.serial, "name": device.name,
+                            "state": device.state, "emulator": device.emulator,
+                        })).collect::<Vec<_>>(),
+                        "avds": avds,
+                    }))
+                })
             })
         },
         cx,
@@ -55,9 +56,10 @@ pub fn register(cx: &mut App) {
             let Some(avd) = params["avd"].as_str().map(str::to_string) else {
                 return Task::ready(Err(anyhow!("`avd` is required")));
             };
-            let manager = DeviceManager::global(cx);
-            let start = manager.update(cx, |manager, cx| manager.start_emulator(&avd, cx));
-            cx.background_spawn(async move { Ok(json!({ "serial": start.await? })) })
+            with_manager(cx, move |manager, cx| {
+                let start = manager.update(cx, |manager, cx| manager.start_emulator(&avd, cx));
+                cx.background_spawn(async move { Ok(json!({ "serial": start.await? })) })
+            })
         },
         cx,
     );
@@ -166,24 +168,40 @@ fn on_device(name: &'static str, cx: &mut App, body: fn(&Adb, String, Value) -> 
     ControlServer::handle_async(
         name,
         move |params, cx| {
-            let manager = DeviceManager::global(cx);
-            manager.update(cx, |manager, cx| manager.ensure_tracking(cx));
-            let manager = manager.read(cx);
-            let Some(adb) = manager.adb().cloned() else {
-                return Task::ready(Err(anyhow!(crate::sdk::Sdk::missing_message())));
-            };
-            // The list may still be loading; then ask adb directly.
-            let known = manager.resolve(params["serial"].as_str()).ok();
-            cx.background_spawn(async move {
-                let serial = match known {
-                    Some(serial) => serial,
-                    None => DeviceManager::resolve_from(&adb.devices()?)?,
+            with_manager(cx, move |manager, cx| {
+                manager.update(cx, |manager, cx| manager.ensure_tracking(cx));
+                let manager = manager.read(cx);
+                let Some(adb) = manager.adb().cloned() else {
+                    return Task::ready(Err(anyhow!(crate::sdk::Sdk::missing_message())));
                 };
-                body(&adb, serial, params)
+                // The list may still be loading; then ask adb directly.
+                let known = manager.resolve(params["serial"].as_str()).ok();
+                cx.background_spawn(async move {
+                    let serial = match known {
+                        Some(serial) => serial,
+                        None => DeviceManager::resolve_from(&adb.devices()?)?,
+                    };
+                    body(&adb, serial, params)
+                })
             })
         },
         cx,
     );
+}
+
+/// Runs `then` with the device manager once it has looked for the SDK (it
+/// does that on a background thread when it is first used): an agent's
+/// first call is not told there is no SDK while it is still being found.
+fn with_manager(
+    cx: &mut App,
+    then: impl FnOnce(Entity<DeviceManager>, &mut App) -> Task<Result<Value>> + 'static,
+) -> Task<Result<Value>> {
+    let manager = DeviceManager::global(cx);
+    let located = manager.read(cx).located();
+    cx.spawn(async move |cx| {
+        located.await;
+        cx.update(|cx| then(manager, cx)).await
+    })
 }
 
 fn int(params: &Value, key: &str) -> Result<i32> {

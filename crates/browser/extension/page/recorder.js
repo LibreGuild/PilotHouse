@@ -7,7 +7,7 @@
   const ns = (globalThis.__pilothouse ??= {});
   if (ns.recorder) return;
 
-  const CSS = `
+  const STYLE = `
     :host { all: initial; }
     .bar { position: fixed; left: 16px; bottom: 16px; display: flex; align-items: center; gap: 10px;
       padding: 8px 10px 8px 12px; border-radius: 10px; background: rgba(20, 18, 32, 0.94); color: white;
@@ -26,12 +26,12 @@
   const selectorOf = (el) => {
     for (const attr of ['data-testid', 'data-test', 'data-cy']) {
       const value = el.getAttribute && el.getAttribute(attr);
-      if (value) return `[${attr}="${value}"]`;
+      if (value) return `[${attr}="${esc(value)}"]`;
     }
     if (el.id && !/\d{3,}/.test(el.id)) return `#${esc(el.id)}`;
     const name = el.getAttribute && el.getAttribute('name');
     if (name && ['input', 'select', 'textarea', 'button'].includes(el.localName)) {
-      return `${el.localName}[name="${name}"]`;
+      return `${el.localName}[name="${esc(name)}"]`;
     }
     const parts = [];
     for (let node = el; node && node.nodeType === 1 && parts.length < 5; node = node.parentElement) {
@@ -223,7 +223,7 @@
       host.style.setProperty('bottom', '0', 'important');
       const root = host.attachShadow({ mode: 'closed' });
       const sheet = new CSSStyleSheet();
-      sheet.replaceSync(CSS);
+      sheet.replaceSync(STYLE);
       root.adoptedStyleSheets = [sheet];
       const bar = element(root, 'div', 'bar');
       bar.setAttribute('role', 'status');

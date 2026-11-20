@@ -192,7 +192,7 @@ impl Render for AccountsView {
                             .rounded(cx.theme().radius)
                             .border_1()
                             .border_color(cx.theme().border)
-                            .child(Icon::new(Icons::GitPullRequest).small().text_color(cx.theme().info))
+                            .child(Icon::new(Icons::GitPullRequest).small().text_color(cx.theme().link))
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -255,7 +255,7 @@ impl Render for AccountsView {
                                     .ghost()
                                     .icon(IconName::ExternalLink)
                                     .label("Create a token")
-                                    .tooltip("Opens your GitHub's token page (scopes: repo, read:org)")
+                                    .tooltip(ph_ui::tip("Opens your GitHub's token page (scopes: repo, read:org)"))
                                     .on_click(move |_, _, cx| cx.open_url(&token_url)),
                             )
                             .child(div().flex_1())

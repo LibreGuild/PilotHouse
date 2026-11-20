@@ -7,7 +7,7 @@ use gpui_kit::{
 
 /// A centered "nothing here yet" message with an optional call to action.
 ///
-/// Used for empty panels: no project, no files open, empty board.
+/// Used for empty panels: no project, no files open, nothing to list.
 #[derive(IntoElement)]
 pub struct EmptyState {
     icon: Option<Icon>,

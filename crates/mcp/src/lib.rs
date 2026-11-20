@@ -96,7 +96,18 @@ impl Session {
         // Notifications (no id) never get a response.
         let id = id?;
         let result = match method {
-            "initialize" => protocol::initialize_result(&params),
+            "initialize" => {
+                // Which browser the user prefers, for the instructions. Not
+                // answered (the app is still starting): the default holds.
+                let answer = self
+                    .client()
+                    .ok()
+                    .and_then(|client| client.call("browser.preference", json!({})).ok());
+                if answer.is_none() {
+                    self.client = None;
+                }
+                protocol::initialize_result(&params, protocol::Browsers::of(answer.as_ref()))
+            }
             "ping" => json!({}),
             "tools/list" => json!({ "tools": tools::definitions() }),
             "tools/call" => self.call_tool(&params),
@@ -234,14 +245,14 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&"board_next_card"));
+        assert!(names.contains(&"todo_add"));
     }
 
     #[test]
     fn tool_errors_are_reported_in_the_result() {
         let mut session = session();
         let call = session
-            .handle_line(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"board_list","arguments":{}}}"#)
+            .handle_line(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"test_list","arguments":{}}}"#)
             .unwrap();
         assert_eq!(call["result"]["isError"], true);
         let unknown = session

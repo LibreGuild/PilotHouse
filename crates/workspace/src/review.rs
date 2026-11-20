@@ -80,6 +80,12 @@ pub fn prepare(
         learned: learned_rules(store, &pull_ref),
         notes: ph_pulls::clones::agent_notes(&clone, &pull.base.name),
     };
+    // Ticks in the summary comment count only for the round they were
+    // printed for (see `ph_review::github::sync`): read them before this
+    // round starts. Without an account or a network, the round still runs.
+    if let Err(err) = ph_review::github::sync(store, &pull_ref) {
+        tracing::debug!("reading GitHub back before a review: {err:#}");
+    }
     let latest = store.latest_pr_review(&pull_ref, None)?;
     let open: Vec<Finding> = match &latest {
         Some(round) => store

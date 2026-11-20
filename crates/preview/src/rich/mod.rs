@@ -22,7 +22,9 @@ mod table;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{
+    InputEvent, MoveDown, MoveUp, Paste, Redo, Textarea, TextareaState, Undo,
+};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
@@ -72,6 +74,13 @@ const SAVE_DELAY: Duration = Duration::from_millis(250);
 const UNDO_DEPTH: usize = 100;
 /// The left margin with each block's handle.
 const GUTTER: f32 = 44.;
+/// The rows (under the header) and columns of a table drawn at most: every
+/// cell is an element made again at each frame, and a generated table can
+/// have many thousands. The rest is there in the block's Markdown.
+const TABLE_ROWS: usize = 200;
+const TABLE_COLUMNS: usize = 40;
+/// Tables kept read, at most (those of blocks that are gone among them).
+const TABLES_KEPT: usize = 64;
 
 /// The block being edited.
 struct Active {
@@ -91,6 +100,9 @@ struct ActiveCell {
     input: Entity<TextareaState>,
     _subscription: Subscription,
 }
+
+/// A block's fingerprint, and the table its text was then (if one).
+type ReadTable = (u64, Option<std::rc::Rc<Table>>);
 
 /// A change to a table's shape, from its cells' menu or handles.
 #[derive(Debug, Clone, Copy)]
@@ -271,6 +283,10 @@ pub struct RichEditor {
     window: Option<gpui_kit::AnyWindowHandle>,
     /// The diagram being typed, as last drawn.
     live_diagram: std::cell::RefCell<Option<crate::mermaid::Diagram>>,
+    /// Each raw block's table as last read from its text (none: it is not
+    /// a table), by the block's id, with the block's fingerprint in
+    /// `listed` then: read once, not at every frame.
+    tables: std::cell::RefCell<std::collections::HashMap<u64, ReadTable>>,
     _save: Option<Task<()>>,
     _copy: Subscription,
 }
@@ -310,6 +326,7 @@ impl RichEditor {
             pressed_here: false,
             window: None,
             live_diagram: Default::default(),
+            tables: Default::default(),
             _save: None,
             _copy: copy,
         }
@@ -537,6 +554,15 @@ impl RichEditor {
                 shift: false,
                 secondary,
             } => {
+                // In code (and other text kept as typed) Enter is a new
+                // line, which the field has added: the event comes all the
+                // same, and must not cut the block in two there.
+                if self
+                    .active_ix()
+                    .is_some_and(|ix| self.document.blocks[ix].kind.is_literal())
+                {
+                    return;
+                }
                 // After the key's own handling: the block that takes the
                 // focus must not be made while the old one still has it.
                 let secondary = *secondary;
@@ -800,6 +826,53 @@ impl RichEditor {
         let id = self.document.blocks[target].id;
         let cursor = if down { Some(0) } else { None };
         self.activate(id, cursor, window, cx);
+        true
+    }
+
+    /// ↑ or ↓ in the block being edited: the slash menu's highlight while
+    /// it is open; otherwise, from the block's first or last place, the
+    /// block above or below. Whether it took the key (the field moves its
+    /// cursor when not).
+    fn arrow_key(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(active) = &self.active else {
+            return false;
+        };
+        if self.menu.is_some() {
+            let count = self.menu_items(cx).len().max(1);
+            let step = if down { 1 } else { count - 1 };
+            self.menu = self.menu.map(|ix| (ix + step) % count);
+            cx.notify();
+            return true;
+        }
+        let input = active.input.read(cx);
+        let value = input.value();
+        let range = input.selected_range();
+        let one_line = !value.contains('\n') && value.chars().count() < 60;
+        let at_edge = if down {
+            range.start >= value.len()
+        } else {
+            range.start == 0 && range.end == 0
+        };
+        (at_edge || one_line) && self.step(down, window, cx)
+    }
+
+    /// Undo or redo while a block is edited: whether the document's own
+    /// history took it. Typing in the block undoes (and comes back) in the
+    /// field first, and so does a table cell's; with no step of the
+    /// document's to take, the key is the field's too.
+    fn history_key(&mut self, redo: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.cell.is_some() {
+            return false;
+        }
+        let typed = self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.input.read(cx).value().as_ref() != active.started);
+        let steps = if redo { &self.redo } else { &self.undo };
+        if typed || steps.is_empty() {
+            return false;
+        }
+        self.undo(redo, window, cx);
         true
     }
 
@@ -1137,7 +1210,11 @@ impl RichEditor {
         };
         let (rows, cols) = (table.rows.len() as isize, table.columns() as isize);
         let at = row as isize * cols + col as isize + dx + dy * cols;
-        if at < 0 || at >= rows * cols {
+        // Past the table's end, or the part of it that is drawn.
+        let drawn = |at: isize| {
+            (at / cols) as usize <= TABLE_ROWS && ((at % cols) as usize) < TABLE_COLUMNS
+        };
+        if at < 0 || at >= rows * cols || !drawn(at) {
             self.cell = None;
             window.focus(&self.focus, cx);
             cx.notify();
@@ -1188,25 +1265,62 @@ impl RichEditor {
         });
     }
 
+    /// The table block `ix` is, if it is one: read from its text when that
+    /// changes, not at every frame (a generated table can be megabytes).
+    fn table_of(&self, ix: usize, block: &Block) -> Option<std::rc::Rc<Table>> {
+        let Some(&fingerprint) = self.listed.get(ix) else {
+            return Table::parse(&block.body).map(std::rc::Rc::new);
+        };
+        let mut tables = self.tables.borrow_mut();
+        if let Some((seen, table)) = tables.get(&block.id)
+            && *seen == fingerprint
+        {
+            return table.clone();
+        }
+        if tables.len() >= TABLES_KEPT {
+            tables.clear();
+        }
+        let table = Table::parse(&block.body).map(std::rc::Rc::new);
+        tables.insert(block.id, (fingerprint, table.clone()));
+        table
+    }
+
     /// A table drawn as a grid: double-click a cell to change it, the
     /// handles add a row or a column, and a cell's menu inserts and
-    /// removes them.
+    /// removes them. A very large one is drawn in part ([`TABLE_ROWS`]).
     fn render_table(&self, id: u64, table: &Table, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (dark, border, header_bg, radius, editing_bg) = (
+        let (dark, border, header_bg, radius, editing_bg, muted) = (
             theme.is_dark(),
             theme.border,
             theme.secondary,
             theme.radius,
             theme.list_hover,
+            theme.muted_foreground,
         );
         // Typing looks like the text it changes.
         let text_size = theme.font_size;
         let editing = self.cell.as_ref().filter(|cell| cell.block == id);
         let columns = table.columns();
-        let mut rows = Vec::with_capacity(table.rows.len());
-        for (r, row) in table.rows.iter().enumerate() {
-            let cells = row.iter().enumerate().map(|(c, text)| {
+        let drawn_rows = table.rows.len().min(TABLE_ROWS + 1);
+        let drawn_columns = columns.min(TABLE_COLUMNS);
+        let more = |count: usize, what: &str| match count {
+            1 => format!("1 more {what}"),
+            count => format!("{count} more {what}s"),
+        };
+        let cut = match (table.rows.len() - drawn_rows, columns - drawn_columns) {
+            (0, 0) => None,
+            (rows, 0) => Some(more(rows, "row")),
+            (0, columns) => Some(more(columns, "column")),
+            (rows, columns) => Some(format!(
+                "{} and {}",
+                more(rows, "row"),
+                more(columns, "column")
+            )),
+        };
+        let mut rows = Vec::with_capacity(drawn_rows);
+        for (r, row) in table.rows.iter().enumerate().take(drawn_rows) {
+            let cells = row.iter().enumerate().take(drawn_columns).map(|(c, text)| {
                 let content: AnyElement = match editing
                     .filter(|cell| cell.row == r && cell.col == c)
                 {
@@ -1316,7 +1430,7 @@ impl RichEditor {
                 .ghost()
                 .xsmall()
                 .icon(IconName::Plus)
-                .tooltip(tip)
+                .tooltip(ph_ui::tip(tip))
                 .accessibility_label(tip)
                 .on_click(cx.listener(move |this, _, _, cx| this.table_op(id, op, cx)))
         };
@@ -1357,16 +1471,38 @@ impl RichEditor {
                             )),
                     ),
             )
-            .child(
-                div()
-                    .invisible()
-                    .group_hover("rich-table", |this| this.visible())
-                    .child(add(
-                        "rich-add-row",
-                        "Add a row",
-                        TableOp::RowBelow(last_row),
-                    )),
-            )
+            .map(|this| match cut {
+                // A row or column added past what is drawn would not be
+                // seen: the rest is reached as Markdown.
+                Some(cut) => this.child(
+                    h_flex()
+                        .pt_1()
+                        .gap_2()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("{cut} not drawn here."))
+                        .child(
+                            Button::new(("rich-table-markdown", id))
+                                .ghost()
+                                .xsmall()
+                                .label("Edit as Markdown")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.finish_cell(cx);
+                                    this.activate(id, None, window, cx)
+                                })),
+                        ),
+                ),
+                None => this.child(
+                    div()
+                        .invisible()
+                        .group_hover("rich-table", |this| this.visible())
+                        .child(add(
+                            "rich-add-row",
+                            "Add a row",
+                            TableOp::RowBelow(last_row),
+                        )),
+                ),
+            })
             .into_any_element()
     }
 
@@ -1382,7 +1518,7 @@ impl RichEditor {
                 .ghost()
                 .xsmall()
                 .label(label)
-                .tooltip(tip)
+                .tooltip(ph_ui::tip(tip))
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.wrap(open, close, window, cx)),
                 )
@@ -1392,7 +1528,7 @@ impl RichEditor {
                 .ghost()
                 .xsmall()
                 .label(label)
-                .tooltip(make.label())
+                .tooltip(ph_ui::tip(make.label()))
                 .on_click(cx.listener(move |this, _, window, cx| this.make(make, window, cx)))
         };
         let separator = || div().w_px().h_4().mx_1().bg(border);
@@ -1449,7 +1585,7 @@ impl RichEditor {
         let indent = block.kind.indent().chars().count() as f32 * 9.;
         let content: AnyElement = match self.active.as_ref().filter(|active| active.id == id) {
             Some(active) => self.render_input(block, active, cx),
-            None => self.render_shown(block, dark, window, cx),
+            None => self.render_shown(ix, block, dark, window, cx),
         };
         let theme = cx.theme();
         let marker: Option<AnyElement> = match &block.kind {
@@ -1485,11 +1621,11 @@ impl RichEditor {
                         .rounded(px(4.))
                         .border_1()
                         .border_color(if checked {
-                            theme.info
+                            theme.primary
                         } else {
                             theme.muted_foreground
                         })
-                        .when(checked, |this| this.bg(theme.info))
+                        .when(checked, |this| this.bg(theme.primary))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -1498,7 +1634,7 @@ impl RichEditor {
                             this.child(
                                 Icon::new(IconName::Check)
                                     .xsmall()
-                                    .text_color(theme.button_info_foreground),
+                                    .text_color(theme.primary_foreground),
                             )
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1586,6 +1722,7 @@ impl RichEditor {
     /// A block not being edited, formatted.
     fn render_shown(
         &self,
+        ix: usize,
         block: &Block,
         dark: bool,
         window: &mut Window,
@@ -1624,7 +1761,7 @@ impl RichEditor {
                         .into_any_element(),
                 }
             }
-            Kind::Raw if let Some(table) = Table::parse(&block.body) => {
+            Kind::Raw if let Some(table) = self.table_of(ix, block) => {
                 // A table edits cell by cell, never as Markdown here.
                 return self.render_table(id, &table, cx);
             }
@@ -1874,6 +2011,37 @@ impl Render for RichEditor {
             .key_context("RichEditor")
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::on_key))
+            // The arrows, undo, redo and paste are the field's own keys
+            // while a block is edited: bindings come before key handlers,
+            // and the field keeps them, so `on_key` never sees them. They
+            // are taken here first, as the field's actions.
+            .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
+                if this.arrow_key(false, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
+                if this.arrow_key(true, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Undo, window, cx| {
+                if this.history_key(false, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Redo, window, cx| {
+                if this.history_key(true, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            // A picture on the clipboard goes in a block of its own (not
+            // from a table cell, which holds none); text pastes as usual.
+            .capture_action(cx.listener(|this, _: &Paste, window, cx| {
+                if this.cell.is_none() && this.paste_image(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .on_mouse_down(
                 gpui_kit::MouseButton::Left,
                 cx.listener(|this, _, window, _| {

@@ -284,14 +284,6 @@ pub fn find(name: &str, cx: &App) -> Option<Rc<ThemeConfig>> {
         })
 }
 
-/// Whether `name` is one of the user's own themes.
-pub fn is_user_theme(name: &str, cx: &App) -> bool {
-    themes(cx)
-        .user
-        .iter()
-        .any(|theme| theme.config.name == name)
-}
-
 /// Selects the theme `name`; one that is gone gives way to the default of
 /// its mode (`dark` when not known). Returns the theme now selected.
 pub(crate) fn select(name: &str, dark: bool, cx: &mut App) -> Rc<ThemeConfig> {

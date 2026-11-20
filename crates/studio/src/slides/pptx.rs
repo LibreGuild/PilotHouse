@@ -31,24 +31,126 @@ pub(crate) const RESOLVED: &str = "[Resolved] ";
 /// the deck part is stale and the slides are read instead.
 const WRITTEN_PART: &str = "pilothouse/written.json";
 
+/// The most a PowerPoint file may unpack to, all its parts together (it is
+/// held in memory or written to the presentation's folder), and the most
+/// files it may hold: no presentation comes near either, and a crafted file
+/// of a few MB could otherwise fill the memory or the disk.
+pub(crate) const MOST_UNPACKED: u64 = 1 << 30;
+const MOST_ENTRIES: usize = 20_000;
+
+/// Refuses an archive of more than [`MOST_ENTRIES`] files.
+fn check_entries(entries: usize, path: &Path) -> Result<()> {
+    if entries > MOST_ENTRIES {
+        bail!("{} holds more than {MOST_ENTRIES} files", path.display());
+    }
+    Ok(())
+}
+
+/// How deep a part's XML may nest: several times what PowerPoint writes.
+/// The XML reader calls itself once for each level, so a part nested
+/// without end would use up the stack, which ends the app (a background
+/// thread's is small).
+const XML_MOST_DEPTH: usize = 128;
+
+/// `text` as an XML document, unless it nests too deeply to read.
+pub(crate) fn parse_xml(text: &str) -> Result<roxmltree::Document<'_>> {
+    if xml_depth(text.as_bytes()) > XML_MOST_DEPTH {
+        bail!("its XML is nested more than {XML_MOST_DEPTH} deep");
+    }
+    Ok(roxmltree::Document::parse(text)?)
+}
+
+/// How deep the elements of `xml` nest at most, counted without reading it
+/// as a document: tags are stepped through as a reader would (comments,
+/// CDATA, processing instructions and quoted attribute values passed over).
+/// Where the text is not well formed a reader stops, and this counts on:
+/// never fewer levels than a reader goes down. A document type that holds
+/// markup (an entity that stands for elements, which a reader that takes
+/// them would nest again where it is named) counts as deeper than anything.
+pub(crate) fn xml_depth(xml: &[u8]) -> usize {
+    let find = |from: usize, what: &[u8]| {
+        xml[from..]
+            .windows(what.len())
+            .position(|window| window == what)
+            .map_or(xml.len(), |at| from + at + what.len())
+    };
+    let (mut depth, mut deepest, mut at) = (0usize, 0usize, 0usize);
+    while let Some(open) = xml[at..].iter().position(|byte| *byte == b'<') {
+        let open = at + open;
+        let rest = &xml[open..];
+        if rest.starts_with(b"<!--") {
+            at = find(open + 4, b"-->");
+        } else if rest.starts_with(b"<![CDATA[") {
+            at = find(open + 9, b"]]>");
+        } else if rest.starts_with(b"<?") {
+            at = find(open + 2, b"?>");
+        } else if rest.starts_with(b"</") {
+            depth = depth.saturating_sub(1);
+            at = open + 2;
+        } else {
+            // A tag or a declaration: to its `>`, past what is quoted.
+            let declaration = rest.starts_with(b"<!");
+            let mut quote = None;
+            let mut end = open + 1;
+            while end < xml.len() {
+                let byte = xml[end];
+                match quote {
+                    Some(mark) if byte == mark => quote = None,
+                    Some(_) if declaration && byte == b'<' => return usize::MAX,
+                    Some(_) => {}
+                    None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+                    None if byte == b'>' => break,
+                    None => {}
+                }
+                end += 1;
+            }
+            if !declaration && xml.get(end.wrapping_sub(1)) != Some(&b'/') {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            at = (end + 1).min(xml.len());
+        }
+    }
+    deepest
+}
+
+/// The fingerprint's hash (FNV-1a), fed a piece at a time.
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Self {
+        Fnv(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= *byte as u64;
+            self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    fn hex(&self) -> String {
+        format!("{:016x}", self.0)
+    }
+}
+
+/// Whether `name` is one of the parts the fingerprint is taken of.
+fn fingerprinted(name: &str) -> bool {
+    name == "ppt/presentation.xml"
+        || (name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
+}
+
 /// A fingerprint of the presentation's own parts (FNV-1a over the
 /// presentation and its slides, in name order).
 fn slides_fingerprint<'a>(parts: impl Iterator<Item = (&'a str, &'a [u8])>) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut named: Vec<(&str, &[u8])> = parts
-        .filter(|(name, _)| {
-            *name == "ppt/presentation.xml"
-                || (name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
-        })
-        .collect();
+    let mut hash = Fnv::new();
+    let mut named: Vec<(&str, &[u8])> = parts.filter(|(name, _)| fingerprinted(name)).collect();
     named.sort_by_key(|(name, _)| *name);
     for (name, bytes) in named {
-        for byte in name.as_bytes().iter().chain(bytes) {
-            hash ^= *byte as u64;
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
-        }
+        hash.feed(name.as_bytes());
+        hash.feed(bytes);
     }
-    format!("{hash:016x}")
+    hash.hex()
 }
 pub const DECK_RELATIONSHIP: &str = "https://schemas.libreguild.dev/pilothouse/2026/deck";
 
@@ -214,7 +316,7 @@ pub(crate) fn rels_of(
     let Ok(text) = std::str::from_utf8(bytes) else {
         return Vec::new();
     };
-    let Ok(document) = roxmltree::Document::parse(text) else {
+    let Ok(document) = parse_xml(text) else {
         return Vec::new();
     };
     document
@@ -243,6 +345,7 @@ pub(crate) fn unzip(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
         std::fs::File::open(path).with_context(|| format!("could not open {}", path.display()))?;
     let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file))
         .with_context(|| format!("{} is not a PowerPoint file", path.display()))?;
+    check_entries(archive.len(), path)?;
     let mut files = BTreeMap::new();
     let mut total = 0usize;
     for index in 0..archive.len() {
@@ -254,7 +357,7 @@ pub(crate) fn unzip(path: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
         // A file that unpacks to more than 1 GB is not a presentation (it
         // is all held in memory); what is read is counted, not what the
         // archive says (that can lie).
-        const MOST: usize = 1 << 30;
+        const MOST: usize = MOST_UNPACKED as usize;
         let left = MOST.saturating_sub(total);
         let mut bytes = Vec::with_capacity(entry.size().min(256 << 20) as usize);
         std::io::Read::read_to_end(
@@ -280,7 +383,7 @@ fn read_template(path: &Path) -> Result<Template> {
             .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
     };
     let presentation = text("ppt/presentation.xml").context("no presentation in it")?;
-    let document = roxmltree::Document::parse(&presentation)?;
+    let document = parse_xml(&presentation)?;
     let rels = rels_of(&files, "ppt/presentation.xml");
     let target_of = |id: &str| {
         rels.iter()
@@ -353,7 +456,7 @@ fn read_template(path: &Path) -> Result<Template> {
     let mut overrides = Vec::new();
     let mut defaults = Vec::new();
     if let Some(types) = text("[Content_Types].xml")
-        && let Ok(types) = roxmltree::Document::parse(&types)
+        && let Ok(types) = parse_xml(&types)
     {
         for node in types.descendants() {
             match node.tag_name().name() {
@@ -1410,7 +1513,9 @@ impl<'a> Writer<'a> {
         rels: &mut Rels,
         opacity: f32,
     ) -> Result<String> {
-        if source.trim().is_empty() {
+        // One nested too deeply is not drawn on the slide either (see
+        // `raster::too_deep`).
+        if source.trim().is_empty() || super::raster::too_deep(source.as_bytes()) {
             return Ok(String::new());
         }
         let frame = element.frame;
@@ -1628,8 +1733,15 @@ impl<'a> Writer<'a> {
     ) -> String {
         let theme = &self.deck_ref().theme;
         let frame = element.frame;
-        let rows = table.rows.len();
-        let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0);
+        // As much of it as is drawn (see `svg::TABLE_MOST`).
+        let most = super::svg::TABLE_MOST;
+        let rows = table.rows.len().min(most);
+        let columns = table.rows[..rows]
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0)
+            .min(most);
         if rows == 0 || columns == 0 {
             return String::new();
         }
@@ -1659,7 +1771,7 @@ impl<'a> Writer<'a> {
         let pad = emu(table.font_size * 0.45);
         let mut covered = vec![vec![(false, false); columns]; rows];
         let mut body = String::new();
-        for (r, cells) in table.rows.iter().enumerate() {
+        for (r, cells) in table.rows[..rows].iter().enumerate() {
             let _ = write!(body, r#"<a:tr h="{row_h}">"#);
             for c in 0..columns {
                 let cell = cells.get(c).cloned().unwrap_or_default();
@@ -2798,6 +2910,7 @@ fn civil(seconds: i64) -> String {
 pub fn read_deck(path: &Path) -> Result<Option<Deck>> {
     let file = std::fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file))?;
+    check_entries(archive.len(), path)?;
     let Ok(mut part) = archive.by_name(DECK_PART) else {
         return Ok(None);
     };
@@ -2806,6 +2919,9 @@ pub fn read_deck(path: &Path) -> Result<Option<Deck>> {
     let mut json = String::new();
     std::io::Read::read_to_string(&mut std::io::Read::take(&mut part, LIMIT), &mut json)?;
     drop(part);
+    // All that is read of it, counted: many parts each under the limit are
+    // no presentation either (see `MOST_UNPACKED`).
+    let mut total = json.len() as u64;
     // Saved by another program since: its slides, not the deck kept.
     let written = match archive.by_name(WRITTEN_PART) {
         Ok(mut written) => {
@@ -2819,6 +2935,7 @@ pub fn read_deck(path: &Path) -> Result<Option<Deck>> {
         Err(_) => None,
     };
     if let Some(text) = written {
+        total += text.len() as u64;
         let wanted = serde_json::from_str::<serde_json::Value>(&text)
             .ok()
             .and_then(|value| {
@@ -2827,26 +2944,35 @@ pub fn read_deck(path: &Path) -> Result<Option<Deck>> {
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
             });
-        let names: Vec<String> = archive
+        let mut names: Vec<String> = archive
             .file_names()
             .filter_map(|name| name.ok().map(|name| name.into_owned()))
-            .filter(|name| {
-                name == "ppt/presentation.xml"
-                    || (name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
-            })
+            .filter(|name| fingerprinted(name))
             .collect();
-        let mut parts = Vec::new();
+        // In name order, as `slides_fingerprint` takes them; each part goes
+        // through the hash as it is read, none is kept.
+        names.sort();
+        let mut hash = Fnv::new();
+        let mut chunk = vec![0u8; 64 * 1024];
         for name in names {
-            let mut entry = archive.by_name(&name)?;
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut std::io::Read::take(&mut entry, LIMIT), &mut bytes)?;
-            parts.push((name, bytes));
+            let entry = archive.by_name(&name)?;
+            let mut entry = std::io::Read::take(entry, LIMIT);
+            hash.feed(name.as_bytes());
+            loop {
+                let read = match std::io::Read::read(&mut entry, &mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => read,
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(err) => return Err(err.into()),
+                };
+                hash.feed(&chunk[..read]);
+                total += read as u64;
+                if total > MOST_UNPACKED {
+                    bail!("{} unpacks to more than 1 GB", path.display());
+                }
+            }
         }
-        let now = slides_fingerprint(
-            parts
-                .iter()
-                .map(|(name, bytes)| (name.as_str(), bytes.as_slice())),
-        );
+        let now = hash.hex();
         if wanted.as_deref() != Some(now.as_str()) {
             return Ok(None);
         }
@@ -2887,6 +3013,57 @@ mod tests {
         }
         let back = read_deck(&out).unwrap().unwrap();
         assert_eq!(back, deck);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn counts_how_deep_xml_nests() {
+        let depth = |xml: &str| xml_depth(xml.as_bytes());
+        assert_eq!(depth(""), 0);
+        assert_eq!(depth("<?xml version='1.0'?><a/>"), 0);
+        assert_eq!(depth("<a><b/><c>text > more</c></a>"), 2);
+        assert_eq!(depth(r#"<a x="1>2" y='<'><b z="/"></b></a>"#), 2);
+        // What only looks like tags.
+        assert_eq!(
+            depth("<a><!-- <b><b><b> --><![CDATA[<b><b>]]><?p <b> ?></a>"),
+            1
+        );
+        // Not well formed: counted on, never as less.
+        assert_eq!(depth("<a><a><a>"), 3);
+        assert_eq!(depth("</a></a><a><a"), 2);
+        assert_eq!(depth(&"<g>".repeat(1000)), 1000);
+        // A document type without markup, and one whose entity stands for
+        // elements.
+        assert_eq!(
+            depth(r#"<!DOCTYPE svg [<!ENTITY ns "http://x">]><svg/>"#),
+            0
+        );
+        assert_eq!(
+            depth(r#"<!DOCTYPE svg [<!ENTITY e "<g>&f;</g>">]><svg>&e;</svg>"#),
+            usize::MAX
+        );
+        assert!(parse_xml(&format!("{}{}", "<a>".repeat(200), "</a>".repeat(200))).is_err());
+        assert!(parse_xml(&format!("{}{}", "<a>".repeat(100), "</a>".repeat(100))).is_ok());
+    }
+
+    #[test]
+    fn an_archive_of_too_many_files_is_refused() {
+        let dir = std::env::temp_dir().join(format!("pilothouse-zip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("many.pptx");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for index in 0..=MOST_ENTRIES {
+            zip.start_file(format!("f{index}"), options).unwrap();
+        }
+        zip.finish().unwrap();
+        let err = unzip(&path).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("more than 20000 files"),
+            "{err:#}"
+        );
+        assert!(read_deck(&path).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PilotHouse</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="top">
+    <img class="logo" src="icons/icon32.png" alt="" width="18" height="18">
+    <h1>PilotHouse</h1>
+    <span id="connection" class="connection" role="status"></span>
+  </header>
+
+  <div id="offline" class="banner" hidden>
+    <strong>PilotHouse is not connected.</strong>
+    Open PilotHouse. If it is open, set the extension up in its Settings → Chrome extension.
+  </div>
+  <div id="busy" class="banner" hidden>
+    <strong>PilotHouse is working with another browser.</strong>
+    It takes one at a time: another Chrome profile, or another browser with this extension, is connected.
+  </div>
+
+  <main>
+    <section id="waiting-section" hidden aria-labelledby="waiting-title">
+      <h2 id="waiting-title">Waiting for you</h2>
+      <ul id="waiting" class="list"></ul>
+    </section>
+
+    <section id="recording" class="recording" hidden role="status">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="grow">
+        <span id="recording-title" class="name"></span>
+        <span id="recording-sub" class="hint"></span>
+      </span>
+      <button id="recording-stop" class="primary">Stop and send</button>
+      <button id="recording-cancel">Cancel</button>
+    </section>
+
+    <section id="send-section" aria-labelledby="send-title">
+      <h2 id="send-title">Send to a chat</h2>
+      <div class="commands" role="group" aria-labelledby="send-title">
+        <button id="selection" data-action="selection" hidden title="The text you selected on the page, as Markdown">
+          <span class="name">The selection</span>
+        </button>
+        <button data-action="page" title="The page’s text, as Markdown">
+          <span class="name">This page</span>
+          <kbd data-command="send-to-pilothouse"></kbd>
+        </button>
+        <button data-action="area" title="Drag over part of the page; a click takes what is on screen">
+          <span class="name">A screenshot</span>
+          <kbd data-command="screenshot-area"></kbd>
+        </button>
+        <button data-action="element" title="Click an element: its selector, styles, source file and a picture">
+          <span class="name">An element</span>
+          <kbd data-command="pick-element"></kbd>
+        </button>
+      </div>
+    </section>
+
+    <section id="record-section" aria-labelledby="record-title">
+      <h2 id="record-title">Record</h2>
+      <div class="commands" role="group" aria-labelledby="record-title">
+        <button data-action="bug">
+          <span class="name">A bug report</span>
+          <span class="hint">What you do, with a video, console errors and failed requests</span>
+        </button>
+        <button data-action="workflow">
+          <span class="name">A workflow</span>
+          <span class="hint">Steps an agent can run again</span>
+        </button>
+      </div>
+    </section>
+
+    <p id="result" class="result" role="status" aria-live="polite"></p>
+
+    <section aria-labelledby="share-title">
+      <label class="switch-row">
+        <span>
+          <span id="share-title" class="name">Let agents use this tab</span>
+          <span class="hint">It joins the PilotHouse tab group. Agents never see your other tabs.</span>
+        </span>
+        <input id="share" type="checkbox" role="switch">
+      </label>
+    </section>
+
+    <section id="agents-section" hidden aria-labelledby="agents-title">
+      <h2 id="agents-title">Agents in this browser</h2>
+      <ul id="agents" class="list"></ul>
+    </section>
+  </main>
+
+  <footer>
+    <h2 id="goes-title">What you send goes to</h2>
+    <div class="segmented" role="radiogroup" aria-labelledby="goes-title">
+      <label><input type="radio" name="destination" value="current"><span>Chat on screen</span></label>
+      <label><input type="radio" name="destination" value="new"><span>New chat</span></label>
+      <label><input type="radio" name="destination" value="quick"><span>Quick chat</span></label>
+    </div>
+    <label class="check-row">
+      <input id="bringForward" type="checkbox">
+      <span>Bring PilotHouse forward when I send</span>
+    </label>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

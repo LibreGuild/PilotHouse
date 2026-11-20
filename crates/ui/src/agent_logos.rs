@@ -24,17 +24,6 @@ static LOGOS: LazyLock<HashMap<&'static str, Arc<Image>>> = LazyLock::new(|| {
     ])
 });
 
-/// The app icon, `size` across (`brand/icons/app-256.png`).
-pub fn app_icon(size: impl Clone + Into<Length>) -> AnyElement {
-    static ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
-        Arc::new(Image::from_bytes(
-            ImageFormat::Png,
-            ph_brand::icons::APP_256_PNG.to_vec(),
-        ))
-    });
-    img(ICON.clone()).flex_none().size(size).into_any_element()
-}
-
 /// The mark for the title bar, `height` square (`brand/icons/title-bar.png`):
 /// PilotHouse's is the app icon's tile (a white mast and pennant, the
 /// pennant the P's bowl, on violet).

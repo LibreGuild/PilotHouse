@@ -9,6 +9,7 @@ icon_assets!(
     ExtraIcons,
     [
         MousePointer2,
+        ShipWheel,
         BellRing,
         MessagesSquare,
         MessageCircleQuestionMark,
@@ -23,6 +24,9 @@ icon_assets!(
         TabletSmartphone,
         Play,
         Plug,
+        CloudUpload,
+        Puzzle,
+        Server,
         FolderDown,
         FoldVertical,
         Package,
@@ -86,7 +90,6 @@ icon_assets!(
         MessageSquare,
         SendHorizontal,
         Sparkles,
-        SquareKanban,
         SquarePen,
         Terminal,
         Trash,
@@ -163,6 +166,7 @@ icon_assets!(
         ZoomOut,
         Scan,
         Maximize2,
+        MoveHorizontal,
     ]
 );
 

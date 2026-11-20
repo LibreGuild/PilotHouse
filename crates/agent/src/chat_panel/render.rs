@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// From this width of the panel (pixels at the default interface size) the
+/// tabs and the chat's own controls share one row.
+const ONE_ROW: f32 = 760.;
+
 impl ChatPanel {
     /// Where the chat's agent works, before its title: a workspace (in its
     /// colour, and the folder when not the main one), a repository, or
@@ -22,8 +26,8 @@ impl ChatPanel {
                 (
                     Some(Icons::MessagesSquare),
                     None,
-                    "Chats".into(),
-                    "No workspace: the agent works in a folder of its own".into(),
+                    project.name.clone(),
+                    "No folder yet: the agent works in a folder of this workspace's own".into(),
                 )
             } else {
                 let sub = (folder != project.path)
@@ -55,7 +59,8 @@ impl ChatPanel {
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tip.clone()))
+                    .build(window, cx)
             })
             .children(icon.map(|icon| Icon::new(icon).xsmall()))
             .children(color.map(|color| {
@@ -69,219 +74,477 @@ impl ChatPanel {
             .into_any_element()
     }
 
-    pub(super) fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let place = self.render_place(cx);
+    /// The top of the chat. Where the panel is a workspace's chat it is two
+    /// rows, each about one thing: which chats there are (their tabs, with
+    /// past chats and a new one at the end), then the chat in front (its
+    /// agent, title, what it has used, and a menu for what is done with it
+    /// once in a while). Anywhere else (a review's chat, the quick chat) it
+    /// is the second row alone, with the chat's place before its title.
+    ///
+    /// The two rows had eight small things in the second, and one row had
+    /// no room for the tabs' names in a narrow panel.
+    pub(super) fn render_header(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tabs = self.tabs.clone().and_then(|tabs| tabs(window, cx));
+        let tabbed = tabs.is_some();
+        // The whole list of chats shows under it: the header says which
+        // chats there are, and nothing about the one behind the list.
+        let listing = self.shows_all_chats();
+        // A new session's agent is being asked: there is no agent to
+        // show yet, and the session has no name.
+        let picking = self.asks_cli_agent();
+        // With the room, the tabs and the rest are one row (the tab in
+        // front says the title); two rows are for a narrow panel, where
+        // one would leave the tabs no room for their names.
+        let (width, probe) = ph_ui::measure::width_of("chat-header-width", window, cx);
+        let wide = tabbed
+            && width.is_some_and(|width| ph_ui::measure::design_px(width, window) >= ONE_ROW);
+        let side_of = self.side_of().cloned();
+        // The session in front: a chat, or one in its CLI form (the chat
+        // behind it is then not what the header is about).
+        let cli = self
+            .terminal_session
+            .as_ref()
+            .map(|shown| (shown.agent, SharedString::from(shown.session.title.clone())));
         let thread = self.active.read(cx);
-        let (dot, label) = match thread.status() {
-            ThreadStatus::Working => (cx.theme().success, "Working"),
-            ThreadStatus::Connecting => (cx.theme().warning, "Starting"),
-            ThreadStatus::Idle if thread.has_started() => {
+        let (dot, label) = match (&cli, thread.status()) {
+            // Its state is on its tab and its card, as the CLI reports it.
+            (Some(_), _) => (cx.theme().muted_foreground.opacity(0.5), "In its CLI"),
+            (None, ThreadStatus::Working) => (cx.theme().success, "Working"),
+            (None, ThreadStatus::Connecting) => (cx.theme().warning, "Starting"),
+            (None, ThreadStatus::Idle) if thread.has_started() => {
                 (cx.theme().success.opacity(0.6), "Ready")
             }
-            ThreadStatus::Idle => (cx.theme().muted_foreground.opacity(0.5), "Idle"),
+            (None, ThreadStatus::Idle) => (cx.theme().muted_foreground.opacity(0.5), "Idle"),
         };
-        let side_of = self.side_of().cloned();
-        h_flex()
+        let spec = cli.as_ref().map_or(thread.agent(), |(agent, _)| *agent);
+        let shown_title = match &cli {
+            _ if picking => "New session".into(),
+            Some((_, title)) => title.clone(),
+            None => thread.title(),
+        };
+        // The agent's mark with a dot for its state; the words are in the
+        // tooltip, to keep the header small.
+        let tip = format!("{} · {label}", spec.name);
+        let agent = div()
+            .id("chat-agent-state")
             .flex_none()
-            .h_11()
+            .relative()
+            .p_0p5()
+            .aria_label(SharedString::from(tip.clone()))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tip.clone()))
+                    .build(window, cx)
+            })
+            .child(spec.mark(ph_ui::rems_from_px(16.)))
+            .child(
+                div()
+                    .absolute()
+                    .right(px(-1.))
+                    .bottom(px(-1.))
+                    .size(ph_ui::rems_from_px(7.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(cx.theme().background)
+                    .bg(dot),
+            );
+        let title = div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_sm()
+            .font_weight(gpui_kit::FontWeight::MEDIUM)
+            .child(shown_title);
+        // The header is the session's name and its form, the same for a
+        // chat and for its CLI. What is the chat's alone (what it used,
+        // its menu) is with the message box, which only a chat has.
+        let form = self.render_form_switch(spec, cx);
+        let back = side_of.map(|parent| {
+            Button::new("side-chat-back")
+                .ghost()
+                .xsmall()
+                .icon(IconName::ArrowLeft)
+                .tooltip(ph_ui::tip(format!("Back to “{}”", parent.title)))
+                .accessibility_label("Back to the chat")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.side = None;
+                    cx.emit(ChatPanelEvent::SelectSession(Some(parent.id)));
+                }))
+        });
+        if wide {
+            // One row: which chats, then this chat's agent, what it has
+            // used and its menu, then the chats not among the tabs and a
+            // new one.
+            return v_flex().flex_none().relative().child(probe).child(
+                h_flex()
+                    .flex_none()
+                    .h_10()
+                    .pl_2()
+                    .pr_3()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .children(back)
+                    .children(tabs.map(|tabs| div().flex_1().min_w_0().child(tabs)))
+                    .when(!listing, |this| {
+                        this.when(!picking, |this| this.child(agent)).children(form)
+                    })
+                    .when(self.history_menu, |this| {
+                        this.child(self.render_history(cx))
+                    }),
+            );
+        }
+        // Which chats: the tabs, and at their end the chats not among
+        // them and a new one.
+        let which = tabs.map(|tabs| {
+            h_flex()
+                .flex_none()
+                .h_9()
+                .pl_2()
+                .pr_3()
+                .gap_2()
+                .child(div().flex_1().min_w_0().child(tabs))
+                .when(self.history_menu, |this| {
+                    this.child(self.render_history(cx))
+                })
+        });
+        if listing && tabbed {
+            return v_flex()
+                .flex_none()
+                .relative()
+                .child(probe)
+                .children(which)
+                .child(div().h(px(1.)).bg(cx.theme().border));
+        }
+        let place = (!tabbed).then(|| self.render_place(cx));
+        // This chat.
+        let this_chat = h_flex()
+            .flex_none()
+            .h_9()
             .px_4()
-            .gap_3()
+            .gap_2()
             .border_b_1()
             .border_color(cx.theme().border)
-            .when_some(side_of, |this, parent| {
-                this.child(
-                    Button::new("side-chat-back")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::ArrowLeft)
-                        .tooltip(format!("Back to “{}”", parent.title))
-                        .accessibility_label("Back to the chat")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.side = None;
-                            cx.emit(ChatPanelEvent::SelectSession(Some(parent.id)));
-                        })),
-                )
-            })
-            .child(place)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .font_weight(gpui_kit::FontWeight::MEDIUM)
-                    .child(thread.title()),
-            )
-            // The agent's mark with a dot for its state; the words are in the
-            // tooltip, to keep the header small.
-            .child({
-                let tip = format!("{} · {label}", thread.agent().name);
-                div()
-                    .id("chat-agent-state")
-                    .flex_none()
-                    .relative()
-                    .p_0p5()
-                    .aria_label(SharedString::from(tip.clone()))
-                    .tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                    })
-                    .child(thread.agent().mark(ph_ui::rems_from_px(16.)))
-                    .child(
-                        div()
-                            .absolute()
-                            .right(px(-1.))
-                            .bottom(px(-1.))
-                            .size(ph_ui::rems_from_px(7.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(cx.theme().background)
-                            .bg(dot),
-                    )
-            })
-            .children(crate::usage_meter::render(thread.usage(), cx))
-            .child(self.render_view_mode(cx))
-            .when(
-                thread.has_started() && *thread.status() == ThreadStatus::Idle,
-                |this| this.child(self.render_hand_off(cx)),
-            )
-            .when(self.history_menu, |this| {
+            .children(back)
+            // In a workspace the agent's mark leads (the window's bar
+            // names the place); elsewhere the place does, and the mark
+            // follows the title as it did.
+            .when(tabbed && !picking, |this| this.child(agent))
+            .children(place)
+            .child(title)
+            .children(form)
+            .when(!tabbed && self.history_menu, |this| {
                 this.child(self.render_history(cx))
-            })
+            });
+        v_flex()
+            .flex_none()
+            .relative()
+            .child(probe)
+            .children(which)
+            .child(this_chat)
     }
 
-    /// How much of the agents' work every chat shows.
-    pub(super) fn render_view_mode(&self, cx: &App) -> impl IntoElement {
-        use crate::view_mode::ViewMode;
-        let current = ViewMode::current(cx);
-        let store = self.store.clone();
-        Button::new("chat-view-mode")
-            .ghost()
-            .xsmall()
-            .icon(Icons::Layers)
-            .tooltip("How much of the agent's work to show")
-            .accessibility_label("View mode")
-            .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-                ViewMode::ALL.into_iter().fold(menu, |menu, mode| {
-                    let store = store.clone();
-                    menu.item(
-                        PopupMenuItem::new(mode.label())
-                            .checked(mode == current)
-                            .on_click(move |_, window, cx| {
-                                mode.choose(&store, cx);
-                                window.refresh();
-                            }),
-                    )
-                })
-            })
-    }
-
-    /// "Continue with": the chat goes on with another agent.
-    pub(super) fn render_hand_off(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = self.active.read(cx).agent().id;
+    /// Which of the agent's accounts the session runs in, for an agent
+    /// that has more than its own (Settings → Agents). Picked before
+    /// something is said; after that it only says which, since the agent
+    /// keeps the conversation in that account's files.
+    fn render_account(
+        &self,
+        agent: &'static AgentSpec,
+        in_words: bool,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let profile = crate::profiles::Profiles::known().of(agent.id);
+        if profile.accounts.is_empty() {
+            return None;
+        }
+        let thread = self.active.read(cx);
+        let current = thread.account().to_string();
+        let name: SharedString = match profile.account(&current) {
+            Some(account) => account.name.clone().into(),
+            None if current.is_empty() => "Default".into(),
+            // Removed in Settings since: the session is still in it.
+            None => current.clone().into(),
+        };
+        if !thread.can_change_account() {
+            let said = format!("Account: {name}. A session stays in the account it started in.");
+            return Some(
+                div()
+                    .id("session-account")
+                    .flex_none()
+                    .px_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(said.clone()))
+                            .build(window, cx)
+                    })
+                    .map(|this| match in_words {
+                        true => this.child(name),
+                        false => this.child(Icon::new(Icons::KeyRound).xsmall()),
+                    })
+                    .into_any_element(),
+            );
+        }
         let panel = cx.weak_entity();
-        Button::new("chat-hand-off")
-            .ghost()
-            .xsmall()
-            .icon(Icons::MoveUpRight)
-            .tooltip("Compact this chat, or continue it with another agent")
-            .accessibility_label("Compact or continue with another agent")
-            .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-                let compact = panel.clone();
-                let menu = menu
-                    .item(
-                        PopupMenuItem::new("Compact chat")
-                            .icon(Icons::FoldVertical)
-                            .on_click(move |_, window, cx| {
-                                _ = compact.update(cx, |panel, cx| panel.compact(window, cx));
-                            }),
-                    )
-                    .separator()
-                    .label("Continue with");
-                agents::AGENTS
-                    .iter()
-                    .filter(|agent| agent.id != current)
-                    .fold(menu, |menu, agent| {
-                        let panel = panel.clone();
+        let accounts: Vec<(String, SharedString)> =
+            std::iter::once((String::new(), SharedString::from("Default")))
+                .chain(
+                    profile
+                        .accounts
+                        .iter()
+                        .map(|account| (account.id.clone(), account.name.clone().into())),
+                )
+                .collect();
+        Some(
+            Button::new("choose-account")
+                .ghost()
+                .xsmall()
+                .map(|this| match in_words {
+                    true => this.label(name.clone()),
+                    false => this.icon(Icon::new(Icons::KeyRound)),
+                })
+                .tooltip(ph_ui::tip(format!(
+                    "Account: {name}. The {} account this session runs in",
+                    agent.name
+                )))
+                .accessibility_label(format!("Account: {name}"))
+                .menu(gpui_kit::Anchor::BottomLeft, move |menu, _, _| {
+                    accounts.iter().fold(menu, |menu, (id, name)| {
+                        let (panel, id) = (panel.clone(), id.clone());
                         menu.item(
-                            PopupMenuItem::new(agent.name).on_click(move |_, window, cx| {
-                                _ = panel.update(cx, |panel, cx| panel.hand_off(agent, window, cx));
-                            }),
+                            PopupMenuItem::new(name.clone())
+                                .checked(id == current)
+                                .on_click(move |_, _, cx| {
+                                    _ = panel.update(cx, |this, cx| {
+                                        this.active
+                                            .update(cx, |thread, cx| thread.set_account(&id, cx));
+                                        cx.notify();
+                                    });
+                                }),
                         )
                     })
-            })
+                })
+                .into_any_element(),
+        )
     }
 
-    /// The IDE layout has no chat list: past chats are in this menu, with a
-    /// new-chat button beside it.
-    pub(super) fn render_history(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (store, project_id) = (self.store.clone(), self.project.id);
-        // A chat about something lists the chats about it.
-        let only = self
-            .context
-            .as_ref()
-            .map(|context| context.cwd.to_string_lossy().into_owned());
-        let active = self.active.read(cx).session().map(|session| session.id);
-        let panel = cx.weak_entity();
-        h_flex()
-            .flex_none()
-            .gap_0p5()
-            .child(
-                Button::new("chat-history")
-                    .ghost()
-                    .xsmall()
-                    .icon(Icons::RotateCcwClock)
-                    .tooltip("Past chats")
-                    .accessibility_label("Past chats")
-                    .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-                        let sessions: Vec<_> = store
-                            .sessions(project_id)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter(|session| {
-                                only.is_none() || session.cwd.as_ref() == only.as_ref()
-                            })
-                            .collect();
-                        if sessions.is_empty() {
-                            return menu.label("No chats yet");
+    /// Chat | CLI: the session's two forms (see [`Form`]), where a session
+    /// has both: a workspace's chat, with an agent that has a CLI. The
+    /// conversation is the same; this picks what it is typed into.
+    fn render_form_switch(
+        &self,
+        agent: &'static AgentSpec,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use gpui_kit::component::tab::{Tab, TabBar};
+        if !self.has_cli_form() || !agents::has_cli(agent.id) {
+            return None;
+        }
+        // While a new CLI session's agent is asked the switch stands on
+        // CLI, though nothing has started.
+        let picking = self.asks_cli_agent();
+        let form = if picking { Form::Cli } else { self.form() };
+        Some(
+            TabBar::new("session-form")
+                .segmented()
+                .xsmall()
+                .flex_none()
+                .selected_index(usize::from(form == Form::Cli))
+                .on_click(cx.listener(move |this, ix: &usize, window, cx| {
+                    let to = if *ix == 1 { Form::Cli } else { Form::Chat };
+                    if this.cli_pick {
+                        // Nothing started: the chat is the new chat it is.
+                        if to == Form::Chat {
+                            this.cli_pick = false;
+                            this.focus_composer(window, cx);
                         }
-                        let menu = menu
-                            .item(PopupMenuItem::new("Search chats (⌘⇧K)").on_click(
-                                |_, window, cx| {
-                                    // The workspace owns the search; this crate cannot name its action.
-                                    if let Ok(action) =
-                                        cx.build_action("workspace::SearchChats", None)
-                                    {
-                                        window.dispatch_action(action, cx);
-                                    }
-                                },
-                            ))
-                            .separator();
-                        sessions.into_iter().take(30).fold(menu, |menu, session| {
-                            let panel = panel.clone();
-                            let id = session.id;
+                    } else if to != this.form() {
+                        // Shown as it is until whoever switches it has.
+                        cx.emit(ChatPanelEvent::ShowAs(to));
+                    }
+                    cx.notify();
+                }))
+                .child(Tab::new().label("Chat"))
+                .child(Tab::new().label("CLI"))
+                .into_any_element(),
+        )
+    }
+
+    /// What is done with a chat once in a while, in one menu at the end of
+    /// the message box's choices. Three groups, each under its name: the
+    /// agent's (its options that have no button of their own, what it is
+    /// always allowed), this chat's (making it shorter, going on with
+    /// another agent), and how much of the agent's work is shown. What has
+    /// choices opens them beside the menu and says the one in use; what
+    /// has none is done on the spot.
+    fn render_menu(&self, options: &[AgentOption], cx: &Context<Self>) -> impl IntoElement {
+        use crate::view_mode::ViewMode;
+        let thread = self.active.read(cx);
+        let current_mode = ViewMode::current(cx);
+        let current_width = ph_theme::preferences::preferences(cx).chat_width;
+        let agent = thread.agent();
+        // Only a chat that has started and is at rest can be made shorter
+        // or handed on.
+        let rested = thread.has_started() && *thread.status() == ThreadStatus::Idle;
+        let store = self.store.clone();
+        let panel = cx.weak_entity();
+        // Claude Code keeps its rules in the folder it works in.
+        let rules_root = (agent.id == "claude" && !self.project.read_only)
+            .then(|| thread.folder().to_path_buf());
+        let others: Vec<AgentOption> = options
+            .iter()
+            .filter(|option| option.category == OptionCategory::Other)
+            .cloned()
+            .collect();
+        Button::new("chat-more")
+            .ghost()
+            .xsmall()
+            .icon(IconName::Ellipsis)
+            .tooltip("More")
+            .accessibility_label("Chat menu")
+            .menu(gpui_kit::Anchor::BottomLeft, move |menu, window, cx| {
+                // The agent's own first: they are about the next message,
+                // like the buttons this one stands after.
+                let menu = if others.is_empty() && rules_root.is_none() {
+                    menu
+                } else {
+                    let menu = others.iter().fold(menu.label(agent.name), |menu, option| {
+                        let (option, panel) = (option.clone(), panel.clone());
+                        menu.submenu_with_icon(
+                            Some(Icon::new(Icons::SlidersHorizontal)),
+                            format!("{}: {}", option.name, option.current_name()),
+                            window,
+                            cx,
+                            move |menu, _, _| option_menu(menu, &option, panel.clone()),
+                        )
+                    });
+                    // What the agent no longer asks about here ("Always
+                    // allow" leaves a rule with the agent): to see, and to
+                    // take back.
+                    let menu = match rules_root.clone() {
+                        Some(root) => menu.item(
+                            PopupMenuItem::new("Always allowed here…")
+                                .icon(Icons::ShieldCheck)
+                                .on_click(move |_, window, cx| {
+                                    use gpui_kit::component::WindowExt as _;
+                                    let view = cx
+                                        .new(|_| crate::claude_rules::RulesView::new(root.clone()));
+                                    window.open_dialog(cx, move |dialog, window, _| {
+                                        dialog
+                                            .title("Always allowed for Claude Code")
+                                            .w(ph_ui::scaled_px(520., window))
+                                            .child(view.clone())
+                                    });
+                                }),
+                        ),
+                        None => menu,
+                    };
+                    menu.separator()
+                };
+                // This chat. Both stay in the menu while they cannot be
+                // done (nothing said yet, the agent at work), so the menu
+                // is the same menu every time it is opened.
+                let compact = panel.clone();
+                let menu = menu.label("This chat").item(
+                    PopupMenuItem::new("Compact chat")
+                        .icon(Icons::FoldVertical)
+                        .disabled(!rested)
+                        .on_click(move |_, window, cx| {
+                            _ = compact.update(cx, |panel, cx| panel.compact(window, cx));
+                        }),
+                );
+                let menu = if rested {
+                    let panel = panel.clone();
+                    menu.submenu_with_icon(
+                        Some(Icon::new(Icons::Redo2)),
+                        "Continue with",
+                        window,
+                        cx,
+                        move |menu, _, _| {
+                            agents::AGENTS
+                                .iter()
+                                .filter(|other| other.id != agent.id)
+                                .fold(menu, |menu, other| {
+                                    let panel = panel.clone();
+                                    menu.item(PopupMenuItem::new(other.name).on_click(
+                                        move |_, window, cx| {
+                                            _ = panel.update(cx, |panel, cx| {
+                                                panel.hand_off(other, window, cx)
+                                            });
+                                        },
+                                    ))
+                                })
+                        },
+                    )
+                } else {
+                    menu.item(
+                        PopupMenuItem::new("Continue with")
+                            .icon(Icons::Redo2)
+                            .disabled(true),
+                    )
+                };
+                // Every chat's: how much of an agent's work the transcript
+                // shows, and how wide it gets in a pane with room to spare.
+                let store = store.clone();
+                let menu = menu.separator().label("View").submenu_with_icon(
+                    Some(Icon::new(Icons::MoveHorizontal)),
+                    format!("Width: {}", current_width.label()),
+                    window,
+                    cx,
+                    move |menu, _, _| {
+                        ph_theme::ChatWidth::ALL
+                            .into_iter()
+                            .fold(menu, |menu, width| {
+                                menu.item(
+                                    PopupMenuItem::new(width.label())
+                                        .checked(width == current_width)
+                                        .on_click(move |_, window, cx| {
+                                            // Saved with the other preferences,
+                                            // which the workspace owns; this
+                                            // crate cannot name its actions.
+                                            let action = match width {
+                                                ph_theme::ChatWidth::Comfortable => {
+                                                    "workspace::ChatWidthNormal"
+                                                }
+                                                ph_theme::ChatWidth::Wide => {
+                                                    "workspace::ChatWidthWide"
+                                                }
+                                                ph_theme::ChatWidth::Full => {
+                                                    "workspace::ChatWidthFull"
+                                                }
+                                            };
+                                            if let Ok(action) = cx.build_action(action, None) {
+                                                window.dispatch_action(action, cx);
+                                            }
+                                        }),
+                                )
+                            })
+                    },
+                );
+                menu.submenu_with_icon(
+                    Some(Icon::new(Icons::Eye)),
+                    format!("Show: {}", current_mode.name()),
+                    window,
+                    cx,
+                    move |menu, _, _| {
+                        ViewMode::ALL.into_iter().fold(menu, |menu, mode| {
+                            let store = store.clone();
                             menu.item(
-                                PopupMenuItem::new(session.title)
-                                    .checked(active == Some(id))
-                                    .on_click(move |_, _, cx| {
-                                        _ = panel.update(cx, |_, cx| {
-                                            cx.emit(ChatPanelEvent::SelectSession(Some(id)))
-                                        });
+                                PopupMenuItem::new(mode.label())
+                                    .checked(mode == current_mode)
+                                    .on_click(move |_, window, cx| {
+                                        mode.choose(&store, cx);
+                                        window.refresh();
                                     }),
                             )
                         })
-                    }),
-            )
-            .child(
-                Button::new("chat-new")
-                    .ghost()
-                    .xsmall()
-                    .icon(Icons::SquarePen)
-                    .tooltip("New chat (⌘N)")
-                    .accessibility_label("New chat")
-                    .on_click(
-                        cx.listener(|_, _, _, cx| cx.emit(ChatPanelEvent::SelectSession(None))),
-                    ),
-            )
+                    },
+                )
+            })
     }
 
     pub(super) fn render_transcript(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -677,7 +940,7 @@ impl ChatPanel {
                             .max_w(
                                 ph_theme::preferences::preferences(cx)
                                     .chat_width
-                                    .max_width(),
+                                    .welcome_width(),
                             )
                             .grid()
                             // Side by side with room for two, else one under the
@@ -798,9 +1061,8 @@ impl ChatPanel {
             };
             let preview: attachment_view::PreviewSource = {
                 let attachment = attachment.clone();
-                let (roots, id, store) =
-                    (self.project.roots(), self.project.id, self.store.clone());
-                Rc::new(move |_| attachment.preview(&roots, id, &store))
+                let roots = self.project.roots();
+                Rc::new(move |_| attachment.preview(&roots))
             };
             let remove = Button::new(("remove-attachment", ix))
                 .ghost()
@@ -812,7 +1074,11 @@ impl ChatPanel {
                     // preview on a click.
                     cx.stop_propagation();
                     if ix < this.attachments.len() {
-                        this.attachments.remove(ix);
+                        // A picture taken off is not drawn again: GPUI
+                        // would keep it decoded until told.
+                        if let Attachment::Image { path, .. } = this.attachments.remove(ix) {
+                            ph_ui::images::release_paths(vec![path], cx);
+                        }
                         cx.notify();
                     }
                 }));
@@ -868,10 +1134,7 @@ impl ChatPanel {
                 .map(|(ix, tool)| {
                     let ix = *ix;
                     let glyph: AnyElement = match tool.status {
-                        _ if busy(tool) => ph_ui::Loader::new()
-                            .xsmall()
-                            .color(theme.info)
-                            .into_any_element(),
+                        _ if busy(tool) => ph_ui::Loader::new().xsmall().into_any_element(),
                         crate::transcript::ToolStatus::Failed => Icon::new(IconName::Close)
                             .xsmall()
                             .text_color(theme.danger)
@@ -943,7 +1206,7 @@ impl ChatPanel {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .when(running > 0, |this| {
-                            this.child(ph_ui::Loader::new().xsmall().color(theme.info))
+                            this.child(ph_ui::Loader::new().xsmall())
                         })
                         .child(label)
                         .child(
@@ -1078,34 +1341,68 @@ impl ChatPanel {
             .iter()
             .find(|option| option.category == OptionCategory::Effort)
             .cloned();
-        let has_more = options
-            .iter()
-            .any(|option| option.category == OptionCategory::Other);
+        let has_text = !self.composer.read(cx).value().trim().is_empty();
+        // Which buttons keep their words, for the room the pane has: in a
+        // narrow one they are icons that say what they are when pointed
+        // at, never a row cut off.
+        let account_name = {
+            let profile = crate::profiles::Profiles::known().of(agent.id);
+            (!profile.accounts.is_empty()).then(|| {
+                profile
+                    .account(thread.account())
+                    .map_or_else(|| "Default".to_string(), |account| account.name.clone())
+            })
+        };
+        let usage = thread.usage().cloned();
+        let row = super::fit::Row {
+            model: options
+                .iter()
+                .find(|option| option.category == OptionCategory::Model)
+                .map(|option| option.current_name())
+                .unwrap_or_else(|| agent.name.to_string()),
+            effort: effort.as_ref().map(|option| option.current_name()),
+            mode: mode.as_ref().map(|option| option.current_name()),
+            account: account_name,
+            usage: usage.is_some(),
+            two_actions: busy && has_text,
+        };
+        let fit = self
+            .width
+            .map_or(super::fit::Fit::ALL, |width| super::fit::fit(width, &row));
+        let account = self.render_account(agent, fit.account, cx);
         let pills = h_flex()
             .gap_1()
             .min_w_0()
             .overflow_hidden()
             .child(attach_button(panel.clone()))
-            .child(model_button(agent, &options, panel.clone(), cx))
+            .child(model_button(agent, &options, panel.clone(), fit.model, cx))
+            .children(account)
             .when_some(effort, |this, effort| {
-                this.child(option_pill(&effort, panel.clone()))
+                this.child(option_pill(&effort, panel.clone(), fit.effort))
             })
             .when_some(mode, |this, mode| {
-                this.child(option_pill(&mode, panel.clone()))
-            })
-            .when(has_more, |this| {
-                this.child(more_options_button(&options, panel.clone()))
+                this.child(option_pill(&mode, panel.clone(), fit.mode))
             });
-
-        let has_text = !self.composer.read(cx).value().trim().is_empty();
+        // The rest of what can be chosen, after the choices that have a
+        // button: never cut off with them in a pane too narrow for all.
+        let menu = self.render_menu(&options, cx).into_any_element();
+        // How much the chat has used, beside what sends.
+        let used = crate::usage_meter::render(usage.as_ref(), fit.usage_bar, cx)
+            .map(IntoElement::into_any_element);
+        // An agent that does not stop when asked: Stop then ends it.
+        let slow = self.active.read(cx).stop_is_slow();
         let stop = busy.then(|| {
             Button::new("stop-agent")
                 .small()
-                .outline()
                 .rounded_full()
                 .icon(IconName::Square)
-                .tooltip("Stop")
-                .accessibility_label("Stop")
+                .map(|this| if slow { this.danger() } else { this.outline() })
+                .tooltip(if slow {
+                    "Not stopping. Press to end the agent's process"
+                } else {
+                    "Stop"
+                })
+                .accessibility_label(if slow { "Force stop" } else { "Stop" })
                 .on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))
         });
         // While the agent works, a message is queued: it goes when the turn ends.
@@ -1129,7 +1426,11 @@ impl ChatPanel {
                 .accessibility_label(if busy { "Queue" } else { "Send" })
                 .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
         });
-        let action = h_flex().gap_1().children(stop).children(send);
+        let action = h_flex()
+            .gap_1()
+            .children(used)
+            .children(stop)
+            .children(send);
         let queued: Vec<(usize, String)> = thread
             .queued()
             .iter()
@@ -1257,7 +1558,14 @@ impl ChatPanel {
                                     .px_2()
                                     .pb_2()
                                     .gap_2()
-                                    .child(div().flex_1().min_w_0().overflow_hidden().child(pills))
+                                    .child(
+                                        h_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .gap_1()
+                                            .child(div().min_w_0().overflow_hidden().child(pills))
+                                            .child(div().flex_none().child(menu)),
+                                    )
                                     .child(div().flex_none().child(action)),
                             ),
                     ),
@@ -1267,11 +1575,19 @@ impl ChatPanel {
 
 impl Render for ChatPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.terminal_session.is_some() {
-            return self.render_terminal_session(cx);
+        if self.shows_all_chats() {
+            return self.render_all_chats(window, cx);
         }
-        let (narrow, probe) = ph_ui::measure::narrower_than("chat-width", 440., window, cx);
-        self.narrow = narrow;
+        if self.asks_cli_agent() {
+            return self.render_cli_pick(window, cx);
+        }
+        if self.terminal_session.is_some() {
+            return self.render_cli(window, cx);
+        }
+        let (width, probe) = ph_ui::measure::width_of("chat-width", window, cx);
+        self.width = width.map(|width| ph_ui::measure::design_px(width, window));
+        // Not narrow until measured: the first frame is drawn in full.
+        self.narrow = self.width.is_some_and(|width| width < 440.);
         v_flex()
             .relative()
             .size_full()
@@ -1287,7 +1603,7 @@ impl Render for ChatPanel {
                     this.drop_external(paths, window, cx)
                 }),
             )
-            .child(self.render_header(cx))
+            .child(self.render_header(window, cx))
             // Clipped: in a short pane the empty chat's welcome is taller
             // than the room and would draw over the header.
             .child(
@@ -1309,14 +1625,13 @@ impl ChatPanel {
     /// away.
     fn render_terminal_offer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let agent = self.active.read(cx).agent();
-        if !self.runs_terminals
+        if self.cli_view.is_none()
             || !agents::chat_unsupported(agent.id)
             || !ph_brand::enabled(ph_brand::Feature::Terminal)
             || self.project.read_only
         {
             return None;
         }
-        let cwd = self.project.path.clone();
         Some(
             h_flex()
                 .flex_none()
@@ -1335,20 +1650,16 @@ impl ChatPanel {
                         .text_color(cx.theme().warning),
                 )
                 .child(div().flex_1().min_w_0().text_sm().child(format!(
-                    "{} here has no chat mode. It works in a terminal, followed like a chat.",
+                    "{} here has no chat mode. It works in its CLI, in this same place.",
                     agent.name
                 )))
                 .child(
                     Button::new("run-agent-in-terminal")
                         .primary()
                         .small()
-                        .label(format!("Run {} in a terminal", agent.name))
+                        .label(format!("Open {}'s CLI", agent.name))
                         .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(ChatPanelEvent::ResumeInTerminal {
-                                agent: agent.id,
-                                session: None,
-                                cwd: cwd.clone(),
-                            })
+                            cx.emit(ChatPanelEvent::ShowAs(Form::Cli))
                         })),
                 )
                 .into_any_element(),
@@ -1362,6 +1673,7 @@ pub(super) fn model_button(
     agent: &'static AgentSpec,
     options: &[AgentOption],
     panel: WeakEntity<ChatPanel>,
+    in_words: bool,
     cx: &App,
 ) -> impl IntoElement + use<> {
     let model = options
@@ -1369,18 +1681,23 @@ pub(super) fn model_button(
         .find(|option| option.category == OptionCategory::Model)
         .map(|option| option.current_name())
         .unwrap_or_else(|| agent.name.to_string());
+    // Without the room for its name the agent's mark stands for it; what
+    // it is shows on pointing at it.
+    let said = format!("Agent and model: {} · {model}", agent.name);
     let label = h_flex()
         .gap_1p5()
         .child(agent.mark(ph_ui::rems_from_px(14.)))
-        .child(
-            // A long model name gives way, so the row's buttons all fit.
-            div()
-                .max_w(ph_ui::rems_from_px(150.))
-                .truncate()
-                .text_xs()
-                .font_weight(gpui_kit::FontWeight::MEDIUM)
-                .child(model),
-        )
+        .when(in_words, |this| {
+            this.child(
+                // A long model name gives way, so the row's buttons all fit.
+                div()
+                    .max_w(ph_ui::rems_from_px(150.))
+                    .truncate()
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                    .child(model),
+            )
+        })
         .child(
             Icon::new(IconName::ChevronDown)
                 .xsmall()
@@ -1394,7 +1711,7 @@ pub(super) fn model_button(
                 .ghost()
                 .xsmall()
                 .child(label)
-                .tooltip("Agent and model")
+                .tooltip(ph_ui::tip(said))
                 .accessibility_label("Agent and model"),
         )
         .on_open_change({
@@ -1518,18 +1835,29 @@ pub(super) fn option_icon(category: OptionCategory) -> Icons {
     }
 }
 
-pub(super) fn option_pill(option: &AgentOption, panel: WeakEntity<ChatPanel>) -> impl IntoElement {
+pub(super) fn option_pill(
+    option: &AgentOption,
+    panel: WeakEntity<ChatPanel>,
+    in_words: bool,
+) -> impl IntoElement {
     let option = option.clone();
-    pill(
-        SharedString::from(format!("option-{}", option.id)),
-        option_icon(option.category),
-        option.current_name(),
-    )
-    .tooltip(if option.category == OptionCategory::Mode {
-        format!("{} (⇧Tab switches)", option.name)
+    let id = SharedString::from(format!("option-{}", option.id));
+    // As an icon it says its choice when pointed at: nothing is hidden,
+    // only not spelled out.
+    let said = format!("{}: {}", option.name, option.current_name());
+    match in_words {
+        true => pill(id, option_icon(option.category), option.current_name()),
+        false => Button::new(id)
+            .ghost()
+            .xsmall()
+            .icon(option_icon(option.category)),
+    }
+    .accessibility_label(said.clone())
+    .tooltip(ph_ui::tip(if option.category == OptionCategory::Mode {
+        format!("{said} (⇧Tab switches)")
     } else {
-        option.name.clone()
-    })
+        said
+    }))
     .menu(gpui_kit::Anchor::BottomLeft, move |menu, _, _| {
         option_menu(menu, &option, panel.clone())
     })
@@ -1561,40 +1889,11 @@ pub(super) fn option_menu(
     })
 }
 
-pub(super) fn more_options_button(
-    options: &[AgentOption],
-    panel: WeakEntity<ChatPanel>,
-) -> impl IntoElement {
-    let others: Vec<AgentOption> = options
-        .iter()
-        .filter(|option| option.category == OptionCategory::Other)
-        .cloned()
-        .collect();
-    Button::new("more-options")
-        .ghost()
-        .xsmall()
-        .icon(IconName::Ellipsis)
-        .tooltip("More options")
-        .accessibility_label("More options")
-        .menu(gpui_kit::Anchor::BottomLeft, move |menu, window, cx| {
-            others.iter().fold(menu, |menu, option| {
-                let option = option.clone();
-                let panel = panel.clone();
-                menu.submenu(
-                    format!("{}: {}", option.name, option.current_name()),
-                    window,
-                    cx,
-                    move |menu, _, _| option_menu(menu, &option, panel.clone()),
-                )
-            })
-        })
-}
-
 /// A pane whose content sits in its middle and scrolls once it is taller
 /// than the pane (the child takes `my_auto()`). Centring alone
 /// (`justify_center`) cuts tall content off at both ends, out of reach: a
 /// narrow chat beside a pull request, a large interface size.
-fn centered_scroll(id: &'static str) -> gpui_kit::Stateful<gpui_kit::Div> {
+pub(super) fn centered_scroll(id: &'static str) -> gpui_kit::Stateful<gpui_kit::Div> {
     v_flex()
         .id(id)
         .size_full()

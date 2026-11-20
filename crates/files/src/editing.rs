@@ -82,6 +82,11 @@ fn covered_lines(text: &str, selection: &Range<usize>) -> Range<usize> {
     let mut end = selection.end;
     if selection.end > selection.start && end == line_start(text, end) {
         end -= 1;
+        // Before the `\r` of a `\r\n` too: on the `\n`, the line's end
+        // would be taken to be after its `\r`.
+        if end > start && text.as_bytes()[end - 1] == b'\r' {
+            end -= 1;
+        }
     }
     start..line_end(text, end.max(start))
 }
@@ -482,6 +487,23 @@ mod tests {
         let last = delete_lines(text, text.len()..text.len());
         assert_eq!(apply(text, &last), "one\ntwo");
         assert_eq!(apply("solo", &delete_lines("solo", 0..0)), "");
+
+        // Windows line endings, the whole line selected (Shift+Down).
+        let text = "x\r\na\r\nb";
+        let a = text.find('a').unwrap();
+        let line = a..a + "a\r\n".len();
+        assert_eq!(
+            apply(text, &move_lines(text, line.clone(), true).unwrap()),
+            "a\r\nx\r\nb"
+        );
+        assert_eq!(
+            apply(text, &move_lines(text, line.clone(), false).unwrap()),
+            "x\r\nb\r\na"
+        );
+        assert_eq!(
+            apply(text, &copy_lines(text, line, false)),
+            "x\r\na\r\na\r\nb"
+        );
     }
 
     #[test]

@@ -28,17 +28,37 @@ pub struct Recording {
     /// The test file the steps go into.
     pub path: PathBuf,
     pub steps: Vec<Step>,
+    /// The chat whose agent records, once it has started: only its turn
+    /// ending ends the recording.
+    pub chat: Option<i64>,
 }
 
 /// Starts recording `project_id`'s browser and device actions, after the
-/// steps already kept (`steps`, empty for a new recording).
-pub fn start(project_id: i64, path: PathBuf, steps: Vec<Step>, cx: &mut App) {
-    cx.default_global::<Recorder>().session = Some(Recording {
+/// steps already kept (`steps`, empty for a new recording). Refused while
+/// another recording runs: there is one for the whole app.
+pub fn start(project_id: i64, path: PathBuf, steps: Vec<Step>, cx: &mut App) -> Result<()> {
+    let recorder = cx.default_global::<Recorder>();
+    if let Some(running) = &recorder.session {
+        if running.project_id == project_id {
+            bail!("A test is already being recorded here: stop it first.");
+        }
+        bail!("A test is being recorded in another workspace: stop it there first.");
+    }
+    recorder.session = Some(Recording {
         project_id,
         path,
         steps,
+        chat: None,
     });
     ControlServer::set_observer(Some(Rc::new(observe)), cx);
+    Ok(())
+}
+
+/// Names the chat whose agent does the recording just started.
+pub fn set_chat(chat: i64, cx: &mut App) {
+    if let Some(recording) = cx.default_global::<Recorder>().session.as_mut() {
+        recording.chat.get_or_insert(chat);
+    }
 }
 
 /// Where a test finds the password typed while it was recorded.
@@ -217,7 +237,9 @@ mod tests {
     #[gpui_kit::test]
     fn recording_keeps_the_projects_actions(cx: &mut gpui_kit::TestAppContext) {
         cx.update(|cx| {
-            start(7, PathBuf::from("t.json"), Vec::new(), cx);
+            start(7, PathBuf::from("t.json"), Vec::new(), cx).unwrap();
+            // One recording at a time, whoever asks.
+            assert!(start(8, PathBuf::from("u.json"), Vec::new(), cx).is_err());
             observe(
                 "browser.open",
                 &json!({ "project_id": 7, "url": "http://x" }),

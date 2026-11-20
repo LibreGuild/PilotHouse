@@ -188,7 +188,11 @@ impl AndroidRun {
         }
         let manager = self.manager.read(cx);
         let Some(adb) = manager.adb().cloned() else {
-            self.stage = Stage::Failed("The Android SDK was not found.".into());
+            self.stage = Stage::Failed(if manager.looking_for_sdk() {
+                "Still looking for the Android SDK; try again in a moment.".into()
+            } else {
+                "The Android SDK was not found.".into()
+            });
             cx.notify();
             return;
         };
@@ -654,7 +658,9 @@ impl Render for AndroidRun {
                             .icon(Icons::Package)
                             .label("Build APK")
                             .disabled(busy)
-                            .tooltip("Build the APK of this module and variant; no device needed")
+                            .tooltip(ph_ui::tip(
+                                "Build the APK of this module and variant; no device needed",
+                            ))
                             .on_click(cx.listener(|run, _, _, cx| run.build_apk(cx))),
                     )
                     .when_some(built_apk, |this, apk| {

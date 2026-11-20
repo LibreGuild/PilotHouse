@@ -131,6 +131,15 @@ impl BrowserPanel {
             }),
             cx.subscribe(&tools, |_, _, event: &ToChat, cx| cx.emit(event.clone())),
             cx.observe(&browser, |_, _, cx| cx.notify()),
+            // The pane goes with its window, which may close while the pane
+            // shows: the browser outlives it in the hub, and would otherwise
+            // stream frames to nobody and never stop for being idle.
+            cx.on_release(|this, cx| {
+                if this.active {
+                    this.browser
+                        .update(cx, |browser, _| browser.set_screencast(false));
+                }
+            }),
         ];
         Self {
             browser,
@@ -149,7 +158,7 @@ impl BrowserPanel {
         if self.active != active {
             self.active = active;
             self.browser
-                .update(cx, |browser, cx| browser.set_screencast(active, cx));
+                .update(cx, |browser, _| browser.set_screencast(active));
         }
     }
 
@@ -170,16 +179,17 @@ impl BrowserPanel {
     fn surface_event(&mut self, event: &SurfaceEvent, cx: &mut Context<Self>) {
         match event {
             SurfaceEvent::Pointer(pointer) => self.browser.read(cx).pointer(*pointer),
-            SurfaceEvent::Key(keystroke) if keystroke.modifiers.platform => {
-                self.editing_shortcut(&keystroke.key, cx)
+            SurfaceEvent::Key(keystroke) if ph_media::editing_shortcut(keystroke, cx) => {
+                self.editing_shortcut(&keystroke.key, keystroke.modifiers.shift, cx)
             }
             SurfaceEvent::Key(keystroke) => self.browser.read(cx).key(keystroke),
             SurfaceEvent::Picked { x, y } => self.pick(*x, *y, cx),
         }
     }
 
-    /// ⌘C/⌘V/⌘X/⌘A/⌘Z inside the page, through the system clipboard.
-    fn editing_shortcut(&mut self, key: &str, cx: &mut Context<Self>) {
+    /// ⌘C/⌘V/⌘X/⌘A/⌘Z/⌘⇧Z (Ctrl elsewhere) inside the page, through the
+    /// system clipboard.
+    fn editing_shortcut(&mut self, key: &str, shift: bool, cx: &mut Context<Self>) {
         let browser = self.browser.clone();
         match key {
             "v" => {
@@ -209,7 +219,11 @@ impl BrowserPanel {
                 .detach();
             }
             "a" | "z" => {
-                let command = if key == "a" { "selectAll" } else { "undo" };
+                let command = match (key, shift) {
+                    ("a", _) => "selectAll",
+                    (_, true) => "redo",
+                    _ => "undo",
+                };
                 browser.update(cx, |browser, cx| {
                     browser
                         .evaluate(format!("document.execCommand('{command}')"), cx)
@@ -321,7 +335,7 @@ impl BrowserPanel {
                 .ghost()
                 .small()
                 .icon(icon)
-                .tooltip(label)
+                .tooltip(ph_ui::tip(label))
                 .accessibility_label(label)
         };
         h_flex()
@@ -369,67 +383,46 @@ impl BrowserPanel {
                     .accessibility_label("Browser options")
                     .menu(gpui_kit::Anchor::TopRight, {
                         let browser = self.browser.clone();
-                        move |menu, _, cx| {
-                            let endpoint = browser.read(cx).devtools_url();
-                            let port_on = browser.read(cx).devtools_port_enabled();
+                        move |menu, _, _| {
                             let stop = browser.clone();
-                            let toggle_port = browser.clone();
-                            menu.item(
-                                PopupMenuItem::new("Allow other DevTools clients")
-                                    .checked(port_on)
-                                    .on_click(move |_, _, cx| {
-                                        toggle_port.update(cx, |browser, cx| {
-                                            browser.set_devtools_port(!port_on, cx)
-                                        })
-                                    }),
-                            )
-                            .when_some(endpoint, |menu, endpoint| {
-                                menu.item(
-                                    PopupMenuItem::new("Copy DevTools address")
-                                        .icon(Icons::Plug)
-                                        .on_click(move |_, _, cx| {
-                                            ph_ui::copy_with_toast(
-                                                endpoint.clone(),
-                                                "the DevTools address",
-                                                cx,
-                                            )
-                                        }),
+                            menu
+                                // Not in a build whose brand leaves the extension out.
+                                .when(
+                                    ph_brand::enabled(ph_brand::Feature::ChromeExtension),
+                                    |menu| {
+                                        menu.item(
+                                            PopupMenuItem::new("Let agents use your Chrome")
+                                                .icon(IconName::Globe)
+                                                .on_click(|_, window, cx| {
+                                                    window.dispatch_action(
+                                                        Box::new(
+                                                            crate::OpenChromeExtensionSettings,
+                                                        ),
+                                                        cx,
+                                                    )
+                                                }),
+                                        )
+                                    },
                                 )
-                            })
-                            .separator()
-                            // Not in a build whose brand leaves the extension out.
-                            .when(
-                                ph_brand::enabled(ph_brand::Feature::ChromeExtension),
-                                |menu| {
-                                    menu.item(
-                                        PopupMenuItem::new("Let agents use your Chrome")
-                                            .icon(IconName::Globe)
-                                            .on_click(|_, window, cx| {
-                                                window.dispatch_action(
-                                                    Box::new(crate::OpenChromeExtensionSettings),
-                                                    cx,
-                                                )
-                                            }),
-                                    )
-                                },
-                            )
-                            .item(
-                                PopupMenuItem::new(if running {
-                                    "Stop the browser"
-                                } else {
-                                    "Start the browser"
-                                })
-                                .icon(Icons::Power)
-                                .on_click(move |_, _, cx| {
-                                    stop.update(cx, |browser, cx| {
-                                        if running {
-                                            browser.stop(cx)
-                                        } else {
-                                            browser.ensure_started(cx)
-                                        }
+                                .item(
+                                    PopupMenuItem::new(if running {
+                                        "Stop the browser"
+                                    } else {
+                                        "Start the browser"
                                     })
-                                }),
-                            )
+                                    .icon(Icons::Power)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            stop.update(cx, |browser, cx| {
+                                                if running {
+                                                    browser.stop(cx)
+                                                } else {
+                                                    browser.ensure_started(cx)
+                                                }
+                                            })
+                                        },
+                                    ),
+                                )
                         }
                     }),
             )
@@ -523,11 +516,11 @@ impl BrowserPanel {
                 .child(ph_ui::Loader::new().small())
                 .child("Starting the browser…")
                 .into_any_element(),
-            // Stopped is not starting: it said so, with a spinner that
-            // never ended, after the user stopped the browser.
-            BrowserStatus::Stopped => EmptyState::new("The browser is stopped")
+            // Not running: it starts when asked to here (or when an agent
+            // uses it), never by the pane coming into view.
+            BrowserStatus::Stopped => EmptyState::new("The browser is not running")
                 .icon(Icons::Power)
-                .description("Its logins are kept. It starts again when you start it here, or when an agent uses it.")
+                .description("Start it to open pages here. Its logins are kept for this workspace, and it also starts when an agent uses it.")
                 .action(
                     Button::new("browser-start")
                         .small()

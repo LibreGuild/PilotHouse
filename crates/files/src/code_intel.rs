@@ -223,7 +223,7 @@ pub fn open_outline(
                             .w(ph_ui::rems_from_px(36.))
                             .flex_none()
                             .text_xs()
-                            .text_color(cx.theme().info)
+                            .text_color(cx.theme().link)
                             .font_family(cx.theme().mono_font_family.clone())
                             .child(kind_label(symbol.kind)),
                     )

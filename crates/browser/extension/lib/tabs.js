@@ -28,6 +28,25 @@ export async function allowed(tabId) {
   return tabId;
 }
 
+/** Whether agents may have a tab show `url`: a web page or the empty page.
+ * A local file or an extension's own page would take them past the group's
+ * rule, which rests on its tabs showing web pages. */
+export function webAddress(url) {
+  if (url === 'about:blank') return true;
+  try {
+    const { protocol } = new URL(url);
+    return protocol === 'http:' || protocol === 'https:';
+  } catch (error) {
+    return false;
+  }
+}
+
+/** The address `tab` shows or is about to show; a tab Chrome is still
+ * creating has none yet and starts blank. */
+export function addressOf(tab) {
+  return tab.pendingUrl || tab.url || 'about:blank';
+}
+
 export async function inGroup(tab) {
   if (tab.groupId === undefined || tab.groupId === NO_GROUP) return false;
   try {

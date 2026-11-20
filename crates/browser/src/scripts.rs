@@ -33,7 +33,16 @@ const selectorOf = (el) => {
   }
   return parts.join(' > ');
 };
-const labelOf = (el) => (el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || el.title || el.alt || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+// What was typed into a field is never its name (a password or a card number
+// would reach the agent as a label): only a button's value is the words on it.
+const labelOf = (el) => {
+  const field = el.localName === 'input' || el.localName === 'textarea';
+  const button = el.localName === 'input' && ['submit', 'button', 'reset'].includes(el.type);
+  const label = el.getAttribute('aria-label') || (field && el.labels && el.labels.length ? el.labels[0].innerText : '')
+    || (field ? '' : el.innerText) || (button ? el.value : '') || el.placeholder || el.title || el.alt
+    || (field ? el.getAttribute('name') || el.id : '') || '';
+  return label.trim().replace(/\s+/g, ' ').slice(0, 80);
+};
 "#;
 
 /// Describes the element at CSS point (x, y) for the element picker.

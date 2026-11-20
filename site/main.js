@@ -1,531 +1,859 @@
-// PilotHouse's site: the radar under the hero, scroll-driven motion (and its
-// fallback where the browser has no `animation-timeline`), the live Agents
-// panel and chat box, the pinned tour, the sideways workbench, the stacking
-// Studio windows, the day's timeline, the theme painter, and the download
-// for this computer. Everything still reads with motion turned off.
+// What moves on the page. Without this file everything is still there, drawn
+// in place: it adds the night sky and the sea the agents float on, the
+// scene that stays while the window comes up out of that sea, the window
+// playing a task by itself, the one window the four moves change, a diff
+// turning into its explanation, the Bridge's cards going from column to
+// column, the colour the whole page takes, and the sun coming up at the end.
+//
+// Each piece runs only while it is on screen, and none of them runs for a
+// reader who asked their system for less motion. A drawing that plays by
+// itself stops where it is when it leaves the screen and carries on from
+// there when it is back (see `playing`): starting over each time made the
+// page blink whenever a reader scrolled a little away and back. A piece that changes how
+// something is laid out says so with a class on that thing (`pin`,
+// `afloat`, `demo-on`, `pinned`, `staged`, `live`), so a style never
+// counts on a script that did not run.
 
 const root = document.documentElement;
-root.classList.add("js");
-const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const $ = (selector, scope = document) => scope.querySelector(selector);
 const $$ = (selector, scope = document) => [...scope.querySelectorAll(selector)];
-const clamp = (value, low = 0, high = 1) => Math.min(high, Math.max(low, value));
-const supports = (rule) => window.CSS && CSS.supports(rule);
-const navHeight = () => parseFloat(getComputedStyle(root).getPropertyValue("--nav-h")) || 64;
+const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+/** 0 to 1, slow at both ends. */
+const ease = (t) => t * t * (3 - 2 * t);
 
-// ---- One loop for everything that follows the scroll position ------------
-const onFrame = new Set();
-const onResize = new Set();
+/** Calls `on(visible)` as `el` comes onto the screen and leaves it. */
+function watch(el, on, margin = "0px") {
+  if (!el) return;
+  if (!("IntersectionObserver" in window)) {
+    on(true);
+    return;
+  }
+  new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) on(entry.isIntersecting);
+    },
+    { rootMargin: margin },
+  ).observe(el);
+}
+
+/** For a drawing that plays by itself: `wait(ms)` waits that long, and then
+ * for as long as `el` is off the screen, so a script written as a row of
+ * waits stops where it is and carries on when its drawing is back. `start`
+ * is called the first time it shows. */
+function playing(el, start) {
+  let visible = false;
+  let started = false;
+  let resume = null;
+  watch(el, (now) => {
+    visible = now;
+    if (!now) return;
+    resume?.();
+    resume = null;
+    if (!started) {
+      started = true;
+      // After whoever called has `wait` in hand (a browser without the
+      // observer says "on screen" before this function returns).
+      setTimeout(start, 0);
+    }
+  });
+  return async (ms) => {
+    await sleep(ms);
+    while (!visible) await new Promise((resolve) => (resume = resolve));
+  };
+}
+
+// What follows the scroll, done once a frame however often the event fires.
+const followers = [];
 let queued = false;
-const schedule = () => {
+const follow = () => {
+  queued = false;
+  for (const each of followers) each();
+};
+const queue = () => {
   if (queued) return;
   queued = true;
-  requestAnimationFrame(() => {
-    queued = false;
-    for (const run of onFrame) run();
-  });
+  requestAnimationFrame(follow);
 };
-addEventListener("scroll", schedule, { passive: true });
-addEventListener("resize", () => {
-  for (const run of onResize) run();
-  schedule();
-});
-addEventListener("load", () => {
-  for (const run of onResize) run();
-  schedule();
-});
+addEventListener("scroll", queue, { passive: true });
+addEventListener("resize", queue);
 
-// Runs `start` while `element` is on screen and `stop` when it leaves.
-const whileVisible = (element, start, stop, margin = "0px") => {
-  if (!element) return;
-  new IntersectionObserver(([entry]) => (entry.isIntersecting ? start() : stop()), { rootMargin: margin }).observe(element);
-};
-
-// ---- Scroll progress, where CSS cannot follow the page itself -------------
-if (!supports("animation-timeline: scroll()")) {
-  const bar = $(".progress");
-  onFrame.add(() => {
-    const max = root.scrollHeight - innerHeight;
-    bar.style.setProperty("--p", max > 0 ? (scrollY / max).toFixed(4) : 0);
-  });
-}
-
-// ---- Scroll-driven effects, scrubbed by hand without `animation-timeline` --
-// Each `.sd` element plays between --a and --b of the time it crosses the
-// screen (as `animation-range: cover --a cover --b` would). Positions are
-// read from the layout (offsets), not from the moving element.
-if (!reduceMotion && !supports("animation-timeline: view()")) {
-  root.classList.add("no-sda");
-  const top = (node) => {
-    let y = 0;
-    for (; node; node = node.offsetParent) y += node.offsetTop;
-    return y;
+/** Runs `draw(seconds)` every frame while `box` is on screen. */
+function animate(box, draw) {
+  let time = 0;
+  let last = 0;
+  let frame = 0;
+  let running = false;
+  const loop = (now) => {
+    if (!running) return;
+    time += Math.min(50, now - last) * 0.001;
+    last = now;
+    draw(time);
+    frame = requestAnimationFrame(loop);
   };
-  const items = $$(".sd").map((element) => {
-    const style = getComputedStyle(element);
-    // An SVG mark follows the page it is drawn on.
-    const box = element instanceof SVGElement ? element.closest("svg").parentElement : element;
-    return {
-      element,
-      box,
-      a: (parseFloat(style.getPropertyValue("--a")) || 0) / 100,
-      b: (parseFloat(style.getPropertyValue("--b")) || 100) / 100,
-      y: 0,
-      h: 0,
-    };
-  });
-  const measure = () => {
-    for (const item of items) {
-      item.y = top(item.box);
-      item.h = item.box.offsetHeight;
-    }
-  };
-  measure();
-  onResize.add(measure);
-  onFrame.add(() => {
-    const height = innerHeight;
-    for (const item of items) {
-      const at = item.y - scrollY;
-      if (at > height * 1.5 || at + item.h < -height * 0.5) continue;
-      const cover = (height - at) / (height + item.h);
-      const p = clamp((cover - item.a) / Math.max(0.0001, item.b - item.a));
-      item.element.style.setProperty("--p", p.toFixed(4));
-    }
-  });
-}
-
-// ---- The headline rises word by word ------------------------------------
-$$(".headline .w").forEach((word, i) => word.style.setProperty("--i", i));
-
-// ---- The radar only turns while the hero shows -----------------------------
-const hero = $(".hero");
-whileVisible(hero, () => hero.classList.remove("paused"), () => hero.classList.add("paused"));
-
-// ---- Text arrives as it scrolls in ---------------------------------------
-$$(".kinds li").forEach((kind, i) => kind.style.setProperty("--k", i));
-const reveal = new IntersectionObserver(
-  (entries) => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      entry.target.classList.add("shown");
-      reveal.unobserve(entry.target);
-    }
-  },
-  { rootMargin: "0px 0px -12% 0px" }
-);
-$$(".reveal, .race, .kinds").forEach((element) => reveal.observe(element));
-
-// ---- The section in view, marked in the bar -------------------------------
-(() => {
-  const links = new Map($$(".nav nav a").map((link) => [link.getAttribute("href").slice(1), link]));
-  // Every section, so one the bar does not name clears the mark.
-  const watched = $$("main > section");
-  const seen = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (entry.isIntersecting) links.forEach((link, id) => link.classList.toggle("on", id === entry.target.id));
+  watch(
+    box,
+    (visible) => {
+      running = visible;
+      cancelAnimationFrame(frame);
+      if (visible) {
+        last = performance.now();
+        frame = requestAnimationFrame(loop);
       }
     },
-    { rootMargin: "-45% 0px -50% 0px" }
+    "120px",
   );
-  watched.forEach((section) => seen.observe(section));
-})();
+}
 
-// ---- The Agents panel, alive --------------------------------------------
-(() => {
-  const lists = {
-    needs: $('[data-list="needs"]'),
-    working: $('[data-list="working"]'),
-    done: $('[data-list="done"]'),
-  };
-  const counts = {
-    needs: $('[data-sec="needs"] .count'),
-    working: $('[data-sec="working"] .count'),
-    done: $('[data-sec="done"] .count'),
-  };
-  const workspaces = {
-    harbor: "#f472b6",
-    "tidewatch-android": "#5eead4",
-    "harbour-office": "#a78bfa",
-    "docs-site": "#fbbf24",
-  };
-  const row = (state, chat) => {
-    const element = document.createElement("div");
-    element.className = `ag ${state}`;
-    const glyph = document.createElement("span");
-    glyph.className = state === "needs" ? "glyph q" : state === "working" ? "glyph spin" : "glyph done";
-    if (state === "needs") glyph.textContent = "?";
-    const title = document.createElement("span");
-    title.className = "t";
-    title.textContent = chat.title;
-    const age = document.createElement("span");
-    age.className = "age";
-    age.textContent = chat.age;
-    const meta = document.createElement("span");
-    meta.className = "meta";
-    const dot = document.createElement("i");
-    dot.style.setProperty("--c", workspaces[chat.workspace]);
-    meta.append(dot, `${chat.workspace} · ${chat.agent}`);
-    const line = document.createElement("span");
-    line.className = "line";
-    line.textContent = state === "needs" ? chat.ask : state === "working" ? chat.doing : chat.said;
-    element.append(glyph, title, age, meta, line);
-    return element;
-  };
-  const chats = [
-    { title: "Build the release and deploy it to staging", workspace: "tidewatch-android", agent: "Codex", ask: "./scripts/deploy.sh staging", doing: "Building the release", said: "Deployed to staging.", age: "3m" },
-    { title: "Start the arrivals board for the office screen", workspace: "harbour-office", agent: "Antigravity", ask: "Write src/board.rs?", doing: "Laying out today's arrivals", said: "The board shows boats due today.", age: "2m" },
-    { title: "Add a rate limit to bookings", workspace: "harbor", agent: "Claude Code", ask: "Run cargo test?", doing: "Running the tests", said: "Bookings are limited to 30 a minute.", age: "4m" },
-    { title: "Fix the broken links in the guide", workspace: "docs-site", agent: "Codex", ask: "Delete old/guide.md?", doing: "Checking 214 links", said: "Fixed 6 links; all pages build.", age: "1m" },
-  ];
-  const state = ["needs", "working", "working", "done"];
-  const render = () => {
-    for (const key of Object.keys(lists)) lists[key].replaceChildren();
-    chats.forEach((chat, i) => lists[state[i]].append(row(state[i], chat)));
-    for (const key of Object.keys(counts)) counts[key].textContent = state.filter((s) => s === key).length;
-  };
-  render();
-  if (reduceMotion) return;
-  const next = { working: "done", done: "working", needs: "working" };
-  let turn = 0;
-  let timer = 0;
-  // One chat moves on each beat: a question answered, a task finished, a
-  // new one started, and now and then an agent asks something.
-  const beat = () => {
-    turn++;
-    const i = turn % chats.length;
-    if (turn % 5 === 0) state[i] = "needs";
-    else state[i] = next[state[i]];
-    if (!state.includes("needs")) state[(i + 1) % chats.length] = "needs";
-    render();
-  };
-  whileVisible(
-    $(".panel-demo"),
-    () => (timer = timer || setInterval(beat, 2600)),
-    () => {
-      clearInterval(timer);
-      timer = 0;
-    }
-  );
-})();
+/** Sizes `canvas` to its box, sharp on a dense screen; returns the box's size. */
+function fit(canvas, context) {
+  const ratio = Math.min(devicePixelRatio || 1, 2);
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  canvas.width = Math.round(width * ratio);
+  canvas.height = Math.round(height * ratio);
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  return [width, height];
+}
 
-// ---- Typing an @ mention ------------------------------------------------
-(() => {
-  const text = $(".composer .text");
-  const suggest = $(".suggest");
-  const items = $$(".sugg", suggest);
-  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const mention = (label) => {
+// The page's accent, as the sky and the sea draw it.
+const accent = { first: "#4fd6c7", second: "#a5f3c4" };
+const readAccent = () => {
+  const style = getComputedStyle(root);
+  const first = style.getPropertyValue("--accent").trim();
+  const second = style.getPropertyValue("--accent-2").trim();
+  if (/^#[0-9a-f]{6}$/i.test(first) && /^#[0-9a-f]{6}$/i.test(second)) Object.assign(accent, { first, second });
+};
+readAccent();
+
+// ---- Headings, a word at a time -----------------------------------------
+for (const heading of $$("[data-reveal]")) {
+  const text = heading.textContent.trim();
+  heading.setAttribute("aria-label", text);
+  heading.textContent = "";
+  text.split(/\s+/).forEach((word, index) => {
     const span = document.createElement("span");
-    span.className = "mention";
-    span.textContent = label;
-    return span;
-  };
-  if (reduceMotion) {
-    text.append("Why does ", mention("@src/routes/bookings.rs"), " return 409 here? ", mention("@screenshot"));
-    return;
-  }
-  let visible = false;
-  const type = async (chars, speed = 55) => {
-    for (const char of chars) {
-      text.append(char);
-      await wait(speed + Math.random() * 40);
-    }
-  };
-  const highlight = (index) => items.forEach((item, i) => item.classList.toggle("hi", i === index));
-  const run = async () => {
-    for (;;) {
-      // Paused off screen, between rounds.
-      while (!visible) await wait(400);
-      text.replaceChildren();
-      await wait(700);
-      await type("Why does ");
-      await type("@", 120);
-      suggest.classList.add("open");
-      for (const index of [0, 1, 2, 1]) {
-        highlight(index);
-        await wait(420);
-      }
-      await type("rou", 110);
-      suggest.classList.remove("open");
-      // The characters typed after "Why does " become the mention.
-      [...text.childNodes].slice(-4).forEach((node) => node.remove());
-      text.append(mention("@src/routes/bookings.rs"));
-      await type(" return 409 here? ");
-      await type("@", 120);
-      highlight(3);
-      suggest.classList.add("open");
-      await wait(900);
-      suggest.classList.remove("open");
-      text.lastChild?.remove();
-      text.append(mention("@screenshot"));
-      await wait(2600);
-    }
-  };
-  let started = false;
-  whileVisible(
-    $(".composer-demo"),
-    () => {
-      visible = true;
-      if (!started) {
-        started = true;
-        run();
-      }
-    },
-    () => (visible = false)
-  );
-})();
-
-// ---- The tour: the step in front zooms the pinned window ------------------
-(() => {
-  const layers = Object.fromEntries($$(".tour-window .layer").map((layer) => [layer.dataset.layer, layer]));
-  const spotlight = $(".spotlight");
-  const dots = $$(".tour-dots i");
-  const steps = $$(".step");
-  let current = null;
-  const show = (step) => {
-    current = step;
-    steps.forEach((other, i) => {
-      other.classList.toggle("on", other === step);
-      dots[i]?.classList.toggle("on", other === step);
-    });
-    for (const [key, layer] of Object.entries(layers)) {
-      const on = key === step.dataset.layer;
-      layer.classList.toggle("on", on);
-      if (on) {
-        layer.style.setProperty("--x", `${-Number(step.dataset.x)}%`);
-        layer.style.setProperty("--y", `${-Number(step.dataset.y)}%`);
-        layer.style.setProperty("--s", step.dataset.s);
-      }
-    }
-    spotlight.style.setProperty("--spot", step.dataset.spot);
-  };
-  // The step in front is the last one whose top has passed the middle of
-  // the screen (from the scroll position, so a fast scroll skips none).
-  onFrame.add(() => {
-    const line = innerHeight * 0.55;
-    const step = steps.filter((each) => each.getBoundingClientRect().top < line).pop() || steps[0];
-    if (step !== current) show(step);
+    span.className = "w";
+    span.setAttribute("aria-hidden", "true");
+    span.style.setProperty("--i", index);
+    span.textContent = word;
+    heading.append(span, " ");
   });
-  show(steps[0]);
-})();
+  watch(heading, (visible) => visible && heading.classList.add("in"), "0px 0px -12% 0px");
+}
 
-// ---- The workbench: down the page moves the strip sideways ----------------
-(() => {
-  const section = $(".hs");
-  const track = $(".hs-track");
-  if (!section || reduceMotion) return;
-  root.classList.add("hs-on");
-  let distance = 0;
-  const measure = () => {
-    distance = Math.max(0, track.scrollWidth - innerWidth);
-    // As much page to scroll as the strip has to move, and a little to rest.
-    section.style.height = `${distance + innerHeight + innerHeight * 0.25}px`;
-  };
-  measure();
-  onResize.add(measure);
-  onFrame.add(() => {
-    const box = section.getBoundingClientRect();
-    if (box.bottom < 0 || box.top > innerHeight) return;
-    const pinned = innerHeight - navHeight();
-    const p = clamp((navHeight() - box.top) / Math.max(1, box.height - pinned));
-    track.style.setProperty("--hs-x", `${(-p * distance).toFixed(1)}px`);
-  });
-})();
+// ---- The sky: stars that twinkle, and now and then one that falls --------
+{
+  const canvas = $("#sky");
+  if (canvas) {
+    const context = canvas.getContext("2d");
+    let width = 0;
+    let height = 0;
+    let stars = [];
+    let falling = null;
+    let nextFall = 2.5;
 
-// ---- Studio: a window steps back as the next one covers it ----------------
-(() => {
-  const cards = $$(".stack-card");
-  if (reduceMotion || cards.length < 2) return;
-  let stops = [];
-  const measure = () => (stops = cards.map((card) => parseFloat(getComputedStyle(card).top) || 0));
-  measure();
-  onResize.add(measure);
-  onFrame.add(() => {
-    for (let i = 0; i < cards.length - 1; i++) {
-      const next = cards[i + 1].getBoundingClientRect().top;
-      const p = clamp((innerHeight - next) / Math.max(1, innerHeight - stops[i + 1]));
-      cards[i].style.setProperty("--shrink", (1 - p * 0.06).toFixed(4));
-      cards[i].style.setProperty("--dimmed", (1 - p * 0.5).toFixed(4));
-    }
-  });
-})();
-
-// ---- File kinds light up in turn as the page passes ------------------------
-(() => {
-  const section = $(".previews");
-  const kinds = $$(".kinds li");
-  if (!section || reduceMotion) return;
-  let lit = -1;
-  onFrame.add(() => {
-    const box = section.getBoundingClientRect();
-    if (box.bottom < 0 || box.top > innerHeight) return;
-    const p = clamp((innerHeight - box.top) / (innerHeight + box.height));
-    const index = Math.floor(p * kinds.length * 1.6) % kinds.length;
-    if (index === lit) return;
-    kinds[lit]?.classList.remove("lit");
-    kinds[index].classList.add("lit");
-    lit = index;
-  });
-})();
-
-// ---- The day's line draws down as you read ------------------------------
-(() => {
-  const line = $(".timeline");
-  const items = $$(".timeline li");
-  if (!line) return;
-  if (reduceMotion) {
-    items.forEach((item) => item.classList.add("lit"));
-    return;
-  }
-  line.style.setProperty("--fill", 0);
-  onFrame.add(() => {
-    const box = line.getBoundingClientRect();
-    if (box.bottom < -200 || box.top > innerHeight + 200) return;
-    const mark = innerHeight * 0.62;
-    line.style.setProperty("--fill", clamp((mark - box.top) / box.height).toFixed(4));
-    for (const item of items) item.classList.toggle("lit", item.getBoundingClientRect().top + 12 < mark);
-  });
-})();
-
-// ---- Themes: the window repaints from the swatch picked -----------------
-(() => {
-  const section = $(".themes");
-  const frame = $(".themes-window");
-  const swatches = $$(".swatch");
-  const GLOW = {
-    "modern-dark": "rgba(0, 120, 212, 0.6)",
-    "modern-light": "rgba(156, 195, 255, 0.45)",
-    "warm-dark": "rgba(217, 164, 91, 0.5)",
-    "warm-light": "rgba(232, 201, 160, 0.4)",
-    dracula: "rgba(189, 147, 249, 0.55)",
-    "one-dark": "rgba(77, 120, 204, 0.55)",
-    "one-light": "rgba(82, 111, 255, 0.45)",
-    "studio-dark": "rgba(53, 116, 240, 0.55)",
-  };
-  const source = (name) => `shots/themes/${name}.webp`;
-  let current = swatches[0].dataset.theme;
-  const paint = (swatch) => {
-    const name = swatch.dataset.theme;
-    if (name === current) return;
-    current = name;
-    swatches.forEach((other) => {
-      other.setAttribute("aria-checked", String(other === swatch));
-      other.tabIndex = other === swatch ? 0 : -1;
-    });
-    frame.style.setProperty("--glow", GLOW[name]);
-    // The paint spreads from the swatch, wherever it is next to the window.
-    const box = frame.getBoundingClientRect();
-    const from = swatch.getBoundingClientRect();
-    const next = document.createElement("img");
-    next.className = reduceMotion ? "paint" : "paint wet";
-    next.width = 1600;
-    next.height = 1000;
-    next.alt = `PilotHouse in the ${swatch.textContent} theme, with Claude Code's chat in the harbor workspace.`;
-    next.style.setProperty("--cx", `${((from.left + from.width / 2 - box.left) / box.width) * 100}%`);
-    next.style.setProperty("--cy", `${((from.top + from.height / 2 - box.top) / box.height) * 100}%`);
-    next.src = source(name);
-    // Only the pictures under this one go, so a quick second pick keeps its own.
-    const settle = () => {
-      while (next.previousElementSibling) next.previousElementSibling.remove();
-      next.classList.remove("wet");
+    const size = () => {
+      [width, height] = fit(canvas, context);
+      // More of them high up, thinning toward the water.
+      stars = Array.from({ length: Math.min(300, Math.round((width * height) / 4800)) }, () => ({
+        x: Math.random() * width,
+        y: Math.random() ** 1.6 * height * 0.88,
+        r: Math.random() < 0.1 ? 1.5 : 0.4 + Math.random() * 0.7,
+        phase: Math.random() * 6.283,
+        speed: 0.4 + Math.random() * 1.7,
+        tint: Math.random() < 0.28 ? "#dfe6ea" : "#ffffff",
+      }));
     };
-    next
-      .decode()
-      .catch(() => {})
-      .then(() => {
-        frame.append(next);
-        if (reduceMotion) settle();
-        else next.addEventListener("animationend", settle, { once: true });
-      });
-  };
-  let cycling = !reduceMotion;
-  swatches.forEach((swatch, i) => {
-    swatch.tabIndex = i === 0 ? 0 : -1;
-    swatch.addEventListener("click", () => {
-      cycling = false;
-      paint(swatch);
+
+    const draw = (time) => {
+      context.clearRect(0, 0, width, height);
+      for (const star of stars) {
+        const lit = reduce ? 0.8 : 0.55 + 0.45 * Math.sin(time * star.speed + star.phase);
+        context.globalAlpha = 0.06 + lit * (1 - star.y / height) * 0.9;
+        context.fillStyle = star.tint;
+        context.beginPath();
+        context.arc(star.x, star.y, star.r, 0, 6.283);
+        context.fill();
+      }
+      if (falling) {
+        const t = (time - falling.start) / 0.9;
+        if (t >= 1) {
+          falling = null;
+        } else {
+          const x = falling.x + falling.dx * t;
+          const y = falling.y + falling.dy * t;
+          const tail = context.createLinearGradient(x, y, x - falling.dx * 0.24, y - falling.dy * 0.24);
+          tail.addColorStop(0, "rgba(255, 255, 255, 0.95)");
+          tail.addColorStop(1, "rgba(255, 255, 255, 0)");
+          context.globalAlpha = Math.sin(Math.PI * t);
+          context.strokeStyle = tail;
+          context.lineWidth = 1.6;
+          context.beginPath();
+          context.moveTo(x, y);
+          context.lineTo(x - falling.dx * 0.24, y - falling.dy * 0.24);
+          context.stroke();
+        }
+      } else if (time > nextFall) {
+        falling = {
+          start: time,
+          x: width * (0.15 + Math.random() * 0.7),
+          y: height * (0.04 + Math.random() * 0.22),
+          dx: (Math.random() < 0.5 ? -1 : 1) * width * 0.26,
+          dy: height * 0.2,
+        };
+        nextFall = time + 5 + Math.random() * 6;
+      }
+      context.globalAlpha = 1;
+    };
+
+    size();
+    draw(0);
+    addEventListener("resize", () => {
+      size();
+      draw(0);
     });
-    swatch.addEventListener("keydown", (event) => {
-      const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
-      if (!step) return;
+    if (!reduce) animate(canvas, draw);
+  }
+}
+
+// ---- A sea: four lines of swell over water nothing shows through ----------
+/** Draws a sea on `canvas` and floats the `.boat`s beside it on its
+ * waves. `look` is its colours: by night under the hero, at sunrise at the
+ * end of the page. */
+function sea(canvas, look) {
+  const box = canvas.parentElement;
+  const context = canvas.getContext("2d");
+  const boats = $$(".boat", box).map((el) => ({ el, at: Number(el.dataset.x), colour: el.style.getPropertyValue("--c").trim(), half: 0 }));
+  // The nearest wave last: lower, slower and fainter.
+  const waves = [
+    { y: look.line, a: 8, k: 0.011, s: 0.7, o: 0.95 },
+    { y: look.line + 0.17, a: 12, k: 0.008, s: 0.5, o: 0.5 },
+    { y: look.line + 0.36, a: 16, k: 0.006, s: 0.38, o: 0.3 },
+    { y: look.line + 0.55, a: 20, k: 0.0045, s: 0.28, o: 0.16 },
+  ];
+  // Glints on the water, thickest under the light in the middle.
+  const glints = Array.from({ length: look.glints }, () => ({
+    x: (Math.random() + Math.random() + Math.random() - 1.5) / 1.5,
+    y: Math.random(),
+    w: 6 + Math.random() * 22,
+    phase: Math.random() * 6.283,
+    speed: 0.8 + Math.random() * 1.8,
+  }));
+  let width = 0;
+  let height = 0;
+  let time = 0;
+
+  const heightAt = (wave, x) =>
+    height * wave.y +
+    wave.a * Math.sin(x * wave.k + time * wave.s) +
+    wave.a * 0.45 * Math.sin(x * wave.k * 2.3 - time * wave.s * 1.4 + 1.3);
+  const trace = (wave) => {
+    context.beginPath();
+    context.moveTo(0, heightAt(wave, 0));
+    for (let x = 8; x <= width + 8; x += 8) context.lineTo(x, heightAt(wave, x));
+  };
+
+  const size = () => {
+    [width, height] = fit(canvas, context);
+    // Half of each agent's width, so none drifts off a narrow screen.
+    for (const boat of boats) boat.half = boat.el.offsetWidth / 2 + 8;
+  };
+
+  const draw = (now) => {
+    time = now;
+    const [first, middle, last] = look.lines();
+    context.clearRect(0, 0, width, height);
+    waves.forEach((wave, index) => {
+      trace(wave);
+      context.lineTo(width, height);
+      context.lineTo(0, height);
+      context.closePath();
+      if (index === 0) {
+        const water = context.createLinearGradient(0, height * wave.y - wave.a, 0, height);
+        look.water.forEach((colour, stop) => water.addColorStop(stop / (look.water.length - 1), colour));
+        context.globalAlpha = 1;
+        context.fillStyle = water;
+        context.fill();
+      }
+      const wash = context.createLinearGradient(0, height * wave.y, 0, height);
+      wash.addColorStop(0, first);
+      wash.addColorStop(1, `${first}00`);
+      context.globalAlpha = wave.o * look.wash;
+      context.fillStyle = wash;
+      context.fill();
+      trace(wave);
+      const line = context.createLinearGradient(0, 0, width, 0);
+      line.addColorStop(0, first);
+      line.addColorStop(0.5, middle);
+      line.addColorStop(1, last);
+      context.globalAlpha = wave.o;
+      context.strokeStyle = line;
+      context.lineWidth = 1.5;
+      context.stroke();
+    });
+
+    const top = waves[0];
+    const depth = height - height * top.y;
+    context.fillStyle = look.glint();
+    for (const glint of glints) {
+      const lit = Math.max(0, Math.sin(time * glint.speed + glint.phase)) ** 3;
+      if (lit < 0.03) continue;
+      const x = width * (0.5 + glint.x * look.spread);
+      context.globalAlpha = lit * look.shine * (1 - glint.y * 0.7);
+      context.fillRect(x - glint.w / 2, heightAt(top, x) + 8 + glint.y * depth * 0.7, glint.w, 1.5);
+    }
+
+    // Each agent rides the second wave (in front of the first, so it sails
+    // on the water and not over what stands behind the sea), leaning with
+    // its slope, its lamp on the water under it.
+    const swell = waves[1];
+    boats.forEach((boat, index) => {
+      if (!boat.half || boat.half * 2 > width) return;
+      const x = clamp(width * boat.at + Math.sin(time * 0.13 + index * 1.7) * 14, boat.half, width - boat.half);
+      const y = heightAt(swell, x);
+      const slope = (heightAt(swell, x + 14) - heightAt(swell, x - 14)) / 28;
+      const glow = context.createRadialGradient(x, y + 12, 0, x, y + 12, 48);
+      glow.addColorStop(0, `${boat.colour}55`);
+      glow.addColorStop(1, `${boat.colour}00`);
+      context.globalAlpha = 1;
+      context.fillStyle = glow;
+      context.fillRect(x - 50, y, 100, 62);
+      boat.el.style.transform = `translate(${x}px, ${y}px) translate(-50%, calc(-100% + 5px)) rotate(${Math.atan(slope) * 46}deg)`;
+    });
+    context.globalAlpha = 1;
+  };
+
+  size();
+  box.classList.add("afloat");
+  size();
+  draw(0);
+  addEventListener("resize", () => {
+    size();
+    draw(time);
+  });
+  document.addEventListener("accent", () => reduce && draw(time));
+  if (!reduce) animate(box, draw);
+}
+
+if ($("#sea")) {
+  sea($("#sea"), {
+    line: 0.34,
+    // Black water: it ends in the colour of the section under it.
+    water: ["#16181b", "#0e0f11", "#08090a"],
+    wash: 0.14,
+    lines: () => [accent.first, accent.second, accent.first],
+    glint: () => accent.second,
+    shine: 0.6,
+    spread: 0.36,
+    glints: 36,
+  });
+}
+if ($("#sea-day")) {
+  sea($("#sea-day"), {
+    line: 0.52,
+    // It ends in the colour of the daylight section under it.
+    water: ["#ec9c84", "#f5cba9", "#f6f1e7"],
+    wash: 0.2,
+    lines: () => ["#fff1dc", "#ffffff", "#ffe3c4"],
+    glint: () => "#fffdf2",
+    shine: 0.95,
+    spread: 0.2,
+    glints: 48,
+  });
+}
+
+// ---- The hero's scene stays while the window comes up ----------------------
+{
+  const hero = $(".hero");
+  const scene = $(".scene");
+  const text = $(".hero-text");
+  const stage = $(".hero-stage");
+  const win = $("#demo");
+  const nav = $(".nav");
+  if (hero && scene && text && stage && win && nav && !reduce) {
+    // Only where there is room for the words, the window and the sea at once.
+    const roomy = matchMedia("(min-width: 1001px) and (min-height: 560px)");
+    let pinned = false;
+
+    let was = "";
+    let settle = 0;
+    const scroll = () => {
+      if (!pinned) return;
+      const span = hero.offsetHeight - scene.clientHeight;
+      const p = ease(clamp((scrollY - hero.offsetTop) / span, 0, 1)).toFixed(4);
+      // Nothing to do for the rest of the page's scroll.
+      if (p === was) return;
+      was = p;
+      scene.style.setProperty("--p", p);
+      // Out of the tab order once they can no longer be seen.
+      text.classList.toggle("gone", p > 0.45);
+      // The window follows the scroll at once (see `.moving` in the styles).
+      scene.classList.add("moving");
+      clearTimeout(settle);
+      settle = setTimeout(() => scene.classList.remove("moving"), 180);
+    };
+
+    const layout = () => {
+      pinned = roomy.matches;
+      hero.classList.toggle("pin", pinned);
+      if (!pinned) {
+        text.classList.remove("gone");
+        return;
+      }
+      const high = scene.clientHeight;
+      const top = nav.offsetHeight;
+      // Where the window ends up: under the header and the task's phases,
+      // as large as fits with a strip of sea under it (larger than drawn
+      // on a big screen, where it would otherwise look lost).
+      const room = high - top - 112;
+      const widest = (scene.clientWidth - 96) / stage.offsetWidth;
+      const end = clamp(room / win.offsetHeight, 0.72, Math.min(1.3, widest));
+      const y1 = top + 60 + Math.max(0, room - win.offsetHeight * end) * 0.35;
+      // Where it starts: just under the words.
+      const y0 = Math.max(text.offsetTop + text.offsetHeight + clamp(high * 0.045, 20, 44), y1);
+      scene.style.setProperty("--y0", `${y0.toFixed(1)}px`);
+      scene.style.setProperty("--y1", `${y1.toFixed(1)}px`);
+      scene.style.setProperty("--s1", end.toFixed(4));
+      scene.style.setProperty("--s0", (end * 0.88).toFixed(4));
+      was = "";
+      scroll();
+    };
+
+    layout();
+    followers.push(scroll);
+    addEventListener("resize", layout);
+    addEventListener("load", layout);
+    roomy.addEventListener("change", layout);
+    document.fonts?.ready.then(layout);
+
+    // "Watch a task go by" brings the window to the middle.
+    $("#watch")?.addEventListener("click", (event) => {
+      if (!pinned) return;
       event.preventDefault();
-      cycling = false;
-      const target = swatches[(i + step + swatches.length) % swatches.length];
-      target.focus();
-      paint(target);
+      scrollTo({ top: hero.offsetTop + hero.offsetHeight - scene.clientHeight + 1, behavior: "smooth" });
     });
-  });
-  // On screen: fetch every theme's picture, and show them in turn until a
-  // swatch is picked.
-  let timer = 0;
-  let fetched = false;
-  whileVisible(
-    section,
-    () => {
-      if (!fetched) {
-        fetched = true;
-        swatches.forEach((swatch) => (new Image().src = source(swatch.dataset.theme)));
-      }
-      clearInterval(timer);
-      timer = setInterval(() => {
-        if (!cycling) return clearInterval(timer);
-        const at = swatches.findIndex((swatch) => swatch.dataset.theme === current);
-        paint(swatches[(at + 1) % swatches.length]);
-      }, 3200);
-    },
-    () => clearInterval(timer)
-  );
-})();
 
-// ---- Numbers count up ---------------------------------------------------
-(() => {
-  const count = (element) => {
-    const end = Number(element.dataset.count);
-    const prefix = element.dataset.prefix || "";
-    const suffix = element.dataset.suffix || "";
-    if (reduceMotion || end === 0) {
-      element.textContent = `${prefix}${end}${suffix}`;
-      return;
+    // The window leans a little toward the pointer.
+    if (matchMedia("(hover: hover)").matches) {
+      scene.addEventListener("pointermove", (event) => {
+        const box = scene.getBoundingClientRect();
+        win.style.setProperty("--ry", `${(((event.clientX - box.left) / box.width - 0.5) * 6).toFixed(2)}deg`);
+        win.style.setProperty("--rx", `${((0.5 - (event.clientY - box.top) / box.height) * 4).toFixed(2)}deg`);
+      });
+      scene.addEventListener("pointerleave", () => {
+        win.style.removeProperty("--ry");
+        win.style.removeProperty("--rx");
+      });
     }
-    const start = performance.now();
-    const step = (now) => {
-      const t = Math.min((now - start) / 1400, 1);
-      const eased = 1 - Math.pow(1 - t, 3);
-      element.textContent = `${prefix}${Math.round(end * eased)}${suffix}`;
-      if (t < 1) requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
-  };
-  const observer = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      count(entry.target);
-      observer.unobserve(entry.target);
-    }
-  });
-  $$("[data-count]").forEach((element) => observer.observe(element));
-})();
-
-// ---- The download for this computer -------------------------------------
-(() => {
-  const platform = (navigator.userAgentData?.platform || navigator.platform || navigator.userAgent).toLowerCase();
-  const os = platform.includes("mac")
-    ? "mac"
-    : platform.includes("win")
-      ? "windows"
-      : platform.includes("linux") && !/android/i.test(navigator.userAgent)
-        ? "linux"
-        : null;
-  if (!os) return;
-  const card = $(`.dl[data-os="${os}"]`);
-  const main = $("#download-main");
-  if (card && main) {
-    card.classList.add("mine");
-    main.textContent = `Download for ${card.querySelector(".os").textContent}`;
-    main.href = card.href;
   }
-  $$(`.mirrors a[data-os="${os}"]`).forEach((link) => link.classList.add("mine"));
-})();
+}
 
-schedule();
+// ---- The hero's window plays a task ---------------------------------------
+{
+  const win = $("#demo");
+  if (win && !reduce) {
+    const part = (name) => $(`[data-d="${name}"]`, win);
+    const hook = (name) => $(`[data-demo="${name}"]`, win);
+    const typed = hook("typed");
+    const pointer = hook("pointer");
+    const tabDot = hook("tabdot");
+    const ask = hook("ask");
+    const [chatIdle, paneIdle] = $$("[data-idle]", win);
+    const phases = $$(".phases li");
+    const REQUEST = "Show the tide chart when there is no network.";
+
+    /** Lights the phase the task is in, and ticks the ones before it. */
+    const phase = (name) => {
+      const at = phases.findIndex((item) => item.dataset.phase === name);
+      phases.forEach((item, index) => {
+        item.classList.toggle("on", index === at);
+        item.classList.toggle("done", name === "all" || (at >= 0 && index < at));
+      });
+    };
+
+    /** Moves the pointer to a point of `el`, in the window's own
+     * coordinates (it is drawn leaning, which the layout does not know). */
+    const pointAt = (el, dx = 0.5, dy = 0.62) => {
+      // On a narrow screen the result pane is not shown: nothing to point at.
+      if (!el.offsetParent) return;
+      let x = 0;
+      let y = 0;
+      for (let node = el; node && node !== win; node = node.offsetParent) {
+        x += node.offsetLeft;
+        y += node.offsetTop;
+      }
+      pointer.style.transform = `translate(${x + el.offsetWidth * dx}px, ${y + el.offsetHeight * dy}px)`;
+    };
+
+    const press = async (el) => {
+      el.classList.remove("pressed");
+      void el.offsetWidth;
+      el.classList.add("pressed");
+      await sleep(320);
+    };
+
+    const reset = () => {
+      for (const el of $$("[data-d]", win)) el.classList.remove("show");
+      for (const tick of ["t1", "t2"]) hook(tick).classList.remove("on");
+      ask.classList.remove("gone");
+      chatIdle.classList.remove("off");
+      paneIdle.classList.remove("off");
+      // A phone shows one pane of the window at a time: the chat first.
+      win.dataset.view = "chat";
+      typed.textContent = "";
+      tabDot.className = "dot";
+      phase("none");
+      pointer.style.transform = `translate(${win.offsetWidth * 0.5}px, ${win.offsetHeight * 0.86}px)`;
+    };
+
+    // The task, over and over. Every `pause` also waits while the window is
+    // off the screen, so the task stops where it is and carries on from
+    // there: it does not start over each time the window comes back.
+    const play = async () => {
+      const show = (name) => part(name).classList.add("show");
+      for (;;) {
+        reset();
+        await pause(700);
+        // The request is typed and sent.
+        phase("ask");
+        for (let length = 1; length <= REQUEST.length; length++) {
+          typed.textContent = REQUEST.slice(0, length);
+          await pause(22);
+        }
+        pointAt(hook("send"));
+        await pause(800);
+        await press(hook("send"));
+        typed.textContent = "";
+        chatIdle.classList.add("off");
+        show("msg");
+        tabDot.className = "dot blue";
+        phase("work");
+        // The agent works: its steps on the left, what it changed on the right.
+        for (const [name, after] of [["s1", 650], ["s2", 750], ["f1", 150], ["diff", 450], ["s3", 750], ["f2", 150]]) {
+          await pause(after);
+          if (name === "f1") paneIdle.classList.add("off");
+          show(name);
+        }
+        // It asks; the answer is a click.
+        await pause(750);
+        show("ask");
+        show("count");
+        tabDot.className = "dot amber";
+        phase("allow");
+        await pause(850);
+        pointAt(hook("allow"));
+        await pause(950);
+        await press(hook("allow"));
+        ask.classList.add("gone");
+        part("count").classList.remove("show");
+        tabDot.className = "dot blue";
+        await pause(850);
+        show("tests");
+        tabDot.className = "dot green";
+        phase("review");
+        // The review: on a phone the Git pane takes the chat's place; then
+        // each file is ticked as read, and the change committed.
+        await pause(750);
+        win.dataset.view = "result";
+        for (const tick of ["t1", "t2"]) {
+          await pause(450);
+          pointAt(hook(tick), 0.5, 0.5);
+          await pause(750);
+          hook(tick).classList.add("on");
+        }
+        await pause(400);
+        show("commit");
+        phase("ship");
+        await pause(400);
+        pointAt(hook("commit"));
+        await pause(950);
+        await press(hook("commit"));
+        show("toast");
+        phase("all");
+        await pause(3600);
+      }
+    };
+
+    win.classList.add("demo-on");
+    reset();
+    const pause = playing(win, () => void play());
+  }
+}
+
+// ---- A task in four moves: one window, changed by the scroll ----------------
+{
+  const section = $(".moves");
+  const stage = section && $(".stage-frames", section);
+  if (section && stage) {
+    const items = $$(".move", section);
+    const dots = $$(".stage-dots li", section);
+    const frames = items.map((item) => {
+      const frame = document.createElement("div");
+      frame.className = "frame";
+      frame.append($(".pane", item).cloneNode(true));
+      stage.append(frame);
+      return frame;
+    });
+    const show = (index) => {
+      items.forEach((item, i) => item.classList.toggle("on", i === index));
+      dots.forEach((dot, i) => dot.classList.toggle("on", i === index));
+      frames.forEach((frame, i) => {
+        frame.classList.toggle("on", i === index);
+        frame.classList.toggle("gone", i < index);
+      });
+    };
+    // Pinned only where there is room for the two side by side.
+    const wide = matchMedia("(min-width: 1001px)");
+    const mode = () => section.classList.toggle("pinned", wide.matches && !reduce);
+    mode();
+    wide.addEventListener("change", mode);
+    // The move nearest the middle of the window is the one shown.
+    const pick = () => {
+      if (!section.classList.contains("pinned")) return;
+      const middle = innerHeight / 2;
+      let best = 0;
+      let nearest = Infinity;
+      items.forEach((item, i) => {
+        const box = item.getBoundingClientRect();
+        const away = Math.abs((box.top + box.bottom) / 2 - middle);
+        if (away < nearest) {
+          nearest = away;
+          best = i;
+        }
+      });
+      show(best);
+    };
+    followers.push(pick);
+    show(0);
+  }
+}
+
+// ---- Explain: the diff turns into plain words, and back ---------------------
+{
+  const win = $("#told");
+  if (win) {
+    const tabs = $$(".seg .s", win);
+    const show = (view) => {
+      win.dataset.view = view;
+      for (const tab of tabs) tab.classList.toggle("on", tab.dataset.to === view);
+    };
+    win.classList.add("live");
+    show("story");
+    // The reader flips it: it stays as they left it until this time.
+    let held = 0;
+    win.addEventListener("click", (event) => {
+      const tab = event.target.closest(".s");
+      if (!tab) return;
+      held = performance.now() + 12000;
+      show(tab.dataset.to);
+    });
+    if (!reduce) {
+      // Told, long enough to read; then the change as a diff for a moment.
+      // Off the screen it waits as it is, and carries on when it is back.
+      const play = async () => {
+        for (;;) {
+          await wait(7400);
+          if (performance.now() < held) continue;
+          show("diff");
+          await wait(2600);
+          if (performance.now() < held) continue;
+          show("story");
+        }
+      };
+      const wait = playing(win, () => void play());
+    }
+  }
+}
+
+// ---- The Bridge: cards go from column to column -----------------------------
+{
+  const board = $("#board");
+  if (board && "animate" in Element.prototype) {
+    const columns = Object.fromEntries($$(".col", board).map((col) => [col.dataset.col, col]));
+    const cards = Object.fromEntries($$(".card", board).map((card) => [card.dataset.id, card]));
+    const start = Object.entries(cards).map(([id, card]) => [id, card.dataset.state]);
+    const count = () => {
+      for (const col of Object.values(columns)) $("small", col).textContent = $$(".card", col).length;
+    };
+
+    /** Puts a card in the column of its new state; it, and the cards that
+     * make room, slide from where they were. */
+    const move = (id, state) => {
+      const all = Object.values(cards);
+      const before = new Map(all.map((card) => [card, card.getBoundingClientRect()]));
+      cards[id].dataset.state = state;
+      columns[state].append(cards[id]);
+      count();
+      if (reduce) return;
+      for (const card of all) {
+        const was = before.get(card);
+        const now = card.getBoundingClientRect();
+        const dx = was.left - now.left;
+        const dy = was.top - now.top;
+        if (!dx && !dy) continue;
+        const moved = card === cards[id];
+        card.classList.toggle("moving", moved);
+        card.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], {
+          duration: moved ? 750 : 450,
+          easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
+        }).onfinish = () => card.classList.remove("moving");
+      }
+    };
+
+    // What happens on an ordinary afternoon.
+    const script = [
+      ["a", "working"],
+      ["d", "done"],
+      ["b", "ready"],
+      ["c", "needs"],
+      ["a", "ready"],
+      ["c", "working"],
+      ["b", "done"],
+    ];
+    // When a reader moved a card, the board waits until this time.
+    let held = 0;
+    /** Plays the afternoon over and over. Off the screen it waits where it
+     * is. A card a reader already moved is left where it is. */
+    const play = async () => {
+      for (;;) {
+        for (const [id, state] of script) {
+          await wait(1900);
+          while (performance.now() < held) await wait(300);
+          if (cards[id].dataset.state !== state) move(id, state);
+        }
+        await wait(2800);
+        for (const [id, state] of start) if (cards[id].dataset.state !== state) move(id, state);
+      }
+    };
+    count();
+    const wait = reduce ? sleep : playing(board, () => void play());
+
+    // A reader can answer too: Allow or Deny sends the agent back to work,
+    // Review changes finishes the task. The board waits a moment, then
+    // carries on by itself.
+    board.classList.add("live");
+    board.addEventListener("click", (event) => {
+      const card = event.target.closest(".wbtn")?.closest(".card");
+      const next = { needs: "working", ready: "done" }[card?.dataset.state];
+      if (!next) return;
+      held = performance.now() + 2600;
+      move(card.dataset.id, next);
+    });
+  }
+}
+
+// ---- The tiles: drawings that move on screen, a light under the pointer ------
+{
+  const grid = $(".bento");
+  if (grid) {
+    const tiles = $$(".tile", grid);
+    grid.classList.add("staged");
+    for (const tile of tiles) watch(tile, (visible) => tile.classList.toggle("play", visible));
+    if (matchMedia("(hover: hover)").matches) {
+      grid.addEventListener("pointermove", (event) => {
+        grid.classList.add("lit");
+        for (const tile of tiles) {
+          const box = tile.getBoundingClientRect();
+          tile.style.setProperty("--mx", `${(event.clientX - box.left).toFixed(0)}px`);
+          tile.style.setProperty("--my", `${(event.clientY - box.top).toFixed(0)}px`);
+        }
+      });
+      grid.addEventListener("pointerleave", () => grid.classList.remove("lit"));
+    }
+  }
+}
+
+// ---- Make it yours: the whole page takes the colour -------------------------
+{
+  // The accent, the colour its gradients run to, and its shade for daylight.
+  const ACCENTS = {
+    teal: ["#4fd6c7", "#a5f3c4", "#0d8377"],
+    green: ["#63d98f", "#d6f58b", "#1f8a50"],
+    blue: ["#6ea8ff", "#8fe3ff", "#2a66d4"],
+    violet: ["#a78bfa", "#f0abfc", "#5a3fd0"],
+    amber: ["#f5b83d", "#ff9e7a", "#a96a05"],
+    pink: ["#f58bc8", "#ffb199", "#c0307c"],
+  };
+  const buttons = $$(".swatches button");
+  for (const button of buttons) {
+    button.addEventListener("click", () => {
+      const [first, second, day] = ACCENTS[button.dataset.accent];
+      root.style.setProperty("--accent", first);
+      root.style.setProperty("--accent-2", second);
+      root.style.setProperty("--accent-day", day);
+      root.style.setProperty("--accent-soft", `${first}29`);
+      for (const other of buttons) other.setAttribute("aria-pressed", String(other === button));
+      readAccent();
+      document.dispatchEvent(new Event("accent"));
+    });
+  }
+}
+
+// ---- The header: how far down, which section, and daylight ------------------
+{
+  const nav = $(".nav");
+  const read = $(".read");
+  const links = $$(".nav nav a");
+  const sections = links.map((link) => $(link.getAttribute("href")));
+  const end = $("#download");
+  const daybreak = $(".daybreak");
+  if (nav) {
+    // The link last marked: the mark is written when it moves, not on
+    // every frame of a scroll.
+    let marked = -2;
+    followers.push(() => {
+      const most = root.scrollHeight - innerHeight;
+      read?.style.setProperty("--read", most > 0 ? (scrollY / most).toFixed(4) : "0");
+      // The section that has reached the upper part of the window is the
+      // current one; past the last of them, none is.
+      const line = innerHeight * 0.4;
+      let current = -1;
+      sections.forEach((section, index) => {
+        if (section && section.getBoundingClientRect().top <= line) current = index;
+      });
+      if (end && end.getBoundingClientRect().top <= line) current = -1;
+      if (current !== marked) {
+        marked = current;
+        links.forEach((link, index) => {
+          if (index === current) link.setAttribute("aria-current", "location");
+          else link.removeAttribute("aria-current");
+        });
+      }
+      if (!daybreak) return;
+      const box = daybreak.getBoundingClientRect();
+      // The header turns light once the sunrise is under it.
+      nav.classList.toggle("day", box.top + box.height * 0.2 < nav.offsetHeight);
+      // And the sun comes up as its sea is scrolled into view.
+      if (!reduce) daybreak.style.setProperty("--rise", ease(clamp((innerHeight - box.top) / (box.height * 0.9), 0, 1)).toFixed(4));
+    });
+  }
+}
+
+// ---- The download for this computer ----------------------------------------
+{
+  const platform = (navigator.userAgentData?.platform || navigator.platform || navigator.userAgent).toLowerCase();
+  const phone = /android|iphone|ipad/i.test(navigator.userAgent);
+  const os = phone
+    ? null
+    : platform.includes("mac")
+      ? "mac"
+      : platform.includes("win")
+        ? "windows"
+        : platform.includes("linux")
+          ? "linux"
+          : null;
+  const names = { mac: "macOS", windows: "Windows", linux: "Linux" };
+  const mine = os && $(`.dl[data-os="${os}"]`);
+  if (mine) {
+    mine.classList.add("mine");
+    const main = $("#download-main");
+    if (main) {
+      main.href = mine.href;
+      $("span", main).textContent = `Download for ${names[os]}`;
+    }
+  }
+}
+
+follow();

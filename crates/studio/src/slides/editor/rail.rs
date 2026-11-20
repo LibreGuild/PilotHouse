@@ -30,6 +30,13 @@ const THUMB_HEIGHT: f32 = 150.;
 /// Pictures kept this many slides either side of those in view.
 const KEEP: usize = 12;
 
+/// The slides whose pictures stay, `from..to`, when `view` was in view and
+/// the deck now has `count` slides (never past its end, never backwards).
+fn kept_slides(view: &Range<usize>, count: usize) -> (usize, usize) {
+    let to = view.end.saturating_add(KEEP).min(count);
+    (view.start.saturating_sub(KEEP).min(to), to)
+}
+
 /// A slide being dragged to another place.
 #[derive(Clone)]
 struct DraggedSlide {
@@ -137,8 +144,9 @@ impl SlidesEditor {
     /// Lets go of the pictures of slides far from view.
     fn keep_rail(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         let deck = self.deck(cx);
-        let from = range.start.saturating_sub(KEEP);
-        let to = (range.end + KEEP).min(deck.slides.len());
+        // The range is last frame's: the deck may be much shorter by now
+        // (an undo, an agent removing slides).
+        let (from, to) = kept_slides(&range, deck.slides.len());
         let keep: std::collections::HashSet<String> = deck.slides[from..to]
             .iter()
             .map(|slide| slide.id.clone())
@@ -402,5 +410,20 @@ impl SlidesEditor {
         );
         let count = self.deck(cx).slides.len();
         self.go_to(index.min(count.saturating_sub(1)), window, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kept_slides_stay_inside_a_deck_that_got_shorter() {
+        assert_eq!(kept_slides(&(20..28), 100), (8, 40));
+        assert_eq!(kept_slides(&(0..6), 4), (0, 4));
+        // Slide 31 was at the top and 5 slides are left: nothing to keep,
+        // and no range that starts after it ends.
+        assert_eq!(kept_slides(&(30..38), 5), (5, 5));
+        assert_eq!(kept_slides(&(30..38), 0), (0, 0));
     }
 }

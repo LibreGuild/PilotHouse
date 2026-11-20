@@ -31,6 +31,42 @@ pub struct Session {
     /// What it said last, for a chat whose messages are kept elsewhere (a
     /// terminal's).
     pub last_line: Option<String>,
+    /// Which of its agent's accounts it is in (Settings → Agents); empty
+    /// for the agent's own.
+    pub account: String,
+    /// Its own choices, by the agent's option id (its mode, its model…):
+    /// what it is put back in when it is picked up again.
+    pub options: std::collections::HashMap<String, String>,
+    /// What it did, in numbers, as of its last turn.
+    pub facts: Option<SessionFacts>,
+}
+
+/// What a chat did, in numbers. It is kept with the chat when a turn ends,
+/// so its card on the Bridge can say so without reading the transcript.
+/// Fields a build does not know are dropped, ones it lacks read as none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SessionFacts {
+    /// Files its edits touched, and the lines they added and removed.
+    pub files: usize,
+    pub added: usize,
+    pub removed: usize,
+    /// The last run of each of its test commands, together: whether all
+    /// ended well (`None`: it ran no tests), and how many tests passed and
+    /// failed where the output says.
+    pub tests_ok: Option<bool>,
+    pub tests_passed: Option<usize>,
+    pub tests_failed: Option<usize>,
+    /// Other commands it ran, and screenshots it took.
+    pub commands: usize,
+    pub screenshots: usize,
+}
+
+impl SessionFacts {
+    /// Nothing to say: it changed nothing and checked nothing.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,11 +89,26 @@ impl Session {
             cwd: row.get("cwd")?,
             kind: row.get("kind")?,
             last_line: row.get("last_line")?,
+            account: row.get("account")?,
+            // Choices that no longer parse are none: the agent's defaults
+            // hold until one is made again.
+            options: serde_json::from_str(&row.get::<_, String>("options")?).unwrap_or_default(),
+            // Facts that no longer parse are none: the next turn writes
+            // them again.
+            facts: row
+                .get::<_, Option<String>>("facts")?
+                .and_then(|raw| serde_json::from_str(&raw).ok()),
         })
     }
 }
 
+/// The highest session id given out.
+const LAST_SESSION: &str = "sessions.last_id";
+
 impl Store {
+    /// A new chat. Its id was never another's: SQLite would give a deleted
+    /// last chat's id again, and what is kept by a chat's id (marked done,
+    /// pinned, a closed tab, its CLI's marks) would pass to the new one.
     pub fn create_session(
         &self,
         project_id: ProjectId,
@@ -65,13 +116,29 @@ impl Store {
         agent_id: &str,
     ) -> Result<Session> {
         let now = now_millis();
-        let conn = self.conn();
-        conn.execute(
-            "INSERT INTO sessions (project_id, title, agent_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![project_id, title, agent_id, now],
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let id: SessionId = tx.query_row(
+            "SELECT max(
+                coalesce((SELECT max(id) FROM sessions), 0),
+                coalesce((SELECT CAST(value AS INTEGER) FROM settings WHERE key = ?1), 0)
+             ) + 1",
+            params![LAST_SESSION],
+            |row| row.get(0),
         )?;
-        let id = conn.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO sessions (id, project_id, title, agent_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![id, project_id, title, agent_id, now],
+        )?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![LAST_SESSION, id.to_string()],
+        )?;
+        tx.commit()?;
+        drop(conn);
+        self.forget_setting(LAST_SESSION);
         Ok(Session {
             id,
             project_id,
@@ -82,7 +149,33 @@ impl Store {
             cwd: None,
             kind: "chat".into(),
             last_line: None,
+            account: String::new(),
+            options: Default::default(),
+            facts: None,
         })
+    }
+
+    /// Keeps session `id`'s own choices (by the agent's option id).
+    pub fn set_session_options(
+        &self,
+        id: SessionId,
+        options: &std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET options = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(options)?],
+        )?;
+        Ok(())
+    }
+
+    /// Puts session `id` in `account` of its agent (empty: the agent's
+    /// own), before its conversation starts.
+    pub fn set_session_account(&self, id: SessionId, account: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET account = ?2 WHERE id = ?1",
+            params![id, account],
+        )?;
+        Ok(())
     }
 
     /// Marks a session as running in `cwd` (e.g. a review worktree).
@@ -177,6 +270,16 @@ impl Store {
         self.conn().execute(
             "UPDATE sessions SET last_line = ?2 WHERE id = ?1",
             params![id, line],
+        )?;
+        Ok(())
+    }
+
+    /// Keeps what a chat did, in numbers (see [`SessionFacts`]).
+    pub fn set_session_facts(&self, id: SessionId, facts: &SessionFacts) -> Result<()> {
+        let raw = serde_json::to_string(facts)?;
+        self.conn().execute(
+            "UPDATE sessions SET facts = ?2 WHERE id = ?1",
+            params![id, raw],
         )?;
         Ok(())
     }
@@ -280,6 +383,47 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ph-sessions-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         store.add_project(&dir).unwrap().id
+    }
+
+    #[test]
+    fn a_deleted_chats_id_is_never_given_again() {
+        let store = Store::open_in_memory().unwrap();
+        let home = project(&store);
+        let first = store.create_session(home, "One", "claude").unwrap();
+        let last = store.create_session(home, "Two", "claude").unwrap();
+        store.delete_session(last.id).unwrap();
+        let next = store.create_session(home, "Three", "claude").unwrap();
+        assert!(next.id > last.id);
+        assert!(first.id < last.id);
+
+        // Nor those of a removed workspace's chats.
+        let dir = std::env::temp_dir().join(format!("ph-sessions-gone-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = store.add_project(&dir).unwrap().id;
+        let theirs = store.create_session(gone, "Theirs", "claude").unwrap();
+        store.remove_project(gone).unwrap();
+        assert!(store.create_session(home, "Four", "claude").unwrap().id > theirs.id);
+    }
+
+    #[test]
+    fn what_a_chat_did_is_kept_with_it() {
+        let store = Store::open_in_memory().unwrap();
+        let session = store
+            .create_session(project(&store), "Task", "claude")
+            .unwrap();
+        assert_eq!(session.facts, None);
+        let facts = SessionFacts {
+            files: 6,
+            added: 87,
+            removed: 12,
+            tests_ok: Some(true),
+            tests_passed: Some(14),
+            ..Default::default()
+        };
+        store.set_session_facts(session.id, &facts).unwrap();
+        let read = store.session(session.id).unwrap().unwrap();
+        assert_eq!(read.facts, Some(facts));
+        assert!(SessionFacts::default().is_empty());
     }
 
     #[test]

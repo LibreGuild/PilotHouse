@@ -12,6 +12,8 @@ anyhow.workspace = true
 base64 = "0.23"
 color_quant = "1.1"
 dirs.workspace = true
+# Real paths without Windows' `\\?\` spelling: where an export may be written.
+dunce.workspace = true
 # Slide text layout, on the same font database usvg draws with.
 cosmic-text = "0.19"
 fontdb = "0.23"

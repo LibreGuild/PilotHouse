@@ -211,7 +211,7 @@ impl Render for ToolsView {
                 )
             };
             Self::row(cx)
-                .child(Icon::new(Icons::Plug).small().text_color(cx.theme().info))
+                .child(Icon::new(Icons::Plug).small().text_color(cx.theme().link))
                 .child(
                     v_flex()
                         .flex_1()
@@ -284,11 +284,11 @@ impl Render for ToolsView {
                             "Use for every agent"
                         })
                         .disabled(taken)
-                        .tooltip(concat!(
+                        .tooltip(ph_ui::tip(concat!(
                             "Copies it, with its environment, into ",
                             ph_brand::name!(),
                             "'s list"
-                        ))
+                        )))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.add(server.clone(), window, cx);
                         })),
@@ -304,7 +304,7 @@ impl Render for ToolsView {
                 .child(
                     Icon::new(Icons::Sparkles)
                         .small()
-                        .text_color(cx.theme().info),
+                        .text_color(cx.theme().link),
                 )
                 .child(
                     v_flex()
@@ -341,7 +341,7 @@ impl Render for ToolsView {
                 "MCP servers for every agent",
                 concat!(
                     ph_brand::name!(),
-                    " starts these for each chat, along with its own (board, browser, devices). Local servers only."
+                    " starts these for each chat, along with its own (browser, devices, tests). Local servers only."
                 ),
                 cx,
             ))

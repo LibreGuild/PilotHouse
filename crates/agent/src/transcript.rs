@@ -23,9 +23,17 @@ const MAX_DIFF_LINES: usize = 80;
 /// hundreds of MB for text no one sees.
 const OUTPUT_LINES: usize = 60;
 const OUTPUT_BYTES: usize = 8_000;
+/// The most pictures of one tool call that are kept.
+const MAX_TOOL_IMAGES: usize = 8;
 /// Plans and other calls whose text is the point (a plan to approve, a
 /// subagent's answer) keep up to this much.
 const WHOLE_OUTPUT_BYTES: usize = 64_000;
+/// A command's output keeps its first lines and, above all, its last: a
+/// test run or a build says what went wrong at its end, and that is what a
+/// reader opens the call for.
+const COMMAND_HEAD_LINES: usize = 20;
+const COMMAND_TAIL_LINES: usize = 200;
+const COMMAND_BYTES: usize = 32_000;
 
 pub enum Entry {
     User {
@@ -60,7 +68,10 @@ pub enum Entry {
         is_error: bool,
     },
     /// The agent needs a login; offers the ways it can sign in itself.
+    /// `title` says what is the matter when that is known to be something
+    /// other than "not signed in".
     SignIn {
+        title: Option<String>,
         message: String,
         methods: Vec<SignInMethod>,
     },
@@ -114,6 +125,13 @@ pub struct ToolEntry {
     /// What the subagent said, newest last (cut to the last few KB).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub agent_text: String,
+    /// How a command went, when the agent says (its exit code, and what it
+    /// printed while it ran).
+    #[serde(default, skip_serializing_if = "CommandRun::is_unknown")]
+    pub run: CommandRun,
+    /// The pictures the tool gave back (a screenshot), saved as files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<std::path::PathBuf>,
     #[serde(skip)]
     pub expanded: bool,
     /// When the call started, if in this run of the app.
@@ -123,6 +141,35 @@ pub struct ToolEntry {
     #[serde(skip)]
     pub touched: Option<std::time::Instant>,
 }
+
+/// What an agent reports of a command beside the tool call itself: Codex
+/// sends what the command prints as it prints it, and both Codex and Claude
+/// Code its exit code (`_meta.terminal_output_delta`, `terminal_output` and
+/// `terminal_exit` on a tool call's updates, the convention editors share).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CommandRun {
+    /// The exit code, once the command ended and the agent knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i32>,
+    /// What the command printed so far, as it came. Its newest part is held
+    /// (see [`STREAM_BYTES`]); `output` is drawn from this.
+    #[serde(skip)]
+    stream: String,
+    /// The lines that fell off the start of `stream`.
+    #[serde(skip)]
+    fell_off: usize,
+}
+
+impl CommandRun {
+    fn is_unknown(&self) -> bool {
+        self.exit.is_none()
+    }
+}
+
+/// How much of a running command's output is held to draw from, at least
+/// (up to twice this between cuts): more than is drawn, so that the lines a
+/// progress bar rewrote are still whole.
+const STREAM_BYTES: usize = 64_000;
 
 /// How long a subagent counts as at work after its last step (Claude runs
 /// subagents in the background: their call ends as they start).
@@ -320,6 +367,8 @@ impl ToolEntry {
             diffs: Vec::new(),
             children: Vec::new(),
             agent_text: String::new(),
+            run: CommandRun::default(),
+            images: Vec::new(),
             expanded: false,
             started: None,
             touched: None,
@@ -413,11 +462,14 @@ impl ToolEntry {
             diffs: Vec::new(),
             children: Vec::new(),
             agent_text: String::new(),
+            run: CommandRun::default(),
+            images: Vec::new(),
             expanded: false,
             started: Some(std::time::Instant::now()),
             touched: None,
         };
         entry.set_content(&call.content);
+        entry.take_report(call.meta.as_ref());
         entry
     }
 
@@ -435,16 +487,151 @@ impl ToolEntry {
         if let Some(content) = &fields.content {
             self.set_content(content);
         }
+        self.take_report(update.meta.as_ref());
+    }
+
+    /// Takes what the agent reports of a command beside its tool call: the
+    /// next piece of what it printed, and how it ended.
+    fn take_report(&mut self, meta: Option<&agent_client_protocol_schema::v1::Meta>) {
+        let Some(meta) = meta else {
+            return;
+        };
+        for key in ["terminal_output_delta", "terminal_output"] {
+            if let Some(chunk) = meta.get(key).and_then(|output| output["data"].as_str()) {
+                self.push_output(chunk);
+            }
+        }
+        if let Some(code) = meta
+            .get("terminal_exit")
+            .and_then(|exit| exit["exit_code"].as_i64())
+        {
+            self.run.exit = i32::try_from(code).ok();
+        }
+    }
+
+    /// Adds `chunk` to what a running command printed, and draws the output
+    /// again from all that is held.
+    pub fn push_output(&mut self, chunk: &str) {
+        if chunk.is_empty() {
+            return;
+        }
+        let run = &mut self.run;
+        run.stream.push_str(chunk);
+        // Cut back only now and then, to half: every piece draws the output
+        // again, and that must cost the same however much was printed.
+        if run.stream.len() > 2 * STREAM_BYTES {
+            // Whole lines fall off the start; a single endless line is cut
+            // where a character starts. (Where a character starts first:
+            // the text is looked through from there, and a place inside a
+            // character is none to look from.)
+            let mut cut = run.stream.len() - STREAM_BYTES;
+            while !run.stream.is_char_boundary(cut) {
+                cut += 1;
+            }
+            if let Some(at) = run.stream[cut..].find('\n') {
+                cut += at + 1;
+            }
+            run.fell_off += run.stream[..cut].matches('\n').count();
+            run.stream.drain(..cut);
+        }
+        self.output = ends(
+            &plain(&run.stream),
+            COMMAND_HEAD_LINES,
+            COMMAND_TAIL_LINES,
+            COMMAND_BYTES,
+            run.fell_off,
+        );
     }
 
     fn set_content(&mut self, content: &[ToolCallContent]) {
-        // Reads, searches and commands are what grows: keep their start.
-        let bulky = !matches!(self.kind, ToolKindLabel::Think | ToolKindLabel::Other);
-        self.output = if bulky {
-            head(&content_text(content), OUTPUT_LINES, OUTPUT_BYTES)
-        } else {
-            head(&content_text(content), usize::MAX, WHOLE_OUTPUT_BYTES)
+        let text = content_text(content);
+        // Content without text (Claude Code names the terminal it reported
+        // the output of) is not the command printing nothing.
+        if text.is_empty() && !self.run.stream.is_empty() {
+            return self.set_diffs(content);
+        }
+        self.output = match self.kind {
+            // What a command printed, as a terminal would have left it,
+            // with its end kept.
+            ToolKindLabel::Execute => {
+                // The whole output replaces what came in pieces.
+                self.run.stream.clear();
+                self.run.fell_off = 0;
+                ends(
+                    &plain(&text),
+                    COMMAND_HEAD_LINES,
+                    COMMAND_TAIL_LINES,
+                    COMMAND_BYTES,
+                    0,
+                )
+            }
+            ToolKindLabel::Think | ToolKindLabel::Other => {
+                head(&text, usize::MAX, WHOLE_OUTPUT_BYTES)
+            }
+            // Reads and searches are what grows: keep their start.
+            _ => head(&text, OUTPUT_LINES, OUTPUT_BYTES),
         };
+        self.set_diffs(content);
+    }
+
+    /// Keeps the pictures in a tool's result (a screenshot tool gives one
+    /// back) as files beside the app's other captures, to show with the
+    /// call. Each is written once: a call's content comes with every
+    /// update of it.
+    fn keep_images(&mut self, content: &[ToolCallContent]) {
+        self.keep_images_in(content, &ph_store::paths::data_dir().join("captures"));
+    }
+
+    /// [`Self::keep_images`], in folder `dir`.
+    fn keep_images_in(&mut self, content: &[ToolCallContent], dir: &std::path::Path) {
+        let pictures = content.iter().filter_map(|item| match item {
+            ToolCallContent::Content(content) => match &content.content {
+                ContentBlock::Image(image) => Some(image),
+                _ => None,
+            },
+            _ => None,
+        });
+        // A tool's id may hold anything; a file's name must not.
+        let name: String = self
+            .id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .take(48)
+            .collect();
+        let mut images = Vec::new();
+        for (ix, image) in pictures.enumerate().take(MAX_TOOL_IMAGES) {
+            let (extension, kind) = match image.mime_type.as_str() {
+                "image/png" => ("png", "image/png"),
+                "image/jpeg" | "image/jpg" => ("jpg", "image/jpeg"),
+                "image/webp" => ("webp", "image/webp"),
+                "image/gif" => ("gif", "image/gif"),
+                // Not one the app draws.
+                _ => continue,
+            };
+            let path = dir.join(format!("tool-{name}-{ix}.{extension}"));
+            if !path.is_file() {
+                let Some(bytes) = crate::attachments::unbase64(&image.data) else {
+                    continue;
+                };
+                // What it is said to be is the tool's word; only what its
+                // bytes are is kept as a picture (a drawing sent as a PNG
+                // is not one).
+                if crate::attachments::image_media_type(&bytes) != Some(kind) {
+                    continue;
+                }
+                if std::fs::create_dir_all(dir).is_err() || std::fs::write(&path, bytes).is_err() {
+                    continue;
+                }
+            }
+            images.push(path);
+        }
+        if !images.is_empty() {
+            self.images = images;
+        }
+    }
+
+    fn set_diffs(&mut self, content: &[ToolCallContent]) {
+        self.keep_images(content);
         self.diffs = content
             .iter()
             .filter_map(|item| match item {
@@ -494,6 +681,122 @@ fn head(output: &str, lines: usize, bytes: usize) -> String {
         .filter(|line| !line.is_empty())
         .count();
     format!("{}\n… {left} more lines", output[..end].trim_end())
+}
+
+/// The start and the end of `output`: at most `first` lines, then a note of
+/// how many were left out, then the last `last` lines, within `bytes` (the
+/// end is what is kept when that is too much). `before` lines are already
+/// gone from the start of `output`: then there is no start to keep, and the
+/// note counts them too.
+fn ends(output: &str, first: usize, last: usize, bytes: usize, before: usize) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    let first = if before > 0 { 0 } else { first };
+    if before == 0 && lines.len() <= first + last && output.len() <= bytes {
+        return output.to_string();
+    }
+    // The end comes first: the start is what is left before it.
+    let tail_from = lines.len().saturating_sub(last);
+    let head = &lines[..first.min(tail_from)];
+    let mut tail = &lines[tail_from..];
+    let head_bytes: usize = head.iter().map(|line| line.len() + 1).sum();
+    // Too much even so: lines come off the tail's start, never its end.
+    let room = bytes.saturating_sub(head_bytes.min(bytes / 4));
+    while tail.len() > 1 && tail.iter().map(|line| line.len() + 1).sum::<usize>() > room {
+        tail = &tail[1..];
+    }
+    let head: Vec<&str> = head
+        .iter()
+        .scan(0usize, |used, line| {
+            *used += line.len() + 1;
+            (*used <= bytes / 4).then_some(*line)
+        })
+        .collect();
+    let left = before + lines.len() - head.len() - tail.len();
+    let mut kept = String::with_capacity(bytes.min(output.len()) + 48);
+    for line in &head {
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    if left > 0 {
+        kept.push_str(&format!(
+            "… {left} line{} left out …\n",
+            if left == 1 { "" } else { "s" }
+        ));
+    }
+    for (ix, line) in tail.iter().enumerate() {
+        // One line longer than everything allowed keeps its end.
+        if line.len() > room {
+            let mut from = line.len() - room;
+            while !line.is_char_boundary(from) {
+                from += 1;
+            }
+            kept.push('…');
+            kept.push_str(&line[from..]);
+        } else {
+            kept.push_str(line);
+        }
+        if ix + 1 < tail.len() || output.ends_with('\n') {
+            kept.push('\n');
+        }
+    }
+    kept
+}
+
+/// `output` as a terminal would have left it on screen, without the
+/// terminal: colour and cursor sequences are taken out, and a line a
+/// program rewrote in place (a progress bar's carriage returns) keeps its
+/// last state. A chat draws text, not escape codes.
+pub(crate) fn plain(output: &str) -> String {
+    let mut text = String::with_capacity(output.len());
+    let mut chars = output.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            text.push(c);
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameters, then one final letter.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: up to a bell or the string terminator.
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' {
+                        chars.next_if_eq(&'\\');
+                        break;
+                    }
+                }
+            }
+            // A two-character sequence (charset, keypad mode…).
+            Some('(' | ')' | '#') => {
+                chars.next();
+            }
+            _ => {}
+        }
+    }
+    if !text.contains('\r') {
+        return text;
+    }
+    let mut shown = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let (body, end) = match line.strip_suffix('\n') {
+            Some(body) => (body, "\n"),
+            None => (line, ""),
+        };
+        // `\r\n` is a line's end; a `\r` inside it starts the line again.
+        let body = body.strip_suffix('\r').unwrap_or(body);
+        shown.push_str(body.rsplit('\r').next().unwrap_or(body));
+        shown.push_str(end);
+    }
+    shown
 }
 
 impl FileDiff {
@@ -697,7 +1000,7 @@ fn turn_diffs(entries: &[Entry]) -> impl Iterator<Item = &FileDiff> {
 /// The tag is `entry`, not `kind`: tool entries have a `kind` field of their own.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "entry", rename_all = "snake_case")]
-enum StoredEntry {
+pub(crate) enum StoredEntry {
     User {
         text: String,
         #[serde(default)]
@@ -824,6 +1127,7 @@ impl Entry {
 }
 
 /// A parsed `session/update` notification.
+#[derive(Debug)]
 pub struct Update {
     pub session_id: String,
     pub update: agent_client_protocol_schema::v1::SessionUpdate,
@@ -837,9 +1141,7 @@ pub struct Update {
 
 /// Parses a `session/update` notification's update, tolerating update types
 /// newer than this build (they are ignored, not treated as errors).
-pub fn parse_update(params: &Value) -> Option<Update> {
-    let notification: agent_client_protocol_schema::v1::SessionNotification =
-        serde_json::from_value(params.clone()).ok()?;
+pub fn parse_update(params: Value) -> Option<Update> {
     let parent = params["update"]["_meta"]["claudeCode"]["parentToolUseId"]
         .as_str()
         .map(str::to_string);
@@ -847,6 +1149,10 @@ pub fn parse_update(params: &Value) -> Option<Update> {
         .get("_claude/rateLimit")
         .filter(|info| info.is_object())
         .cloned();
+    // Last, so that the update (it may hold a whole file) is moved into
+    // its type, not copied for it.
+    let notification: agent_client_protocol_schema::v1::SessionNotification =
+        serde_json::from_value(params).ok()?;
     Some(Update {
         session_id: notification.session_id.0.to_string(),
         update: notification.update,
@@ -921,6 +1227,266 @@ mod tests {
     }
 
     #[test]
+    fn a_command_keeps_the_end_of_what_it_printed() {
+        let long: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        let kept = ends(
+            &long,
+            COMMAND_HEAD_LINES,
+            COMMAND_TAIL_LINES,
+            COMMAND_BYTES,
+            0,
+        );
+        assert!(kept.starts_with("line 0\nline 1\n"));
+        assert!(kept.contains("line 19\n… 780 lines left out …\nline 800\n"));
+        assert!(
+            kept.ends_with("line 998\nline 999\n"),
+            "the failure is at the end"
+        );
+        // Short output is kept whole.
+        assert_eq!(ends("ok\nfine\n", 20, 200, 32_000, 0), "ok\nfine\n");
+        // Too many bytes: the tail's start goes, its end stays.
+        let wide: String = (0..300)
+            .map(|i| format!("{i} {}\n", "x".repeat(400)))
+            .collect();
+        let kept = ends(
+            &wide,
+            COMMAND_HEAD_LINES,
+            COMMAND_TAIL_LINES,
+            COMMAND_BYTES,
+            0,
+        );
+        assert!(kept.len() <= COMMAND_BYTES + 64, "{}", kept.len());
+        assert!(kept.contains("\n299 x"));
+        // One endless line (minified output) keeps its end.
+        let one = format!("{}END", "é".repeat(40_000));
+        let kept = ends(&one, 20, 200, 32_000, 0);
+        assert!(kept.len() <= 32_000 + 8 && kept.ends_with("END"));
+        // A command's call keeps its end; a read keeps its start.
+        let content = |text: &str| {
+            vec![ToolCallContent::Content(
+                agent_client_protocol_schema::v1::Content::new(ContentBlock::Text(
+                    agent_client_protocol_schema::v1::TextContent::new(text.to_string()),
+                )),
+            )]
+        };
+        let mut call = ToolEntry {
+            id: "1".into(),
+            title: "cargo test".into(),
+            kind: ToolKindLabel::Execute,
+            status: ToolStatus::Failed,
+            output: String::new(),
+            diffs: Vec::new(),
+            children: Vec::new(),
+            agent_text: String::new(),
+            run: Default::default(),
+            images: Vec::new(),
+            expanded: false,
+            started: None,
+            touched: None,
+        };
+        call.set_content(&content(&format!(
+            "{long}\u{1b}[31mFAILED\u{1b}[0m 2 tests\n"
+        )));
+        assert!(
+            call.output.ends_with("line 999\nFAILED 2 tests\n"),
+            "{:?}",
+            &call.output[call.output.len() - 40..]
+        );
+        call.kind = ToolKindLabel::Read;
+        call.set_content(&content(&long));
+        assert!(call.output.ends_with("… 940 more lines"));
+    }
+
+    /// What Codex sends while a command runs, and both Codex and Claude Code
+    /// at its end.
+    #[test]
+    fn a_running_command_shows_what_it_prints_and_how_it_ended() {
+        let update = |meta: Value, fields: Value| -> ToolCallUpdate {
+            let mut update = serde_json::json!({ "toolCallId": "call_1", "_meta": meta });
+            for (key, value) in fields.as_object().unwrap() {
+                update[key] = value.clone();
+            }
+            serde_json::from_value(update).unwrap()
+        };
+        let chunk = |data: &str| {
+            update(
+                serde_json::json!({ "terminal_output_delta": { "terminal_id": "call_1", "data": data } }),
+                serde_json::json!({}),
+            )
+        };
+        let mut call = ToolEntry {
+            id: "call_1".into(),
+            kind: ToolKindLabel::Execute,
+            ..ToolEntry::placeholder()
+        };
+        call.apply(&chunk("running 2 tests\n"));
+        call.apply(&chunk("test a ... ok\ntest b ... "));
+        assert_eq!(call.output, "running 2 tests\ntest a ... ok\ntest b ... ");
+        call.apply(&chunk("\u{1b}[31mFAILED\u{1b}[0m\n"));
+        assert!(
+            call.output.ends_with("test b ... FAILED\n"),
+            "{:?}",
+            call.output
+        );
+        // The end: Claude Code names the terminal as the content; that is
+        // not the output going away.
+        call.apply(&update(
+            serde_json::json!({ "terminal_exit": { "terminal_id": "call_1", "exit_code": 101, "signal": null } }),
+            serde_json::json!({ "status": "failed", "content": [{ "type": "terminal", "terminalId": "call_1" }] }),
+        ));
+        assert_eq!(call.run.exit, Some(101));
+        assert_eq!(call.status, ToolStatus::Failed);
+        assert!(call.output.ends_with("test b ... FAILED\n"));
+        // The exit code is kept with the chat; the pieces are not.
+        let stored = serde_json::to_value(&call).unwrap();
+        assert_eq!(stored["run"]["exit"], 101);
+        let back: ToolEntry = serde_json::from_value(stored).unwrap();
+        assert_eq!(back.output, call.output);
+        // An older stored call has no `run`.
+        let old: ToolEntry = serde_json::from_value(serde_json::json!({
+            "id": "1", "title": "ls", "kind": "execute", "status": "done", "output": "", "diffs": []
+        }))
+        .unwrap();
+        assert_eq!(old.run.exit, None);
+        // An unknown exit code (an interrupted command) says nothing.
+        call.apply(&update(
+            serde_json::json!({ "terminal_exit": { "terminal_id": "call_1", "exit_code": null } }),
+            serde_json::json!({}),
+        ));
+        assert_eq!(call.run.exit, Some(101));
+
+        // A command that prints without end: the newest is held, and the
+        // note counts what fell off.
+        let mut noisy = ToolEntry {
+            kind: ToolKindLabel::Execute,
+            ..ToolEntry::placeholder()
+        };
+        for piece in 0..400 {
+            let lines: String = (piece * 100..piece * 100 + 100)
+                .map(|i| format!("line {i} of a long build log\n"))
+                .collect();
+            noisy.push_output(&lines);
+        }
+        assert!(noisy.run.stream.len() <= 2 * STREAM_BYTES);
+        assert!(noisy.output.len() <= COMMAND_BYTES + 64);
+        assert!(
+            noisy
+                .output
+                .starts_with("… 39800 lines left out …\nline 39800 "),
+            "{:?}",
+            &noisy.output[..60]
+        );
+        assert!(noisy.output.ends_with("line 39999 of a long build log\n"));
+        // What is printed in other letters than ASCII is cut where a
+        // character starts: a tick is three bytes, and half of what is
+        // held is not a whole number of them (a cut inside one stopped
+        // the app).
+        let mut ticks = ToolEntry {
+            kind: ToolKindLabel::Execute,
+            ..ToolEntry::placeholder()
+        };
+        let many = 2 * STREAM_BYTES / 3 + 1;
+        assert_ne!((3 * many - STREAM_BYTES) % 3, 0);
+        ticks.push_output(&"✓".repeat(many));
+        assert!(ticks.run.stream.len() <= STREAM_BYTES);
+        assert!(ticks.run.stream.chars().all(|c| c == '✓'));
+        assert!(ticks.output.ends_with('✓'));
+        // A progress bar's rewrites do not pile up.
+        let mut bar = ToolEntry {
+            kind: ToolKindLabel::Execute,
+            ..ToolEntry::placeholder()
+        };
+        for i in 0..=100 {
+            bar.push_output(&format!("\r{i}%"));
+        }
+        assert_eq!(bar.output, "100%");
+        // Whole output sent at the end replaces the pieces.
+        bar.apply(&update(
+            serde_json::json!({}),
+            serde_json::json!({ "content": [{ "type": "content", "content": { "type": "text", "text": "done\n" } }] }),
+        ));
+        assert_eq!(bar.output, "done\n");
+    }
+
+    /// A tool that gives a picture back (a screenshot) shows it: it was
+    /// dropped, and the call said one line of text.
+    #[test]
+    fn a_picture_a_tool_gives_back_is_kept() {
+        let dir = std::env::temp_dir().join(format!("ph-tool-images-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let png: &[u8] = b"\x89PNG\r\n\x1a\nnot really a picture";
+        let content: Vec<ToolCallContent> = serde_json::from_value(serde_json::json!([
+            { "type": "content", "content": { "type": "text", "text": "Took a screenshot." } },
+            { "type": "content", "content": {
+                "type": "image", "mimeType": "image/png",
+                "data": crate::attachments::base64(png)
+            } },
+            // Not a kind the app draws: passed over.
+            { "type": "content", "content": {
+                "type": "image", "mimeType": "image/tiff", "data": "AAAA"
+            } },
+            { "type": "content", "content": {
+                "type": "image", "mimeType": "image/png", "data": "not base64!"
+            } },
+            // Said to be a PNG, and is a drawing that links a file: its
+            // bytes say what it is.
+            { "type": "content", "content": {
+                "type": "image", "mimeType": "image/png",
+                "data": crate::attachments::base64(
+                    br#"<svg xmlns="http://www.w3.org/2000/svg"><image href="/dev/zero"/></svg>"#
+                )
+            } },
+        ]))
+        .unwrap();
+        let mut call = ToolEntry {
+            id: "toolu_01/../x".into(),
+            ..ToolEntry::placeholder()
+        };
+        call.keep_images_in(&content, &dir);
+        assert_eq!(call.images.len(), 1);
+        let path = call.images[0].clone();
+        assert_eq!(std::fs::read(&path).unwrap(), png);
+        assert!(path.starts_with(&dir), "{}", path.display());
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            "tool-toolu_01x-0.png",
+            "a file's name holds nothing of a path"
+        );
+        // The same content again (every update carries it) writes nothing
+        // new, and an update without pictures keeps the ones there are.
+        let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+        call.keep_images_in(&content, &dir);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            written
+        );
+        call.keep_images_in(&content[..1], &dir);
+        assert_eq!(call.images, vec![path]);
+        // Kept with the chat.
+        let stored = serde_json::to_value(&call).unwrap();
+        let back: ToolEntry = serde_json::from_value(stored).unwrap();
+        assert_eq!(back.images, call.images);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn output_reads_as_a_terminal_left_it() {
+        // Colours and cursor moves are taken out.
+        assert_eq!(
+            plain("\u{1b}[1;32m   Compiling\u{1b}[0m app v0.1\u{1b}[K\n"),
+            "   Compiling app v0.1\n"
+        );
+        // A title or a link sequence, ended either way.
+        assert_eq!(
+            plain("a\u{1b}]0;title\u{7}b\u{1b}]8;;http://x\u{1b}\\c"),
+            "abc"
+        );
+        // A progress bar that rewrote its line shows as it ended.
+        assert_eq!(plain("10%\r50%\r100% done\r\nnext\n"), "100% done\nnext\n");
+        assert_eq!(plain("plain text\n"), "plain text\n");
+    }
+
+    #[test]
     fn diff_counts_and_caps_lines() {
         let old = "a\nb\nc\n";
         let new = "a\nB\nc\nd\n";
@@ -939,18 +1505,20 @@ mod tests {
     fn tool_entries_round_trip_through_the_store() {
         let tool = ToolEntry {
             id: "t1".into(),
-            title: "mcp__pilothouse__board_list".into(),
+            title: "mcp__pilothouse__test_list".into(),
             kind: ToolKindLabel::Other,
             status: ToolStatus::Done,
             output: "ok".into(),
             diffs: Vec::new(),
             children: Vec::new(),
             agent_text: String::new(),
+            run: Default::default(),
+            images: Vec::new(),
             expanded: false,
             started: None,
             touched: None,
         };
-        assert_eq!(tool.display_title(), "board list · pilothouse");
+        assert_eq!(tool.display_title(), "test list · pilothouse");
         let body = serde_json::to_string(&StoredEntry::Tool(tool.clone())).unwrap();
         match serde_json::from_str::<StoredEntry>(&body).unwrap() {
             StoredEntry::Tool(restored) => assert_eq!(restored, tool),
@@ -1020,13 +1588,13 @@ mod tests {
             "sessionId": "s1",
             "update": { "sessionUpdate": "some_future_update", "x": 1 }
         });
-        assert!(parse_update(&params).is_none());
+        assert!(parse_update(params).is_none());
 
         let params = serde_json::json!({
             "sessionId": "s1",
             "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "hi" } }
         });
-        let parsed = parse_update(&params).unwrap();
+        let parsed = parse_update(params).unwrap();
         assert_eq!(parsed.session_id, "s1");
         assert!(parsed.parent.is_none());
 
@@ -1039,7 +1607,7 @@ mod tests {
             }
         });
         assert_eq!(
-            parse_update(&params).unwrap().parent.as_deref(),
+            parse_update(params).unwrap().parent.as_deref(),
             Some("toolu_1")
         );
     }

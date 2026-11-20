@@ -1,7 +1,7 @@
 //! Templates: what an agent is asked to do with a pull request, and how its
 //! answer should look. PilotHouse ships some (review, security review,
 //! explain, test plan); the user can edit them, put them back as shipped,
-//! and add their own (Settings → Templates).
+//! and add their own (Settings → Review templates).
 //!
 //! - A **review** template's text is the reviewing guide: what to look for,
 //!   what each severity means, what counts as evidence. PilotHouse adds the

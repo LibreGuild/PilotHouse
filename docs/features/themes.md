@@ -18,7 +18,7 @@ PilotHouse comes with eight themes, and you can design your own by describing it
 | One Light | light | Atom's One Light |
 | Studio Dark | dark | Android Studio's and IntelliJ's dark look |
 
-Themes you made are listed after them, marked *(yours)*. *Use light appearance* and *Use dark appearance* in the command palette switch to the theme's light or dark version (Modern, Warm and One come in both), else to Modern Light or Modern Dark. Fonts, sizes, corners and a translucent window are settings of their own, kept whichever theme you choose.
+Themes you made are listed after them, marked *(yours)*. *Use light appearance* and *Use dark appearance* in the command palette switch to the theme's light or dark version (Modern, Warm and One come in both), else to Modern Light or Modern Dark. Fonts, sizes and corners are settings of their own, kept whichever theme you choose. (The window's background was one too, with translucent, Mica, gradient and picture looks; the window is plain now.)
 
 A choice saved by an earlier version (Light, or Dark with Modern or Warm) becomes the theme it showed, once.
 
@@ -26,11 +26,10 @@ A choice saved by an earlier version (Light, or Dark with Modern or Warm) become
 
 All in **Settings → Appearance**; the defaults are the look PilotHouse has always had.
 
-- **Accent**: one color for focus outlines, links, selected text, highlights and progress, laid over whichever theme is chosen (the first, empty swatch is the theme's own). The main buttons take it too when the theme draws them in its accent (Modern Dark's Send), not when they are its own color (Modern Light's black). Each color comes in a shade that reads on a dark theme and one for a light theme.
-- **Density** (*Layout*): Compact, Comfortable or Spacious: the height of rows and the spacing in the sidebar, the file tree, the Git lists and the chat. Text keeps its size (that is *Interface size*).
+- **Accent**: one color laid over whichever theme is chosen (the first, empty swatch is the theme's own), wherever the theme shows its own accent: focus outlines, links, selected text, the text cursor, progress, the controls that show a choice (switches, checkboxes, radio buttons, a tab's line; they are drawn in `primary`), and the main buttons when the theme draws them in a color (Modern Dark's blue Send), not when they are ink (Modern Light's black; `is_colored`, by the color's chroma). Text on the accent reads at 4.5 to 1 or better: ink on a bright one (the green, teal, amber, orange: by luminance, `text_on`), white on the others, whose fill is darkened a shade where white needs it (`fill`). The accent as text is lightened or darkened until it reads on the theme (`readable`). The colors that say a state (`info`, `success`, `warning`, `danger`) never follow it, so *Working* cannot come to look like *Ready for review*: a view that tints an icon or a word only to draw the eye uses `link`, a border `ring`, and those follow.
+- **Density** (*Layout*): Compact, Comfortable or Spacious: the height of rows and the spacing in the lists, the file tree, the Git lists and the chat. Text keeps its size (that is *Interface size*).
 - **Interface font and size** (*Text*): the default font is Inter, which PilotHouse carries, so the interface looks the same on macOS, Windows and Linux; *System font* is the system's own, and every installed family is listed. *Interface size* (11 to 24, 16 by default) is the size of everything, not only of text: rows, icons, paddings and dialogs grow and shrink with it, as a web page does when it is zoomed (⌘+ and ⌘− do the same in half steps). Code has its own font (JetBrains Mono by default, without ligatures) and size in *Editor* and *Terminal*.
 - **Terminal colors** follow the theme: Dracula's terminal looks like Dracula. The themes from earlier versions keep the terminal as it was; a theme file sets its own with `terminal`.
-- **Background** (*Window*): Solid, Translucent (the desktop, blurred), Mica on Windows, a **Gradient** (Dusk, Ocean, Aurora, Ember, Graphite; deep on a dark theme, soft on a light one) or an **Image** of yours. A gradient or image shows behind the frame (sidebar, title bar, the strips around the panels) under a veil of the frame's color, so its text stays readable; the panels keep *Panel opacity*. PilotHouse keeps its own copy of the image, scaled to a screen's size off the UI thread, so a large photo costs a screen's worth of memory.
 
 ## Designing your own
 
@@ -50,7 +49,7 @@ The agent works with the `theme_*` tools of PilotHouse's MCP server:
 
 ## The frame's colour
 
-The window's frame (the title bar, the two columns of icons, the status bar; see [the workspace page](workspace.md)) is one piece and takes one colour: the theme's `sidebar.background`, a little lighter at the top and darker at the bottom, with the colour of the workspace in front laid faintly over it. A theme's `title_bar.background` and `status_bar.background` are not painted there (a theme that gave its status bar a colour of its own, as some imported ones do, shows the frame's instead); other windows (a file's own, Studio) still use them.
+The window's frame (the title bar, the column of icons, the status bar; see [the workspace page](workspace.md)) is one piece and takes one colour: the theme's `sidebar.background`, a little lighter at the top and darker at the bottom, with the colour of the workspace in front laid faintly over it. A theme's `title_bar.background` and `status_bar.background` are not painted there (a theme that gave its status bar a colour of its own, as some imported ones do, shows the frame's instead); other windows (a file's own, Studio) still use them.
 
 ## Importing a VS Code theme
 
@@ -67,7 +66,7 @@ Your themes are JSON files in `<data dir>/themes` (**Open folder** in Settings s
 | `crates/theme/themes/pilothouse.json` | PilotHouse's eight themes |
 | `crates/theme/src/themes.rs` | The themes to choose from (PilotHouse's and yours), the selected one, the preview, saving and deleting |
 | `crates/theme/src/appearance.rs` | The choice (`Appearance`: the system, or a theme by name) and showing it |
-| `crates/theme/src/preferences.rs` | Fonts, sizes, corners, accent, density and the window's background, laid over the theme |
+| `crates/theme/src/preferences.rs` | Fonts, sizes, corners, accent and density, laid over the theme |
 | `crates/theme/src/fonts.rs`, `crates/theme/fonts/` | The fonts PilotHouse carries (Inter, JetBrains Mono) and loading them |
 | `crates/ui/src/scale.rs` | `rems_from_px` and `scaled_px`: sizes that follow the interface size |
 | `crates/theme/src/vscode.rs` | Importing VS Code color themes |

@@ -28,6 +28,15 @@ impl ViewMode {
         }
     }
 
+    /// The mode in a word, where its menu says which is in use.
+    pub fn name(self) -> &'static str {
+        match self {
+            ViewMode::Detailed => "Detailed",
+            ViewMode::Normal => "Normal",
+            ViewMode::Summary => "Summary",
+        }
+    }
+
     /// The mode chats are shown in.
     pub fn current(cx: &App) -> Self {
         cx.try_global::<Current>()

@@ -43,6 +43,29 @@ const HISTORY_PREAMBLE_CHARS: usize = 8_000;
 /// background command or subagent) counts as done after this long without
 /// an update and with no tool call running…
 const BACKGROUND_QUIET: Duration = Duration::from_secs(8);
+/// What an agent's own program needs to go on with a chat's conversation
+/// (see [`ChatThread::hand_over`]).
+#[derive(Debug, Clone)]
+pub struct Handover {
+    pub agent: &'static AgentSpec,
+    /// The chat as stored; `None` for one nothing was sent in.
+    pub session: Option<Session>,
+    /// The agent's own session to go on with; `None` when there is none
+    /// yet, and the program starts one.
+    pub resume: Option<String>,
+    /// Where the agent works.
+    pub cwd: std::path::PathBuf,
+    /// The chat's model and mode, as the agent names them, to start the
+    /// program with: a switch must not quietly change either.
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    /// Which of the agent's accounts the chat is in (empty: its own).
+    pub account: String,
+}
+
+/// How long an agent has to stop when asked, before Stop offers to end its
+/// process instead. Longer than a second press by mistake.
+const STOP_GRACE: Duration = Duration::from_secs(3);
 /// …or after this long without any update at all.
 const BACKGROUND_SILENT: Duration = Duration::from_secs(90);
 
@@ -151,7 +174,9 @@ pub enum ThreadEvent {
     /// The agent finished a turn (or it stopped or failed).
     TurnEnded,
     /// The first send created the stored session.
-    SessionCreated(Session),
+    SessionCreated(Box<Session>),
+    /// The agent named the session: lists of the chats show the new name.
+    Renamed,
     /// A review card asks to open a file, or for a new review run.
     Review(ReviewCardEvent),
 }
@@ -166,6 +191,9 @@ pub enum ReviewTurn {
     Claim { finding_id: i64 },
     /// A walkthrough, saved as run `run_id`.
     Walkthrough { run_id: i64 },
+    /// An explanation of a change, saved as explanation `id` (started in
+    /// the store, without its text).
+    Explanation { id: i64 },
 }
 
 /// The agent session id, once set up; shared so concurrent callers await one setup.
@@ -180,6 +208,12 @@ pub struct ChatThread {
     connection: Option<Entity<AgentConnection>>,
     acp_session_id: Option<String>,
     setup: Option<SetupTask>,
+    /// Which set-up of an agent session is the chat's: counted up when one
+    /// starts and when one is let go of (another account, the agent ended).
+    /// A set-up still under way then finds another number here when it
+    /// ends, and leaves the chat as it is: its session is the old account's
+    /// or a process's that is gone, and a newer set-up may be under way.
+    setup_generation: u64,
     /// What the agent offers (model, mode, effort…); from the cache until the session exists.
     options: Vec<AgentOption>,
     /// Ignore streamed history while the agent replays a resumed session.
@@ -192,6 +226,15 @@ pub struct ChatThread {
     /// The agent session was started anew for a chat that had one before
     /// (the agent cannot resume it): the next message carries a recap.
     recap_due: bool,
+    /// When the turn was asked to stop, while it has not.
+    stop_asked: Option<Instant>,
+    /// Which of the agent's accounts the chat is in (`profiles`); empty
+    /// for the agent's own. Fixed once something was said.
+    account: String,
+    /// The name the chat was given by itself (from its first message, or
+    /// by its agent), in this run: the agent's own name for the session
+    /// may replace this one, never a name the user gave.
+    auto_title: Option<String>,
     entries: Vec<Entry>,
     /// The questions of `entries` still waiting for an answer, oldest
     /// first: the sidebar and title bar ask on every frame, and a long
@@ -200,8 +243,13 @@ pub struct ChatThread {
     /// Replies whose drawn view is kept, most recently drawn last (see
     /// [`KEPT_VIEWS`]).
     views: VecDeque<usize>,
+    /// Where each open command's output is scrolled to, by the call's id.
+    /// A command opens at its end: that is where a failure says why.
+    output_scrolls: HashMap<String, gpui_kit::ScrollHandle>,
     /// `entries[..saved]` are in the store.
     saved: usize,
+    /// What the chat did, in numbers, as the store has it.
+    facts_saved: Option<ph_store::sessions::SessionFacts>,
     status: ThreadStatus,
     scroller: Entity<TranscriptScroll>,
     /// The PR review this chat runs, if it is a review chat.
@@ -286,15 +334,21 @@ impl ChatThread {
             connection: None,
             acp_session_id: None,
             setup: None,
+            setup_generation: 0,
             options,
             replaying: false,
             importing: false,
             accepts_images: true,
             recap_due: false,
+            stop_asked: None,
+            account: String::new(),
+            auto_title: None,
             entries: Vec::new(),
             pending: Vec::new(),
             views: VecDeque::new(),
+            output_scrolls: HashMap::new(),
             saved: 0,
+            facts_saved: None,
             status: ThreadStatus::Idle,
             scroller,
             review_id: None,
@@ -329,25 +383,160 @@ impl ChatThread {
     /// Code a process of its own and its MCP servers, hundreds of MB.
     fn end_session_on_release(cx: &mut Context<Self>) {
         cx.on_release(|this, cx| {
-            let Some(connection) = this.connection.take() else {
-                return;
-            };
-            let (known, setup) = (this.acp_session_id.take(), this.setup.take());
-            if known.is_none() && setup.is_none() {
-                return;
-            }
-            // A session still being set up (a draft warmed a moment ago) is
-            // closed once it exists.
-            let session = async move {
-                match (known, setup) {
-                    (Some(id), _) => Some(id),
-                    (None, Some(setup)) => setup.await.ok(),
-                    (None, None) => None,
-                }
-            };
-            connection.read(cx).close_session(session, cx);
+            this.end_agent_session(cx);
+            // Its pictures too (sent images, what tools gave back): each
+            // one drawn stays decoded until GPUI is told to let go.
+            let mut pictures = crate::attachment_view::pictures(&this.entries);
+            pictures.extend(
+                this.queued
+                    .iter()
+                    .flat_map(|prompt| &prompt.attachments)
+                    .filter_map(|attachment| attachment.image.clone()),
+            );
+            ph_ui::images::release_paths(pictures, cx);
         })
         .detach();
+    }
+
+    /// Lets go of the chat's session set-up, done or still under way: one
+    /// under way no longer writes to the chat when it ends (see
+    /// `setup_generation`). Whoever takes it sees to the session it makes.
+    fn take_setup(&mut self) -> Option<SetupTask> {
+        self.setup_generation += 1;
+        self.setup.take()
+    }
+
+    /// Ends the chat's agent session, where the agent can, and lets go of
+    /// the agent. The agent keeps the conversation: a next message here
+    /// would load it again.
+    fn end_agent_session(&mut self, cx: &mut App) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        let (known, setup) = (self.acp_session_id.take(), self.take_setup());
+        if known.is_none() && setup.is_none() {
+            return;
+        }
+        // A session still being set up (a draft warmed a moment ago) is
+        // closed once it exists.
+        let session = async move {
+            match (known, setup) {
+                (Some(id), _) => Some(id),
+                (None, Some(setup)) => setup.await.ok(),
+                (None, None) => None,
+            }
+        };
+        connection.read(cx).close_session(session, cx);
+    }
+
+    /// Hands the conversation to the agent's own program (a session's CLI
+    /// form): the chat's agent session ends, since two programs must never
+    /// go on with one conversation, and what the program needs to go on is
+    /// returned. Refused, with why, while the chat works or waits for an
+    /// answer: a turn under way cannot be moved.
+    ///
+    /// The task with it resolves once the agent's side has let go: the
+    /// program is started on the conversation only then. (An agent keeps a
+    /// hold on a conversation it has open; Antigravity and Codex say
+    /// "already open in another process" to a CLI started too soon, and
+    /// Codex then takes no input.)
+    pub fn hand_over(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<(Handover, Task<()>), SharedString> {
+        let name = self.agent.name;
+        if self.status != ThreadStatus::Idle || self.background {
+            return Err(format!(
+                "{name} is still working. Stop it, or wait, then switch to its CLI."
+            )
+            .into());
+        }
+        if !self.pending.is_empty() {
+            return Err(format!("{name} waits for an answer. Answer it, then switch.").into());
+        }
+        if !self.queued.is_empty() {
+            return Err("Messages are still waiting to be sent in this chat.".into());
+        }
+        // One process serves every chat of this agent here. While another
+        // of them works it cannot be ended, and an agent that cannot close
+        // one session by itself would keep its hold on this conversation.
+        let me = cx.entity_id();
+        if let Some(connection) = &self.connection {
+            let connection = connection.read(cx);
+            if connection.busy(Some(me), cx) && connection.closes_sessions() == Some(false) {
+                return Err(format!(
+                    "{name} cannot let go of this conversation while another of its chats here is at work. Wait for that chat, then switch."
+                )
+                .into());
+            }
+        }
+        // The agent keeps a session once something was said in it. One
+        // only warmed up has nothing to go on with (and no file of its
+        // own to find): the CLI then starts a session of its own.
+        let said = self
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::User { .. }));
+        let resume = said
+            .then(|| {
+                self.acp_session_id.clone().or_else(|| {
+                    self.session
+                        .as_ref()
+                        .and_then(|session| session.acp_session_id.clone())
+                })
+            })
+            .flatten();
+        let choice = |category: options::OptionCategory| {
+            self.options
+                .iter()
+                .find(|option| option.category == category)
+                .map(|option| option.current.clone())
+                .filter(|value| !value.is_empty())
+        };
+        let handover = Handover {
+            agent: self.agent,
+            session: self.session.clone(),
+            resume,
+            cwd: self.project.path.clone(),
+            model: choice(options::OptionCategory::Model),
+            mode: choice(options::OptionCategory::Mode),
+            account: self.account.clone(),
+        };
+        self.persist(cx);
+        let released = self.release_conversation(cx);
+        self.reads_this_turn = false;
+        self.app_tools_this_turn = false;
+        cx.notify();
+        Ok((handover, released))
+    }
+
+    /// Makes the agent's side let go of the chat's conversation, for
+    /// another program to go on with it; resolves when it has.
+    ///
+    /// Where no other chat of the agent's process is at work, the process
+    /// is ended: the one sure way that nothing of it holds the
+    /// conversation (its other chats, at rest, load their sessions again
+    /// with their next message). Where one is, only this session is
+    /// closed, and that is waited for.
+    fn release_conversation(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        let Some(connection) = self.connection.take() else {
+            return Task::ready(());
+        };
+        let (known, setup) = (self.acp_session_id.take(), self.take_setup());
+        let me = cx.entity_id();
+        if !connection.read(cx).busy(Some(me), cx) {
+            let message = SharedString::from(format!("{} restarted.", self.agent.name));
+            connection.update(cx, |connection, cx| connection.end(Some(me), message, cx));
+            return Task::ready(());
+        }
+        let session = async move {
+            match (known, setup) {
+                (Some(id), _) => Some(id),
+                (None, Some(setup)) => setup.await.ok(),
+                (None, None) => None,
+            }
+        };
+        connection.read(cx).closed_session(session, cx)
     }
 
     /// Whether this chat is a new one nothing happened in yet (no message,
@@ -513,6 +702,38 @@ impl ChatThread {
                     cx,
                 );
             }
+            ReviewTurn::Explanation { id } => {
+                let session = self.session.as_ref().map(|session| session.id);
+                let notice = match ph_review::explanation::parse(&reply) {
+                    Some(explanation) => match self.store.finish_explanation(
+                        id,
+                        &explanation.title(),
+                        &explanation.markdown,
+                        session,
+                    ) {
+                        Ok(()) => "The explanation is ready in the Git tab.".to_string(),
+                        Err(err) => format!("Could not save the explanation: {err:#}"),
+                    },
+                    None => {
+                        // Nothing to show for it: no one waits for it.
+                        let _ = self.store.delete_explanation(id);
+                        format!(
+                            "No explanation in that reply (between {} and {}).",
+                            ph_review::explanation::START,
+                            ph_review::explanation::END
+                        )
+                    }
+                };
+                // Every view of the change shows it now.
+                crate::explanations::Explanations::written(id, cx);
+                self.push(
+                    Entry::Notice {
+                        text: notice,
+                        is_error: false,
+                    },
+                    cx,
+                );
+            }
         }
     }
 
@@ -599,9 +820,14 @@ impl ChatThread {
             thread.watch_card(entry, cx);
         }
         thread.saved = entries.len();
+        thread.facts_saved = session.facts.clone();
         thread.usage = thread.store.session_usage(session.id).ok().flatten();
         thread.scroller = cx.new(|cx| TranscriptScroll::new(entries.len(), cx));
         thread.entries = entries;
+        thread.account = session.account.clone();
+        // It shows what was chosen in it, not what new chats start in.
+        thread.options =
+            options::with_preferences(std::mem::take(&mut thread.options), &session.options);
         thread.session = Some(session);
         thread
     }
@@ -635,6 +861,8 @@ impl ChatThread {
     pub fn show_history(&mut self, keep: usize, entries: Vec<Entry>, cx: &mut Context<Self>) {
         let keep = keep.min(self.entries.len());
         let old = self.entries.len();
+        // The pictures of the entries that go are let go of with them.
+        ph_ui::images::release_paths(crate::attachment_view::pictures(&self.entries[keep..]), cx);
         self.entries.truncate(keep);
         let added = entries.len();
         self.entries.extend(entries);
@@ -694,6 +922,15 @@ impl ChatThread {
             let request = request.read(cx);
             request.is_pending().then(|| request.title.to_string())
         })
+    }
+
+    /// The newest question still waiting for the user.
+    pub fn pending_request(&self, cx: &App) -> Option<Entity<PermissionRequest>> {
+        self.pending
+            .iter()
+            .rev()
+            .find(|request| request.read(cx).is_pending())
+            .cloned()
     }
 
     /// The last turn ended in an error (the agent failed or exited).
@@ -903,6 +1140,62 @@ impl ChatThread {
         self.acp_session_id.is_some() || self.setup.is_some() || !self.entries.is_empty()
     }
 
+    /// The agent's own name for the session takes the place of the name
+    /// the chat got from its first message (that one is the message cut
+    /// short; the agent's says what the work is). A name the user gave
+    /// stays.
+    fn take_agent_title(&mut self, title: &str, cx: &mut Context<Self>) {
+        let title = title.trim();
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        if title.is_empty()
+            || session.title == title
+            || self.auto_title.as_deref() != Some(session.title.as_str())
+        {
+            return;
+        }
+        if self.store.rename_session(session.id, title).is_ok() {
+            session.title = title.to_string();
+            self.auto_title = Some(title.to_string());
+            cx.emit(ThreadEvent::Renamed);
+            cx.notify();
+        }
+    }
+
+    /// Which of the agent's accounts the chat is in; empty for its own.
+    pub fn account(&self) -> &str {
+        &self.account
+    }
+
+    /// Whether the chat's account can still be another: nothing was said
+    /// in it. A session only warmed up is let go for it.
+    pub fn can_change_account(&self) -> bool {
+        self.status == ThreadStatus::Idle
+            && !self.background
+            && !self
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::User { .. }))
+    }
+
+    /// Puts the chat in `account` of its agent (empty: the agent's own).
+    /// Only before something is said: the agent keeps a conversation in
+    /// its account's files, and it cannot move.
+    pub fn set_account(&mut self, account: &str, cx: &mut Context<Self>) {
+        if self.account == account || !self.can_change_account() {
+            return;
+        }
+        // A session warmed up in the account it was in is not this one's.
+        self.end_agent_session(cx);
+        self.account = account.to_string();
+        if let Some(session) = &mut self.session {
+            let _ = self.store.set_session_account(session.id, account);
+            session.account = account.to_string();
+        }
+        cx.notify();
+    }
+
     /// Changes the agent. Only allowed before the agent session started.
     pub fn set_agent(&mut self, agent: &'static AgentSpec, cx: &mut Context<Self>) {
         if self.has_started() || self.agent.id == agent.id {
@@ -966,7 +1259,18 @@ impl ChatThread {
         // `cline::launch_env`): Cline is started again on it.
         let pinned_before = (self.agent.id == "cline" && option_id == "provider")
             .then(|| crate::cline::pinned(&self.store));
-        options::remember(&self.store, self.agent.id, option_id, value);
+        // In a chat nothing was said in yet, a choice is how the user wants
+        // chats with this agent to start. Once something was said it is
+        // this chat's own: putting one chat in plan mode must not put the
+        // next one there. (Cline's provider is the agent's, always.)
+        let said = self
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::User { .. }));
+        if !said || pinned_before.is_some() {
+            options::remember(&self.store, self.agent.id, option_id, value);
+        }
+        self.keep_choice(option_id, value);
         if let Some(before) = pinned_before {
             let after = crate::cline::pinned(&self.store);
             if crate::cline::needs_restart(before.as_deref(), after.as_deref()) {
@@ -1014,6 +1318,24 @@ impl ChatThread {
         .detach();
     }
 
+    /// Keeps a choice with the chat (once it is stored): what it is put
+    /// back in when it is picked up again, whatever the agent's defaults
+    /// are by then.
+    fn keep_choice(&mut self, option_id: &str, value: &str) {
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        if session.options.get(option_id).map(String::as_str) == Some(value) {
+            return;
+        }
+        session
+            .options
+            .insert(option_id.to_string(), value.to_string());
+        if let Err(err) = self.store.set_session_options(session.id, &session.options) {
+            tracing::warn!("keeping a chat's choice: {err:#}");
+        }
+    }
+
     /// Starts the agent again, in every workspace, for an option it takes
     /// only at its start (`option_id` set to `value`); this chat goes on in
     /// a new session, told what was said. Not while one of its chats works:
@@ -1037,7 +1359,7 @@ impl ChatThread {
         if restarted {
             option.current = value.to_string();
             self.acp_session_id = None;
-            self.setup = None;
+            self.take_setup();
             self.connection = None;
         } else {
             // Kept as it is: the choice is the user's to make again.
@@ -1082,6 +1404,19 @@ impl ChatThread {
                         let _ = self.store.set_session_acp_id(session.id, Some(acp_id));
                         session.acp_session_id = Some(acp_id.clone());
                     }
+                    if !self.account.is_empty() {
+                        let _ = self.store.set_session_account(session.id, &self.account);
+                        session.account = self.account.clone();
+                    }
+                    self.auto_title = Some(session.title.clone());
+                    // What the chat starts in is its own from here on.
+                    session.options = self
+                        .options
+                        .iter()
+                        .filter(|option| !option.current.is_empty())
+                        .map(|option| (option.id.clone(), option.current.clone()))
+                        .collect();
+                    let _ = self.store.set_session_options(session.id, &session.options);
                     if let Some(review_id) = self.review_id {
                         let cwd = self.project.path.to_string_lossy().to_string();
                         let _ = self
@@ -1104,7 +1439,7 @@ impl ChatThread {
                         let _ = self.store.set_session_place(session.id, "chat", Some(&cwd));
                         session.cwd = Some(cwd);
                     }
-                    cx.emit(ThreadEvent::SessionCreated(session.clone()));
+                    cx.emit(ThreadEvent::SessionCreated(Box::new(session.clone())));
                     self.session = Some(session);
                 }
                 Err(err) => {
@@ -1251,8 +1586,11 @@ impl ChatThread {
                 };
                 // Token totals, when the agent reports them (not in the stable
                 // schema yet, so read from the raw reply).
-                if let Some(report) = response.get("usage").and_then(turn_usage) {
-                    _ = this.update(cx, |this, cx| this.record_usage(report, cx));
+                if let Some(mut report) = response.get("usage").and_then(turn_usage) {
+                    _ = this.update(cx, |this, cx| {
+                        report.per_turn = counts_turn_tokens(this.agent().id);
+                        this.record_usage(report, cx)
+                    });
                 }
                 let response: PromptResponse = serde_json::from_value(response)
                     .map_err(|err| SharedString::from(format!("Unexpected prompt reply: {err}")))?;
@@ -1299,6 +1637,65 @@ impl ChatThread {
         })
         .detach();
         self.cancel_pending_permissions(cx);
+        // Stopping is a request the agent answers. One that does not (a
+        // tool that hangs, an agent that no longer reads) is seen as slow,
+        // and Stop then ends its process.
+        if self.status != ThreadStatus::Idle && self.stop_asked.is_none() {
+            self.stop_asked = Some(Instant::now());
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(STOP_GRACE).await;
+                _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+    }
+
+    /// Whether the turn was asked to stop a while ago and still goes on.
+    pub fn stop_is_slow(&self) -> bool {
+        self.status != ThreadStatus::Idle
+            && self
+                .stop_asked
+                .is_some_and(|asked| asked.elapsed() >= STOP_GRACE)
+    }
+
+    /// Ends the agent's process: for a turn that does not stop when asked.
+    /// The process serves every chat of this agent in the workspace, so
+    /// those at work lose their turn too, and are told why. Each chat picks
+    /// its conversation up again with its next message.
+    pub fn force_stop(&mut self, cx: &mut Context<Self>) {
+        let me = cx.entity_id();
+        let name = self.agent.name;
+        if let Some(connection) = self.connection.take() {
+            connection.update(cx, |connection, cx| {
+                connection.end(
+                    Some(me),
+                    format!("{name} was stopped from another chat. Send a message to go on.")
+                        .into(),
+                    cx,
+                )
+            });
+        }
+        // The prompt's answer will not come: nothing waits for it.
+        self._turn = None;
+        self.acp_session_id = None;
+        self.take_setup();
+        self.reads_this_turn = false;
+        self.app_tools_this_turn = false;
+        if self.background {
+            self.end_background(false, cx);
+        } else if self.status != ThreadStatus::Idle {
+            self.finish_turn(Ok(StopReason::Cancelled), cx);
+        }
+        self.push(
+            Entry::Notice {
+                text: format!(
+                    "{name} did not stop when asked, so its process was ended. Your next message starts it again."
+                ),
+                is_error: false,
+            },
+            cx,
+        );
+        self.persist(cx);
     }
 
     /// Runs an agent-handled sign-in, then asks the user to retry.
@@ -1361,7 +1758,22 @@ impl ChatThread {
                     .find(|option| option.category == options::OptionCategory::Mode)
                 {
                     mode.current = update.current_mode_id.0.to_string();
+                    // The agent changed it (out of plan mode once the plan
+                    // was approved): the chat keeps that.
+                    let (id, value) = (mode.id.clone(), mode.current.clone());
+                    self.keep_choice(&id, &value);
                     cx.notify();
+                }
+                return;
+            }
+            // The agent's own name for the session (Claude Code and Codex
+            // name one after a turn or two).
+            SessionUpdate::SessionInfoUpdate(info) => {
+                let title = serde_json::to_value(info)
+                    .ok()
+                    .and_then(|info| info["title"].as_str().map(str::to_string));
+                if let Some(title) = title {
+                    self.take_agent_title(&title, cx);
                 }
                 return;
             }
@@ -1651,27 +2063,46 @@ impl ChatThread {
             .iter()
             .map(PermissionChoice::from_option)
             .collect();
+        // The call as the transcript knows it, with what the question adds.
+        let mut tool = self
+            .tool_index(&request.tool_call.tool_call_id.0)
+            .and_then(|ix| match &self.entries[ix] {
+                Entry::Tool(tool) => Some(tool.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(ToolEntry::placeholder);
+        tool.apply(&request.tool_call);
         // Approving a plan: the plan goes in the card, to read before
         // answering.
-        let plan = (request.tool_call.fields.kind
-            == Some(agent_client_protocol_schema::v1::ToolKind::SwitchMode))
-        .then(|| {
-            let mut tool = self
-                .tool_index(&request.tool_call.tool_call_id.0)
-                .and_then(|ix| match &self.entries[ix] {
-                    Entry::Tool(tool) => Some(tool.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(ToolEntry::placeholder);
-            tool.apply(&request.tool_call);
-            tool.output
-        })
-        .filter(|plan| !plan.trim().is_empty())
-        .map(|plan| cx.new(|cx| crate::reply::Reply::new(&plan, cx)));
+        let is_plan = request.tool_call.fields.kind
+            == Some(agent_client_protocol_schema::v1::ToolKind::SwitchMode);
+        let plan = is_plan
+            .then(|| tool.output.clone())
+            .filter(|plan| !plan.trim().is_empty())
+            .map(|plan| cx.new(|cx| crate::reply::Reply::new(&plan, cx)));
+        // Anything else: the command, the edit or the tool's input, whole.
+        let asked = if is_plan {
+            crate::permission::Asked::default()
+        } else {
+            // The card names files from the workspace's folder, as the
+            // transcript does.
+            let root = self.project.path.clone();
+            for diff in &mut tool.diffs {
+                let (folder, name) = crate::entry_view::shown_path(&diff.path, Some(&root));
+                diff.path = format!("{folder}{name}");
+            }
+            crate::permission::Asked::of(
+                &title,
+                tool.kind,
+                request.tool_call.fields.raw_input.as_ref(),
+                tool.diffs,
+            )
+        };
         let permission = cx.new(|_| {
             let mut permission =
                 PermissionRequest::new(source.into(), title.into(), choices, respond);
             permission.plan = plan;
+            permission.asked = asked;
             permission
         });
         self.add_request(permission, cx);
@@ -1766,16 +2197,33 @@ impl ChatThread {
         self.acp_session_id = None;
         self.reads_this_turn = false;
         self.app_tools_this_turn = false;
-        self.setup = None;
+        self.take_setup();
         self.connection = None;
         if self.status != ThreadStatus::Idle {
+            // The prompt's own failure ("the agent process exited") would
+            // end the turn a second time, saying less.
+            self._turn = None;
             self.finish_turn(Err(message), cx);
         }
     }
 
+    /// Where the output of the open command `id` is scrolled to.
+    pub fn output_scroll(&self, id: &str) -> Option<gpui_kit::ScrollHandle> {
+        self.output_scrolls.get(id).cloned()
+    }
+
     pub fn toggle_expanded(&mut self, ix: usize, cx: &mut Context<Self>) {
         match self.entries.get_mut(ix) {
-            Some(Entry::Tool(tool)) => tool.expanded = !tool.expanded,
+            Some(Entry::Tool(tool)) => {
+                tool.expanded = !tool.expanded;
+                if tool.expanded && tool.kind == crate::transcript::ToolKindLabel::Execute {
+                    let scroll = gpui_kit::ScrollHandle::new();
+                    scroll.scroll_to_bottom();
+                    self.output_scrolls.insert(tool.id.clone(), scroll);
+                } else {
+                    self.output_scrolls.remove(&tool.id);
+                }
+            }
             Some(Entry::Thought { expanded, .. }) => *expanded = !*expanded,
             _ => return,
         }
@@ -1792,6 +2240,10 @@ impl ChatThread {
         if let Some(setup) = &self.setup {
             return setup.clone();
         }
+        // This set-up is the chat's from here; one before it that is still
+        // under way is not any more (see `setup_generation`).
+        self.setup_generation += 1;
+        let generation = self.setup_generation;
         self.connection = Some(connection.clone());
         let ready = connection.read(cx).ready();
         let cwd = self.project.path.clone();
@@ -1800,7 +2252,11 @@ impl ChatThread {
             .session
             .as_ref()
             .and_then(|session| session.acp_session_id.clone());
-        let prefs = options::preferences(&self.store, agent.id);
+        // The agent's defaults, with the chat's own choices over them.
+        let mut prefs = options::preferences(&self.store, agent.id);
+        if let Some(session) = &self.session {
+            prefs.extend(session.options.clone());
+        }
         let store = self.store.clone();
         let mcp = pilothouse_mcp_server(&cwd, agent.id, self.project.id);
         // The servers set up in Settings → MCP & skills, for every agent.
@@ -1811,7 +2267,11 @@ impl ChatThread {
             let ready: Ready = match ready.await {
                 Ok(ready) => ready,
                 Err(err) => {
-                    let _ = this.update(cx, |this, cx| this.offer_sign_in(&err, &[], cx));
+                    let _ = this.update(cx, |this, cx| {
+                        if this.setup_generation == generation {
+                            this.offer_sign_in(&err, &[], cx)
+                        }
+                    });
                     return Err(err);
                 }
             };
@@ -1832,13 +2292,21 @@ impl ChatThread {
                 // Listen for the replay, which comes before the answer.
                 let weak = this.clone();
                 let replay_id = resume_id.clone();
-                let _ = this.update(cx, |this, cx| {
-                    this.replaying = !this.entries.is_empty();
-                    this.importing = !this.replaying;
-                    connection.update(cx, |connection, _| {
-                        connection.register_thread(replay_id, weak)
-                    });
-                });
+                // Not for a set-up the chat let go of: its replay is no
+                // one's to take in.
+                let listening = this
+                    .update(cx, |this, cx| {
+                        if this.setup_generation != generation {
+                            return false;
+                        }
+                        this.replaying = !this.entries.is_empty();
+                        this.importing = !this.replaying;
+                        connection.update(cx, |connection, _| {
+                            connection.register_thread(replay_id, weak)
+                        });
+                        true
+                    })
+                    .unwrap_or(false);
                 let mut params =
                     json!({ "sessionId": resume_id, "cwd": cwd, "mcpServers": mcp_servers });
                 if !extra.is_empty() {
@@ -1848,9 +2316,13 @@ impl ChatThread {
                     response = Some((resume_id.clone(), result));
                 }
                 let _ = this.update(cx, |this, cx| {
-                    this.replaying = false;
-                    this.importing = false;
-                    this.persist(cx);
+                    // Unless a newer set-up is under way: it may be taking
+                    // in a replay of its own, which is its to end.
+                    if listening && (this.setup_generation == generation || this.setup.is_none()) {
+                        this.replaying = false;
+                        this.importing = false;
+                        this.persist(cx);
+                    }
                 });
             }
             let resumed = response.is_some();
@@ -1867,8 +2339,11 @@ impl ChatThread {
                             let err =
                                 SharedString::from(format!("Could not start a session: {err:#}"));
                             let methods = ready.sign_in.clone();
-                            let _ =
-                                this.update(cx, |this, cx| this.offer_sign_in(&err, &methods, cx));
+                            let _ = this.update(cx, |this, cx| {
+                                if this.setup_generation == generation {
+                                    this.offer_sign_in(&err, &methods, cx)
+                                }
+                            });
                             return Err(err);
                         }
                     };
@@ -1895,10 +2370,35 @@ impl ChatThread {
             let weak = this.clone();
             let id = session_id.clone();
             let _ = this.update(cx, |this, cx| {
+                // Let go of meanwhile (another account was picked, the
+                // agent ended): the session is not the chat's. Whoever let
+                // go of it closes it, by the id returned below.
+                if this.setup_generation != generation {
+                    return;
+                }
                 this.acp_session_id = Some(id.clone());
                 // The chat had a session the agent did not take back: it
                 // starts over in this one.
                 this.recap_due = resume_id.is_some() && !resumed;
+                if this.recap_due {
+                    // Said, not done quietly: the agent no longer knows
+                    // what it knew, only what the summary tells it.
+                    let why = if can_load {
+                        "could not open its own record of this chat"
+                    } else {
+                        "cannot pick a chat up where it left off"
+                    };
+                    this.push(
+                        Entry::Notice {
+                            text: format!(
+                                "{} {why}, so it starts fresh here. It is given a summary of what was said, not all it knew.",
+                                agent.name
+                            ),
+                            is_error: false,
+                        },
+                        cx,
+                    );
+                }
                 this.accepts_images = ready.images && !agent.quirks.text_prompts;
                 if !offered.is_empty() {
                     options::cache(&this.store, agent.id, &offered);
@@ -1937,9 +2437,34 @@ impl ChatThread {
         cx: &mut Context<Self>,
     ) {
         if needs_login(error) && !methods.is_empty() {
+            // Gemini asks for a login where it does not read the key the
+            // user saved: said as what it is.
+            let untrusted = self.agent.id == "gemini"
+                && dirs::home_dir().is_some_and(|home| {
+                    let environment = crate::profiles::Profiles::known()
+                        .of(self.agent.id)
+                        .environment_for(&self.account);
+                    let var = |name: &str| {
+                        environment
+                            .iter()
+                            .find(|(known, _)| known == name)
+                            .map(|(_, value)| value.clone())
+                            .or_else(|| ph_env::var(name).map(str::to_string))
+                    };
+                    crate::gemini_trust::keeps_saved_key_from(&self.project.path, &home, &var)
+                });
+            let (title, message) = if untrusted {
+                (
+                    Some(format!("{} does not trust this folder", self.agent.name)),
+                    crate::gemini_trust::explanation(&self.project.path),
+                )
+            } else {
+                (None, error.to_string())
+            };
             self.push(
                 Entry::SignIn {
-                    message: error.to_string(),
+                    title,
+                    message,
                     methods: methods.to_vec(),
                 },
                 cx,
@@ -2008,6 +2533,7 @@ impl ChatThread {
         self.background = false;
         self.status = ThreadStatus::Idle;
         self.turn_started = None;
+        self.stop_asked = None;
         self.changed_last(cx);
         self.persist(cx);
         cx.emit(ThreadEvent::TurnEnded);
@@ -2042,6 +2568,7 @@ impl ChatThread {
         }
         self.status = ThreadStatus::Idle;
         self.turn_started = None;
+        self.stop_asked = None;
         // The working row goes and the turn's summary comes.
         self.changed_last(cx);
         self.reads_this_turn = false;
@@ -2056,7 +2583,11 @@ impl ChatThread {
         // A turn that did not finish has no answer to read; what is said
         // next is conversation.
         if !matches!(result_kind, Some(StopReason::EndTurn)) {
-            self.review_turn = None;
+            // An explanation that will not come is not waited for.
+            if let Some(ReviewTurn::Explanation { id }) = self.review_turn.take() {
+                let _ = self.store.delete_explanation(id);
+                crate::explanations::Explanations::written(id, cx);
+            }
         }
         match result {
             Ok(StopReason::EndTurn) => self.record_review(cx),
@@ -2136,6 +2667,47 @@ impl ChatThread {
                 self.saved = self.entries.len();
             }
             Err(err) => tracing::warn!("saving chat messages failed: {err:#}"),
+        }
+        self.save_facts();
+    }
+
+    /// What the chat did, in numbers: the files and lines its edits
+    /// changed, and what it ran to check them.
+    fn facts(&self) -> ph_store::sessions::SessionFacts {
+        let (files, added, removed) = crate::transcript::turn_change_counts(&self.entries);
+        let evidence = crate::evidence::of(&self.entries);
+        let total = |count: fn(&crate::evidence::TestRun) -> Option<usize>| {
+            evidence
+                .tests
+                .iter()
+                .filter_map(count)
+                .reduce(|sum, count| sum + count)
+        };
+        ph_store::sessions::SessionFacts {
+            files,
+            added,
+            removed,
+            tests_ok: (!evidence.tests.is_empty()).then(|| evidence.tests.iter().all(|run| run.ok)),
+            tests_passed: total(|run| run.passed),
+            tests_failed: total(|run| run.failed),
+            commands: evidence.commands,
+            screenshots: evidence.screenshots,
+        }
+    }
+
+    /// Keeps the chat's facts with it when they changed, for its card on
+    /// the Bridge (which does not read transcripts).
+    fn save_facts(&mut self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let facts = self.facts();
+        if self.facts_saved.as_ref() == Some(&facts) {
+            return;
+        }
+        match self.store.set_session_facts(session.id, &facts) {
+            Ok(()) => self.facts_saved = Some(facts),
+            Err(err) => tracing::warn!("saving what the chat did failed: {err:#}"),
         }
     }
 
@@ -2425,7 +2997,7 @@ fn to_value(value: &impl serde::Serialize) -> Value {
 }
 
 /// The PilotHouse MCP server, offered to every new agent session so agents
-/// can use the board, the browser and devices. It is this binary in `mcp` mode.
+/// can use the browser, devices and tests. It is this binary in `mcp` mode.
 /// `project_id` names the workspace outright: the agent may work in a copy
 /// (a review, a parallel lane) that no workspace's folder holds.
 pub(crate) fn pilothouse_mcp_server(
@@ -2433,30 +3005,64 @@ pub(crate) fn pilothouse_mcp_server(
     agent_id: &str,
     project_id: ProjectId,
 ) -> Option<McpServer> {
-    let exe = ph_store::paths::helper_program("mcp").ok()?;
-    let mut env = Vec::new();
-    if let Some(dir) = std::env::var_os(ph_store::paths::DATA_DIR_ENV) {
-        env.push(EnvVariable::new(
-            ph_store::paths::DATA_DIR_ENV,
-            dir.to_string_lossy().to_string(),
-        ));
-    }
+    let (exe, args, env) = own_tools_command(project_path, agent_id, project_id)?;
     Some(McpServer::Stdio(
-        McpServerStdio::new("pilothouse", exe)
-            .args(vec![
-                "mcp".into(),
-                "--project".into(),
-                project_path.to_string_lossy().to_string(),
-                "--agent".into(),
-                agent_id.to_string(),
-                "--workspace".into(),
-                project_id.to_string(),
-            ])
-            .env(env),
+        McpServerStdio::new("pilothouse", exe).args(args).env(
+            env.into_iter()
+                .map(|(name, value)| EnvVariable::new(name, value))
+                .collect(),
+        ),
     ))
 }
 
-/// The prompt reply's `usage` (running totals for the agent session).
+/// A command to start: its program, its arguments and the environment it
+/// needs.
+pub type ToolsCommand = (std::path::PathBuf, Vec<String>, Vec<(String, String)>);
+
+/// The PilotHouse MCP server as a command. An agent's own program in a
+/// terminal takes its servers as flags, not from a session's set-up.
+pub fn own_tools_command(
+    project_path: &std::path::Path,
+    agent_id: &str,
+    project_id: ProjectId,
+) -> Option<ToolsCommand> {
+    let exe = ph_store::paths::helper_program("mcp").ok()?;
+    let mut env = Vec::new();
+    if let Some(dir) = std::env::var_os(ph_store::paths::DATA_DIR_ENV) {
+        env.push((
+            ph_store::paths::DATA_DIR_ENV.to_string(),
+            dir.to_string_lossy().to_string(),
+        ));
+    }
+    Some((
+        exe,
+        vec![
+            "mcp".into(),
+            "--project".into(),
+            project_path.to_string_lossy().to_string(),
+            "--agent".into(),
+            agent_id.to_string(),
+            "--workspace".into(),
+            project_id.to_string(),
+        ],
+        env,
+    ))
+}
+
+/// Whether `agent`'s prompt reply counts that turn's tokens alone, as the
+/// protocol describes it, rather than a running total. Read in their
+/// sources: claude-agent-acp 0.95.0 (pinned in `agents.rs`) sets its tally to
+/// zero when a turn starts, codex-acp 2.2.2 (pinned) reports the prompt's
+/// total less the one it started from, Gemini CLI 0.70.0 counts in the
+/// prompt's own variables. Check again when a pin changes; an agent not
+/// read yet is taken as a running total, which can count too little but
+/// never twice.
+fn counts_turn_tokens(agent: &str) -> bool {
+    matches!(agent, "claude" | "codex" | "gemini")
+}
+
+/// The prompt reply's `usage` (a running total for the agent session, or
+/// the turn's own: see [`counts_turn_tokens`]).
 fn turn_usage(usage: &Value) -> Option<UsageReport> {
     let number = |key: &str| usage.get(key).and_then(Value::as_u64);
     let report = UsageReport {
@@ -2553,12 +3159,19 @@ mod session_tests {
     /// A fake agent in `dir` that logs the methods it gets to
     /// `dir/methods.log`, and offers `session/close` when `can_close`.
     fn fake_agent(dir: &Path, can_close: bool) -> &'static AgentSpec {
-        let log = dir.join("methods.log");
         let capabilities = if can_close {
             r#"{\"sessionCapabilities\":{\"close\":{}}}"#
         } else {
             "{}"
         };
+        fake_agent_that(dir, capabilities, "")
+    }
+
+    /// A fake agent with these `capabilities` (JSON, quotes escaped for the
+    /// shell) that treats some methods its own way: `cases` are lines of
+    /// the script's `case "$method"`, tried before answering `{}`.
+    fn fake_agent_that(dir: &Path, capabilities: &str, cases: &str) -> &'static AgentSpec {
+        let log = dir.join("methods.log");
         let script = format!(
             r#"n=0
 while IFS= read -r line; do
@@ -2568,6 +3181,7 @@ while IFS= read -r line; do
   case "$method" in
     initialize) echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"protocolVersion\":1,\"agentCapabilities\":{capabilities}}}}}" ;;
     session/new) n=$((n+1)); echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"sessionId\":\"fake-$n\"}}}}" ;;
+    {cases}
     *) [ -n "$id" ] && echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{}}}}" ;;
   esac
 done"#,
@@ -2710,6 +3324,47 @@ done"#,
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A session still being set up when the chat's account changes is the
+    /// old account's: it is closed once it exists and never becomes the
+    /// chat's (the new account's agent knows nothing by its id).
+    #[gpui_kit::test]
+    fn a_set_up_let_go_of_does_not_become_the_chats_session(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = temp_dir("account");
+        let spec = fake_agent(&dir, true);
+        let store = Store::open_in_memory().unwrap();
+        let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+        let thread = cx.new(|cx| ChatThread::draft(store, project(&dir), spec, cx));
+        thread.update(cx, |thread, cx| {
+            thread.warm_up(connection.clone(), cx);
+            // Before the agent has answered, another account is picked.
+            thread.set_account("work", cx);
+        });
+        // Closed only after the set-up ended: what it did to the chat shows.
+        wait_until(cx, "the old account's session to be closed", |_| {
+            methods(&dir).iter().any(|m| m == "session/close")
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.account(), "work");
+            assert!(
+                thread.acp_session_id.is_none(),
+                "the old account's session is not the chat's"
+            );
+            assert!(thread.connection.is_none() && thread.setup.is_none());
+        });
+        // The new account's agent then sets the chat up as usual.
+        let other = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+        thread.update(cx, |thread, cx| thread.warm_up(other.clone(), cx));
+        wait_until(cx, "the new account's session to start", |cx| {
+            thread.read_with(cx, |thread, _| thread.acp_session_id.is_some())
+        });
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.connection.as_ref() == Some(&other));
+        });
+        drop((thread, connection, other));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[gpui_kit::test]
     fn a_restarted_agent_leaves_its_chats_to_start_again(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
@@ -2749,6 +3404,452 @@ done"#,
             );
         });
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn say(text: &str) -> Vec<ContentBlock> {
+        vec![ContentBlock::Text(TextContent::new(text.to_string()))]
+    }
+
+    fn last_notice(thread: &ChatThread) -> Option<(String, bool)> {
+        thread.entries.iter().rev().find_map(|entry| match entry {
+            Entry::Notice { text, is_error } => Some((text.clone(), *is_error)),
+            _ => None,
+        })
+    }
+
+    #[gpui_kit::test]
+    fn an_agent_that_does_not_stop_when_asked_is_ended(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = temp_dir("stubborn");
+        // It takes a prompt and never answers, and does not hear "stop".
+        let spec = fake_agent_that(&dir, "{}", "session/prompt|session/cancel) ;;");
+        let store = Store::open_in_memory().unwrap();
+        let place = store.add_project(&dir).unwrap();
+        let here = ThreadProject {
+            id: place.id,
+            ..project(&dir)
+        };
+        let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+        let thread = cx.new(|cx| ChatThread::draft(store.clone(), here.clone(), spec, cx));
+        let other = cx.new(|cx| ChatThread::draft(store, here, spec, cx));
+        for (chat, text) in [(&thread, "go"), (&other, "you too")] {
+            chat.update(cx, |chat, cx| {
+                chat.send(
+                    text.into(),
+                    Vec::new(),
+                    text.into(),
+                    say(text),
+                    connection.clone(),
+                    cx,
+                )
+            });
+        }
+        wait_until(cx, "both prompts to reach the agent", |_| {
+            methods(&dir)
+                .iter()
+                .filter(|m| *m == "session/prompt")
+                .count()
+                == 2
+        });
+        // Asked to stop: the agent gets the request, and time to answer it.
+        thread.update(cx, |thread, cx| thread.cancel(cx));
+        wait_until(cx, "the request to stop to reach the agent", |_| {
+            methods(&dir).iter().any(|m| m == "session/cancel")
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.status, ThreadStatus::Working);
+            assert!(
+                !thread.stop_is_slow(),
+                "a second press by mistake ends nothing"
+            );
+        });
+        // It did not stop: Stop now ends its process.
+        thread.update(cx, |thread, _| {
+            thread.stop_asked = Some(Instant::now() - STOP_GRACE);
+        });
+        assert!(thread.read_with(cx, |thread, _| thread.stop_is_slow()));
+        thread.update(cx, |thread, cx| thread.force_stop(cx));
+        cx.run_until_parked();
+        assert!(connection.read_with(cx, |connection, _| connection.has_exited()));
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.status, ThreadStatus::Idle);
+            assert!(!thread.stop_is_slow());
+            assert!(thread.connection.is_none() && thread.acp_session_id.is_none());
+            let (text, is_error) = last_notice(thread).unwrap();
+            assert!(text.contains("its process was ended"), "{text}");
+            assert!(!is_error);
+            // It keeps the session to pick up again.
+            assert!(
+                thread
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.acp_session_id.is_some())
+            );
+        });
+        // The agent's other chat at work lost its turn, and is told why.
+        other.read_with(cx, |other, _| {
+            assert_eq!(other.status, ThreadStatus::Idle);
+            let (text, is_error) = last_notice(other).unwrap();
+            assert!(text.contains("stopped from another chat"), "{text}");
+            assert!(is_error);
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The agent's own name for a session replaces the name the chat got
+    /// from its first message, and never one the user gave.
+    #[gpui_kit::test]
+    fn the_agents_name_for_a_session_replaces_the_first_messages(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = temp_dir("named");
+        let spec = fake_agent_that(
+            &dir,
+            "{}",
+            r#"session/prompt) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}" ;;"#,
+        );
+        let store = Store::open_in_memory().unwrap();
+        let place = store.add_project(&dir).unwrap();
+        let here = ThreadProject {
+            id: place.id,
+            ..project(&dir)
+        };
+        let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+        let thread = cx.new(|cx| ChatThread::draft(store.clone(), here, spec, cx));
+        thread.update(cx, |thread, cx| {
+            thread.send(
+                "fix it".into(),
+                Vec::new(),
+                "fix it".into(),
+                say("fix it"),
+                connection.clone(),
+                cx,
+            )
+        });
+        wait_until(cx, "the turn to end", |cx| {
+            thread.read_with(cx, |thread, _| thread.status == ThreadStatus::Idle)
+        });
+        let named = |title: &str| -> SessionUpdate {
+            serde_json::from_value(
+                json!({ "sessionUpdate": "session_info_update", "title": title }),
+            )
+            .unwrap()
+        };
+        let stored_title = |cx: &mut TestAppContext| {
+            let id = thread.read_with(cx, |thread, _| thread.session().unwrap().id);
+            store.session(id).unwrap().unwrap().title
+        };
+        thread.update(cx, |thread, cx| {
+            thread.apply_update(named("Fix the tide table's off-by-one"), None, cx)
+        });
+        assert_eq!(stored_title(cx), "Fix the tide table's off-by-one");
+        // The agent may name it again as the work goes on.
+        thread.update(cx, |thread, cx| {
+            thread.apply_update(named("Tide table fixes"), None, cx)
+        });
+        assert_eq!(stored_title(cx), "Tide table fixes");
+        // The user's own name stays, whatever the agent says after.
+        thread.update(cx, |thread, cx| {
+            let id = thread.session().unwrap().id;
+            thread.store.rename_session(id, "Tides").unwrap();
+            thread.set_title("Tides", cx);
+            thread.apply_update(named("Something else"), None, cx);
+            thread.apply_update(named("  "), None, cx);
+        });
+        assert_eq!(stored_title(cx), "Tides");
+        drop(connection);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Putting one chat in plan mode must not put the next one there: a
+    /// choice made once something was said is the chat's own.
+    #[gpui_kit::test]
+    fn a_choice_made_in_a_chat_is_the_chats_own(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = temp_dir("choices");
+        let spec = fake_agent_that(
+            &dir,
+            "{}",
+            r#"session/prompt) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}" ;;"#,
+        );
+        let store = Store::open_in_memory().unwrap();
+        let place = store.add_project(&dir).unwrap();
+        let here = ThreadProject {
+            id: place.id,
+            ..project(&dir)
+        };
+        let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+        let thread = cx.new(|cx| ChatThread::draft(store.clone(), here.clone(), spec, cx));
+        // Before anything is said: how chats with this agent start.
+        thread.update(cx, |thread, cx| thread.set_option("mode", "default", cx));
+        assert_eq!(
+            options::preferences(&store, "fake")
+                .get("mode")
+                .map(String::as_str),
+            Some("default")
+        );
+        thread.update(cx, |thread, cx| {
+            thread.send(
+                "plan it".into(),
+                Vec::new(),
+                "plan it".into(),
+                say("plan it"),
+                connection.clone(),
+                cx,
+            )
+        });
+        wait_until(cx, "the turn to end", |cx| {
+            thread.read_with(cx, |thread, _| thread.status == ThreadStatus::Idle)
+        });
+        // Something was said: this chat goes to plan mode, by itself.
+        thread.update(cx, |thread, cx| thread.set_option("mode", "plan", cx));
+        assert_eq!(
+            options::preferences(&store, "fake")
+                .get("mode")
+                .map(String::as_str),
+            Some("default"),
+            "the next chat does not start in plan mode"
+        );
+        let id = thread.read_with(cx, |thread, _| thread.session().unwrap().id);
+        let stored = store.session(id).unwrap().unwrap();
+        assert_eq!(stored.options.get("mode").map(String::as_str), Some("plan"));
+        // Picked up again, it is still its own, whatever new chats start in.
+        options::remember(&store, "fake", "mode", "acceptEdits");
+        let again = cx.new(|cx| ChatThread::open(store.clone(), here, stored, cx));
+        again.read_with(cx, |again, _| {
+            assert_eq!(
+                again
+                    .session()
+                    .unwrap()
+                    .options
+                    .get("mode")
+                    .map(String::as_str),
+                Some("plan")
+            )
+        });
+        drop(connection);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Waits for `released` (what [`ChatThread::hand_over`] gives back).
+    fn wait_released(cx: &mut TestAppContext, released: Task<()>) {
+        let done = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = done.clone();
+        cx.spawn(async move |_| {
+            released.await;
+            flag.set(true);
+        })
+        .detach();
+        wait_until(cx, "the agent's side to let go", |_| done.get());
+    }
+
+    /// A chat's conversation goes on in its agent's own program: the
+    /// agent's side lets go first, and only at rest. With no other chat of
+    /// the agent at work its process ends, the one sure way that nothing
+    /// holds the conversation.
+    #[gpui_kit::test]
+    fn a_chat_hands_its_conversation_to_the_agents_cli(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = temp_dir("handover");
+        // It answers a prompt at once.
+        let spec = fake_agent_that(
+            &dir,
+            "{}",
+            r#"session/prompt) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}" ;;"#,
+        );
+        let store = Store::open_in_memory().unwrap();
+        let place = store.add_project(&dir).unwrap();
+        let here = ThreadProject {
+            id: place.id,
+            ..project(&dir)
+        };
+        let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+        let thread = cx.new(|cx| ChatThread::draft(store.clone(), here, spec, cx));
+        // Nothing said yet: there is no conversation to go on with, and
+        // the agent's program starts one of its own.
+        thread.update(cx, |thread, cx| thread.warm_up(connection.clone(), cx));
+        wait_until(cx, "the session to start", |cx| {
+            thread.read_with(cx, |thread, _| thread.acp_session_id.is_some())
+        });
+        let (empty, released) = thread
+            .update(cx, |thread, cx| thread.hand_over(cx))
+            .unwrap();
+        wait_released(cx, released);
+        assert!(empty.resume.is_none() && empty.session.is_none());
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.acp_session_id.is_none() && thread.connection.is_none())
+        });
+        assert!(
+            connection.read_with(cx, |connection, _| connection.has_exited()),
+            "nothing of the agent holds a conversation any more"
+        );
+
+        // Something said: the session it was said in is what goes on.
+        let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+        thread.update(cx, |thread, cx| {
+            thread.send(
+                "go".into(),
+                Vec::new(),
+                "go".into(),
+                say("go"),
+                connection.clone(),
+                cx,
+            );
+            // Not while it works: a turn under way cannot be moved.
+            let refused = thread.hand_over(cx).unwrap_err();
+            assert!(refused.contains("still working"), "{refused}");
+        });
+        wait_until(cx, "the turn to end", |cx| {
+            thread.read_with(cx, |thread, _| {
+                thread.status == ThreadStatus::Idle && thread.acp_session_id.is_some()
+            })
+        });
+        let session_id = thread.read_with(cx, |thread, _| thread.acp_session_id.clone().unwrap());
+        let (handover, released) = thread
+            .update(cx, |thread, cx| thread.hand_over(cx))
+            .unwrap();
+        // Already let go as this returns: the process is gone.
+        assert!(connection.read_with(cx, |connection, _| connection.has_exited()));
+        wait_released(cx, released);
+        assert_eq!(handover.resume, Some(session_id.clone()));
+        assert_eq!(handover.agent.id, "fake");
+        assert_eq!(handover.cwd, dir);
+        let stored = handover
+            .session
+            .expect("a chat something was said in is stored");
+        assert_eq!(
+            store.session(stored.id).unwrap().unwrap().acp_session_id,
+            Some(session_id)
+        );
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.acp_session_id.is_none() && thread.connection.is_none())
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With another chat of the agent at work, its process cannot be ended
+    /// under that chat: only this session is closed, and waited for; an
+    /// agent that cannot close one session keeps the chat where it is.
+    #[gpui_kit::test]
+    fn a_handover_does_not_end_the_agent_under_another_chat(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        for (name, can_close) in [("handover-busy", true), ("handover-held", false)] {
+            let dir = temp_dir(name);
+            let capabilities = if can_close {
+                r#"{\"sessionCapabilities\":{\"close\":{}}}"#
+            } else {
+                "{}"
+            };
+            // A prompt is never answered: the other chat stays at work.
+            let spec = fake_agent_that(&dir, capabilities, "session/prompt) ;;");
+            let store = Store::open_in_memory().unwrap();
+            let place = store.add_project(&dir).unwrap();
+            let here = ThreadProject {
+                id: place.id,
+                ..project(&dir)
+            };
+            let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+            let thread = cx.new(|cx| ChatThread::draft(store.clone(), here.clone(), spec, cx));
+            let other = cx.new(|cx| ChatThread::draft(store.clone(), here, spec, cx));
+            thread.update(cx, |thread, cx| thread.warm_up(connection.clone(), cx));
+            wait_until(cx, "the session to start", |cx| {
+                thread.read_with(cx, |thread, _| thread.acp_session_id.is_some())
+            });
+            other.update(cx, |other, cx| {
+                other.send(
+                    "work".into(),
+                    Vec::new(),
+                    "work".into(),
+                    say("work"),
+                    connection.clone(),
+                    cx,
+                )
+            });
+            wait_until(cx, "the other chat's prompt to reach the agent", |_| {
+                methods(&dir).iter().any(|m| m == "session/prompt")
+            });
+            let handed = thread.update(cx, |thread, cx| thread.hand_over(cx));
+            if can_close {
+                let (_, released) = handed.unwrap();
+                wait_released(cx, released);
+                assert!(
+                    methods(&dir).iter().any(|m| m == "session/close"),
+                    "this chat's session was closed: {:?}",
+                    methods(&dir)
+                );
+            } else {
+                let refused = handed.unwrap_err();
+                assert!(refused.contains("cannot let go"), "{refused}");
+                thread.read_with(cx, |thread, _| {
+                    assert!(thread.acp_session_id.is_some(), "the chat stays as it was")
+                });
+            }
+            // Either way the other chat's agent goes on.
+            assert!(!connection.read_with(cx, |connection, _| connection.has_exited()));
+            other.read_with(cx, |other, _| {
+                assert_eq!(other.status, ThreadStatus::Working)
+            });
+            drop((thread, other, connection));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn a_chat_whose_agent_lost_it_says_it_starts_fresh(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        for (name, capabilities, cases, why) in [
+            (
+                // It can load sessions, and does not know this one.
+                "lost",
+                r#"{\"loadSession\":true}"#,
+                r#"session/load) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32002,\"message\":\"no such session\"}}" ;;"#,
+                "could not open its own record of this chat",
+            ),
+            // It cannot load sessions at all.
+            (
+                "no-load",
+                "{}",
+                "",
+                "cannot pick a chat up where it left off",
+            ),
+        ] {
+            let dir = temp_dir(name);
+            let spec = fake_agent_that(&dir, capabilities, cases);
+            let store = Store::open_in_memory().unwrap();
+            let place = store.add_project(&dir).unwrap();
+            let session = store.create_session(place.id, "Tides", "claude").unwrap();
+            store
+                .set_session_acp_id(session.id, Some("from-before"))
+                .unwrap();
+            let session = store.session(session.id).unwrap().unwrap();
+            let here = ThreadProject {
+                id: place.id,
+                ..project(&dir)
+            };
+            let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+            let thread = cx.new(|cx| {
+                let mut thread = ChatThread::open(store.clone(), here, session, cx);
+                thread.agent = spec;
+                thread
+            });
+            thread.update(cx, |thread, cx| thread.warm_up(connection.clone(), cx));
+            wait_until(cx, "a session to start", |cx| {
+                thread.read_with(cx, |thread, _| thread.acp_session_id.is_some())
+            });
+            thread.read_with(cx, |thread, _| {
+                assert_eq!(thread.acp_session_id.as_deref(), Some("fake-1"));
+                assert!(thread.recap_due, "the next message tells it what was said");
+                let (text, is_error) = last_notice(thread).unwrap();
+                assert!(text.contains(why), "{name}: {text}");
+                assert!(text.contains("starts fresh here") && !is_error);
+            });
+            assert_eq!(
+                methods(&dir).iter().any(|m| m == "session/load"),
+                name == "lost",
+                "{:?}",
+                methods(&dir)
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[gpui_kit::test]

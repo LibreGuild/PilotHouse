@@ -47,7 +47,8 @@ pub(crate) fn fits(width: u32, height: u32) -> bool {
 enum Picture {
     /// The file's bytes, decoded by GPUI.
     Encoded(Arc<Image>),
-    /// Pixels decoded here, smaller than the file (a very large picture).
+    /// Pixels decoded here: a very large picture made smaller, or the
+    /// frames of a GIF.
     Drawn(Arc<RenderImage>),
 }
 
@@ -340,7 +341,8 @@ fn read_image(path: &std::path::Path) -> Result<Loaded, String> {
         .ok()
         .and_then(|reader| reader.into_dimensions().ok())
         .ok_or("The image could not be read.")?;
-    if !fits(width, height) {
+    let gif = format == ::image::ImageFormat::Gif;
+    if !fits(width, height) || (gif && width.max(height) > ph_ui::images_safe::GIF_SIDE) {
         return Err(format!("{too_large} It is {width} × {height} pixels."));
     }
     // A photo taken turned says so (EXIF); it is shown upright, so its
@@ -367,10 +369,24 @@ fn read_image(path: &std::path::Path) -> Result<Loaded, String> {
         (width as f32, height as f32)
     };
     let info = format!("{label} · {}", byte_size(bytes.len() as u64));
-    // A very large still picture is drawn smaller (an animated GIF keeps
-    // its frames as they are).
+    // A GIF is decoded here, within limits: GPUI keeps every frame, each
+    // as large as the whole picture, however many there are.
+    if gif {
+        let (frames, still) = ph_ui::images_safe::decode_gif(&bytes)
+            .map_err(|_| "The image could not be read.".to_string())?;
+        let info = if still {
+            format!("{info} · too large to play here: its first frame")
+        } else {
+            info
+        };
+        return Ok(Loaded {
+            image: Picture::Drawn(frames),
+            size,
+            info,
+        });
+    }
+    // A very large still picture is drawn smaller.
     if width.max(height) > DRAWN_SIDE
-        && format != ::image::ImageFormat::Gif
         && let Some(drawn) = draw_smaller(&bytes, format, orientation)
     {
         return Ok(Loaded {

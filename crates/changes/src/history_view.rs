@@ -4,7 +4,10 @@ use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
-    h_flex, v_flex,
+    h_flex,
+    resizable::{ResizableState, resizable_panel, v_resizable},
+    tab::{Tab, TabBar},
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -12,18 +15,25 @@ use gpui_kit::{
     IntoElement, ParentElement as _, PathBuilder, Pixels, Render, StatefulInteractiveElement as _,
     Styled as _, Task, Window, canvas, div, point, px,
 };
-use ph_git::FileChange;
 use ph_git::log::{self, Commit, GraphRow};
 
 use crate::branch_picker::ago;
 use crate::commit_box::{Writer, clean_message, cut};
+use crate::diff_list::Diffs;
 use crate::repo::Repo;
-use ph_preview::diff as diff_view;
 
 /// Commits read per page.
 const PAGE: usize = 200;
 const ROW_HEIGHT: f32 = 44.;
 const LANE_WIDTH: f32 = 14.;
+/// Files of one commit drawn: a commit that touched thousands (a vendored
+/// library, a formatter run) shows its first ones.
+const FILES_SHOWN: usize = 50;
+
+/// The commit whose changes show (its id and first line), or none now.
+pub struct CommitShown(pub Option<(String, String)>);
+
+impl gpui_kit::EventEmitter<CommitShown> for HistoryView {}
 
 pub struct HistoryView {
     repo: Entity<Repo>,
@@ -33,15 +43,35 @@ pub struct HistoryView {
     all: bool,
     more: bool,
     selected: Option<usize>,
-    /// The selected commit's changes (shared: drawn every frame, never
-    /// copied).
-    detail: Option<(String, std::rc::Rc<Vec<FileChange>>)>,
+    /// The selected commit's changes, laid out once read.
+    detail: Option<Detail>,
     loaded: bool,
     writer: Option<Writer>,
     writing: bool,
+    /// Commits can be explained in plain words (the build has that).
+    explains: bool,
+    /// The explanation of the commit with this id, as whoever shows the
+    /// panel gives it, and whether it shows in place of the changes.
+    explanation: Option<(String, gpui_kit::AnyView)>,
+    explaining: bool,
+    /// The line between the commits and the one shown, which drags: a
+    /// commit's changes or its explanation want more room than the list.
+    split: Entity<ResizableState>,
     _load: Option<Task<()>>,
     _write: Option<Task<()>>,
     _detail: Option<Task<()>>,
+}
+
+/// A commit's changes, read and laid out off the UI thread.
+struct Detail {
+    /// The commit's id.
+    id: String,
+    /// How many files it changed (the first [`FILES_SHOWN`] are drawn).
+    files: usize,
+    diffs: Diffs,
+    /// The commit's title and details, the diffs, then how many files
+    /// were not drawn (see [`crate::diff_list`]).
+    list: gpui_kit::ListState,
 }
 
 impl HistoryView {
@@ -64,12 +94,40 @@ impl HistoryView {
             loaded: false,
             writer: None,
             writing: false,
+            explains: false,
+            explanation: None,
+            explaining: false,
+            split: cx.new(|_| ResizableState::default()),
             _load: None,
             _write: None,
             _detail: None,
         };
         view.reload(cx);
         view
+    }
+
+    /// Whether commits can be explained here.
+    pub fn set_explains(&mut self, explains: bool, cx: &mut Context<Self>) {
+        self.explains = explains;
+        if !explains {
+            self.explanation = None;
+            self.explaining = false;
+        }
+        cx.notify();
+    }
+
+    /// The view that explains commit `sha`; `show`: in place of its
+    /// changes at once (one was just asked for).
+    pub fn set_explanation(
+        &mut self,
+        sha: &str,
+        view: gpui_kit::AnyView,
+        show: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.explanation = Some((sha.to_string(), view));
+        self.explaining |= show;
+        cx.notify();
     }
 
     pub fn set_writer(&mut self, writer: Option<Writer>) {
@@ -140,22 +198,33 @@ impl HistoryView {
     fn load(&mut self, skip: usize, cx: &mut Context<Self>) {
         let root = self.repo.read(cx).root().to_path_buf();
         let all = self.all;
-        let read = cx.background_spawn(async move { log::log(&root, PAGE, skip, all) });
+        // A reload reads as many commits as are loaded: older pages the
+        // user asked for stay.
+        let limit = if skip == 0 {
+            self.commits.len().max(PAGE)
+        } else {
+            PAGE
+        };
+        let read = cx.background_spawn(async move { log::log(&root, limit, skip, all) });
         self._load = Some(cx.spawn(async move |this, cx| {
             let page = read.await.unwrap_or_default();
             _ = this.update(cx, |this, cx| {
                 this.loaded = true;
-                this.more = page.len() == PAGE;
+                this.more = page.len() == limit;
                 if skip == 0 {
-                    let unchanged = this.commits.first().map(|c| &c.id)
-                        == page.first().map(|c| &c.id)
-                        && this.commits.len() <= page.len();
-                    if unchanged && !this.commits.is_empty() {
+                    // Whole commits are compared: a moved branch or tag
+                    // leaves the top commit as it was.
+                    if this.commits == page {
                         return;
                     }
+                    let shown = this.selected_id();
                     this.commits = page;
-                    this.selected = None;
-                    this.detail = None;
+                    // The commit read stays open where it still is.
+                    this.selected =
+                        shown.and_then(|id| this.commits.iter().position(|commit| commit.id == id));
+                    if this.selected.is_none() {
+                        this.detail = None;
+                    }
                 } else {
                     this.commits.extend(page);
                 }
@@ -165,24 +234,49 @@ impl HistoryView {
         }));
     }
 
+    /// The id of the commit whose changes show.
+    fn selected_id(&self) -> Option<String> {
+        let commit = self.commits.get(self.selected?)?;
+        Some(commit.id.clone())
+    }
+
     fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Some(commit) = self.commits.get(ix).cloned() else {
             return;
         };
         self.selected = Some(ix);
         self.detail = None;
+        self.explanation = None;
+        self.explaining = false;
+        if self.explains {
+            cx.emit(CommitShown(Some((
+                commit.id.clone(),
+                commit.subject.clone(),
+            ))));
+        }
         let root = self.repo.read(cx).root().to_path_buf();
-        let read = cx.background_spawn(async move { log::changes(&root, &commit) });
+        let id = commit.id.clone();
+        let read = cx.background_spawn(async move {
+            let files = log::changes(&root, &commit).unwrap_or_default();
+            let shown = &files[..files.len().min(FILES_SHOWN)];
+            (files.len(), Diffs::build(shown))
+        });
         self._detail = Some(cx.spawn(async move |this, cx| {
-            let files = read.await.unwrap_or_default();
+            let (files, diffs) = read.await;
             _ = this.update(cx, |this, cx| {
-                if this.selected == Some(ix) {
-                    let id = this
-                        .commits
-                        .get(ix)
-                        .map(|c| c.id.clone())
-                        .unwrap_or_default();
-                    this.detail = Some((id, std::rc::Rc::new(files)));
+                if this.selected_id().as_ref() == Some(&id) {
+                    let more = usize::from(files > FILES_SHOWN);
+                    let list = gpui_kit::ListState::new(
+                        1 + diffs.len() + more,
+                        gpui_kit::ListAlignment::Top,
+                        px(800.),
+                    );
+                    this.detail = Some(Detail {
+                        id,
+                        files,
+                        diffs,
+                        list,
+                    });
                     cx.notify();
                 }
             });
@@ -237,21 +331,103 @@ impl HistoryView {
 
     fn render_detail(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let commit = self.commits.get(self.selected?)?;
-        let files = self
-            .detail
+        let detail = self.detail.as_ref().filter(|detail| detail.id == commit.id);
+        let explanation = self
+            .explanation
             .as_ref()
             .filter(|(id, _)| *id == commit.id)
-            .map(|(_, files)| files.clone());
+            .map(|(_, view)| view.clone());
+        let explaining = self.explaining && explanation.is_some();
+        if let Some(detail) = detail.filter(|detail| detail.files > 0 && !explaining) {
+            use gpui_kit::component::scroll::ScrollableElement as _;
+            // Drawn only where it shows (see `diff_list`).
+            let entity = cx.entity().downgrade();
+            return Some(
+                div()
+                    .relative()
+                    .size_full()
+                    .child(
+                        gpui_kit::list(detail.list.clone(), move |ix, _, cx| {
+                            entity
+                                .update(cx, |this, cx| this.render_detail_item(ix, cx))
+                                .unwrap_or_else(|_| div().into_any_element())
+                        })
+                        .size_full(),
+                    )
+                    .vertical_scrollbar(&detail.list)
+                    .into_any_element(),
+            );
+        }
         Some(
             v_flex()
                 .id("commit-detail")
-                .flex_1()
-                .min_h_0()
+                .size_full()
                 .overflow_y_scroll()
                 .p_3()
                 .gap_2()
-                .border_t_1()
-                .border_color(cx.theme().border)
+                .child(self.render_detail_top(cx)?)
+                .map(|this| match detail {
+                    _ if explaining => this.children(explanation),
+                    None => this.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Loading changes…"),
+                    ),
+                    Some(_) => this.child(div().text_xs().child("No file changes.")),
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Row `ix` of a commit's changes: its title and details, its files'
+    /// diffs, then how many files were not drawn.
+    fn render_detail_item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        if ix == 0 {
+            return div()
+                .px_3()
+                .pt_3()
+                .pb_2()
+                .children(self.render_detail_top(cx))
+                .into_any_element();
+        }
+        let Some(detail) = &self.detail else {
+            return div().into_any_element();
+        };
+        let ix = ix - 1;
+        if ix < detail.diffs.len() {
+            let last = ix + 1 == detail.diffs.len() && detail.files <= FILES_SHOWN;
+            return div()
+                .px_3()
+                .when(last, |this| this.pb_3())
+                .child(detail.diffs.render_item("commit", ix, cx))
+                .into_any_element();
+        }
+        let more = detail.files.saturating_sub(FILES_SHOWN);
+        div()
+            .px_3()
+            .pt_2()
+            .pb_3()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(format!(
+                "{more} more file{} not shown.",
+                if more == 1 { "" } else { "s" }
+            ))
+            .into_any_element()
+    }
+
+    /// The shown commit's title, details and, when it has an explanation,
+    /// the switch between its changes and that.
+    fn render_detail_top(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let commit = self.commits.get(self.selected?)?;
+        let explains = self
+            .explanation
+            .as_ref()
+            .is_some_and(|(id, _)| *id == commit.id);
+        Some(
+            v_flex()
+                .gap_2()
                 .child(
                     h_flex()
                         .gap_2()
@@ -270,6 +446,9 @@ impl HistoryView {
                                 .accessibility_label("Close commit")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.selected = None;
+                                    this.explanation = None;
+                                    this.explaining = false;
+                                    cx.emit(CommitShown(None));
                                     cx.notify();
                                 })),
                         ),
@@ -286,39 +465,22 @@ impl HistoryView {
                             ago(commit.time)
                         )),
                 )
-                .map(|this| match files {
-                    None => this.child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Loading changes…"),
-                    ),
-                    Some(files) if files.is_empty() => {
-                        this.child(div().text_xs().child("No file changes."))
-                    }
-                    // A commit that touched thousands of files (a vendored
-                    // library, a formatter run) shows its first ones.
-                    Some(files) => {
-                        const SHOWN: usize = 50;
-                        let more = files.len().saturating_sub(SHOWN);
-                        this.children(
-                            files
-                                .iter()
-                                .take(SHOWN)
-                                .map(|file| diff_view::file_diff(file, cx)),
-                        )
-                        .when(more > 0, |this| {
-                            this.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!(
-                                        "{more} more file{} not shown.",
-                                        if more == 1 { "" } else { "s" }
-                                    )),
-                            )
-                        })
-                    }
+                // The commit's changes, or the commit told in plain words.
+                .when(explains, |this| {
+                    this.child(
+                        h_flex().child(
+                            TabBar::new("commit-reading")
+                                .segmented()
+                                .xsmall()
+                                .selected_index(usize::from(self.explaining))
+                                .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                    this.explaining = *ix == 1;
+                                    cx.notify();
+                                }))
+                                .child(Tab::new().label("Changes"))
+                                .child(Tab::new().label("Explanation")),
+                        ),
+                    )
                 })
                 .into_any_element(),
         )
@@ -326,13 +488,11 @@ impl HistoryView {
 }
 
 impl Render for HistoryView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let detail = self.render_detail(cx);
         let list = v_flex()
             .id("history-list")
-            .when(detail.is_some(), |this| this.h(px(ROW_HEIGHT * 7.)))
-            .when(detail.is_none(), |this| this.flex_1())
-            .min_h_0()
+            .size_full()
             .overflow_y_scroll()
             .children(
                 {
@@ -398,7 +558,7 @@ impl Render for HistoryView {
                                 .ghost()
                                 .icon(ph_ui::Icons::Sparkles)
                                 .label(if self.writing { "Writing…" } else { "Write changelog" })
-                                .tooltip("An agent writes release notes from the commits since the last tag")
+                                .tooltip(ph_ui::tip("An agent writes release notes from the commits since the last tag"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     if !this.writing {
                                         this.write_changelog(window, cx)
@@ -407,15 +567,34 @@ impl Render for HistoryView {
                         )
                     }),
             )
-            .child(list)
-            .children(detail)
+            .child(div().flex_1().min_h_0().child(match detail {
+                None => list.into_any_element(),
+                // The commits over the one shown, the line between them
+                // dragged to give either more of the pane.
+                Some(detail) => v_resizable("git-history-split")
+                    .with_state(&self.split)
+                    .child(
+                        resizable_panel()
+                            .size(ph_ui::scaled_px(ROW_HEIGHT * 5., window))
+                            .size_range(
+                                ph_ui::scaled_px(ROW_HEIGHT * 2., window)..Pixels::MAX,
+                            )
+                            .child(list),
+                    )
+                    .child(
+                        resizable_panel()
+                            .size_range(ph_ui::scaled_px(120., window)..Pixels::MAX)
+                            .child(detail),
+                    )
+                    .into_any_element(),
+            }))
     }
 }
 
 /// `HEAD -> main`, `origin/main`, `tag: v1` as small badges.
 fn ref_badge(name: &str, cx: &App) -> AnyElement {
     let (text, color) = if let Some(branch) = name.strip_prefix("HEAD -> ") {
-        (branch.to_string(), cx.theme().info)
+        (branch.to_string(), cx.theme().link)
     } else if let Some(tag) = name.strip_prefix("tag: ") {
         (tag.to_string(), cx.theme().warning)
     } else {

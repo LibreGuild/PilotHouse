@@ -22,8 +22,6 @@ pub(crate) fn of_action(action: &dyn Action) -> Option<Feature> {
         Feature::Changes
     } else if any.is::<ShowPulls>() {
         Feature::Pulls
-    } else if any.is::<ShowBoard>() {
-        Feature::Board
     } else if any.is::<ShowBrowser>() {
         Feature::Browser
     } else if any.is::<ShowDevices>() {

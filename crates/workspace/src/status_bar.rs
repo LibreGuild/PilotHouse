@@ -1,9 +1,11 @@
-//! The bar at the bottom of the window: the git branch (click for the
-//! branch picker), the project folder, where its work runs when it is on a
-//! network drive, how CI went for the commit checked out, the ports the
-//! workspace's processes listen on, the Android device in use (its menu
-//! switches, connects and opens Logcat), the detected stack, and how close
-//! each agent subscription is to its limits.
+//! The bar at the bottom of the window. First what waits across every
+//! workspace (tasks that need the user, are worked on, or finished unseen),
+//! whatever is in front. Then, for the workspace in front: the git branch
+//! (click for the branch picker), its folder, where its work runs when it
+//! is on a network drive, how CI went for the commit checked out, the ports
+//! its processes listen on, the Android device in use (its menu switches,
+//! connects and opens Logcat). At the right, how close each agent
+//! subscription is to its limits.
 
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _,
@@ -75,12 +77,17 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
         // Part of the window's frame: clear, and no line over it.
         .bg(gpui_kit::transparent_black())
         .border_t_0()
+        // The islands end a gap over it already: with room of its own
+        // above as well, its text stood lower than the strip's middle and
+        // the strip was taller than it needs to be.
+        .pt_0()
         .left(
             h_flex()
                 .gap_3()
                 .min_w_0()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
+                .children(tasks_item(workspace, cx))
                 .children(branch)
                 .children(merged)
                 .children(ci)
@@ -91,8 +98,10 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                         .min_w_0()
                         .when(!full_paths.is_empty(), |this| {
                             this.tooltip(move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(full_paths.clone())
-                                    .build(window, cx)
+                                gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(
+                                    full_paths.clone(),
+                                ))
+                                .build(window, cx)
                             })
                         })
                         .when_some(path, |this, path| {
@@ -109,10 +118,165 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                 .gap_3()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
+                .children(agent_updates_item(cx))
                 .children(limits(cx))
-                .when(!stacks.is_empty(), |this| this.child(stacks.join(" · ")))
-                .child(format!("{} {}", ph_brand::NAME, ph_ui::version())),
+                .when(!stacks.is_empty(), |this| this.child(stacks.join(" · "))),
         )
+}
+
+/// The agents' CLIs that are behind their newest release, when any is
+/// (`agent_updates`): how many, and a pop-up that updates each with the
+/// agent's own updater, in a terminal where it is seen to run.
+fn agent_updates_item(cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    use gpui_kit::component::v_flex;
+    let behind = crate::agent_updates::behind(cx).to_vec();
+    if behind.is_empty() {
+        return None;
+    }
+    let label = match behind.len() {
+        1 => "1 agent update".to_string(),
+        n => format!("{n} agent updates"),
+    };
+    let workspace = cx.weak_entity();
+    Some(
+        Popover::new("agent-updates")
+            .offset(ph_ui::POPUP_GAP)
+            .anchor(gpui_kit::Anchor::BottomRight)
+            .trigger(
+                Button::new("status-agent-updates")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(Icons::Download).xsmall())
+                    .label(label)
+                    .tooltip("Newer versions of the agents' CLIs"),
+            )
+            .content(move |_, _, cx| {
+                let rows = behind.iter().map(|update| {
+                    let (agent, workspace) = (update.agent, workspace.clone());
+                    h_flex()
+                        .gap_2()
+                        .child(agent.mark(ph_ui::rems_from_px(16.)))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_sm().child(agent.name))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "{} → {}",
+                                            update.installed, update.latest
+                                        )),
+                                ),
+                        )
+                        .child(
+                            Button::new(gpui_kit::SharedString::from(format!(
+                                "agent-update-{}",
+                                agent.id
+                            )))
+                            .small()
+                            .outline()
+                            // Its updater runs in a terminal; the row goes
+                            // once the CLI says it is the newest.
+                            .label(if crate::agent_updates::updating(agent.id, cx) {
+                                "Updating…"
+                            } else {
+                                "Update"
+                            })
+                            .tooltip(ph_ui::tip(
+                                crate::agent_updates::update_command(agent.id)
+                                    .map(|command| format!("Runs `{command}` in a terminal"))
+                                    .unwrap_or_default(),
+                            ))
+                            .on_click(move |_, window, cx| {
+                                _ = workspace.update(cx, |workspace, cx| {
+                                    workspace.update_agent_cli(agent, window, cx)
+                                });
+                            }),
+                        )
+                });
+                v_flex()
+                    .w(ph_ui::rems_from_px(340.))
+                    .gap_3()
+                    .p_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .child("Agent updates"),
+                            )
+                            .child(
+                                Button::new("agent-updates-check")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icons::RotateCw)
+                                    .loading(crate::agent_updates::looking(cx))
+                                    .tooltip(ph_ui::tip(
+                                        "Check again: asks each CLI its version and looks for newer ones",
+                                    ))
+                                    .accessibility_label("Check again")
+                                    .on_click(|_, _, cx| crate::agent_updates::look(cx)),
+                            ),
+                    )
+                    .children(rows)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(concat!(
+                                "Each runs the agent's own updater in a terminal of the workspace in front. This updates the CLI; a chat runs on the adapter this version of ",
+                                ph_brand::name!(),
+                                " was built with."
+                            )),
+                    )
+            })
+            .into_any_element(),
+    )
+}
+
+/// What waits across every workspace, in a few words, whatever is in
+/// front: how many tasks need the user (amber), are being worked on, or
+/// finished and were not looked at. A click shows the Bridge. Nothing when
+/// nothing is under way.
+fn tasks_item(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let (needs_you, working) = crate::bridge::counts(workspace, cx);
+    let unseen = crate::bridge::unseen(workspace);
+    if needs_you + working + unseen == 0 {
+        return None;
+    }
+    let theme = cx.theme();
+    let part = |count: usize, one: &str, many: &str, color: gpui_kit::Hsla| {
+        (count > 0).then(|| {
+            div()
+                .flex_none()
+                .text_color(color)
+                .child(format!("{count} {}", if count == 1 { one } else { many }))
+        })
+    };
+    Some(
+        h_flex()
+            .id("status-tasks")
+            .flex_none()
+            .gap_2()
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme.foreground))
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new("Show the Bridge").build(window, cx)
+            })
+            .children(part(needs_you, "needs you", "need you", theme.warning))
+            .children(part(working, "working", "working", theme.muted_foreground))
+            .children(part(unseen, "to look at", "to look at", theme.success))
+            .on_click(cx.listener(|workspace, _, window, cx| {
+                workspace.set_view(crate::workspace::View::Bridge, window, cx)
+            }))
+            .into_any_element(),
+    )
 }
 
 /// Each agent's limit windows as small meters ("Claude 5h ▰▰▱ 62%"), amber
@@ -179,7 +343,8 @@ fn limits(cx: &Context<Workspace>) -> Vec<AnyElement> {
                     )
                 }))
                 .tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tip.clone()))
+                        .build(window, cx)
                 })
                 .into_any_element()
         })
@@ -202,10 +367,7 @@ fn ci_item(ci: Option<&crate::signals::Ci>, cx: &Context<Workspace>) -> Option<A
         )
     } else if ci.pending > 0 {
         (
-            ph_ui::Loader::new()
-                .xsmall()
-                .color(theme.info)
-                .into_any_element(),
+            ph_ui::Loader::new().xsmall().into_any_element(),
             "CI running".into(),
             theme.muted_foreground,
         )
@@ -241,7 +403,8 @@ fn ci_item(ci: Option<&crate::signals::Ci>, cx: &Context<Workspace>) -> Option<A
                     .on_click(move |_, _, cx| cx.open_url(&url))
             })
             .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tip.clone()))
+                    .build(window, cx)
             })
             .into_any_element(),
     )
@@ -258,7 +421,9 @@ fn merged_item(cx: &Context<Workspace>) -> AnyElement {
                 .text_color(cx.theme().success),
         )
         .label("Merged · Finish task")
-        .tooltip("The task's branch is in its base: remove its worktree and workspace")
+        .tooltip(ph_ui::tip(
+            "The task's branch is in its base: remove its worktree and workspace",
+        ))
         .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::FinishTask), cx))
         .into_any_element()
 }
@@ -374,7 +539,7 @@ fn drive_item(
             .icon(Icon::new(Icons::HardDrive).xsmall())
             .label(label)
             .text_color(color)
-            .tooltip(tip)
+            .tooltip(ph_ui::tip(tip))
             .on_click(|_, window, cx| {
                 window.dispatch_action(Box::new(crate::actions::ShowNetworkDrives), cx)
             })

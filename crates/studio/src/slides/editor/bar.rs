@@ -572,7 +572,7 @@ impl SlidesEditor {
                     .small()
                     .icon(icon)
                     .selected(on)
-                    .tooltip(tip)
+                    .tooltip(ph_ui::tip(tip))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.style_selected("style", json!({ key: !on }), Value::Null, window, cx)
                     }))
@@ -627,7 +627,7 @@ impl SlidesEditor {
                     .small()
                     .icon(icon)
                     .selected(para.align == align)
-                    .tooltip(tip)
+                    .tooltip(ph_ui::tip(tip))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.style_selected(
                             "align",
@@ -1443,7 +1443,7 @@ impl SlidesEditor {
                     .ghost()
                     .small()
                     .icon(icon)
-                    .tooltip(tip)
+                    .tooltip(ph_ui::tip(tip))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let ids = this.selected.clone();
                         this.apply(
@@ -1763,17 +1763,21 @@ impl SlidesEditor {
             .as_ref()
             .map(|color| to_hsla(theme.resolve(&Color(color.clone()))));
         let border = cx.theme().border;
-        let trigger = Button::new(id).ghost().small().tooltip(tooltip).child(
-            div()
-                .size(ph_ui::rems_from_px(16.))
-                .rounded(px(3.))
-                .border_1()
-                .border_color(border)
-                .when_some(shown, |this, color| this.bg(color))
-                .when(shown.is_none(), |this| {
-                    this.child(gpui_kit::component::Icon::new(Icons::Slash).xsmall())
-                }),
-        );
+        let trigger = Button::new(id)
+            .ghost()
+            .small()
+            .tooltip(ph_ui::tip(tooltip))
+            .child(
+                div()
+                    .size(ph_ui::rems_from_px(16.))
+                    .rounded(px(3.))
+                    .border_1()
+                    .border_color(border)
+                    .when_some(shown, |this, color| this.bg(color))
+                    .when(shown.is_none(), |this| {
+                        this.child(gpui_kit::component::Icon::new(Icons::Slash).xsmall())
+                    }),
+            );
         let current = current.unwrap_or_default();
         Popover::new(id)
             .anchor(gpui_kit::Anchor::BottomLeft)
@@ -1796,7 +1800,7 @@ impl SlidesEditor {
                         .bg(to_hsla(theme.resolve(&Color(color.clone()))))
                         .cursor_pointer()
                         .tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(title.clone())
+                            gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(title.clone()))
                                 .build(window, cx)
                         })
                         .on_click(move |_, window, cx| {

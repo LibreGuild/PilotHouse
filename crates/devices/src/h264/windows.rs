@@ -7,10 +7,10 @@ use anyhow::{Context as _, Result};
 use ph_media::Frame;
 use windows::Win32::Media::MediaFoundation::{
     CLSID_MSH264DecoderMFT, IMFSample, IMFTransform, MF_E_NOTACCEPTING,
-    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_DEFAULT_STRIDE,
-    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSTARTUP_NOSOCKET, MFShutdown,
-    MFStartup, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY,
+    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION,
+    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSTARTUP_NOSOCKET,
+    MFShutdown, MFStartup, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
     MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES,
     MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFVideoFormat_H264, MFVideoFormat_NV12,
 };
@@ -49,6 +49,14 @@ impl Decoder {
             let transform: IMFTransform =
                 CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER)
                     .context("Windows has no H.264 decoder")?;
+            // The stream is live and stops while the screen is still. A
+            // decoder left in its usual mode may hold the last pictures
+            // back (to reorder them) until more input comes, and the pane
+            // would show the screen as it was a few frames ago. A decoder
+            // that does not know the setting is used as it is.
+            if let Ok(attributes) = transform.GetAttributes() {
+                let _ = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
+            }
             let input = MFCreateMediaType()?;
             input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
             input.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;

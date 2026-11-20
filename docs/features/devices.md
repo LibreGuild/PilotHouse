@@ -33,7 +33,7 @@ Back, Home and Recents are in the toolbar. Esc is Back, typing types, and ⌘V p
 
 ## Logcat
 
-A tool of its own (`logcat_panel.rs`), in the bottom panel by default, where its columns have the window's width; **Logcat** in the Devices toolbar or the status bar's device menu opens it, and its header picks the device (the same one the app uses). It needs no screen.
+A tool of its own (`logcat_panel.rs`), in the result pane (under ⋯), where its columns have the pane's width; **Logcat** in the Devices toolbar or the status bar's device menu opens it, and its header picks the device (the same one the app uses). It needs no screen.
 
 - **Logcat** (`logcat.rs`, `logcat_view.rs`) shows the last 20,000 lines in columns: time, level, tag (a steady colour per tag) and message, coloured by level. Pick the lowest level shown and one app (*All apps* or an installed package; its processes are found with `pidof` and followed through ActivityManager's "Start proc" lines). The filter box takes words (all must match the tag or message, and are highlighted), `tag:Name`, `-tag:Name`, `package:com.app` and `pid:123`. It follows new lines until you scroll back; click a line for its full text, pid and tid, to copy it or send it to chat. **Send to chat** sends the last 80 lines shown.
 - **Live tools**: annotate, the element picker (the smallest UI node under the click, sent with its id, text and bounds), capture, record, before/after. Drag the bar by its grip anywhere over the screen (double-click the grip to put it back), or fold it to one button. See [live-panes.md](live-panes.md).

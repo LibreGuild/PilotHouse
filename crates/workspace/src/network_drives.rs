@@ -685,7 +685,7 @@ impl Render for NetworkDrivesView {
                             .rounded(theme.radius)
                             .border_1()
                             .border_color(theme.border)
-                            .child(Icon::new(Icons::HardDrive).small().text_color(theme.info))
+                            .child(Icon::new(Icons::HardDrive).small().text_color(theme.link))
                             .child(
                                 v_flex()
                                     .flex_1()

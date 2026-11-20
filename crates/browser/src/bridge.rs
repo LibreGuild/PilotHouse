@@ -16,6 +16,13 @@ use crate::extension::read_line;
 /// Most one message from the extension may be (a full-page screenshot).
 const MAX_MESSAGE: usize = 64 << 20;
 
+/// Messages read and not yet taken by the UI thread. When it falls behind,
+/// the readers wait, and so does the host writing to them, instead of
+/// memory growing.
+const WAITING: usize = 256;
+/// Most messages the UI thread takes at once before it lets other work run.
+pub(crate) const BATCH: usize = 64;
+
 pub(crate) type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
 
 pub(crate) enum BridgeEvent {
@@ -34,7 +41,7 @@ pub(crate) fn listen() -> Result<smol::channel::Receiver<BridgeEvent>> {
         ph_store::paths::ensure_private_dir(parent)?;
     }
     let mut listener = ph_control::transport::Listener::bind(&endpoint)?;
-    let (sender, receiver) = smol::channel::unbounded();
+    let (sender, receiver) = smol::channel::bounded(WAITING);
     std::thread::Builder::new()
         .name("chrome-bridge".into())
         .spawn(move || {

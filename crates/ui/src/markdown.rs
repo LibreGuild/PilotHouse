@@ -7,6 +7,10 @@ use gpui_kit::component::{ActiveTheme as _, clipboard::Clipboard, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{App, IntoElement, ParentElement as _, Styled as _, Window};
 
+mod nesting;
+
+pub use nesting::{deepens, guarded, nests_too_deep, on_trial, parses};
+
 /// Turns the line endings inside paragraphs into hard breaks, so a single
 /// newline shows as a new line instead of joining the two lines. Code
 /// blocks keep their text as it is. Fed in pieces (a streaming reply), it

@@ -1,16 +1,15 @@
 // What PilotHouse says about its agents, shown in Chrome: the count of chats
-// waiting for you on the toolbar icon, Chrome notifications (when chosen in
-// the panel), and handing a tab to the user when an agent needs them in it
-// (to sign in, or to pass a check that a person is there).
+// waiting for you on the toolbar icon, and handing a tab to the user when an
+// agent needs them in it (to sign in, or to pass a check that a person is
+// there). PilotHouse itself tells of chats that finish: Chrome does not say
+// it a second time.
 
-import { onAppNote, onConnection, send } from '../lib/link.js';
-import { onSettings, settings } from '../lib/settings.js';
+import { onAppNote, onConnection } from '../lib/link.js';
 
-const CHAT = 'pilothouse-chat|';
 const HANDOFF = 'pilothouse-handoff|';
 
-/** The latest from the app; side panels are told of each change. */
-let latest = { connected: false, waiting: [], working: [], agents: [] };
+/** The latest from the app; an open popup is told of each change. */
+let latest = { connected: false, busy: false, waiting: [], working: [], agents: [] };
 /** Fields set since this worker started, which what was kept must not undo. */
 const live = new Set();
 const watchers = new Set();
@@ -35,18 +34,17 @@ function changed(next) {
     try {
       watcher(latest);
     } catch (error) {
-      // A closed panel.
+      // A closed popup.
     }
   }
 }
 
 async function badge() {
-  const chosen = await settings();
   const waiting = latest.connected ? latest.waiting.length : 0;
   const action = chrome.action;
   // Set even with no badge: a tab's own colour is put back to this one.
   await action.setBadgeBackgroundColor({ color: BADGE_COLOR }).catch(() => {});
-  if (!chosen.badge || waiting === 0) {
+  if (waiting === 0) {
     await action.setBadgeText({ text: '' }).catch(() => {});
     await action.setTitle({ title: chrome.runtime.getManifest().action?.default_title ?? '' }).catch(() => {});
     return;
@@ -58,19 +56,20 @@ async function badge() {
 }
 
 export function install() {
-  // Kept across this worker's restarts, so the panel shows it at once; read
+  // Kept across this worker's restarts, so the popup shows it at once; read
   // after the connection may already have been made, so what is known by
   // now wins (and `connected` is never taken from before the restart).
   void chrome.storage.session.get('status').then(({ status: kept }) => {
     if (!kept) return;
     const restored = Object.fromEntries(Object.entries(kept)
-      .filter(([key]) => key !== 'connected' && !live.has(key) && key in latest));
+      .filter(([key]) => key !== 'connected' && key !== 'busy' && !live.has(key) && key in latest));
     if (Object.keys(restored).length) changed(restored);
   }).catch(() => {});
   void badge();
 
-  onConnection((connected) => changed(connected ? { connected } : { connected, waiting: [], working: [], agents: [] }));
-  onSettings(() => void badge());
+  onConnection((connected, busy) => changed(connected
+    ? { connected, busy: false }
+    : { connected, busy: !!busy, waiting: [], working: [], agents: [] }));
 
   onAppNote('PilotHouse.status', (params) => {
     changed({
@@ -78,17 +77,6 @@ export function install() {
       working: list(params.working),
       agents: list(params.agents),
     });
-  });
-
-  onAppNote('PilotHouse.news', async (params) => {
-    if (!(await settings()).notifyNews || typeof params.tag !== 'string') return;
-    await chrome.notifications.create(`${CHAT}${params.tag}`, {
-      type: 'basic',
-      iconUrl: 'icons/icon128.png',
-      title: text(params.title, 120) || 'PilotHouse',
-      message: text(params.body, 300),
-      priority: params.kind === 'needs' ? 2 : 0,
-    }).catch(() => {});
   });
 
   onAppNote('PilotHouse.handoff', async (params) => {
@@ -100,7 +88,6 @@ export function install() {
     // attention without taking the keyboard from what the user is doing.
     await chrome.tabs.update(tabId, { active: true }).catch(() => {});
     await chrome.windows.update(tab.windowId, { drawAttention: true }).catch(() => {});
-    if (!(await settings()).notifyHandoff) return;
     const agent = text(params.agent, 60) || 'An agent';
     await chrome.notifications.create(`${HANDOFF}${tabId}`, {
       type: 'basic',
@@ -113,19 +100,12 @@ export function install() {
   });
 
   chrome.notifications.onClicked.addListener(async (id) => {
+    if (!id.startsWith(HANDOFF)) return;
     await chrome.notifications.clear(id).catch(() => {});
-    if (id.startsWith(CHAT)) {
-      try {
-        send('PilotHouse.openChat', { tag: id.slice(CHAT.length) });
-      } catch (error) {
-        // PilotHouse closed meanwhile.
-      }
-    } else if (id.startsWith(HANDOFF)) {
-      const tab = await chrome.tabs.get(Number(id.slice(HANDOFF.length))).catch(() => null);
-      if (!tab) return;
-      await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
-      await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
-    }
+    const tab = await chrome.tabs.get(Number(id.slice(HANDOFF.length))).catch(() => null);
+    if (!tab) return;
+    await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
   });
 }
 

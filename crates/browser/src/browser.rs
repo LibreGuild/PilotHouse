@@ -5,7 +5,7 @@
 //! the data directory, so logins survive restarts. Frames are only streamed
 //! while the pane is visible; agents use one-off screenshots instead.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -20,7 +20,7 @@ use ph_media::{Frame, PointerKind, SurfacePointer};
 use ph_store::Store;
 use serde_json::{Value, json};
 
-use crate::cdp::{Cdp, CdpEvent};
+use crate::cdp::{Cdp, CdpEvent, CdpEvents};
 use crate::chrome::{self, Chrome};
 use crate::input;
 use crate::logs::Logs;
@@ -87,8 +87,6 @@ struct Running {
     /// The page shown in the pane.
     cdp: Cdp,
     target_id: String,
-    /// `http://127.0.0.1:<port>`, only when the user opened a port.
-    devtools: Option<String>,
 }
 
 /// A JavaScript dialog waiting for an answer. Headless Chrome cannot show
@@ -204,29 +202,6 @@ impl Browser {
         self.frame.as_ref()
     }
 
-    /// Where other DevTools clients (e.g. a browser MCP server) can attach,
-    /// when the user opened a port for them.
-    pub fn devtools_url(&self) -> Option<String> {
-        self.running
-            .as_ref()
-            .and_then(|running| running.devtools.clone())
-    }
-
-    pub fn devtools_port_enabled(&self) -> bool {
-        self.store.setting::<bool>(&port_key(self.project_id))
-    }
-
-    /// Opens or closes the DevTools port (restarting Chrome). Off by default:
-    /// any local process could drive the browser through it.
-    pub fn set_devtools_port(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        let _ = self.store.set_setting(&port_key(self.project_id), &enabled);
-        let was_running = self.running.is_some() || self.starting.is_some();
-        self.stop(cx);
-        if was_running {
-            self.ensure_started(cx);
-        }
-    }
-
     pub fn dialog(&self) -> Option<&Dialog> {
         self.dialog.as_ref()
     }
@@ -268,7 +243,8 @@ impl Browser {
         cx.spawn(async move |_, _| start.await.map_err(|err| anyhow!("{err}")))
     }
 
-    /// Starts Chrome (if needed) without waiting, e.g. when the pane opens.
+    /// Starts Chrome (if needed) without waiting: when the user asks for it
+    /// in the pane, or picks a browser.
     pub fn ensure_started(&mut self, cx: &mut Context<Self>) {
         if self.running.is_none() && self.starting.is_none() {
             self.connection(cx).detach();
@@ -315,12 +291,11 @@ impl Browser {
         self.status = BrowserStatus::Starting;
         cx.notify();
         let profile = chrome::profile_dir(self.project_id);
-        let open_port = self.devtools_port_enabled();
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let launched = cx
                 .background_spawn(async move {
-                    let mut chrome = Chrome::launch(&binary, &profile, open_port)?;
+                    let mut chrome = Chrome::launch(&binary, &profile)?;
                     let (reader, writer) = (chrome.reader.take(), chrome.writer.take());
                     let (browser, events) = Cdp::connect(
                         reader.context("Chrome pipe")?,
@@ -343,7 +318,6 @@ impl Browser {
                                 browser,
                                 cdp: cdp.clone(),
                                 target_id,
-                                devtools: None,
                             };
                             this.started(running, events, cx);
                             Ok(cdp)
@@ -373,25 +347,32 @@ impl Browser {
         .shared()
     }
 
-    fn started(
-        &mut self,
-        mut running: Running,
-        events: smol::channel::Receiver<CdpEvent>,
-        cx: &mut Context<Self>,
-    ) {
-        running.devtools = running._chrome.devtools.clone();
+    fn started(&mut self, running: Running, events: CdpEvents, cx: &mut Context<Self>) {
         let cdp = running.cdp.clone();
         self.running = Some(running);
         self.starting = None;
         self.status = BrowserStatus::Running;
         self._events = Some(cx.spawn(async move |this, cx| {
-            while let Ok(event) = events.recv().await {
-                if this
-                    .update(cx, |this, cx| this.handle_event(event, cx))
-                    .is_err()
-                {
+            while let Some(batch) = events.next_batch().await {
+                let handled = this.update(cx, |this, cx| {
+                    if batch.dropped > 0 {
+                        this.logs.record(
+                            "Log.entryAdded",
+                            &json!({ "entry": { "level": "warning", "text": format!(
+                                "{} console and network messages were left out: the page sent them faster than they could be kept",
+                                batch.dropped
+                            ) } }),
+                        );
+                    }
+                    for event in batch.events {
+                        this.handle_event(event, cx);
+                    }
+                });
+                if handled.is_err() {
                     return;
                 }
+                // A page that floods the console must not hold the window.
+                smol::future::yield_now().await;
             }
             let _ = this.update(cx, |this, cx| {
                 this.running = None;
@@ -631,15 +612,18 @@ impl Browser {
 
     // ---- The pane ----
 
-    /// Streams frames while `on` (the pane is visible).
-    pub fn set_screencast(&mut self, on: bool, cx: &mut Context<Self>) {
+    /// Streams frames while `on` (the pane is visible). Showing the pane
+    /// starts no browser: a look at Preview must not launch a program
+    /// nobody asked for (as a phone is not started by looking at its
+    /// pane). It starts when asked to in the pane, when an address is
+    /// entered, or when an agent uses it; frames flow from then on.
+    pub fn set_screencast(&mut self, on: bool) {
         self.last_used = Instant::now();
         if self.screencast == on {
             return;
         }
         self.screencast = on;
         if on {
-            self.ensure_started(cx);
             self.start_screencast();
         } else if let Some(cdp) = self.cdp() {
             cdp.fire("Page.stopScreencast", json!({}));
@@ -841,9 +825,29 @@ impl Browser {
     /// Navigates and waits for that page's load event (or a timeout).
     pub fn navigate(&mut self, url: &str, cx: &mut Context<Self>) -> Task<Result<Value>> {
         let url = normalize_url(url);
-        self.skip_restore |= self.running.is_none();
-        let connection = self.connection(cx);
+        let file = match agent_address(&url) {
+            Ok(file) => file,
+            Err(err) => return Task::ready(Err(err)),
+        };
+        let folders = match &file {
+            Some(_) => self
+                .store
+                .project(self.project_id)
+                .ok()
+                .flatten()
+                .map(|project| project.folders())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
         cx.spawn(async move |this, cx| {
+            if let Some(path) = file {
+                cx.background_spawn(async move { file_inside(&path, &folders) })
+                    .await?;
+            }
+            let connection = this.update(cx, |this, cx| {
+                this.skip_restore |= this.running.is_none();
+                this.connection(cx)
+            })?;
             let cdp = connection.await?;
             let result = cdp.call("Page.navigate", json!({ "url": url })).await?;
             if let Some(error) = result["errorText"].as_str() {
@@ -1199,10 +1203,6 @@ fn url_key(project_id: i64) -> String {
     format!("browser.{project_id}.url")
 }
 
-fn port_key(project_id: i64) -> String {
-    format!("browser.{project_id}.devtools_port")
-}
-
 /// The page a browser opens with when it has been nowhere yet.
 pub const HOME_PAGE: &str = "https://www.google.com/";
 
@@ -1242,6 +1242,67 @@ pub fn normalize_url(input: &str) -> String {
     }
 }
 
+/// The scheme of `url` in lower case (`https`, `file`, `about`), or `None`
+/// when it does not start with one.
+fn scheme_of(url: &str) -> Option<String> {
+    let (scheme, _) = url.split_once(':')?;
+    let mut chars = scheme.chars();
+    let valid = chars.next()?.is_ascii_alphabetic()
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    valid.then(|| scheme.to_ascii_lowercase())
+}
+
+/// Whether an agent may send a tab of the user's own Chrome to `url`: a web
+/// page or the empty page. A local file, the browser's or an extension's own
+/// pages and `javascript:` would take the agent past what it is allowed to
+/// read and drive there.
+pub fn is_web_address(url: &str) -> bool {
+    match scheme_of(url).as_deref() {
+        Some("http" | "https") => true,
+        Some("about") => url.eq_ignore_ascii_case("about:blank"),
+        _ => false,
+    }
+}
+
+/// What an agent may open in the built-in browser: a web address, `data:`,
+/// or (the returned path) a `file:` the caller still has to find inside the
+/// workspace's folders. The browser's own pages are refused.
+fn agent_address(url: &str) -> Result<Option<PathBuf>> {
+    if is_web_address(url) || scheme_of(url).as_deref() == Some("data") {
+        return Ok(None);
+    }
+    if scheme_of(url).as_deref() == Some("file") {
+        let path = url::Url::parse(url)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+            .with_context(|| format!("{url} is not a local file's address"))?;
+        return Ok(Some(path));
+    }
+    bail!(
+        "agents can open web addresses (http, https), about:blank, data: and files inside the workspace's folders, not {url}"
+    )
+}
+
+/// Refuses `path` unless it is inside one of `folders`, both resolved, so a
+/// link inside a folder cannot lead out of it.
+fn file_inside(path: &Path, folders: &[PathBuf]) -> Result<()> {
+    let real = path
+        .canonicalize()
+        .with_context(|| format!("{} does not exist", path.display()))?;
+    let inside = folders.iter().any(|folder| {
+        folder
+            .canonicalize()
+            .is_ok_and(|folder| real.starts_with(folder))
+    });
+    if !inside {
+        bail!(
+            "{} is outside the workspace's folders; agents can open only files inside them",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// `text` as a query-string value (`application/x-www-form-urlencoded`).
 fn form_urlencoded(text: &str) -> String {
     let mut out = String::new();
@@ -1260,6 +1321,49 @@ fn form_urlencoded(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agents_open_only_web_pages_and_workspace_files() {
+        for url in [
+            "https://example.com",
+            "HTTP://localhost:3000",
+            "about:blank",
+        ] {
+            assert!(is_web_address(url), "{url}");
+            assert!(matches!(agent_address(url), Ok(None)), "{url}");
+        }
+        for url in [
+            "file:///etc/passwd",
+            "chrome://settings",
+            "chrome-extension://abc/popup.html",
+            "view-source:https://example.com",
+            "javascript:alert(1)",
+            "devtools://devtools/bundled/inspector.html",
+            "about:settings",
+            "data:text/html,<p>x",
+            "\u{1}https://example.com",
+        ] {
+            assert!(!is_web_address(url), "{url}");
+        }
+        assert!(matches!(agent_address("data:text/html,<p>x"), Ok(None)));
+        for url in [
+            "chrome://settings",
+            "view-source:file:///etc/passwd",
+            "javascript:alert(1)",
+            "blob:https://x/y",
+        ] {
+            assert!(agent_address(url).is_err(), "{url}");
+        }
+        // A file is let through only with its path, for the folder check.
+        let file = if cfg!(windows) {
+            "file:///C:/ws/a%20b.html"
+        } else {
+            "file:///ws/a%20b.html"
+        };
+        let path = agent_address(file).unwrap().unwrap();
+        assert!(path.ends_with("a b.html"));
+        assert!(agent_address("file://server/share/x.html").is_err() || cfg!(windows));
+    }
 
     #[test]
     fn address_bar_input_becomes_a_url() {

@@ -8,8 +8,8 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread as _, MainThreadMarker};
 use objc2_av_foundation::{
-    AVMediaTypeVideo, AVPlayer, AVPlayerItem, AVPlayerItemStatus, AVPlayerItemVideoOutput,
-    AVVideoComposition,
+    AVAsset, AVMediaTypeVideo, AVPlayer, AVPlayerItem, AVPlayerItemStatus, AVPlayerItemVideoOutput,
+    AVURLAsset, AVVideoComposition,
 };
 use objc2_core_foundation::{CFRetained, CFString};
 use objc2_core_media::CMTime;
@@ -37,36 +37,70 @@ fn ns_key(key: &'static CFString) -> &'static NSString {
     unsafe { &*(key as *const CFString as *const NSString) }
 }
 
-/// A video recorded turned (a phone's) plays upright: its frames are
-/// handed over as they are stored unless a composition turns them.
+/// What opening reads from the file, which can take a while (a slow or
+/// network disk, a file not downloaded yet): made on any thread by
+/// [`Engine::prepare`], then given to [`Engine::open_prepared`] on the main
+/// one.
+pub struct Prepared {
+    asset: Retained<AVURLAsset>,
+    /// The video is stored turned (a phone's recording).
+    turned: bool,
+}
+
+/// Whether the asset's video is stored turned. Waits until the file's
+/// tracks are read.
 #[allow(deprecated)]
-unsafe fn upright(item: &AVPlayerItem) {
-    // SAFETY: AVFoundation's documented calls; a local file's tracks load
-    // at once.
+unsafe fn stored_turned(asset: &AVAsset) -> bool {
+    // SAFETY: AVFoundation's documented calls, which may be made on any
+    // thread.
     unsafe {
-        let asset = item.asset();
         let Some(video) = AVMediaTypeVideo else {
-            return;
+            return false;
         };
         let Some(track) = asset.tracksWithMediaType(video).firstObject() else {
-            return;
+            return false;
         };
         let t = track.preferredTransform();
         let identity = (t.a - 1.).abs() < 1e-6
             && t.b.abs() < 1e-6
             && t.c.abs() < 1e-6
             && (t.d - 1.).abs() < 1e-6;
+        // What standing it upright needs is read here too, not on the
+        // main thread later.
         if !identity {
-            let composition = AVVideoComposition::videoCompositionWithPropertiesOfAsset(&asset);
-            item.setVideoComposition(Some(&composition));
+            _ = asset.duration();
         }
+        !identity
     }
 }
 
 impl Engine {
+    /// Opens the video, waiting for its file to be read: [`Engine::prepare`]
+    /// off the main thread and then [`Engine::open_prepared`] do not hold
+    /// the window up.
     pub fn open(path: &Path) -> Result<Self, String> {
+        Self::open_prepared(Self::prepare(path))
+    }
+
+    /// Reads what opening needs from the file. On any thread.
+    pub fn prepare(path: &Path) -> Prepared {
+        // A pool of its own: the thread this runs on may have none.
+        objc2::rc::autoreleasepool(|_| {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+            // SAFETY: AVFoundation's documented calls; an asset is made and
+            // read on any thread.
+            unsafe {
+                let asset = AVURLAsset::URLAssetWithURL_options(&url, None);
+                let turned = stored_turned(&asset);
+                Prepared { asset, turned }
+            }
+        })
+    }
+
+    /// The player for a video [`Engine::prepare`] has read. On the main
+    /// thread.
+    pub fn open_prepared(prepared: Prepared) -> Result<Self, String> {
         let main = MainThreadMarker::new().ok_or("Video opens on the main thread.")?;
-        let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
         let keys: [&NSString; 3] = unsafe {
             [
                 ns_key(kCVPixelBufferPixelFormatTypeKey),
@@ -82,13 +116,22 @@ impl Engine {
         let attributes = NSDictionary::from_retained_objects(&keys, &values);
         // SAFETY: AVFoundation's documented calls, on the main thread.
         unsafe {
-            let item = AVPlayerItem::playerItemWithURL(&url, main);
+            let item = AVPlayerItem::playerItemWithAsset(&prepared.asset, main);
             let output = AVPlayerItemVideoOutput::initWithPixelBufferAttributes(
                 AVPlayerItemVideoOutput::alloc(),
                 Some(&attributes),
             );
             item.addOutput(&output);
-            upright(&item);
+            // A video recorded turned (a phone's) plays upright: its frames
+            // are handed over as they are stored unless a composition turns
+            // them. The asset's tracks are read already, so this does not
+            // wait for the file.
+            if prepared.turned {
+                #[allow(deprecated)]
+                let composition =
+                    AVVideoComposition::videoCompositionWithPropertiesOfAsset(&prepared.asset);
+                item.setVideoComposition(Some(&composition));
+            }
             let player = AVPlayer::playerWithPlayerItem(Some(&item), main);
             Ok(Self {
                 player,
@@ -194,5 +237,19 @@ impl Drop for Engine {
             self.player.pause();
             self.player.replaceCurrentItemWithPlayerItem(None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_is_read_off_the_main_thread() {
+        // Tests run off the main thread, as the player's reading does: no
+        // call in it may be one of the main thread's. A file that is not
+        // there has no video to turn.
+        let prepared = Engine::prepare(Path::new("/nonexistent/ph-preview-video.mov"));
+        assert!(!prepared.turned);
     }
 }

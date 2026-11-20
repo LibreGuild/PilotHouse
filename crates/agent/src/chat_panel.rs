@@ -36,7 +36,7 @@ use ph_store::sessions::{Session, SessionId};
 use ph_ui::Icons;
 use ph_ui::MenuButton as _;
 
-use crate::agents::{self, AGENTS, AgentSpec, Availability};
+use crate::agents::{self, AGENTS, AgentSpec};
 use crate::attachment_view;
 use crate::attachments::{self, Attachment, LiveSources, PullBrief};
 use crate::chats::{ChatHub, DEFAULT_AGENT_KEY, WorkspaceChats, default_agent};
@@ -50,7 +50,10 @@ use crate::thread::{ChatThread, ThreadEvent, ThreadProject, ThreadStatus};
 use crate::transcript_scroll::TranscriptList;
 use crate::{setup, setup_view};
 
+mod cli_pick;
 mod dropped;
+mod fit;
+mod history;
 mod mentions;
 mod picker;
 mod render;
@@ -86,26 +89,41 @@ pub enum ChatPanelEvent {
     WantPulls,
     /// A starter of the panel's [`ChatContext`] was picked (its id).
     Starter(String),
-    /// Go on with an agent CLI's session in a terminal of the workspace
-    /// (`session` resumed; a new one when not known).
-    ResumeInTerminal {
+    /// Show the session in front in its other form (see [`Form`]): a chat
+    /// goes on in its agent's CLI, a CLI session in the chat.
+    ShowAs(Form),
+    /// Pick one of an agent's own sessions in this folder that did not
+    /// start here (the agent's id), to go on with it.
+    PickOutsideSession(&'static str),
+    /// Something was sent to the session in front while it is in its CLI
+    /// form: this text is to be typed into the CLI, for the user to send.
+    TypeInCli(String),
+    /// Asked of a chat from its row in Past chats (see `history`).
+    ChatAction(Box<Session>, ChatAction),
+    /// The new chat in front is to start in this agent's CLI, in this
+    /// account of it (empty: the agent's own): picked where new sessions
+    /// open as a CLI (see `cli_pick`).
+    StartCli {
         agent: &'static str,
-        session: Option<String>,
-        cwd: std::path::PathBuf,
-    },
-    /// Go on in a new chat with `agent`, from `recap` of a terminal session.
-    ContinueInChat {
-        agent: &'static AgentSpec,
-        recap: String,
-        title: String,
-    },
-    /// Go on in a new chat that takes agent `agent`'s own `session` back.
-    ResumeInChat {
-        agent: &'static str,
-        session: String,
-        title: String,
+        account: String,
     },
 }
+
+pub use history::{ChatAction, ChatMarks};
+
+/// The two forms of a session with an agent: the chat, or the agent's own
+/// program in a terminal. It is one conversation either way (the agent's
+/// session, which both go on with), shown in the same place; only what is
+/// typed into changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Form {
+    Chat,
+    Cli,
+}
+
+/// The agent's program of the session a panel shows, as a view, while it
+/// runs. Whoever shows the panel has the terminals.
+pub type CliView = Rc<dyn Fn(SessionId, &mut Window, &mut App) -> Option<gpui_kit::AnyView>>;
 
 /// What a chat panel is for when it is not a workspace's plain chat: the
 /// GitHub view's chat about one pull request.
@@ -166,12 +184,8 @@ const SUGGESTIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "Plan a feature",
-        "Break work into board cards",
-        concat!(
-            "Help me plan a feature. Ask me what it should do, then break it into small cards on the ",
-            ph_brand::name!(),
-            " board."
-        ),
+        "The steps, and what to build first",
+        "Help me plan a feature. Ask me what it should do, then write a short plan: the steps in order, the files each one touches, and how to check each before the next.",
     ),
     (
         "Write tests",
@@ -194,15 +208,6 @@ const FOLDERLESS_SUGGESTIONS: &[(&str, &str, &str)] = &[
             "Open a website I name in the ",
             ph_brand::name!(),
             " browser and tell me what you find: what works, what looks broken, and anything slow. Ask me which site first."
-        ),
-    ),
-    (
-        "Plan work",
-        "Break it into board cards",
-        concat!(
-            "Help me plan some work. Ask me what it is, then break it into small cards on the ",
-            ph_brand::name!(),
-            " board."
         ),
     ),
     (
@@ -251,6 +256,11 @@ pub struct ChatPanel {
     live: Option<LiveSources>,
     /// The header lists past chats (when the window's sidebar is hidden).
     history_menu: bool,
+    /// What the header shows in place of the chat's place and title: the
+    /// tabs of the workspace's open chats, drawn by whoever shows the
+    /// panel there. One row then says which chats there are, which is in
+    /// front and what can be done with it.
+    tabs: Option<HeaderTabs>,
     /// What the panel is for, when not a workspace's plain chat.
     context: Option<ChatContext>,
     /// A closed terminal's chat on screen, instead of `active`.
@@ -263,10 +273,25 @@ pub struct ChatPanel {
     _busy_tick: Option<Task<()>>,
     /// The pane is narrow: the empty chat's starters stack in one column.
     narrow: bool,
+    /// The pane's width when it was last drawn (pixels at the default
+    /// interface size): the message box's buttons keep their words while
+    /// there is room for them (`fit`).
+    width: Option<f32>,
     /// Whoever shows this panel can run an agent's CLI in a terminal (a
     /// workspace's screen; not the quick chat or a Studio window), so the
     /// offer to do so is worth making.
-    runs_terminals: bool,
+    /// The CLI of the session shown, where sessions have their other form
+    /// here (a workspace's chat).
+    cli_view: Option<CliView>,
+    /// Past chats (see `history`): its pop-up is open; the whole list
+    /// shows where the chat is; the chats either lists, read when it
+    /// opens; and who says which are marked done.
+    history_open: bool,
+    all_chats: bool,
+    /// The agent of a new CLI session is being asked (see `cli_pick`).
+    cli_pick: bool,
+    history: Vec<Session>,
+    chat_marks: Option<ChatMarks>,
     /// The shared Chrome tabs are being read (`@tabs`): the message waits
     /// for them, so it does not go without them.
     reading_tabs: bool,
@@ -281,10 +306,17 @@ pub struct ChatPanel {
     /// workspace's chats keep them.
     sent_off: Vec<(Entity<ChatThread>, Subscription)>,
     failed: Option<SharedString>,
+    /// The agent was to be started before the agents had been looked for
+    /// (the message box got the keyboard right after launch): it is once
+    /// they are, see [`Self::warm_up`].
+    warm_up_due: bool,
     _prepare: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     _active_subscriptions: Vec<Subscription>,
 }
+
+/// Draws the tabs a panel's header shows (see [`ChatPanel::set_header_tabs`]).
+pub type HeaderTabs = std::rc::Rc<dyn Fn(&mut Window, &mut App) -> Option<gpui_kit::AnyElement>>;
 
 impl EventEmitter<ChatPanelEvent> for ChatPanel {}
 
@@ -360,6 +392,7 @@ impl ChatPanel {
             next_title: None,
             live: None,
             history_menu: false,
+            tabs: None,
             terminal_session: None,
             context: None,
             busy: None,
@@ -367,13 +400,20 @@ impl ChatPanel {
             busy_since: None,
             _busy_tick: None,
             narrow: false,
-            runs_terminals: false,
+            width: None,
+            cli_view: None,
+            history_open: false,
+            all_chats: false,
+            cli_pick: false,
+            history: Vec::new(),
+            chat_marks: None,
             reading_tabs: false,
             tabs_attached: false,
             subagents_open: false,
             sent_off: Vec::new(),
             side: None,
             failed: None,
+            warm_up_due: false,
             _prepare: None,
             _subscriptions: vec![
                 subscription,
@@ -397,6 +437,15 @@ impl ChatPanel {
                 this.chats
                     .update(cx, |chats, cx| chats.set_preparing(None, cx));
             }
+            // Pictures attached and never sent are drawn nowhere else.
+            let unsent = this
+                .attachments
+                .iter()
+                .filter_map(|attachment| match attachment {
+                    Attachment::Image { path, .. } => Some(path.clone()),
+                    _ => None,
+                });
+            ph_ui::images::release_paths(unsent.collect(), cx);
         })
         .detach();
         panel
@@ -404,12 +453,17 @@ impl ChatPanel {
 
     /// Shows `session`, or a fresh draft for `None`.
     pub fn set_session(&mut self, session: Option<Session>, cx: &mut Context<Self>) {
-        self.terminal_session = None;
+        // A chat was picked (from the list, a tab, anywhere): it shows.
+        self.show_chat();
         if let Some(session) = session
             .as_ref()
             .filter(|session| session.kind == "terminal")
         {
             self.show_terminal_session(session.clone(), cx);
+            // The chat behind the CLI is not being looked at: it is told
+            // of (unread, a notification) when it ends a turn or asks.
+            self.chats
+                .update(cx, |chats, cx| chats.set_viewing(None, cx));
             cx.notify();
             return;
         }
@@ -436,6 +490,16 @@ impl ChatPanel {
         cx.notify();
     }
 
+    /// The chat in `active` is what shows from here: not the CLI of the
+    /// session that was in front, nor the list of chats or the question
+    /// that stood in the chat's place. Whatever puts a chat in front does
+    /// this, or the chat it started would go on unseen behind them.
+    fn show_chat(&mut self) {
+        self.all_chats = false;
+        self.cli_pick = false;
+        self.terminal_session = None;
+    }
+
     /// A new chat whose agent works in `folder`, a folder of the workspace.
     pub fn new_chat_in(
         &mut self,
@@ -443,6 +507,7 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.show_chat();
         let agent = default_agent(&self.store);
         let project = ThreadProject {
             path: folder,
@@ -469,6 +534,9 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.type_in_cli(Some(&attachment), text, cx) {
+            return;
+        }
         let existing = self.composer.read(cx).value().trim().to_string();
         let draft = if existing.is_empty() {
             text.to_string()
@@ -496,6 +564,9 @@ impl ChatPanel {
     /// Begins a message for the user to finish: `text` in the composer,
     /// focused, the cursor after it.
     pub fn begin_message(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.type_in_cli(None, text, cx) {
+            return;
+        }
         self.composer.update(cx, |composer, cx| {
             composer.set_value(text.to_string(), window, cx)
         });
@@ -515,9 +586,35 @@ impl ChatPanel {
         }
     }
 
-    /// Says that [`ChatPanelEvent::ResumeInTerminal`] is acted on here.
-    pub fn set_runs_terminals(&mut self, on: bool) {
-        self.runs_terminals = on;
+    /// Gives sessions their other form here: `view` is the agent's program
+    /// of a session, while it runs, and [`ChatPanelEvent::ShowAs`] is acted
+    /// on by whoever shows the panel.
+    pub fn set_cli_view(&mut self, view: CliView) {
+        self.cli_view = Some(view);
+    }
+
+    /// The form the session in front is in.
+    pub fn form(&self) -> Form {
+        if self.terminal_session.is_some() {
+            Form::Cli
+        } else {
+            Form::Chat
+        }
+    }
+
+    /// The session in front as it is stored, once it is (a chat nothing
+    /// was sent in is not yet).
+    pub fn shown_session(&self, cx: &App) -> Option<Session> {
+        match &self.terminal_session {
+            Some(shown) => Some(shown.session.clone()),
+            None => self.active.read(cx).session().cloned(),
+        }
+    }
+
+    /// The chat in front (behind a session shown as its CLI, the chat
+    /// shown before it).
+    pub fn active_thread(&self) -> &Entity<ChatThread> {
+        &self.active
     }
 
     /// Makes this panel the chat about something (`None`: a plain chat).
@@ -644,6 +741,13 @@ impl ChatPanel {
         !self.composer.read(cx).value().trim().is_empty() || !self.attachments.is_empty()
     }
 
+    /// Shows `tabs` in the header, in place of the chat's place and title
+    /// (the window names those where the panel is a workspace's chat).
+    pub fn set_header_tabs(&mut self, tabs: HeaderTabs, cx: &mut Context<Self>) {
+        self.tabs = Some(tabs);
+        cx.notify();
+    }
+
     /// Offers past chats in the header (the sidebar that lists them is hidden).
     pub fn set_history_menu(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.history_menu = shown;
@@ -659,6 +763,12 @@ impl ChatPanel {
     /// session's, shown read only, has none).
     pub fn takes_messages(&self) -> bool {
         self.terminal_session.is_none()
+    }
+
+    /// What the chat in view did to check its work (tests, commands,
+    /// screenshots), read off its tool calls.
+    pub fn evidence(&self, cx: &App) -> crate::evidence::Evidence {
+        crate::evidence::of(self.active.read(cx).entries())
     }
 
     pub fn active_session_id(&self, cx: &App) -> Option<SessionId> {
@@ -701,32 +811,6 @@ impl ChatPanel {
         cx.notify();
     }
 
-    /// Opens a new review chat working in `cwd` (the PR's worktree) and
-    /// starts it: `display` is what the chat shows for the long `prompt`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn start_review(
-        &mut self,
-        review_id: i64,
-        cwd: std::path::PathBuf,
-        title: String,
-        display: String,
-        prompt: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.start_review_turn(
-            Some(review_id),
-            Some(crate::thread::ReviewTurn::Round),
-            None,
-            cwd,
-            title,
-            display,
-            prompt,
-            window,
-            cx,
-        )
-    }
-
     /// Starts a chat that asks `prompt` about a pull request, working in
     /// its checkout `cwd` and only reading.
     pub fn start_question(
@@ -759,6 +843,7 @@ impl ChatPanel {
     ) {
         self.clear_busy(cx);
         self.failed = None;
+        self.show_chat();
         let agent = agent.unwrap_or_else(|| default_agent(&self.store));
         let store = self.store.clone();
         // A review works in its worktree alone.
@@ -789,6 +874,49 @@ impl ChatPanel {
         });
         self.focus_composer(window, cx);
         cx.notify();
+    }
+
+    /// Starts review round `review_id` as a chat of its own, behind the one
+    /// in view: several pull requests can be reviewed at once without each
+    /// taking the panel from the one before. Returns its session.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_review_behind(
+        &mut self,
+        review_id: i64,
+        agent: &'static AgentSpec,
+        cwd: std::path::PathBuf,
+        title: String,
+        display: String,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) -> Option<SessionId> {
+        let store = self.store.clone();
+        // A review works in its worktree alone.
+        let project = ThreadProject {
+            path: cwd,
+            extra_dirs: Vec::new(),
+            empty: false,
+            ..self.project.clone()
+        };
+        let thread = cx.new(|cx| {
+            let mut thread = ChatThread::draft(store, project, agent, cx);
+            thread.set_review(review_id);
+            thread
+        });
+        let connection = self.connection_of(&thread, cx);
+        let blocks = vec![agent_client_protocol_schema::v1::ContentBlock::Text(
+            agent_client_protocol_schema::v1::TextContent::new(prompt),
+        )];
+        thread.update(cx, |thread, cx| {
+            thread.send(display, Vec::new(), title, blocks, connection, cx)
+        });
+        let session = thread.read(cx).session().map(|session| session.id)?;
+        // Kept by the workspace's chats: it works on off screen.
+        self.chats
+            .update(cx, |chats, cx| chats.keep(session, thread, cx));
+        cx.emit(ChatPanelEvent::SessionsChanged);
+        cx.notify();
+        Some(session)
     }
 
     /// Starts a new chat named `title` with `prompt`, letting the agent use
@@ -833,7 +961,7 @@ impl ChatPanel {
                 thread.set_parallel();
                 thread
             });
-            let connection = self.connection(agent, cx);
+            let connection = self.connection_of(&thread, cx);
             let blocks = vec![agent_client_protocol_schema::v1::ContentBlock::Text(
                 agent_client_protocol_schema::v1::TextContent::new(prompt.to_string()),
             )];
@@ -858,6 +986,7 @@ impl ChatPanel {
             first.get_or_insert(thread);
         }
         if let Some(first) = first {
+            self.show_chat();
             self.active = first;
             self.watch_active(cx);
         }
@@ -881,6 +1010,14 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // In its CLI the question is typed there, for the user to send.
+        let question = prompt
+            .as_ref()
+            .map_or("", |(_, prompt)| prompt.as_str())
+            .to_string();
+        if self.type_in_cli(Some(&attachment), &question, cx) {
+            return;
+        }
         if matches!(
             self.active.read(cx).status(),
             ThreadStatus::Working | ThreadStatus::Connecting
@@ -899,7 +1036,7 @@ impl ChatPanel {
         cx.notify();
     }
 
-    /// Sends `prompt` as if the user typed it (used by the board). A new chat
+    /// Sends `prompt` as if the user typed it (a tool's task). A new chat
     /// is named `title` rather than after the prompt text.
     pub fn send_text(
         &mut self,
@@ -940,7 +1077,54 @@ impl ChatPanel {
         }
     }
 
+    /// What is sent to the session in front while it is in its CLI form
+    /// (a file, a capture, selected text, the start of a message) is typed
+    /// into the CLI instead, for the user to send there: the message box
+    /// is not on screen, and what went into it would be lost. True when
+    /// the session is in that form.
+    fn type_in_cli(
+        &mut self,
+        attachment: Option<&Attachment>,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.terminal_session.is_none() {
+            return false;
+        }
+        let mut typed = String::new();
+        match attachment {
+            // An agent's CLI reads a file or an image it is given the path
+            // of; text goes as it is.
+            Some(Attachment::File(path)) => {
+                let path = std::path::Path::new(path);
+                let path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    self.project.path.join(path)
+                };
+                typed.push_str(&path.to_string_lossy());
+                typed.push(' ');
+            }
+            Some(Attachment::Image { path, .. }) => {
+                typed.push_str(&path.to_string_lossy());
+                typed.push(' ');
+            }
+            Some(Attachment::Text { label, text }) => {
+                typed.push_str(&format!("{label}:\n{}\n", text.trim_end()));
+            }
+            None => {}
+        }
+        typed.push_str(text.trim());
+        if !typed.trim().is_empty() {
+            cx.emit(ChatPanelEvent::TypeInCli(typed));
+        }
+        true
+    }
+
     pub fn attach(&mut self, attachment: Attachment, window: &mut Window, cx: &mut Context<Self>) {
+        if self.type_in_cli(Some(&attachment), "", cx) {
+            return;
+        }
         if !self.attachments.contains(&attachment) {
             self.attachments.push(attachment);
         }
@@ -970,6 +1154,7 @@ impl ChatPanel {
                         cx.emit(ChatPanelEvent::SessionsChanged);
                     }
                     ThreadEvent::TurnEnded => cx.emit(ChatPanelEvent::TurnEnded),
+                    ThreadEvent::Renamed => cx.emit(ChatPanelEvent::SessionsChanged),
                     ThreadEvent::Review(ReviewCardEvent::OpenFile { path, line }) => {
                         cx.emit(ChatPanelEvent::OpenFile {
                             path: path.clone(),
@@ -991,14 +1176,32 @@ impl ChatPanel {
         ];
     }
 
-    /// The workspace's process for `spec`.
+    /// The workspace's process for `spec`, in the account the chat in
+    /// front is in.
     fn connection(
         &mut self,
         spec: &'static AgentSpec,
         cx: &mut Context<Self>,
     ) -> Entity<AgentConnection> {
+        let account = self.active.read(cx).account().to_string();
         self.chats
-            .update(cx, |chats, cx| chats.connection(spec, cx))
+            .update(cx, |chats, cx| chats.connection(spec, &account, cx))
+    }
+
+    /// The workspace's process for `thread`'s agent, in the account that
+    /// chat is in: for a chat started behind the one in front (a review, a
+    /// lane of a parallel run), which is not in the front chat's account.
+    fn connection_of(
+        &mut self,
+        thread: &Entity<ChatThread>,
+        cx: &mut Context<Self>,
+    ) -> Entity<AgentConnection> {
+        let (spec, account) = {
+            let thread = thread.read(cx);
+            (thread.agent(), thread.account().to_string())
+        };
+        self.chats
+            .update(cx, |chats, cx| chats.connection(spec, &account, cx))
     }
 
     /// Starts the agent and its session now (a resumed session is loaded,
@@ -1025,6 +1228,10 @@ impl ChatPanel {
             self.active
                 .update(cx, |thread, cx| thread.set_agent(default, cx));
         }
+        // Asked for while the agents were still being looked for.
+        if std::mem::take(&mut self.warm_up_due) {
+            self.warm_up(cx);
+        }
         cx.notify();
     }
 
@@ -1038,7 +1245,18 @@ impl ChatPanel {
             return;
         }
         let spec = self.active.read(cx).agent();
-        if !matches!(spec.availability(), Availability::Ready { .. }) {
+        // Whether it can start is what the look in the background found.
+        // Asking here would search the PATH on the UI's thread and, until
+        // the login shell has answered, wait for it: seconds with the
+        // window frozen, for a click in the message box. Not looked for
+        // yet: it starts when the look is done (`agents_found`).
+        let Some(installed) = agents::installed() else {
+            self.warm_up_due = true;
+            return;
+        };
+        if !installed.iter().any(|known| known.id == spec.id) {
+            // A look under way may find it (it was installed just now).
+            self.warm_up_due = crate::installed::looking(cx);
             return;
         }
         let connection = self.connection(spec, cx);
@@ -1239,16 +1457,11 @@ impl ChatPanel {
             ));
         }
         for attachment in &attached {
-            blocks.extend(attachment.to_blocks(
-                &roots,
-                self.project.id,
-                &self.store,
-                accepts_images,
-            ));
+            blocks.extend(attachment.to_blocks(&roots, accepts_images));
         }
         let summaries = attached
             .iter()
-            .map(|attachment| attachment.summary(&roots, self.project.id, &self.store))
+            .map(|attachment| attachment.summary(&roots))
             .collect();
 
         let spec = self.active.read(cx).agent();
@@ -1280,8 +1493,16 @@ impl ChatPanel {
         cx.notify();
     }
 
+    /// Stop: asks the agent to; pressed again once that has not worked,
+    /// ends its process.
     fn cancel(&mut self, cx: &mut Context<Self>) {
-        self.active.update(cx, |thread, cx| thread.cancel(cx));
+        self.active.update(cx, |thread, cx| {
+            if thread.stop_is_slow() {
+                thread.force_stop(cx)
+            } else {
+                thread.cancel(cx)
+            }
+        });
     }
 
     /// Puts a queued message back in the composer to change it.

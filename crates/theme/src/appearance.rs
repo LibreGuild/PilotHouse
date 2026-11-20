@@ -43,6 +43,25 @@ impl Appearance {
     }
 }
 
+/// Names PilotHouse's own fonts on the theme before the component library
+/// starts: call it right before `gpui_kit::init`.
+///
+/// The library's theme starts with the system's families as placeholders,
+/// and to settle them it lists every font installed: about 100 ms on a Mac
+/// with many, all of it before the first window. This app draws with the
+/// fonts it carries, so a theme that names them from the start has nothing
+/// to settle. Leaving this call out costs that time and nothing else.
+pub fn before_init(cx: &mut App) {
+    if !crate::fonts::register(cx) || cx.has_global::<Theme>() {
+        return;
+    }
+    cx.set_global(Theme {
+        font_family: crate::fonts::INTERFACE.into(),
+        mono_font_family: crate::fonts::CODE.into(),
+        ..Theme::default()
+    });
+}
+
 /// Loads PilotHouse's fonts and themes, and shows Modern Dark until the
 /// user's choice is applied.
 ///
@@ -98,6 +117,37 @@ pub fn apply_appearance(appearance: &Appearance, mut window: Option<&mut Window>
 mod tests {
     use super::*;
     use crate::{DarkTheme, Preferences};
+
+    #[gpui_kit::test]
+    fn the_theme_names_the_apps_own_fonts_from_the_start(cx: &mut gpui_kit::TestAppContext) {
+        use crate::fonts::{CODE, INTERFACE};
+        cx.update(|cx| {
+            before_init(cx);
+            gpui_kit::init(cx);
+            init(cx);
+            // A text system that cannot take the fonts (none does today)
+            // leaves the library's own families, which is the fallback.
+            if !crate::fonts::registered(cx) {
+                return;
+            }
+            // Still there after the library's start: had it put its
+            // placeholders back, it would have listed the system's fonts
+            // to settle them, which is the time `before_init` saves.
+            let theme = Theme::global(cx);
+            assert_eq!(theme.font_family.as_ref(), INTERFACE);
+            assert_eq!(theme.mono_font_family.as_ref(), CODE);
+
+            let fonts = crate::preferences::effective_fonts(&Preferences::default(), cx);
+            assert_eq!(fonts, (INTERFACE.to_string(), CODE.to_string()));
+            // A family the user chose is used as it is.
+            let chosen = Preferences {
+                ui_font: "Helvetica".into(),
+                ..Preferences::default()
+            };
+            let fonts = crate::preferences::effective_fonts(&chosen, cx);
+            assert_eq!(fonts, ("Helvetica".to_string(), CODE.to_string()));
+        });
+    }
 
     #[test]
     fn choices_saved_before_themes_had_names_keep_their_look() {

@@ -22,7 +22,7 @@ Use `gpui_kit::test::TestWindowExt` (`click`, `press`, `input`, `find`) and `Tes
 ```sh
 export PILOTHOUSE_DATA_DIR=/tmp/ph-profile        # same value as the running app
 pilothouse ctl app.add_project '{"path":"/path/to/repo"}'
-pilothouse ctl ui.click '{"label":"Board"}'        # by accessible label
+pilothouse ctl ui.click '{"label":"Terminal"}'     # by accessible label
 pilothouse ctl ui.click '{"id":"send-message"}'    # by element id
 pilothouse ctl ui.dispatch '{"action":"files::QuickOpen"}'
 pilothouse ctl ui.input '{"text":"main.rs"}'
@@ -33,6 +33,25 @@ pilothouse ctl app.state                            # projects, active tab, sess
 ```
 
 Screenshots render the window offscreen (`Window::render_to_image`), so they need no screen-recording permission. Release builds do not include the `ui.*` methods.
+
+## The explanation prompt
+
+What an agent is asked when it explains a change (`crates/review/src/explanation/prompt.rs`, see [explanations](features/explanations.md)) is tried on real agents and real changes, without the app:
+
+```sh
+# The prompt for the work not committed in a folder, or for a commit.
+cargo run -p ph-review --example explanation_prompt -- /path/to/repo > /tmp/prompt.txt
+cargo run -p ph-review --example explanation_prompt -- /path/to/repo --commit abc1234
+# With what the chats said (a list of `Asked`: chat, agent, request, outcome, commands).
+cargo run -p ph-review --example explanation_prompt -- /path/to/repo --asked record.json
+
+# Give it to an agent in that folder, read-only, and read what comes back.
+cd /path/to/repo
+claude -p "$(cat /tmp/prompt.txt)" --allowedTools Read Grep Glob "Bash(git diff:*)" "Bash(git show:*)" "Bash(git status:*)"
+codex exec -s read-only "$(cat /tmp/prompt.txt)"
+```
+
+Try a small change, an ordinary one, a large one, and a commit with no record. Read each reply as the person it is for: would you read it to the end, does it say how this part worked before, is anything in it not true of the code, is it within its words (the prompt names the limit), and is the explanation in the reply between its two marker lines. Agents differ: one wrote a file instead of replying, and one ran the project's tests, until the prompt said not to. Change the prompt, not the reply.
 
 ## Network drives (SSH)
 
@@ -54,3 +73,15 @@ In the app, add the same mapping in Settings → Network drives and open a folde
 ## Visual regression
 
 Keep reference screenshots of key screens (welcome, chat, each tab, light and dark). Compare new captures after UI changes. Automating the comparison is planned; for now, review the images.
+
+## Coverage
+
+Which lines and functions the tests run, with [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) (once: `cargo install cargo-llvm-cov --locked` and `rustup component add llvm-tools-preview`):
+
+```sh
+cargo coverage-summary -p ph-store   # a table: per file, regions, functions and lines covered
+cargo coverage -p ph-store           # the same as pages, in target/llvm-cov/html
+cargo coverage --workspace           # everything: builds it all again, instrumented (tens of GB)
+```
+
+A run builds what it covers a second time, instrumented, in `target/llvm-cov-target`, so one crate at a time is the usual way to look. A function no test runs is not thereby unused: the compiler (with `-D warnings`) says what nothing in a crate calls, and for `pub` items another crate might call, count their uses across `crates/`.

@@ -29,7 +29,6 @@ pub enum Feature {
     Files,
     Changes,
     Pulls,
-    Board,
     Browser,
     Devices,
     Runs,
@@ -46,6 +45,9 @@ pub enum Feature {
     Presentations,
     ChromeExtension,
     QuickChat,
+    /// Changes explained in plain words: Explain in the Git tab and on a
+    /// commit, and Why Is This Here? in the editor.
+    Explanations,
 }
 
 impl Feature {
@@ -53,7 +55,6 @@ impl Feature {
         Feature::Files,
         Feature::Changes,
         Feature::Pulls,
-        Feature::Board,
         Feature::Browser,
         Feature::Devices,
         Feature::Runs,
@@ -69,6 +70,7 @@ impl Feature {
         Feature::Presentations,
         Feature::ChromeExtension,
         Feature::QuickChat,
+        Feature::Explanations,
     ];
 
     /// Its key in `[features]`.
@@ -77,7 +79,6 @@ impl Feature {
             Feature::Files => "files",
             Feature::Changes => "changes",
             Feature::Pulls => "pulls",
-            Feature::Board => "board",
             Feature::Browser => "browser",
             Feature::Devices => "devices",
             Feature::Runs => "runs",
@@ -93,6 +94,7 @@ impl Feature {
             Feature::Presentations => "presentations",
             Feature::ChromeExtension => "chrome_extension",
             Feature::QuickChat => "quick_chat",
+            Feature::Explanations => "explanations",
         }
     }
 }

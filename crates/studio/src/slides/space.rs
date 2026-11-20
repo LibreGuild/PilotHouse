@@ -27,6 +27,11 @@ const KEEP: usize = 20;
 const EVERY: Duration = Duration::from_secs(5 * 60);
 /// Pictures longer than this on a side are made smaller when added.
 const LARGEST: u32 = 3840;
+/// The most pixels a picture may have (100 megapixels): one larger is not
+/// taken in and not drawn. A bitmap is decoded whole, at the size its
+/// header says, so a small file that claims more would ask for more memory
+/// than there is.
+pub const MOST_PIXELS: u64 = 100_000_000;
 /// Where small copies of large pictures are kept (in `media`), for the
 /// slides' small pictures to draw quickly, and their longest side.
 pub const SMALL: &str = ".small";
@@ -228,6 +233,18 @@ impl Space {
         if extension == "jpeg" {
             extension = "jpg".into();
         }
+        // Its size by its header, before anything is decoded (see
+        // `MOST_PIXELS`).
+        if extension != "svg"
+            && let Some((width, height)) = header_size(&bytes)
+            && width as u64 * height as u64 > MOST_PIXELS
+        {
+            bail!(
+                "the picture is {width} × {height} pixels, more than the {} megapixels {} draws",
+                MOST_PIXELS / 1_000_000,
+                ph_brand::NAME
+            );
+        }
         // Huge photos would make every slide slow to draw and the PPTX big.
         if extension != "svg"
             && extension != "gif"
@@ -289,6 +306,15 @@ impl Space {
 /// exactly; any other is read as well as it can be (what was left out is
 /// said), and remembered, so its masters and layouts go back as they were.
 pub fn import_pptx(root: &Path, pptx: &Path) -> Result<(Space, Vec<String>)> {
+    // A file from anywhere: what its reader did not expect is an error
+    // here, not the end of the app (see `raster::caught`).
+    super::raster::caught(&format!("reading {}", pptx.display()), || {
+        import(root, pptx)
+    })
+    .unwrap_or_else(|| Err(anyhow::anyhow!("{} could not be read", pptx.display())))
+}
+
+fn import(root: &Path, pptx: &Path) -> Result<(Space, Vec<String>)> {
     if let Some(mut deck) = super::pptx::read_deck(pptx)? {
         if deck.title.trim().is_empty()
             && let Some(stem) = pptx.file_stem()
@@ -308,6 +334,9 @@ pub fn import_pptx(root: &Path, pptx: &Path) -> Result<(Space, Vec<String>)> {
         let file = std::fs::File::open(pptx)?;
         let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file))?;
         let media = space.media();
+        // As for any other PowerPoint file (see `pptx::unzip`): what is
+        // read is counted, and all of it is at most 1 GB.
+        let mut total = 0u64;
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index)?;
             let Some(name) = entry.name()?.strip_prefix("ppt/media/").map(str::to_string) else {
@@ -320,10 +349,17 @@ pub fn import_pptx(root: &Path, pptx: &Path) -> Result<(Space, Vec<String>)> {
             let mut bytes = Vec::new();
             // At most what a picture can be (the declared size is not
             // trusted).
+            let left = super::pptx::MOST_UNPACKED.saturating_sub(total);
             std::io::Read::read_to_end(
-                &mut std::io::Read::take(&mut entry, 512 << 20),
+                &mut std::io::Read::take(&mut entry, (512 << 20).min(left + 1)),
                 &mut bytes,
             )?;
+            total += bytes.len() as u64;
+            if total > super::pptx::MOST_UNPACKED {
+                // Nothing of a file refused for its size stays behind.
+                let _ = std::fs::remove_dir_all(&space.path);
+                bail!("{} unpacks to more than 1 GB", pptx.display());
+            }
             std::fs::write(media.join(&name), bytes)?;
         }
         return Ok((space, Vec::new()));
@@ -549,6 +585,16 @@ pub fn safe_media_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// The width and height a picture's header gives, when it is a bitmap
+/// whose header can be read.
+fn header_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
 /// A fingerprint of `bytes` (FNV-1a), to name media by what they hold.
 fn fingerprint(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
@@ -587,6 +633,21 @@ mod tests {
         assert!(space.media().join(&name).is_file());
         assert_eq!(space.add_media(&picture).unwrap(), name, "kept once");
         assert!(space.add_media(&root.join("x.txt")).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_picture_over_100_megapixels_is_not_taken_in() {
+        let root = std::env::temp_dir().join(format!("pilothouse-huge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let deck = new_deck("Huge", "clean", SlideSize::default());
+        let space = Space::create(&root, &deck).unwrap();
+        let png = crate::slides::raster::tests::png_claiming;
+        let err = space
+            .add_media_bytes(&png(50_000, 50_000), "png")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("megapixels"), "{err:#}");
+        assert_eq!(std::fs::read_dir(space.media()).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

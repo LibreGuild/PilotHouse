@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use gpui_kit::{
     AppContext as _, Context, Entity, Image, ImageFormat, IntoElement, ParentElement as _, Render,
@@ -24,14 +25,68 @@ pub struct Diagram {
 /// it is full (emptying it would draw every diagram again at once).
 #[derive(Default)]
 struct Drawn {
-    diagrams: HashMap<(String, bool), Result<Diagram, String>>,
+    diagrams: HashMap<(String, bool), Kept>,
     order: std::collections::VecDeque<(String, bool)>,
 }
+
+/// A diagram kept, and when it was last asked for.
+struct Kept {
+    drawn: Result<Diagram, String>,
+    used: Instant,
+}
+
 static DRAWN: LazyLock<Mutex<Drawn>> = LazyLock::new(Mutex::default);
 const KEEP: usize = 64;
+/// The most the pictures of the kept diagrams may weigh. GPUI draws a
+/// diagram it shows at twice its size, four bytes a pixel, and holds those
+/// pixels for as long as the diagram is kept here: every version of a
+/// large diagram being typed added fifteen megabytes, sixty-four of them a
+/// gigabyte.
+const KEEP_BYTES: u64 = 128 * 1024 * 1024;
+/// A diagram asked for this lately is on screen. It is never pushed out:
+/// it would be drawn again at once, and push out another.
+const IN_USE: Duration = Duration::from_secs(2);
 /// Diagrams pushed out of [`DRAWN`], whose pictures GPUI still holds until
 /// [`release_evicted`] lets them go (on the UI thread).
 static EVICTED: LazyLock<Mutex<Vec<Arc<Image>>>> = LazyLock::new(Mutex::default);
+/// The diagrams being drawn for [`draw_soon`].
+static DRAWING: LazyLock<Mutex<std::collections::HashSet<(String, bool)>>> =
+    LazyLock::new(Mutex::default);
+
+impl Drawn {
+    /// What the pictures of the kept diagrams weigh once GPUI has drawn
+    /// them.
+    fn bytes(&self) -> u64 {
+        self.diagrams
+            .values()
+            .filter_map(|kept| kept.drawn.as_ref().ok())
+            .map(|diagram| 16 * diagram.width as u64 * diagram.height as u64)
+            .sum()
+    }
+
+    /// Pushes out the oldest diagrams not in use at `now`, until those
+    /// kept are within the limits; gives back their pictures.
+    fn trim(&mut self, now: Instant) -> Vec<Arc<Image>> {
+        let mut pushed_out = Vec::new();
+        let mut ix = 0;
+        while ix < self.order.len() && (self.order.len() > KEEP || self.bytes() > KEEP_BYTES) {
+            let in_use = self
+                .diagrams
+                .get(&self.order[ix])
+                .is_some_and(|kept| now.duration_since(kept.used) < IN_USE);
+            if in_use {
+                ix += 1;
+            } else if let Some(key) = self.order.remove(ix)
+                && let Some(Kept {
+                    drawn: Ok(diagram), ..
+                }) = self.diagrams.remove(&key)
+            {
+                pushed_out.push(diagram.image);
+            }
+        }
+        pushed_out
+    }
+}
 
 /// Lets go of the pictures of diagrams no longer cached.
 pub fn release_evicted(cx: &mut gpui_kit::App) {
@@ -46,8 +101,10 @@ pub fn release_evicted(cx: &mut gpui_kit::App) {
 
 /// The drawing of `source` made before, if one.
 pub fn cached(source: &str, dark: bool) -> Option<Result<Diagram, String>> {
-    let drawn = DRAWN.lock().ok()?;
-    drawn.diagrams.get(&(source.to_string(), dark)).cloned()
+    let mut drawn = DRAWN.lock().ok()?;
+    let kept = drawn.diagrams.get_mut(&(source.to_string(), dark))?;
+    kept.used = Instant::now();
+    Some(kept.drawn.clone())
 }
 
 /// Draws `source` for a dark or light background.
@@ -58,28 +115,30 @@ pub fn draw(source: &str, dark: bool) -> Result<Diagram, String> {
     let drawn = draw_uncached(source, dark);
     if let Ok(mut cache) = DRAWN.lock() {
         let key = (source.to_string(), dark);
-        if cache.diagrams.insert(key.clone(), drawn.clone()).is_none() {
+        let kept = Kept {
+            drawn: drawn.clone(),
+            used: Instant::now(),
+        };
+        if cache.diagrams.insert(key.clone(), kept).is_none() {
             cache.order.push_back(key);
         }
-        while cache.order.len() > KEEP {
-            if let Some(oldest) = cache.order.pop_front()
-                && let Some(Ok(diagram)) = cache.diagrams.remove(&oldest)
-                && let Ok(mut evicted) = EVICTED.lock()
-            {
-                evicted.push(diagram.image);
-            }
+        let pushed_out = cache.trim(Instant::now());
+        if !pushed_out.is_empty()
+            && let Ok(mut evicted) = EVICTED.lock()
+        {
+            evicted.extend(pushed_out);
         }
     }
     drawn
 }
 
 /// Draws `source` off the UI thread (once, however often it is asked for
-/// meanwhile), then redraws the view that asked; until then, [`cached`]
-/// has nothing for it. `wait` first lets typing go on (a diagram half
-/// typed is never drawn).
-pub fn draw_soon<T: 'static>(source: String, dark: bool, wait: bool, cx: &mut Context<T>) {
-    static DRAWING: LazyLock<Mutex<std::collections::HashSet<(String, bool)>>> =
-        LazyLock::new(Mutex::default);
+/// meanwhile), then draws the windows again; until then, [`cached`] has
+/// nothing for it. `wait` first lets typing go on (a diagram half typed is
+/// never drawn). Every window, not the one view that asked: several may
+/// wait for the same diagram, and a block of a Markdown view has no view
+/// of its own to tell.
+pub fn draw_soon(source: String, dark: bool, wait: bool, cx: &mut gpui_kit::App) {
     let key = (source, dark);
     if !DRAWING
         .lock()
@@ -87,10 +146,10 @@ pub fn draw_soon<T: 'static>(source: String, dark: bool, wait: bool, cx: &mut Co
     {
         return;
     }
-    cx.spawn(async move |this, cx| {
+    cx.spawn(async move |cx| {
         if wait {
             cx.background_executor()
-                .timer(std::time::Duration::from_millis(300))
+                .timer(Duration::from_millis(300))
                 .await;
         }
         let drawn = key.clone();
@@ -101,9 +160,9 @@ pub fn draw_soon<T: 'static>(source: String, dark: bool, wait: bool, cx: &mut Co
         if let Ok(mut drawing) = DRAWING.lock() {
             drawing.remove(&key);
         }
-        _ = this.update(cx, |_, cx| {
+        cx.update(|cx| {
             release_evicted(cx);
-            cx.notify()
+            cx.refresh_windows();
         });
     })
     .detach();
@@ -197,6 +256,9 @@ impl MermaidPreview {
                     }
                     Err(err) => this.error = Some(err.into()),
                 }
+                // Every pause in typing draws a diagram: the ones this
+                // pushed out of the cache give their pictures back.
+                release_evicted(cx);
                 cx.notify();
             });
         }));
@@ -243,6 +305,43 @@ mod tests {
         .expect("drawn");
         assert!(diagram.width > 10. && diagram.height > 10.);
         assert!(draw("not a diagram at all", true).is_err());
+    }
+
+    #[test]
+    fn kept_diagrams_stay_within_a_weight() {
+        let then = Instant::now();
+        // 2000 × 2000: 64 MB once drawn.
+        let diagram = |name: &str| Diagram {
+            image: Arc::new(Image::from_bytes(
+                ImageFormat::Svg,
+                name.as_bytes().to_vec(),
+            )),
+            width: 2000.,
+            height: 2000.,
+        };
+        let mut drawn = Drawn::default();
+        for name in ["first", "second", "third"] {
+            let key = (name.to_string(), false);
+            let kept = Kept {
+                drawn: Ok(diagram(name)),
+                used: then,
+            };
+            drawn.diagrams.insert(key.clone(), kept);
+            drawn.order.push_back(key);
+        }
+        // All on screen: none goes, though they weigh too much together.
+        assert!(drawn.trim(then + Duration::from_secs(1)).is_empty());
+        // The first still on screen later, the others not: the oldest of
+        // those goes, and with it the weight is within the limit.
+        let later = then + Duration::from_secs(10);
+        if let Some(kept) = drawn.diagrams.get_mut(&("first".to_string(), false)) {
+            kept.used = later;
+        }
+        let pushed_out = drawn.trim(later);
+        assert_eq!(pushed_out.len(), 1);
+        assert_eq!(pushed_out[0].bytes(), b"second");
+        let kept: Vec<&str> = drawn.order.iter().map(|key| key.0.as_str()).collect();
+        assert_eq!(kept, ["first", "third"]);
     }
 
     #[test]

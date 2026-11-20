@@ -54,17 +54,10 @@ impl ChatPanel {
             .as_ref()
             .map(|(_, files)| files)
             .unwrap_or(&empty);
-        let cards: Vec<(i64, String)> = if typing.trigger == '#' {
-            self.store
-                .cards(self.project.id)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|card| (card.id, card.title))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if typing.trigger == '@' && typing.query.starts_with("pr") && !self.pulls_asked {
+        if typing.trigger == '@'
+            && mention_complete::asks_for_pulls(&typing.query)
+            && !self.pulls_asked
+        {
             self.pulls_asked = true;
             cx.emit(ChatPanelEvent::WantPulls);
         }
@@ -80,7 +73,7 @@ impl ChatPanel {
             commands: &commands,
             tabs: self.live.as_ref().is_some_and(|live| live.tabs.is_some()),
         };
-        let items = mention_complete::suggestions(&typing, files, &cards, &extra);
+        let items = mention_complete::suggestions(&typing, files, &extra);
         let selected = self
             .mention
             .as_ref()
@@ -148,7 +141,7 @@ impl ChatPanel {
                 match result {
                     Ok(tabs) if tabs.is_empty() => window.push_notification(
                         gpui_kit::component::notification::Notification::info(
-                            "No tab is shared yet. In Chrome, put tabs in the purple PilotHouse group (the PilotHouse panel: “Let agents use this tab”), then try again.",
+                            "No tab is shared yet. In Chrome, put tabs in the purple PilotHouse group (PilotHouse’s button in the toolbar: “Let agents use this tab”), then try again.",
                         ),
                         cx,
                     ),
@@ -183,6 +176,11 @@ impl ChatPanel {
 
     pub(super) fn render_mention_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let menu = self.mention.as_ref()?;
+        // A few at a time, the selected one always among them: a list
+        // longer than that (an agent's commands) moves with the arrows.
+        let shown = shown_range(menu.selected, menu.items.len());
+        let place = (menu.items.len() > mention_complete::LIMIT)
+            .then(|| format!("{} of {} · ", menu.selected + 1, menu.items.len()));
         Some(
             v_flex()
                 .id("mention-menu")
@@ -198,7 +196,8 @@ impl ChatPanel {
                 .border_color(cx.theme().border)
                 .bg(cx.theme().popover)
                 .shadow_lg()
-                .children(menu.items.iter().enumerate().map(|(ix, item)| {
+                .children(shown.map(|ix| {
+                    let item = &menu.items[ix];
                     h_flex()
                         .id(("mention-item", ix))
                         .gap_2()
@@ -232,8 +231,38 @@ impl ChatPanel {
                         .pt_1()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("↑↓ to pick · Enter or Tab to insert · Esc to close"),
+                        .child(format!(
+                            "{}↑↓ to pick · Enter or Tab to insert · Esc to close",
+                            place.unwrap_or_default()
+                        )),
                 ),
         )
+    }
+}
+
+/// The items of a menu of `len` that show when item `selected` is picked:
+/// [`mention_complete::LIMIT`] of them, the picked one among them.
+fn shown_range(selected: usize, len: usize) -> std::ops::Range<usize> {
+    let rows = mention_complete::LIMIT;
+    if len <= rows {
+        return 0..len;
+    }
+    let start = (selected + 1).saturating_sub(rows).min(len - rows);
+    start..start + rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shown_range;
+
+    #[test]
+    fn a_long_menu_moves_with_what_is_picked() {
+        assert_eq!(shown_range(0, 5), 0..5);
+        assert_eq!(shown_range(0, 30), 0..8);
+        assert_eq!(shown_range(7, 30), 0..8);
+        // Past the last row shown: the list moves, the pick at its end.
+        assert_eq!(shown_range(8, 30), 1..9);
+        assert_eq!(shown_range(29, 30), 22..30);
+        assert_eq!(shown_range(0, 0), 0..0);
     }
 }

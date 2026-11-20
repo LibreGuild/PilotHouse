@@ -160,7 +160,8 @@ impl LogcatPanel {
 impl Render for LogcatPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let manager = self.manager.read(cx);
-        let empty = if manager.adb().is_none() {
+        // Not said while the SDK is still being looked for.
+        let empty = if manager.adb().is_none() && !manager.looking_for_sdk() {
             Some(
                 EmptyState::new("Android SDK not found")
                     .icon(Icons::ScrollText)

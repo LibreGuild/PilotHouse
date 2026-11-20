@@ -1,5 +1,6 @@
 //! How the GitHub view is drawn: its sidebar (inbox lists, repositories),
-//! the page in the middle and the repository's chat.
+//! the page in the middle and the repository's chat. An inbox list's page
+//! is the queue's (`queue`).
 
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::{
@@ -16,7 +17,6 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use ph_github::search::Inbox;
-use ph_pulls::clones::RepoId;
 use ph_theme::layout;
 use ph_ui::{EmptyState, Icons, MenuButton as _};
 
@@ -85,7 +85,8 @@ impl GithubView {
                 cx,
             )
             .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tooltip.clone()))
+                    .build(window, cx)
             })
             .on_click(
                 cx.listener(move |this, _, window, cx| this.show_repo(id.clone(), window, cx)),
@@ -181,169 +182,6 @@ impl GithubView {
             .into_any_element()
     }
 
-    /// One inbox list: each pull request with its repository.
-    fn render_inbox(&self, kind: Inbox, cx: &mut Context<Self>) -> AnyElement {
-        let list = self.inbox.get(&kind);
-        let mut items = list.map(|list| list.items.clone()).unwrap_or_default();
-        let error = list.and_then(|list| list.error.clone());
-        let key = |host: &str, pull: &ph_github::search::FoundPull| {
-            pull.repo()
-                .map(|(owner, name)| (host.to_string(), owner, name, pull.number))
-        };
-        if self.review_first {
-            // Assessed ones by rank; the rest after, by date as read.
-            items.sort_by_key(|(host, pull)| {
-                key(host, pull)
-                    .and_then(|key| self.triage.get(&key))
-                    .map(|(_, triage)| (0, triage.rank()))
-                    .unwrap_or((1, (9, 9, 9, ph_review::triage::Size::Large)))
-            });
-        }
-        let rows =
-            items.into_iter().enumerate().map(|(ix, (host, pull))| {
-                let triage = key(&host, &pull)
-                    .and_then(|key| self.triage.get(&key).map(|(_, triage)| triage.clone()));
-                let repo = pull
-                    .repo()
-                    .and_then(|(owner, name)| RepoId::parse(&format!("{host}/{owner}/{name}")));
-                let number = pull.number;
-                let place = repo
-                    .as_ref()
-                    .map(|repo| repo.full_name())
-                    .unwrap_or_default();
-                v_flex()
-                    .id(("github-found", ix))
-                    .aria_label(SharedString::from(format!(
-                        "{place} #{number} {}",
-                        pull.title
-                    )))
-                    .flex_none()
-                    .gap_0p5()
-                    .px_2p5()
-                    .py_2()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .cursor_pointer()
-                    .hover(|style| style.bg(cx.theme().list_hover))
-                    .when_some(repo, |this, repo| {
-                        this.on_click(cx.listener(move |this, _, window, cx| {
-                            this.show_pull(repo.clone(), number, window, cx)
-                        }))
-                    })
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(Icon::new(Icons::GitPullRequest).small().text_color(
-                                if pull.draft {
-                                    cx.theme().muted_foreground
-                                } else {
-                                    cx.theme().success
-                                },
-                            ))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_sm()
-                                    .truncate()
-                                    .child(pull.title.clone()),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .flex_wrap()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{place} #{number} · {} · {}",
-                                pull.user.login,
-                                ph_pulls::short_date(&pull.updated_at)
-                            ))
-                            .when_some(triage, |this, triage| {
-                                this.children(triage_chips(&triage, cx))
-                            }),
-                    )
-                    .test_support()
-                    .into_any_element()
-            });
-        let empty = list.is_none_or(|list| list.items.is_empty()) && !self.loading;
-        v_flex()
-            .size_full()
-            .child(
-                h_flex()
-                    .flex_none()
-                    .h_10()
-                    .px_3()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        Icon::new(inbox_icon(kind))
-                            .small()
-                            .text_color(cx.theme().info),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(kind.label()),
-                    )
-                    .child(div().flex_1())
-                    .when(self.loading, |this| this.child(ph_ui::Loader::new().xsmall()))
-                    .child(
-                        Button::new("inbox-sort")
-                            .xsmall()
-                            .ghost()
-                            .label(if self.review_first { "Review first" } else { "Newest first" })
-                            .tooltip(if self.review_first {
-                                "Sorted for review: pushed since your review, CI not failing, risky, small. Click for newest first."
-                            } else {
-                                "Sorted by date. Click to sort for review."
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let on = !this.review_first;
-                                this.set_review_first(on, cx)
-                            })),
-                    ),
-            )
-            .when_some(error, |this, error| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(error),
-                )
-            })
-            .child(
-                v_flex()
-                    .id("github-inbox-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p_2()
-                    .gap_1()
-                    .when(empty, |this| {
-                        this.child(
-                            div()
-                                .p_3()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(match kind {
-                                    Inbox::ReviewRequested => "Nothing waits for your review.",
-                                    Inbox::Mine => "You have no open pull requests.",
-                                    Inbox::Assigned => "No open pull requests are assigned to you.",
-                                }),
-                        )
-                    })
-                    .children(rows),
-            )
-            .into_any_element()
-    }
-
     fn render_page(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.accounts.is_empty() {
             return v_flex()
@@ -429,9 +267,8 @@ impl Render for GithubView {
     }
 }
 
-/// A sidebar section's title, with `actions` added by the caller.
 /// An inbox pull request's triage, as small chips.
-fn triage_chips(triage: &ph_review::triage::Triage, cx: &App) -> Vec<AnyElement> {
+pub(super) fn triage_chips(triage: &ph_review::triage::Triage, cx: &App) -> Vec<AnyElement> {
     use ph_review::triage::Ci;
     let chip = |text: String, color: gpui_kit::Hsla| {
         div()
@@ -464,6 +301,7 @@ fn triage_chips(triage: &ph_review::triage::Triage, cx: &App) -> Vec<AnyElement>
     chips
 }
 
+/// A sidebar section's title, with `actions` added by the caller.
 fn section(title: &'static str, cx: &App) -> gpui_kit::Div {
     h_flex()
         .flex_none()
@@ -522,7 +360,7 @@ fn row(
         })
 }
 
-fn inbox_icon(kind: Inbox) -> Icons {
+pub(super) fn inbox_icon(kind: Inbox) -> Icons {
     match kind {
         Inbox::ReviewRequested => Icons::Eye,
         Inbox::Mine => Icons::GitPullRequest,

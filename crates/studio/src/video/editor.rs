@@ -1244,8 +1244,9 @@ impl VideoEditor {
             }
             _ => notice("Opening…", cx),
         };
-        // Paused: an exact still of the result, when it is made.
-        if !playing && self.tool != Tool::Crop {
+        // Paused: an exact still of the result, when it is made. Not while
+        // dragging (scrubbing, moving a mark): it would not be shown.
+        if !playing && self.tool != Tool::Crop && self.drag.is_none() {
             let position = self.position;
             self.doc.update(cx, |doc, cx| doc.want_still(position, cx));
         }
@@ -1574,7 +1575,14 @@ impl VideoEditor {
                 return;
             };
             let result = match shot.await {
-                Ok(png) => std::fs::write(&path, png).map_err(anyhow::Error::from),
+                Ok(png) => {
+                    // Off the UI thread: the folder may be a slow one.
+                    let to = path.clone();
+                    cx.background_spawn(async move {
+                        std::fs::write(&to, png).map_err(anyhow::Error::from)
+                    })
+                    .await
+                }
                 Err(err) => Err(err),
             };
             _ = cx.update(|window, cx| {
@@ -1701,7 +1709,7 @@ impl VideoEditor {
                     .small()
                     .icon(Icons::Undo2)
                     .disabled(!can_undo)
-                    .tooltip(format!("Undo ({undo_key})"))
+                    .tooltip(ph_ui::tip(format!("Undo ({undo_key})")))
                     .on_click(
                         cx.listener(|this, _, _, cx| this.doc.update(cx, |doc, cx| doc.undo(cx))),
                     ),
@@ -1750,11 +1758,11 @@ impl VideoEditor {
                             .small()
                             .icon(*icon)
                             .selected(current == tool)
-                            .tooltip(if key.is_empty() {
+                            .tooltip(ph_ui::tip(if key.is_empty() {
                                 name.to_string()
                             } else {
                                 format!("{name} ({key})")
-                            })
+                            }))
                             .accessibility_label(*name)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.set_tool(tool, cx);

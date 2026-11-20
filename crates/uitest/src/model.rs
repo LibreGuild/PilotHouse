@@ -122,13 +122,6 @@ impl Step {
         }
     }
 
-    pub fn is_check(&self) -> bool {
-        matches!(
-            self,
-            Step::ExpectText { .. } | Step::ExpectNoText { .. } | Step::ExpectUrl { .. }
-        )
-    }
-
     /// The control method and parameters that perform an action step;
     /// `None` for checks (the runner reads the screen for those).
     pub fn call(&self, project_id: i64, serial: Option<&str>) -> Option<(&'static str, Value)> {

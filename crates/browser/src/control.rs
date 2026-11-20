@@ -16,6 +16,16 @@ pub fn register(cx: &mut App) {
         let url = string(&params, "url")?;
         Ok(browser.navigate(&url, cx))
     });
+    // Which browser agents use first, and whether Chrome is there: asked by
+    // the bridge as a chat starts, for the instructions it gives the agent.
+    ControlServer::handle(
+        "browser.preference",
+        |_, cx| {
+            let store = BrowserHub::store(cx);
+            Ok(crate::preference::preference_note(&store, cx))
+        },
+        cx,
+    );
     method("browser.screenshot", cx, |browser, params, cx| {
         Ok(browser.screenshot(params["full_page"].as_bool().unwrap_or(false), cx))
     });
@@ -98,6 +108,22 @@ pub fn register(cx: &mut App) {
 type BrowserMethod = fn(&mut Browser, Value, &mut Context<Browser>) -> Result<Task<Result<Value>>>;
 
 /// Registers an async method that runs `body` on the project's browser.
+/// Opens `url` in the built-in browser of the project `params` names: what
+/// `browser.open` does, for a page asked for in Chrome while Chrome is not
+/// connected (`chrome.open`).
+pub(crate) fn open_in_built_in(params: &Value, cx: &mut App) -> Task<Result<Value>> {
+    let Some(project_id) = params["project_id"].as_i64() else {
+        return Task::ready(Err(anyhow::anyhow!("missing `project_id`")));
+    };
+    let url = match string(params, "url") {
+        Ok(url) => url,
+        Err(err) => return Task::ready(Err(err)),
+    };
+    BrowserHub::agent_uses(project_id, cx);
+    let browser: Entity<Browser> = BrowserHub::browser(project_id, cx);
+    browser.update(cx, |browser, cx| browser.navigate(&url, cx))
+}
+
 fn method(name: &'static str, cx: &mut App, body: BrowserMethod) {
     ControlServer::handle_async(
         name,

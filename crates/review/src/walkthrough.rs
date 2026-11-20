@@ -143,33 +143,55 @@ impl Walkthrough {
     /// file opens `<web>/blob/<sha>/<path>#L<line>` (`web`: the repository's
     /// page). Code blocks and diagrams are left as they are.
     pub fn linked(&self, changed: &[String], web: Option<&str>, sha: &str) -> String {
-        let mut out = String::with_capacity(self.markdown.len() + 256);
-        let mut fence: Option<&str> = None;
-        for line in self.markdown.split_inclusive('\n') {
-            let trimmed = line.trim_start();
-            match fence {
-                Some(open) => {
-                    if trimmed.trim_end() == open {
-                        fence = None;
-                    }
-                    out.push_str(line);
-                    continue;
-                }
-                None if trimmed.starts_with("```") || trimmed.starts_with("~~~") => {
-                    let marks = trimmed
-                        .chars()
-                        .take_while(|c| *c == '`' || *c == '~')
-                        .count();
-                    fence = Some(&trimmed[..marks]);
-                    out.push_str(line);
-                    continue;
-                }
-                None => {}
+        link_references(&self.markdown, |path, start, end| {
+            if changed.iter().any(|changed| changed == path) {
+                return Some(file_link(path, start));
             }
-            out.push_str(&link_spans(line, changed, web, sha));
-        }
-        out
+            web.filter(|_| !sha.is_empty()).map(|web| {
+                let lines = match (start, end) {
+                    (Some(start), Some(end)) if end > start => format!("#L{start}-L{end}"),
+                    (Some(start), _) => format!("#L{start}"),
+                    _ => String::new(),
+                };
+                format!("{}/blob/{sha}/{path}{lines}", web.trim_end_matches('/'))
+            })
+        })
     }
+}
+
+/// `markdown` with its code references (`` `src/a.rs:12-20` ``) made links:
+/// `target` gives the link for a path and its lines, or `None` to leave the
+/// reference as code. Code blocks and diagrams are left as they are.
+pub fn link_references(
+    markdown: &str,
+    target: impl Fn(&str, Option<u64>, Option<u64>) -> Option<String>,
+) -> String {
+    let mut out = String::with_capacity(markdown.len() + 256);
+    let mut fence: Option<&str> = None;
+    for line in markdown.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        match fence {
+            Some(open) => {
+                if trimmed.trim_end() == open {
+                    fence = None;
+                }
+                out.push_str(line);
+                continue;
+            }
+            None if trimmed.starts_with("```") || trimmed.starts_with("~~~") => {
+                let marks = trimmed
+                    .chars()
+                    .take_while(|c| *c == '`' || *c == '~')
+                    .count();
+                fence = Some(&trimmed[..marks]);
+                out.push_str(line);
+                continue;
+            }
+            None => {}
+        }
+        out.push_str(&link_spans(line, &target));
+    }
+    out
 }
 
 /// The scheme of a link to a changed file, opened in the Files tab.
@@ -183,18 +205,36 @@ pub fn file_link(path: &str, line: Option<u64>) -> String {
     }
 }
 
-/// The file and line a link made by [`file_link`] names.
+/// The file and line a link made by [`file_link`] names. Only a path
+/// inside the repository ([`is_inside`]): the link's text is the agent's or
+/// the repository's, never trusted.
 pub fn parse_file_link(url: &str) -> Option<(String, Option<u64>)> {
     let rest = url.strip_prefix(FILE_SCHEME)?;
     let (path, line) = match rest.rsplit_once('#') {
         Some((path, line)) => (path, line.parse().ok()),
         None => (rest, None),
     };
-    (!path.is_empty()).then(|| (path.to_string(), line))
+    is_inside(path).then(|| (path.to_string(), line))
+}
+
+/// Whether `path`, read as text, is a relative path that stays inside the
+/// folder it is joined to: not absolute, no `..`, no drive or share. Decided
+/// before the file system is asked anything: on Windows a path such as
+/// `//host/share/a` alone makes the system connect to that host and offer
+/// the user's credentials.
+pub fn is_inside(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with(['/', '\\'])
+        && path
+            .split(['/', '\\'])
+            .all(|part| !part.is_empty() && part != ".." && !part.contains(':'))
 }
 
 /// `line` with each inline code span that names a file made a link.
-fn link_spans(line: &str, changed: &[String], web: Option<&str>, sha: &str) -> String {
+fn link_spans(
+    line: &str,
+    target: &impl Fn(&str, Option<u64>, Option<u64>) -> Option<String>,
+) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
     while let Some(open) = rest.find('`') {
@@ -206,27 +246,12 @@ fn link_spans(line: &str, changed: &[String], web: Option<&str>, sha: &str) -> S
         // Already a link's text (`[`…`](…)`): left alone.
         let in_link = rest[..open].ends_with('[') && after[close + 1..].starts_with("](");
         out.push_str(&rest[..open]);
-        match (!in_link).then(|| reference(code)).flatten() {
-            Some((path, start, end)) => {
-                let target = if changed.iter().any(|changed| changed == path) {
-                    Some(file_link(path, start))
-                } else {
-                    web.filter(|_| !sha.is_empty()).map(|web| {
-                        let lines = match (start, end) {
-                            (Some(start), Some(end)) if end > start => {
-                                format!("#L{start}-L{end}")
-                            }
-                            (Some(start), _) => format!("#L{start}"),
-                            _ => String::new(),
-                        };
-                        format!("{}/blob/{sha}/{path}{lines}", web.trim_end_matches('/'))
-                    })
-                };
-                match target {
-                    Some(target) => out.push_str(&format!("[`{code}`]({target})")),
-                    None => out.push_str(&format!("`{code}`")),
-                }
-            }
+        let link = (!in_link)
+            .then(|| reference(code))
+            .flatten()
+            .and_then(|(path, start, end)| target(path, start, end));
+        match link {
+            Some(link) => out.push_str(&format!("[`{code}`]({link})")),
             None => out.push_str(&format!("`{code}`")),
         }
         rest = &after[close + 1..];
@@ -261,7 +286,7 @@ fn reference(code: &str) -> Option<(&str, Option<u64>, Option<u64>)> {
         && path
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '@' | '+'));
-    if !looks_like_path {
+    if !looks_like_path || !is_inside(path) {
         return None;
     }
     let (start, end) = match lines {
@@ -377,5 +402,30 @@ Run `cargo test` and see `docs/sessions.md` and [`src/app.rs`](https://example.c
         ] {
             assert_eq!(reference(code), None, "{code}");
         }
+    }
+
+    #[test]
+    fn only_paths_inside_the_repository_are_references() {
+        for code in [
+            "/etc/passwd",
+            "//203.0.113.5/s/a.txt",
+            "../../secret.txt",
+            "src/../../x.rs",
+            "/Volumes/share/a.md:3",
+        ] {
+            assert_eq!(reference(code), None, "{code}");
+        }
+        for url in [
+            "pilothouse-file:/etc/passwd",
+            "pilothouse-file://host/share/a.txt",
+            "pilothouse-file:\\\\host\\share\\a.txt",
+            "pilothouse-file:..\\a.txt",
+            "pilothouse-file:C:\\Users\\a.txt",
+            "pilothouse-file:src/../../a.txt#3",
+            "pilothouse-file:",
+        ] {
+            assert_eq!(parse_file_link(url), None, "{url}");
+        }
+        assert!(is_inside("src/a.rs") && is_inside("a..b/c.rs"));
     }
 }

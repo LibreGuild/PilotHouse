@@ -26,4 +26,5 @@ pub use live_tools::{CapturedImage, LiveTools, ToChat};
 pub use recorder::{Recorder, Recording};
 pub use surface::{
     PointerKind, SURFACE_CONTEXT, SurfaceEvent, SurfaceMode, SurfacePointer, SurfaceView,
+    editing_shortcut,
 };

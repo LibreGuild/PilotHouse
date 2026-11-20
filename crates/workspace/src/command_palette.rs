@@ -29,6 +29,8 @@ enum Run {
     Action(Box<dyn Action>),
     OpenProject(ProjectId),
     OpenChat(ProjectId, ph_store::sessions::SessionId),
+    /// A review's chat, shown in Reviews (its repository is no workspace).
+    OpenReview(ph_store::sessions::SessionId),
     /// Start an agent CLI without a chat in a terminal.
     /// Open the Utilities dialog at one utility.
     Utility(&'static str),
@@ -73,12 +75,12 @@ fn chats(workspace: &Workspace, cx: &App) -> Vec<Entry> {
         ChatState::Done | ChatState::Failed => 2,
         ChatState::Idle => 3,
     };
-    let mut live = crate::agents_board::cards(workspace, cx);
+    let mut live = crate::bridge::live_cards(workspace, cx);
     live.sort_by_key(|card| rank(card.summary.state));
     let mut seen = std::collections::HashSet::new();
     let mut entries = Vec::new();
     for (card, session) in live.iter().filter_map(|card| match card.target {
-        crate::agents_board::Target::Chat(session) if card.summary.state != ChatState::Idle => {
+        crate::bridge::Target::Chat(session) if card.summary.state != ChatState::Idle => {
             Some((card, session))
         }
         _ => None,
@@ -94,18 +96,17 @@ fn chats(workspace: &Workspace, cx: &App) -> Vec<Entry> {
             label: format!("{} · {} · {state}", card.title, card.place).into(),
             icon: Icons::MessageSquare.into(),
             keywords: &["chat", "agent"],
-            run: Run::OpenChat(card.project, session),
+            run: if card.github {
+                Run::OpenReview(session)
+            } else {
+                Run::OpenChat(card.project, session)
+            },
         });
     }
     let mut stored: Vec<(String, ph_store::sessions::Session)> = workspace
         .projects()
         .iter()
         .map(|project| (project.id, project.name.clone()))
-        .chain(
-            workspace
-                .chats_space()
-                .map(|chats| (chats.id, "Chats".to_string())),
-        )
         .flat_map(|(id, place)| {
             workspace
                 .sessions_of(id, cx)
@@ -301,17 +302,26 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         &["floating", "popup", "overlay", "ask", "spotlight", "hotkey"],
     ));
     general.push(Entry::action(
-        "Show or hide the sidebar",
+        "Show or hide the chat",
         IconName::PanelLeft,
         ToggleSidebar,
-        &["toggle sidebar", "toggle", "hide", "show", "list"],
+        &[
+            "toggle sidebar",
+            "hide the sidebar",
+            "toggle",
+            "hide",
+            "show",
+            "fold",
+            "list",
+        ],
     ));
     general.push(Entry::action(
-        "Show or hide the tools",
+        "Show or hide the result pane",
         IconName::PanelRight,
         ToggleContextPanel,
         &[
             "toggle tools",
+            "hide the tools",
             "toggle",
             "hide",
             "show",
@@ -321,43 +331,29 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         ],
     ));
     general.push(Entry::action(
-        "Show or hide the bottom panel",
-        IconName::PanelBottom,
-        ToggleBottomPanel,
-        &[
-            "toggle bottom panel",
-            "toggle",
-            "hide",
-            "show",
-            "terminal",
-            "logcat",
-            "panel",
-        ],
-    ));
-    general.push(Entry::action(
         "Show or hide the terminal",
         IconName::SquareTerminal,
         ToggleTerminal,
-        &["toggle terminal", "toggle", "shell", "console"],
+        &[
+            "toggle terminal",
+            "toggle bottom panel",
+            "bottom panel",
+            "toggle",
+            "shell",
+            "console",
+        ],
     ));
     general.push(Entry::action(
-        "Maximize the panel in front",
+        "Let the result pane fill the window",
         IconName::Maximize,
         ToggleZoom,
-        &["maximize panel", "zoom", "full"],
+        &["maximize panel", "maximize", "zoom", "full", "editor"],
     ));
     general.push(Entry::action(
         "Reset the layout",
         Icons::LayoutGrid,
         ResetLayout,
-        &[
-            "reset layout",
-            "panes",
-            "dock",
-            "default",
-            "restore",
-            "arrange",
-        ],
+        &["reset layout", "panes", "default", "restore", "arrange"],
     ));
     groups.push(("General", general));
 
@@ -394,16 +390,24 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         "Views",
         vec![
             Entry::action(
-                "Show Workspaces",
-                ph_ui::Icons::LayoutGrid,
+                "Show the Bridge",
+                ph_ui::Icons::ShipWheel,
                 ShowWorkspacesView,
-                &["workspaces view", "view", "sidebar", "list", "folders"],
+                &[
+                    "workspaces view",
+                    "show workspaces",
+                    "agents",
+                    "tasks",
+                    "home",
+                    "view",
+                    "board",
+                ],
             ),
             Entry::action(
-                "Show Chats",
+                "Show Chats (the chats that need no folder)",
                 ph_ui::Icons::MessagesSquare,
                 ShowChatsView,
-                &["view", "sidebar", "list", "loose", "pinned"],
+                &["view", "chat", "chats", "no folder", "loose", "scratch"],
             ),
             Entry::action(
                 "Let agents use your Chrome",
@@ -420,16 +424,18 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
                 ],
             ),
             Entry::action(
-                "Show the agents at work",
-                ph_ui::Icons::Bot,
-                ShowAgentsView,
-                &["agents", "board", "working", "needs", "waiting"],
-            ),
-            Entry::action(
-                "Show GitHub",
-                ph_ui::Icons::Github,
+                "Show Reviews",
+                ph_ui::Icons::GitPullRequest,
                 ShowGitHubView,
-                &["github view", "view", "pull", "review", "pr"],
+                &[
+                    "github view",
+                    "show github",
+                    "github",
+                    "view",
+                    "pull",
+                    "review",
+                    "pr",
+                ],
             ),
         ]
         .into_iter()
@@ -462,7 +468,11 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
     let projects: Vec<Entry> = workspace
         .projects()
         .iter()
-        .filter(|project| Some(project.id) != workspace.active_project_id())
+        // Not the one on screen; the one behind the Bridge is offered.
+        .filter(|project| {
+            workspace.view() != crate::workspace::View::Workspaces
+                || Some(project.id) != workspace.active_project_id()
+        })
         .map(|project| Entry {
             label: format!("Open {}", project.name).into(),
             icon: IconName::Folder.into(),
@@ -525,7 +535,7 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         entries.retain(|entry| match &entry.run {
             Run::Action(action) => crate::features::allows(action.as_ref()),
             Run::Utility(_) => ph_brand::enabled(ph_brand::Feature::Utilities),
-            Run::OpenProject(_) | Run::OpenChat(..) | Run::Custom(_) => true,
+            Run::OpenProject(_) | Run::OpenChat(..) | Run::OpenReview(_) | Run::Custom(_) => true,
         });
     }
     groups.retain(|(_, entries)| !entries.is_empty());
@@ -538,7 +548,11 @@ fn row(entry: &Entry) -> CommandItem {
     let icon = entry.icon.clone();
     let action = match &entry.run {
         Run::Action(action) => Some(action.boxed_clone()),
-        Run::OpenProject(_) | Run::OpenChat(..) | Run::Utility(_) | Run::Custom(_) => None,
+        Run::OpenProject(_)
+        | Run::OpenChat(..)
+        | Run::OpenReview(_)
+        | Run::Utility(_)
+        | Run::Custom(_) => None,
     };
     CommandItem::new()
         .label(entry.label.clone())
@@ -558,6 +572,11 @@ fn row(entry: &Entry) -> CommandItem {
 
 /// Opens the palette. Takes the workspace by reference because it is called
 /// from a workspace action handler, while the entity is already borrowed.
+/// The palette's width and the most its list is high, at the default
+/// interface size.
+const PALETTE_WIDTH: f32 = 680.;
+const PALETTE_LIST: f32 = 460.;
+
 pub(crate) fn open(
     workspace: &Workspace,
     handle: Entity<Workspace>,
@@ -574,12 +593,20 @@ pub(crate) fn open(
         focus_state.read(cx).focus_handle(cx).focus(window, cx);
     });
 
-    window.open_dialog(cx, move |dialog, _, cx| {
+    window.open_dialog(cx, move |dialog, window, cx| {
         let confirm_groups = groups.clone();
         let workspace = workspace.clone();
+        // Wide enough to read a chat's title or a command with its key,
+        // and long enough to show a dozen rows: the kit's own size (448 by
+        // 300) cut titles short and showed eight. Never more than the
+        // window has.
+        let view = window.viewport_size();
+        let width = ph_ui::scaled_px(PALETTE_WIDTH, window).min(view.width - gpui_kit::px(32.));
+        let list = ph_ui::scaled_px(PALETTE_LIST, window).min(view.height * 0.6);
         let mut command = Command::new(&state)
             .bordered(false)
             .rounded(cx.theme().radius_lg)
+            .max_h(list)
             .placeholder("Type a command or search…")
             .on_confirm(move |index_path, window, cx| {
                 let Some(entry) = confirm_groups
@@ -604,6 +631,12 @@ pub(crate) fn open(
                             workspace.open_chat(project, session, window, cx)
                         });
                     }
+                    Run::OpenReview(session) => {
+                        let session = *session;
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.show_session(session, window, cx)
+                        });
+                    }
                     Run::Utility(id) => crate::utilities::open(Some(id), window, cx),
                     Run::Custom(index) => {
                         if let Some(command) = ph_custom::commands().into_iter().nth(*index) {
@@ -622,6 +655,6 @@ pub(crate) fn open(
                     .items(entries.iter().map(row)),
             );
         }
-        dialog.close_button(false).p_0().child(command)
+        dialog.close_button(false).w(width).p_0().child(command)
     });
 }

@@ -16,6 +16,9 @@ pub struct Note {
     pub text: String,
     /// Written by an agent's review of the changes (replaced by its next).
     pub from_review: bool,
+    /// On a line the changes removed: `line` is its number in the file as
+    /// it was.
+    pub removed: bool,
 }
 
 /// The new-file line number of each line of a hunk (`None` for removed
@@ -50,10 +53,16 @@ pub fn prompt(notes: &[Note], root: &Path) -> String {
     );
     for (ix, note) in notes.iter().enumerate() {
         text.push_str(&format!(
-            "\n{}. {}:{}\n   `{}`\n   {}\n",
+            "\n{}. {}:{}{}\n   `{}`\n   {}\n",
             ix + 1,
             note.path,
             note.line,
+            // Its number is the old file's: the line is gone from the new.
+            if note.removed {
+                " (a removed line)"
+            } else {
+                ""
+            },
             note.code.trim_end(),
             note.text.trim()
         ));
@@ -85,6 +94,7 @@ mod tests {
             code: "+    let x = 1;".into(),
             text: "Name this better".into(),
             from_review: false,
+            removed: false,
         }];
         let text = prompt(&notes, Path::new("/repo"));
         assert!(text.contains("1. src/app.rs:7"));

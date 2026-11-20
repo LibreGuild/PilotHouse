@@ -53,13 +53,60 @@ const MAX_CONTROL_PATH: usize = 84;
 /// them all at quit (also those of mappings changed since).
 static USED_SOCKETS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
-/// The sockets' folder, made private the first time it is needed.
+/// The sockets' folder, made private the first time it is needed. When its
+/// path leaves no room for a socket (macOS's temp folder and an account name
+/// of 12 or more characters), a short private one in `/tmp` instead.
 fn sockets_dir() -> Option<&'static PathBuf> {
-    static READY: OnceLock<bool> = OnceLock::new();
+    static READY: OnceLock<Option<PathBuf>> = OnceLock::new();
     let dir = SOCKETS.get()?;
     READY
-        .get_or_init(|| private_dir(dir).is_ok())
-        .then_some(dir)
+        .get_or_init(|| {
+            private_dir(dir).ok()?;
+            if fits_socket(dir) {
+                return Some(dir.clone());
+            }
+            short_private_dir(dir)
+        })
+        .as_ref()
+}
+
+/// Whether a socket's 8-character name in `dir` stays within
+/// [`MAX_CONTROL_PATH`].
+fn fits_socket(dir: &Path) -> bool {
+    dir.as_os_str().len() + 1 + 8 <= MAX_CONTROL_PATH
+}
+
+/// `/tmp/ph-ssh-<uid>`, made readable by this user only, or `None` when
+/// someone else made it or it is not a plain folder: `/tmp` is shared, and
+/// whoever can reach a socket runs commands as the user on the server.
+/// `owned` is a folder this user made, which tells the user's id.
+#[cfg(unix)]
+fn short_private_dir(owned: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+    let me = std::fs::metadata(owned).ok()?.uid();
+    let dir = PathBuf::from(format!("/tmp/ph-ssh-{me}"));
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    let metadata = std::fs::symlink_metadata(&dir).ok()?;
+    if !metadata.is_dir() || metadata.uid() != me {
+        tracing::warn!(
+            "{} is not this user's own folder; connections are not shared",
+            dir.display()
+        );
+        return None;
+    }
+    if metadata.mode() & 0o077 != 0 {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok()?;
+    }
+    fits_socket(&dir).then_some(dir)
+}
+
+#[cfg(not(unix))]
+fn short_private_dir(_: &Path) -> Option<PathBuf> {
+    None
 }
 
 /// The socket of `mapping`'s shared connection. `None` on Windows (its
@@ -112,7 +159,10 @@ fn user_known_hosts(mapping: &Mapping) -> Vec<String> {
     {
         return files.clone();
     }
-    let mut command = ssh();
+    // Not `ssh()`: the agent plays no part in reading the config, and
+    // waiting for the login shell's environment here would hold up a
+    // terminal opened as the app starts.
+    let mut command = ph_env::command("ssh");
     command.arg("-G");
     if let Some(port) = mapping.port {
         command.args(["-p", &port.to_string()]);

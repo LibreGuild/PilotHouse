@@ -25,7 +25,6 @@ const FEATURES: &[&str] = &[
     "files",
     "changes",
     "pulls",
-    "board",
     "browser",
     "devices",
     "runs",
@@ -41,7 +40,12 @@ const FEATURES: &[&str] = &[
     "presentations",
     "chrome_extension",
     "quick_chat",
+    "explanations",
 ];
+
+/// Keys of features that were removed, still read (and ignored) for one
+/// release: `board`, the cards of each workspace, gone in 0.7.
+const RETIRED: &[&str] = &["board"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,6 +102,14 @@ fn main() {
     let mut out = String::new();
     custom_icons(&folder.join("icons/custom"), &mut out);
     for key in brand.features.keys() {
+        // A feature that is gone: its key is still taken for a release, so
+        // that a build which switched it off (or on) goes on building.
+        if RETIRED.contains(&key.as_str()) {
+            println!(
+                "cargo:warning=brand.toml: [features] `{key}` is no longer a feature; the line can go"
+            );
+            continue;
+        }
         if !FEATURES.contains(&key.as_str()) {
             fail(&format!(
                 "[features] has no feature `{key}` (it has: {})",
@@ -108,7 +120,7 @@ fn main() {
     let off: Vec<&str> = brand
         .features
         .iter()
-        .filter(|(_, on)| !**on)
+        .filter(|(key, on)| !**on && !RETIRED.contains(&key.as_str()))
         .map(|(key, _)| key.as_str())
         .collect();
     writeln!(

@@ -18,7 +18,7 @@ pub const MAX_PIXELS: u64 = 100_000_000;
 /// The most marks on one picture, and the longest text of one.
 const MAX_MARKS: usize = 500;
 const MAX_TEXT: usize = 500;
-const MAX_POINTS: usize = 5_000;
+pub(crate) const MAX_POINTS: usize = 5_000;
 
 /// A color, written `#rrggbb` or `#rrggbbaa`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -485,19 +485,6 @@ pub enum MarkType {
 }
 
 impl MarkType {
-    /// Whether the mark is an area drawn by dragging its corners.
-    pub fn is_area(self) -> bool {
-        matches!(
-            self,
-            MarkType::Rect
-                | MarkType::Ellipse
-                | MarkType::Highlight
-                | MarkType::Blur
-                | MarkType::Pixelate
-                | MarkType::Spotlight
-        )
-    }
-
     /// A new mark of this type over `area` (from `from` to `to` for lines),
     /// in `color` where it has one.
     pub fn mark(self, from: [f32; 2], to: [f32; 2], color: Color) -> MarkKind {
@@ -1065,6 +1052,31 @@ impl ImageEdit {
         self.orientation = self.orientation.then(turn);
     }
 
+    /// Changes the crop. A resize is a size in pixels, so it follows: the
+    /// new crop is scaled as the old one was, never stretched to the old
+    /// one's size. `size` is the original's.
+    pub fn set_crop(&mut self, crop: Option<Rect>, size: (u32, u32)) {
+        let before = self.crop_rect(size);
+        self.crop = crop;
+        self.resize_follows(before, size);
+    }
+
+    /// The crop was `before`: a resize keeps the scale it had on it.
+    fn resize_follows(&mut self, before: Rect, size: (u32, u32)) {
+        let after = self.crop_rect(size);
+        if let Some(resize) = &mut self.resize {
+            let scaled = |side: u32, was: f32, is: f32| {
+                if was == is {
+                    side
+                } else {
+                    (side as f32 / was * is).round().max(1.) as u32
+                }
+            };
+            resize.width = scaled(resize.width, before.width, after.width);
+            resize.height = scaled(resize.height, before.height, after.height);
+        }
+    }
+
     /// Adds `kind` with its sizes made to suit a picture of `size`;
     /// returns its id.
     pub fn add_mark(&mut self, mut kind: MarkKind, size: (u32, u32)) -> Result<u32> {
@@ -1072,8 +1084,10 @@ impl ImageEdit {
             bail!("a picture has at most {MAX_MARKS} marks");
         }
         kind.check()?;
-        let (width, height) = self.turned_size(size);
-        kind.fill_sizes(width.max(height) as f32);
+        // The result shows only the crop: sizes that suit the whole picture
+        // would be huge on a small part of it.
+        let crop = self.crop_rect(size);
+        kind.fill_sizes(crop.width.max(crop.height));
         if let MarkKind::Step { number, .. } = &mut kind
             && *number == 0
         {
@@ -1133,13 +1147,15 @@ impl ImageEdit {
             let resize = changes
                 .as_object_mut()
                 .and_then(|changes| changes.remove("resize"));
+            let crop_before = next.crop_rect(size);
             let mut value = serde_json::to_value(&next)?;
             merge(&mut value, &changes);
             next = serde_json::from_value(value).map_err(|err| anyhow::anyhow!("set: {err}"))?;
             match resize {
                 Some(Value::Null) => next.resize = None,
                 Some(resize) => next.resize = complete_resize(&resize, next.crop_rect(size))?,
-                None => {}
+                // A resize set earlier keeps its scale on a new crop.
+                None => next.resize_follows(crop_before, size),
             }
             done.push("changed".into());
         }
@@ -1400,6 +1416,84 @@ mod tests {
         assert_eq!(edit.marks.iter().map(|m| m.id).collect::<Vec<_>>(), [2, 3]);
         edit.apply(&json!({ "remove": "all" }), SIZE).unwrap();
         assert!(edit.marks.is_empty());
+    }
+
+    #[test]
+    fn a_resize_follows_the_crop() {
+        let size = (1600, 900);
+        let half = Size {
+            width: 800,
+            height: 450,
+        };
+        let mut edit = ImageEdit {
+            resize: Some(half),
+            ..Default::default()
+        };
+        // A square part at the same scale is square, not 800 × 450.
+        edit.set_crop(Some(Rect::new(100., 0., 900., 900.)), size);
+        assert_eq!(
+            edit.resize,
+            Some(Size {
+                width: 450,
+                height: 450
+            })
+        );
+        edit.set_crop(None, size);
+        assert_eq!(edit.resize, Some(half));
+        // An agent that crops in a later call gets the same.
+        edit.apply(
+            &json!({ "set": { "crop": { "x": 0, "y": 0, "width": 400, "height": 900 } } }),
+            size,
+        )
+        .unwrap();
+        assert_eq!(
+            edit.resize,
+            Some(Size {
+                width: 200,
+                height: 450
+            })
+        );
+        // A size given with the crop is taken as given.
+        edit.apply(
+            &json!({ "set": { "crop": null, "resize": { "width": 320, "height": 200 } } }),
+            size,
+        )
+        .unwrap();
+        assert_eq!(
+            edit.resize,
+            Some(Size {
+                width: 320,
+                height: 200
+            })
+        );
+    }
+
+    #[test]
+    fn sizes_left_out_suit_the_part_kept() {
+        let size = (5120, 2880);
+        let text = || MarkKind::Text {
+            x: 10.,
+            y: 10.,
+            text: "Here".into(),
+            size: 0.,
+            color: Color::RED,
+            background: None,
+            bold: true,
+            align: Align::Left,
+        };
+        let size_of = |edit: &ImageEdit| match edit.marks[0].kind {
+            MarkKind::Text { size, .. } => size,
+            _ => panic!(),
+        };
+        let mut whole = ImageEdit::default();
+        whole.add_mark(text(), size).unwrap();
+        let mut part = ImageEdit {
+            crop: Some(Rect::new(0., 0., 900., 600.)),
+            ..Default::default()
+        };
+        part.add_mark(text(), size).unwrap();
+        assert_eq!(size_of(&part), 30.);
+        assert!(size_of(&whole) > 5. * size_of(&part));
     }
 
     #[test]

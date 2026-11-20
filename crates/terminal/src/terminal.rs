@@ -41,11 +41,13 @@ pub struct StartedShell {
     events: smol::channel::Receiver<Event>,
     /// Program status reports (OSC 7501) found in the output.
     statuses: smol::channel::Receiver<crate::program_status::Message>,
-    title: SharedString,
+    pub(crate) title: SharedString,
     /// The shell's name, as the user picked it (`zsh`, `PowerShell 7`).
-    shell: SharedString,
+    pub(crate) shell: SharedString,
     /// Where it started.
     cwd: std::path::PathBuf,
+    /// The program's process, where the system tells.
+    pid: Option<u32>,
     columns: usize,
     rows: usize,
 }
@@ -76,6 +78,8 @@ pub struct Terminal {
     shell: SharedString,
     /// Where the shell started.
     cwd: std::path::PathBuf,
+    /// The shell's process, where the system tells.
+    pid: Option<u32>,
     /// A fixed name (a run configuration's), shown instead of the shell's title.
     label: Option<SharedString>,
     /// An agent's state, when an agent runs in it.
@@ -97,6 +101,48 @@ pub struct Terminal {
 
 impl EventEmitter<TerminalEvent> for Terminal {}
 
+/// The current folder of process `pid`, where the system tells.
+#[cfg(target_os = "linux")]
+fn folder_of(pid: u32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn folder_of(pid: u32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    // SAFETY: `info` is plain data the call fills, and is given with its
+    // own size; nothing is read unless the call says it wrote all of it.
+    let info = unsafe {
+        let mut info: libc::proc_vnodepathinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+        let wrote = libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&raw mut info).cast(),
+            size,
+        );
+        if wrote != size {
+            return None;
+        }
+        info
+    };
+    let path = &info.pvi_cdir.vip_path;
+    // The path is a C string in a fixed array of arrays.
+    let bytes: Vec<u8> = path
+        .iter()
+        .flatten()
+        .map(|byte| *byte as u8)
+        .take_while(|byte| *byte != 0)
+        .collect();
+    (!bytes.is_empty()).then(|| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&bytes)))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn folder_of(_: u32) -> Option<std::path::PathBuf> {
+    None
+}
+
 impl Terminal {
     /// Starts the user's login shell in `cwd`. Done before creating the
     /// terminal so a failure can be shown instead of an empty one. A folder
@@ -114,9 +160,14 @@ impl Terminal {
     ) -> anyhow::Result<StartedShell> {
         if let Some(remote) = ph_remote::remote_of(&cwd) {
             let (program, args) = ph_remote::ssh::shell(&remote.mapping, &remote.path);
-            let mut shell = Self::start_program(&program, args, home_or(cwd))?;
+            let mut shell = Self::start_program(&program, args, home_or(cwd.clone()))?;
             shell.title = remote.mapping.host.clone().into();
             shell.shell = remote.mapping.host.clone().into();
+            // `ssh` runs in the home folder here; the shell is in the mapped
+            // folder on the server, and a split or a restart must open the
+            // server's shell there again, not a local one in home.
+            shell.cwd = cwd;
+            shell.pid = None;
             return Ok(shell);
         }
         match shell {
@@ -140,6 +191,17 @@ impl Terminal {
         args: Vec<String>,
         cwd: std::path::PathBuf,
     ) -> anyhow::Result<StartedShell> {
+        Self::start_program_with(program, args, cwd, &[])
+    }
+
+    /// [`Self::start_program`], with `environment` set for the program over
+    /// the user's own (an agent's account).
+    pub fn start_program_with(
+        program: &str,
+        args: Vec<String>,
+        cwd: std::path::PathBuf,
+        environment: &[(String, String)],
+    ) -> anyhow::Result<StartedShell> {
         let shell = std::path::PathBuf::from(program);
         // Not waiting for the login shell's environment (a terminal opened
         // as the app starts would hang until it is read): the shell started
@@ -154,6 +216,7 @@ impl Terminal {
         extra_env
             .entry("CLICOLOR".into())
             .or_insert_with(|| "1".into());
+        extra_env.extend(environment.iter().cloned());
 
         let options = tty::Options {
             shell: Some(tty::Shell::new(program.to_string(), args)),
@@ -171,6 +234,10 @@ impl Terminal {
             cell_height: 16,
         };
         let pty = tty::new(&options, size, 0)?;
+        #[cfg(unix)]
+        let pid = Some(pty.child().id());
+        #[cfg(not(unix))]
+        let pid = None;
         let (status_sender, statuses) = smol::channel::bounded(64);
         let pty = crate::program_status::Tapped::new(pty, status_sender);
 
@@ -202,6 +269,7 @@ impl Terminal {
             shell: title.clone(),
             title,
             cwd,
+            pid,
             columns,
             rows,
         })
@@ -241,6 +309,7 @@ impl Terminal {
             title: shell.title,
             shell: shell.shell,
             cwd: shell.cwd,
+            pid: shell.pid,
             label: None,
             badge: None,
             program: None,
@@ -460,6 +529,12 @@ impl Terminal {
         }));
     }
 
+    /// Types `text` into the program as a paste (see [`Self::paste`]): what
+    /// the app puts into a program for the user to send.
+    pub fn paste_text(&self, text: &str) {
+        self.paste(text);
+    }
+
     /// Pastes `text`, bracketed when the program asked for that.
     pub(crate) fn paste(&self, text: &str) {
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
@@ -510,6 +585,17 @@ impl Terminal {
         &self.cwd
     }
 
+    /// The folder the shell is in now (it went there with `cd`), where the
+    /// system tells; else where it started. What a terminal brought back
+    /// after a restart starts in.
+    pub fn current_dir(&self) -> std::path::PathBuf {
+        self.pid
+            .filter(|_| !self.exited)
+            .and_then(folder_of)
+            .filter(|folder| folder.is_dir())
+            .unwrap_or_else(|| self.cwd.clone())
+    }
+
     /// The history and the screen as text, at most the last `max_lines`
     /// lines, without trailing blanks: what is kept when PilotHouse quits.
     pub fn history_text(&self, max_lines: usize) -> String {
@@ -554,6 +640,21 @@ impl Terminal {
         let mut parser: alacritty_terminal::vte::ansi::Processor =
             alacritty_terminal::vte::ansi::Processor::new();
         parser.advance(&mut *self.term.lock(), &bytes);
+    }
+
+    /// Writes a dimmed "ended with code" line under what an ended program
+    /// left on screen, so a tab kept after it failed does not look alive.
+    pub(crate) fn show_ended(&self, code: i32) {
+        let mut term = self.term.lock();
+        let mut bytes = Vec::new();
+        if term.grid().cursor.point.column.0 > 0 {
+            bytes.extend_from_slice(b"\r\n");
+        }
+        let note = format!("\u{2500}\u{2500} Ended with code {code} \u{2500}\u{2500}");
+        bytes.extend_from_slice(format!("\x1b[0m\x1b[2m{note}\x1b[0m\r\n").as_bytes());
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut *term, &bytes);
     }
 
     /// The lines on screen now, without trailing blanks.
@@ -609,6 +710,28 @@ fn pasted(text: &str, bracketed: bool) -> String {
 
 #[cfg(test)]
 mod paste_tests {
+    /// A terminal comes back after a restart in the folder its shell was
+    /// in, which the system is asked of.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_process_is_asked_where_it_is() {
+        let dir = std::env::temp_dir().join(format!("ph-folder-of-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(&dir)
+            .spawn()
+            .unwrap();
+        let found = super::folder_of(child.id()).map(|found| std::fs::canonicalize(found).unwrap());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(found, Some(dir.clone()));
+        // A process that is gone has no folder to tell of.
+        assert_eq!(super::folder_of(child.id()), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::pasted;
 
     #[test]

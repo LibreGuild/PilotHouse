@@ -27,17 +27,19 @@ pub mod cdp;
 pub mod chrome;
 mod control;
 pub mod extension;
+mod extension_guide;
 mod extension_view;
 mod hub;
 mod input;
 pub mod logs;
+pub mod preference;
 mod scripts;
 mod sourcemap;
 pub mod workflows;
 
 pub use agent_chrome::{
-    AgentChrome, AgentChromeEvent, AgentChromeStatus, BrowserHost, ChatNews, ChatNote, Delivery,
-    SendTo, SiteAction, TabText, WorkflowUse,
+    AgentChrome, AgentChromeEvent, AgentChromeStatus, BrowserHost, ChatNote, Delivery, SendTo,
+    TabText, WorkflowUse,
 };
 pub use browser::{Browser, BrowserEvent, BrowserStatus, Emulation, Viewport, normalize_url};
 pub use browser_panel::BrowserPanel;

@@ -34,16 +34,25 @@ pub fn release_render_image(image: Arc<RenderImage>, cx: &mut App) {
     });
 }
 
-/// Drops `images`' textures from every window, once they are free.
-pub fn release_render_images(images: Vec<Arc<RenderImage>>, cx: &mut App) {
-    if images.is_empty() {
+/// Lets go of the pictures drawn from the files `paths` (a chat's
+/// attachments, shown through [`crate::images_safe::attached`]): their
+/// decoded pixels and their textures. One that was never drawn costs
+/// nothing, and one still on screen is read again when it is next drawn.
+pub fn release_paths(paths: Vec<std::path::PathBuf>, cx: &mut App) {
+    if paths.is_empty() {
         return;
     }
     cx.defer(move |cx| {
-        for image in images {
-            cx.drop_image(image, None);
+        let mut freed = false;
+        for path in paths {
+            if let Some(render) = crate::images_safe::forget_attached(&path, cx) {
+                cx.drop_image(render, None);
+                freed = true;
+            }
         }
-        trim_soon(cx);
+        if freed {
+            trim_soon(cx);
+        }
     });
 }
 

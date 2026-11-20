@@ -26,7 +26,7 @@ fn with(mut properties: Value, extra: Value) -> Value {
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: "chrome_open",
-        description: "Open a URL in your tab of the user's own Chrome (through the PilotHouse extension), with the sites they are signed in to. Waits for the page to load. Your tabs live in Chrome's PilotHouse tab group; you can use only tabs in that group (ones you open, and ones the user shared: see chrome_tabs). Use it first for any web page: websites (web apps, dashboards, docs, accounts) and the project's own dev server (localhost) alike. Only when it answers that the extension is not connected, use the built-in browser's tools if you have them; otherwise ask the user to set the extension up. Each chat has its own tab; new_tab opens another. Never try to solve a CAPTCHA or other check that a person is there: ask the user to complete it in that tab.",
+        description: "Open a URL in your tab of the user's own Chrome (through the PilotHouse extension), with the sites they are signed in to. Waits for the page to load. Your tabs live in Chrome's PilotHouse tab group; you can use only tabs in that group (ones you open, and ones the user shared: see chrome_tabs). For any web page: websites (web apps, dashboards, docs, accounts) and the project's own dev server (localhost) alike. When Chrome is not connected, the page opens in the built-in browser instead (where there is one) and the answer says so: go on there with the browser_ tools. Each chat has its own tab; new_tab opens another. Never try to solve a CAPTCHA or other check that a person is there: ask the user to complete it in that tab.",
         schema: || {
             json!({ "type": "object", "required": ["url"], "properties": {
             "url": { "type": "string" },
@@ -258,7 +258,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "chrome_workflows",
-        description: "Workflows the user recorded in Chrome (PilotHouse menu → Record a workflow): steps on a website they do often. Without a name, the list; with a name, its steps. chrome_run_workflow runs one.",
+        description: "Workflows the user recorded in Chrome (PilotHouse’s toolbar button → Record → A workflow): steps on a website they do often. Without a name, the list; with a name, its steps. chrome_run_workflow runs one.",
         schema: || json!({ "type": "object", "properties": { "name": { "type": "string" } } }),
         build: |arguments, project_id, _| {
             Ok(("chrome.workflows", with_project(arguments, project_id)))

@@ -1,5 +1,5 @@
-//! Searching every chat's messages (⌘⇧K, the palette, the sidebar, or the
-//! chat history menu). Results come from the store's full-text index as you
+//! Searching every chat's messages (⌘⇧K, the palette, or the chat history
+//! menu). Results come from the store's full-text index as you
 //! type; picking one opens that chat at the message.
 
 use std::time::Duration;
@@ -127,9 +127,15 @@ fn open_pick(pick: Pick, window: &mut Window, cx: &mut App) {
     show(pick, window, cx);
 }
 
+/// Shows `pick` from the window the search was made in: its own workspace,
+/// else the main window's, each with its own `Window`.
 fn show(pick: Pick, window: &mut Window, cx: &mut App) {
-    if let Some((_, workspace)) = crate::open::main_workspace(cx) {
+    if let Some(workspace) = crate::windows::workspace_of(window.window_handle(), cx) {
         workspace.update(cx, |workspace, cx| workspace.show_message(pick, window, cx));
+    } else if let Some((handle, workspace)) = crate::open::main_workspace(cx) {
+        let _ = handle.update(cx, |_, window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.show_message(pick, window, cx))
+        });
     }
 }
 

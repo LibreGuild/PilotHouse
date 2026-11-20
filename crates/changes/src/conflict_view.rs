@@ -18,8 +18,13 @@ use gpui_kit::{
 };
 use ph_git::conflicts::{self, Resolution, Segment};
 
-use crate::commit_box::{Writer, cut};
+use crate::commit_box::Writer;
 use crate::repo::Repo;
+
+/// The most of a conflict (both sides together, in bytes) sent to an agent
+/// to merge. Its answer replaces the whole block, so the agent must see the
+/// whole block: a longer one is not offered.
+const ASK_AT_MOST: usize = 60_000;
 
 #[derive(Debug, Clone)]
 pub enum ConflictEvent {
@@ -105,17 +110,17 @@ impl ConflictView {
         ) else {
             return;
         };
+        if too_long_to_ask(&conflict) {
+            return;
+        }
         let prompt = format!(
             "Resolve this git merge conflict in `{}`. Combine both sides so the \
              intent of each is kept. Reply with only the merged text, no \
              markers, no code fences, no commentary, and do not use tools.\n\n\
              Ours ({}):\n```\n{}```\n\nTheirs ({}):\n```\n{}```",
-            self.path,
-            conflict.ours_label,
-            cut(&conflict.ours, 6_000),
-            conflict.theirs_label,
-            cut(&conflict.theirs, 6_000)
+            self.path, conflict.ours_label, conflict.ours, conflict.theirs_label, conflict.theirs
         );
+        let crlf = conflict.ours.contains("\r\n") || conflict.theirs.contains("\r\n");
         let root = self.repo.read(cx).root().to_path_buf();
         self.asking = Some(ix);
         cx.notify();
@@ -125,13 +130,7 @@ impl ConflictView {
             _ = this.update_in(cx, |this, window, cx| {
                 this.asking = None;
                 match result {
-                    Ok(text) => {
-                        let mut text = crate::commit_box::clean_message(&text);
-                        if !text.ends_with('\n') {
-                            text.push('\n');
-                        }
-                        this.resolve(ix, Resolution::Custom(text), cx);
-                    }
+                    Ok(text) => this.resolve(ix, Resolution::Custom(merged_block(text, crlf)), cx),
                     Err(err) => {
                         window.push_notification(Notification::error(format!("{err:#}")), cx)
                     }
@@ -180,7 +179,7 @@ impl ConflictView {
                 .rounded(cx.theme().radius)
                 .border_1()
                 .border_color(if picked {
-                    cx.theme().info
+                    cx.theme().ring
                 } else {
                     cx.theme().border
                 })
@@ -242,6 +241,7 @@ impl ConflictView {
                     .child(button("use-theirs", "Theirs", Resolution::Theirs, cx))
                     .child(button("use-both", "Both", Resolution::Both, cx))
                     .when(self.writer.is_some(), |this| {
+                        let too_long = too_long_to_ask(conflict);
                         this.child(
                             Button::new(("ask-agent-merge", ix))
                                 .xsmall()
@@ -252,7 +252,12 @@ impl ConflictView {
                                 } else {
                                     "Ask agent"
                                 })
-                                .disabled(self.asking.is_some())
+                                .when(too_long, |this| {
+                                    this.tooltip(
+                                        "Too long to send to an agent whole: pick Ours, Theirs or Both",
+                                    )
+                                })
+                                .disabled(self.asking.is_some() || too_long)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.ask_agent(ix, window, cx)
                                 })),
@@ -357,5 +362,50 @@ impl Render for ConflictView {
                             .map(|(ix, conflict)| self.render_conflict(ix, conflict, cx)),
                     ),
             )
+    }
+}
+
+/// Whether conflict `conflict` is too long to send to an agent whole.
+fn too_long_to_ask(conflict: &conflicts::Conflict) -> bool {
+    conflict.ours.len() + conflict.theirs.len() > ASK_AT_MOST
+}
+
+/// The agent's merge as the block's new text: as it wrote it (indentation
+/// and quotes are code), ending its last line as the block's lines end.
+fn merged_block(mut text: String, crlf: bool) -> String {
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push_str(if crlf { "\r\n" } else { "\n" });
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_merge_keeps_its_indentation_and_quotes() {
+        let answer = "    \"version\": \"2.0.0\",\n    \"name\": \"x\"";
+        assert_eq!(
+            merged_block(answer.to_string(), false),
+            "    \"version\": \"2.0.0\",\n    \"name\": \"x\"\n"
+        );
+        assert_eq!(merged_block("a\r\nb".to_string(), true), "a\r\nb\r\n");
+        assert_eq!(merged_block("a\n".to_string(), true), "a\n");
+    }
+
+    #[test]
+    fn a_block_too_long_to_send_whole_is_not_asked_for() {
+        let conflict = |ours: usize, theirs: usize| conflicts::Conflict {
+            ours_label: "HEAD".into(),
+            ours: "a".repeat(ours),
+            theirs_label: "main".into(),
+            theirs: "b".repeat(theirs),
+            base: None,
+            base_label: String::new(),
+        };
+        let half = ASK_AT_MOST / 2;
+        assert!(!too_long_to_ask(&conflict(half, half)));
+        assert!(too_long_to_ask(&conflict(half, half + 1)));
     }
 }

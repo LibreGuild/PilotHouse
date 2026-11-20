@@ -6,7 +6,9 @@ use gpui_kit::component::{
     ActiveTheme as _, IndexPath, WindowExt as _, h_flex,
     list::{List, ListDelegate, ListItem, ListState},
 };
-use gpui_kit::{App, AppContext as _, ParentElement as _, Styled as _, Task, Window, div};
+use gpui_kit::{
+    App, AppContext as _, ParentElement as _, Styled as _, Task, WeakEntity, Window, div,
+};
 
 use crate::file_index::FileList;
 use crate::fuzzy::fuzzy_match;
@@ -22,6 +24,8 @@ pub struct QuickOpenDelegate {
     results: Vec<usize>,
     selected: Option<IndexPath>,
     on_open: OnOpen,
+    /// What was typed, to rank a list that arrives later by it.
+    query: String,
 }
 
 impl QuickOpenDelegate {
@@ -32,6 +36,7 @@ impl QuickOpenDelegate {
             results,
             selected: None,
             on_open,
+            query: String::new(),
         }
     }
 }
@@ -61,13 +66,23 @@ impl ListDelegate for QuickOpenDelegate {
         cx: &mut gpui_kit::Context<ListState<Self>>,
     ) -> Task<()> {
         let files = self.files.clone();
-        let query = query.to_string();
+        self.query = query.to_string();
+        let query = self.query.clone();
         // Scoring 100k paths takes a few milliseconds: keep it off the UI thread.
-        let ranked = cx.background_spawn(async move { rank(&files, &query) });
+        let ranked = {
+            let (files, query) = (files.clone(), query.clone());
+            cx.background_spawn(async move { rank(&files, &query) })
+        };
         cx.spawn_in(window, async move |list, cx| {
             let results = ranked.await;
             _ = list.update(cx, |list, cx| {
-                list.delegate_mut().results = results;
+                // Typed on, or the list was replaced, meanwhile: these
+                // results are for something no longer shown.
+                let delegate = list.delegate_mut();
+                if delegate.query != query || !std::sync::Arc::ptr_eq(&delegate.files, &files) {
+                    return;
+                }
+                delegate.results = results;
                 cx.notify();
             });
         })
@@ -143,17 +158,21 @@ impl ListDelegate for QuickOpenDelegate {
     }
 }
 
+/// The open finder, to give it a newer list.
+pub type Finder = WeakEntity<ListState<QuickOpenDelegate>>;
+
 /// Opens the finder over `files`; `on_open` receives the chosen relative path.
 pub fn open(
     files: FileList,
     on_open: impl Fn(&str, &mut Window, &mut App) + 'static,
     window: &mut Window,
     cx: &mut App,
-) {
+) -> Finder {
     let on_open: OnOpen = Rc::new(on_open);
     let state = cx.new(|cx| {
         ListState::new(QuickOpenDelegate::new(files, on_open), window, cx).searchable(true)
     });
+    let finder = state.downgrade();
     let focus = state.clone();
     window.defer(cx, move |window, cx| {
         focus.update(cx, |state, cx| state.focus(window, cx))
@@ -163,6 +182,22 @@ pub fn open(
             .close_button(false)
             .p_0()
             .child(List::new(&state).search_placeholder("Go to file…").h_96())
+    });
+    finder
+}
+
+/// Puts a newer file list in an open finder, ranked by what is typed
+/// (nothing happens once the finder is closed).
+pub fn replace_files(finder: &Finder, files: FileList, window: &mut Window, cx: &mut App) {
+    let Some(state) = finder.upgrade() else {
+        return;
+    };
+    state.update(cx, |list, cx| {
+        let query = list.delegate().query.clone();
+        list.delegate_mut().files = files;
+        list.delegate_mut()
+            .perform_search(&query, window, cx)
+            .detach();
     });
 }
 

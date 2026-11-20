@@ -9,19 +9,21 @@ Crates: `ph-github` (API, accounts, secrets), `ph-pulls` (UI), `ph-review` (revi
 - Tokens live in the system keychain (macOS Keychain, Windows Credential Manager); on Linux, and in debug builds, in a file only the user can read in the private data folder. Never in SQLite, logs or chats. Requests go only to hosts you added; a token is never sent to another host (checked per request, including pagination links).
 - TLS uses the operating system (native-tls with the system's roots), so company CAs installed on the machine work.
 
-## The GitHub view (⌘⇧G)
+## Reviews
 
-What you would see on GitHub's own pages, apart from any workspace (`crates/workspace/src/github_view/`). Picked in the title bar beside *Workspaces*.
+*Reviews* in the column of icons (⌘⇧G): other people's pull requests and what agents make of them, apart from any workspace (`crates/workspace/src/github_view/`; the code calls it the GitHub view). It is for whoever reviews for a team as much as for an author: a workspace's own pull requests are in its *Pull requests* tool.
 
-- **Inbox** (sidebar): *Review requested*, *My pull requests* and *Assigned to me*: open pull requests across every repository each account sees, newest activity first (`ph_github::search`, GitHub's issue search). They are read when the view is first shown, again when it is shown after two minutes, and with the refresh button. The title bar's *GitHub* shows how many wait for your review.
-- **Repositories** (sidebar): those your workspaces' folders come from (their remote, for a host with an account), and any you add with **+** (`owner/name` on github.com, else on your only account's host, or the repository's URL; GitHub confirms the token can see it). Added ones are kept in `github.repositories` and can be taken out of the list from their menu.
-- **The middle** shows an inbox list, or a repository's open pull requests and one PR in full (the same list and PR view as a workspace's PRs tool, without *New* and *Check out*, which need a checkout of yours).
+- **Inbox** (the list): *Review requested*, *My pull requests* and *Assigned to me*: open pull requests across every repository each account sees, newest activity first (`ph_github::search`, GitHub's issue search). They are read when the view is first shown, again when it is shown after two minutes, and with the refresh button. The *Reviews* icon shows how many wait for your review, and the Bridge links to them.
+- **Repositories** (the list): those your workspaces' folders come from (their remote, for a host with an account), and any you add with **+** (`owner/name` on github.com, else on your only account's host, or the repository's URL; GitHub confirms the token can see it). Added ones are kept in `github.repositories` and can be taken out of the list from their menu.
+- **The middle** shows an inbox list as a queue (below), or a repository's open pull requests and one PR in full (the same list and PR view as a workspace's PRs tool, without *New* and *Check out*, which need a checkout of yours).
 - **The chat** on the right is the open pull request's (it shows while one is open): ready to type into, with the templates as starters (*Review this PR*, *Security review*, *Explain this PR*, *Test plan*, and your own). The first message of a new chat clones the repository if needed and checks the PR out (the chat says so while it does), then sends. Its header lists that PR's earlier chats. A file a chat names opens in a window of its own (the view has no editor).
 - **Chats here only read.** They work in PilotHouse's copy of the PR: reads, searches and read-only commands (also chained with `&&`, `;` or `|`, like `cd … && git log | head`) run without asking; edits, deletes and moves are refused without asking, and the agent is told the chat is read-only. Anything else asks. Antigravity can only run a command by going on with every permission for the rest of the turn, so that always asks you. Changes are made from a workspace.
 
-### Templates (Settings → Templates)
+### Templates (Settings → Review templates)
 
 What agents are asked to do with a pull request (`ph_review::templates`). Shipped: *Review this PR* and *Security review* (reviews with findings), *Explain this PR* and *Test plan* (answers). Each can be edited, put back as shipped, or taken out of the list and brought back; *New template* adds your own, making either a review or an answer.
+
+The page shows the list or one template, never both (`templates_view.rs`): a click on a row opens it with the page to itself, *← Templates*, *Cancel* and *Save* over its fields, so they are in reach wherever the text is scrolled to. The instructions box gets the rows the page has room for (`editor_rows`, from the window's height), and scrolls its own text beyond that.
 
 - A **review** template's text is the reviewing guide: what to look for, what each severity means (critical: must not merge; major: fix before merging; minor: worth fixing; nit: polish), and that every finding needs **evidence** (the quoted lines, the input or call path) and a **fix**. PilotHouse adds the pull request, the repository's own rules from `.pilothouse/review.md` on the base branch (never the PR's head, which its author controls), the earlier findings to re-check, and the answer format the findings card reads, so a template changes how a review is done but never breaks the card.
 - An **answer** template's text is a request (the shipped *Explain this PR* asks for a summary, how it works drawn as Mermaid diagrams, a file-by-file table, what to look at and how to try it). PilotHouse adds where the PR is checked out and how to see its diff.
@@ -39,28 +41,47 @@ What agents are asked to do with a pull request (`ph_review::templates`). Shippe
 
 - The project's remote (`origin`, else `upstream`, read before `insteadOf` rewrites) gives host, owner and repo; the account for that host is used.
 - Open PRs, newest activity first, with CI state (check runs and statuses), labels, draft and "Review requested". Filters: Open, Mine, To review.
-- **New** opens a PR for the current branch (pushes it first if needed): title, base, description (**Write description**: an agent writes it from the branch's commits and diff), draft.
-- **Review with agent** and **Open review chat** switch to the GitHub view, where reviews run.
+- **New** opens a PR for the current branch (pushes it first if needed): title, base (the repository's default branch, filled in a moment after the form opens: Git is asked off the UI thread), description (**Write description**: an agent writes it from the branch's commits and diff), draft.
+- **Review with agent** and **Open review chat** switch to Reviews, where reviews run.
 
 ## A pull request
 
-- **Overview**: the description and conversation (Markdown), reviews with their state, then Comment / Request changes / Approve, and Merge (merge, squash or rebase; asks to confirm).
+The tabs put what an agent found, and how to read the change, before the conversation about it; a pull request with an agent's review at hand opens on *Findings*, any other on *Conversation*.
+
 - **Findings**: what agent reviews found, kept across rounds (see [Findings](#findings)). The tab shows how many are open; opening it reads the author's ticks and replies.
 - **Walkthrough**: a briefing on the change for whoever reviews it (see [Walkthrough](#walkthrough)).
 - **Files**: each file's diff with its line comment threads; Reply in a thread. Only the files in sight are drawn (patches are parsed once), and a diff over 400 lines is folded behind *Show diff*. **Ask about lines** under a file asks an agent about some of its lines (type `start-end: question`).
+- **Conversation** (it was *Overview*, and came first): the description and conversation (Markdown), reviews with their state, then Comment / Request changes / Approve, and Merge (merge, squash or rebase; asks to confirm; it merges the commit the page shows, and says so when something was pushed since).
 - **Commits**, **Checks** (click to open a check's page).
 - **The header** has one button, **Review with agent**, and a **⋯** menu with the rest (*Watch*, *Check out this branch*, *Address the reviewers' comments*, *Refresh*); **Watching** shows beside it while it is on. The tabs fold to icons in a narrow pane.
 - **Watch**: PilotHouse looks at the pull request every three minutes and tells you (a system notification) when the author pushes or answers a finding; answers are applied. Merged or closed pull requests stop being watched.
 - **Address comments** (your own pull requests): a [task](#fix-in-a-task) on the branch whose agent works through the reviewers' comments not yet resolved, changes what is right and drafts a reply for each.
 - **Check out** (in a workspace's PRs tool): fetches the PR head and switches to a local `pr/<number>` branch.
 
-## The inbox, for review
+## The queue
+
+`github_view/queue.rs`. An inbox list groups its pull requests by what an agent has made of each, what waits for you first:
+
+| Group | What is in it |
+|---|---|
+| **Findings to read** | the newest finished round left findings open: how many, and the worst (*3 findings, 1 major*). **Read** opens the pull request on its Findings tab, as a click on the row does. |
+| **Agents at work** | a review is being readied (*Cloning owner/repo 12s*) or runs (what the agent is doing). **Watch** opens its chat; **Answer** when it asks something. |
+| **Not started** | nobody reviewed it. A tick box, and **Review** for one. A review started in this run that ended on an error says so (*The review stopped*, **See why** opens its chat). |
+| **Reviewed, nothing found** | the newest round has no open finding. |
+
+- **Reviews of several at once.** Tick pull requests under *Not started* (*Tick the N not started* takes them all) and press **Review N with an agent**. Each gets a full review by the default agent and review template (the bar names both), in the view's own copy of the repository, reading only; nothing is posted until you post it from the pull request's page. The repository is cloned once and each pull request checked out in turn (one Git operation at a time); the agents then run side by side.
+- **A review from the queue runs behind the chat in view** (`ChatPanel::start_review_behind`): a chat of its own in the repository's space, which does not take the panel beside whatever pull request is open. Its row follows it, and so does its card on the Bridge.
+- **One round at a time on a pull request.** Its rounds share one checkout: while a review of it is readied or runs, *Review with agent* on its page says so instead of starting another, and its tick is dropped.
+- **Check the fixes** shows on a reviewed row when the author pushed since: a round on the new commits that says which findings still stand.
+- What agents found is read from the store when the lists are read and whenever a round ends (`GithubView::read_reviews`), off the UI thread.
+
+The rows also carry the triage:
 
 The *Review requested*, *My pull requests* and *Assigned to me* lists show, for the first 15 pull requests of each: the size (small, medium, large, and lines changed), CI (green, failing, running), what the change touches that deserves care (auth, security, migrations, payments, CI, dependencies) and whether you reviewed it and the author pushed since. **Review first** (the default; **Newest first** sorts by date) puts first the reviews the author answered with commits, then pull requests whose CI is not failing, risky before plain, small before large (`ph_review::triage`).
 
 ## Review with agent
 
-The chat beside the pull request shows the review as begun the moment it is asked for: the request as its first message and, under the agent's name, *Cloning owner/repo…* (the first time) or *Checking out #n…* with the time it has taken ([a chat being readied](chat.md#a-chat-being-readied)). The Agents pop-up lists it as work. A clone that fails says why over the composer. (A pull request opened from the inbox before its repository was read had no chat beside it, so a review started there showed nothing until the agent spoke; its chat is now attached when it opens.)
+The chat beside the pull request shows the review as begun the moment it is asked for: the request as its first message and, under the agent's name, *Cloning owner/repo…* (the first time) or *Checking out #n…* with the time it has taken ([a chat being readied](chat.md#a-chat-being-readied)). The Bridge lists it under *Working*. A clone that fails says why over the composer. (A pull request opened from the inbox before its repository was read had no chat beside it, so a review started there showed nothing until the agent spoke; its chat is now attached when it opens.)
 
 1. PilotHouse brings the repository's [managed clone](#where-it-works-the-managed-clones) up to date, fetches the PR head (`pull/<n>/head`) and checks it out in `pr-<n>` beside the clone. Your checkout is not touched. The reviewed commit is kept (`refs/pilothouse/reviewed/<n>/<sha>`) so the next round can see how lines moved, even after a force-push.
 2. **A clean checkout.** What a pull request carries that would act on the agent instead of being read is taken out of the checkout before the agent starts: agent settings with hooks (`.claude/settings*.json`, `.claude/hooks`), MCP servers (`.mcp.json`, `.vscode/mcp.json`), other agents' folders (`.gemini`, `.codex`, `.cursor`, `.agents`, `.clinerules`) and the root's `.env` files. The chat's first message lists what was taken out. Findings are still checked against the commit itself.
@@ -99,7 +120,7 @@ And for all: **Post to GitHub** / **Update on GitHub**, **Summary only**, **Read
 
 ### Fix in a task
 
-**Fix in a task** (a finding, or all open ones) and **Address comments** make a [task](workspace.md) on the pull request's head: from a workspace's checkout of the repository when there is one, else the GitHub view's clone (branch `task/pr-<n>-fix`). Its chat starts with the findings (or comments) and says how to push to the pull request's branch. In a task on someone else's pull request, their agent settings are taken out (and hidden from git, so the removal is never committed).
+**Fix in a task** (a finding, or all open ones) and **Address comments** make a [task](workspace.md) on the pull request's head: from a workspace's checkout of the repository when there is one, else Reviews' clone (branch `task/pr-<n>-fix`). Its chat starts with the findings (or comments) and says how to push to the pull request's branch. In a task on someone else's pull request, their agent settings are taken out (and hidden from git, so the removal is never committed).
 
 ## Walkthrough
 
@@ -120,8 +141,8 @@ It is shown as the chat shows a reply: Markdown with its Mermaid diagrams drawn 
 
 **Review** in the Git tab (over the changes) has an agent review what you have not pushed yet: commits ahead of the upstream and work not committed (or only the latter without an upstream), with the repository's rules and learned rules. Its findings come back as **notes on the changed lines**, and **Fix with agent** gives them to the chat. **Review again** carries the findings on, as rounds do for pull requests.
 
-## Agents board
+## On the Bridge
 
-Review chats of the GitHub view show on the Agents board with the workspaces' chats (*GitHub · owner/name*), and count in its tab.
+Reviews an agent works on, or waits for you in, show on the [Bridge](workspace.md#the-bridge) with the workspaces' tasks (*Reviews · owner/name*), also while their repository is still being cloned. Finished ones are read here, in the queue.
 
 History lives in SQLite (`pr_reviews`: every round, its kind, agent, round number and summary comment; `pr_findings`: each finding of each round with its status, who set it and why, its comments and issue).

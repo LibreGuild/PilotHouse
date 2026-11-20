@@ -94,7 +94,8 @@ impl RenderOnce for CopyButton {
                 this.label(if done { "Copied".into() } else { label })
             })
             .when_some(self.tooltip, |this, tooltip| {
-                this.accessibility_label(tooltip.clone()).tooltip(tooltip)
+                this.accessibility_label(tooltip.clone())
+                    .tooltip(crate::tip(tooltip))
             })
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();

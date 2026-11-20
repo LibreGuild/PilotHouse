@@ -708,6 +708,152 @@ impl Tail {
     }
 }
 
+/// The steps the session file at `path` holds, all of them.
+fn steps_of(format: Format, path: &std::path::Path) -> Vec<Step> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let mut parsed = Parsed::default();
+    parsed.feed(format, &String::from_utf8_lossy(&bytes));
+    parsed.steps(format)
+}
+
+/// How many steps the session file at `path` holds. A chat whose
+/// conversation goes on in the agent's CLI keeps this as its mark: what
+/// the file holds after it was said there.
+pub fn step_count(format: Format, path: &std::path::Path) -> usize {
+    steps_of(format, path).len()
+}
+
+/// Where an agent's own record of one of its sessions is looked for.
+pub struct Record<'a> {
+    pub agent: &'a str,
+    /// The agent's own id of the session.
+    pub id: &'a str,
+    /// The folder the session works in.
+    pub cwd: &'a std::path::Path,
+    /// What the agent is started with beside the user's own environment
+    /// (its account): where its files are is read from this.
+    pub environment: &'a [(String, String)],
+    /// Its session file, when the agent said where it is (its hooks).
+    pub file: Option<std::path::PathBuf>,
+}
+
+impl Record<'_> {
+    /// What the record says, as steps; `None` when the agent keeps none
+    /// this can read, or this session's is not found.
+    fn steps(&self) -> Option<Vec<Step>> {
+        // One database a conversation, not a file of lines.
+        if self.agent == "antigravity" {
+            return crate::antigravity_store::steps(self.id, self.environment);
+        }
+        let format = Format::of(self.agent)?;
+        let file = self.file.clone().or_else(|| {
+            crate::cli_sessions::sessions_in(self.agent, self.cwd, self.environment)
+                .into_iter()
+                .find(|session| session.id == self.id)
+                .and_then(|session| session.path)
+        })?;
+        file.is_file().then(|| steps_of(format, &file))
+    }
+
+    /// How many steps the record holds now; `None` when it cannot be
+    /// read. A chat whose conversation goes on in the agent's CLI keeps
+    /// this as its mark: what the record holds after it was said there.
+    pub fn step_count(&self) -> Option<usize> {
+        self.steps().map(|steps| steps.len())
+    }
+
+    /// Adds to chat `session`'s transcript what the record says after its
+    /// first `from` steps (see [`take_in`]). `Ok(None)` when the record
+    /// cannot be read: nothing is added, and nothing is known of what was
+    /// said.
+    pub fn take_in(
+        &self,
+        store: &ph_store::Store,
+        session: ph_store::sessions::SessionId,
+        from: usize,
+    ) -> anyhow::Result<Option<usize>> {
+        match self.steps() {
+            Some(steps) => take_in_steps(store, session, steps, from).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Adds to chat `session`'s transcript what the agent's session file says
+/// after its first `from` steps: the part of a conversation that went on
+/// in the agent's CLI, taken in when it comes back to the chat. Returns
+/// how many entries were added.
+///
+/// These read plainer than a chat's own (a tool is its name, without its
+/// output or its diff): the file says less than the agent tells a chat.
+/// A file with fewer than `from` steps is not the conversation the chat
+/// knew (the CLI started another): nothing is added, and that is an error
+/// to tell the user of.
+pub fn take_in(
+    store: &ph_store::Store,
+    session: ph_store::sessions::SessionId,
+    format: Format,
+    path: &std::path::Path,
+    from: usize,
+) -> anyhow::Result<usize> {
+    take_in_steps(store, session, steps_of(format, path), from)
+}
+
+fn take_in_steps(
+    store: &ph_store::Store,
+    session: ph_store::sessions::SessionId,
+    steps: Vec<Step>,
+    from: usize,
+) -> anyhow::Result<usize> {
+    use crate::transcript::StoredEntry;
+    anyhow::ensure!(
+        steps.len() >= from,
+        "the agent's record holds {} steps, fewer than the {from} the chat knew",
+        steps.len()
+    );
+    let stored: Vec<(&str, String)> = steps
+        .into_iter()
+        .enumerate()
+        .skip(from)
+        .filter_map(|(ix, step)| {
+            let (role, entry) = match step {
+                Step::User(text) => (
+                    "user",
+                    StoredEntry::User {
+                        text,
+                        attachments: Vec::new(),
+                        checkpoint: None,
+                    },
+                ),
+                Step::Agent(text) => ("agent", StoredEntry::Agent { text }),
+                step @ Step::Tool(_) => match step.into_entry(ix) {
+                    Entry::Tool(tool) => ("agent", StoredEntry::Tool(tool)),
+                    _ => return None,
+                },
+            };
+            serde_json::to_string(&entry).ok().map(|body| (role, body))
+        })
+        .collect();
+    store.append_messages(session, &stored)?;
+    Ok(stored.len())
+}
+
+/// Adds a line of PilotHouse's own to chat `session`'s transcript.
+pub fn note(
+    store: &ph_store::Store,
+    session: ph_store::sessions::SessionId,
+    text: &str,
+) -> anyhow::Result<()> {
+    let entry = crate::transcript::StoredEntry::Notice {
+        text: text.to_string(),
+        is_error: false,
+    };
+    store.append_messages(session, &[("agent", serde_json::to_string(&entry)?)])?;
+    Ok(())
+}
+
 impl Step {
     /// The entry of step `ix` (its id keeps tool runs apart).
     fn into_entry(self, ix: usize) -> Entry {
@@ -727,6 +873,8 @@ impl Step {
                 diffs: Vec::new(),
                 children: Vec::new(),
                 agent_text: String::new(),
+                run: Default::default(),
+                images: Vec::new(),
                 expanded: false,
                 started: None,
                 touched: None,
@@ -775,7 +923,9 @@ impl Render for TranscriptView {
                     .xsmall()
                     .icon(Icons::MessageSquare)
                     .label("Continue in a chat")
-                    .tooltip("A new chat that starts from this session, with any agent")
+                    .tooltip(ph_ui::tip(
+                        "A new chat that starts from this session, with any agent",
+                    ))
                     .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
                         crate::agents::AGENTS.iter().fold(menu, |menu, agent| {
                             let view = view.clone();
@@ -850,6 +1000,70 @@ mod tests {
                 Step::Agent("Fixed.".into()),
             ]
         );
+    }
+
+    /// A conversation that went on in the agent's CLI comes back to its
+    /// chat: only what was said there is added.
+    #[test]
+    fn what_was_said_in_the_cli_is_taken_into_the_chat() {
+        let dir = std::env::temp_dir().join(format!("ph-take-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("session.jsonl");
+        let before = [
+            r#"{"type":"user","message":{"content":"Fix the bug"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed."}]}}"#,
+        ];
+        std::fs::write(&file, before.join("\n") + "\n").unwrap();
+        // The mark the chat keeps as it goes to the CLI.
+        let mark = step_count(Format::Claude, &file);
+        assert_eq!(mark, 2);
+        // In the CLI: one more turn, with a command.
+        let after = [
+            r#"{"type":"user","message":{"content":"Now run the tests"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"All pass."}]}}"#,
+        ];
+        let all = before.iter().chain(&after).copied().collect::<Vec<_>>();
+        std::fs::write(&file, all.join("\n") + "\n").unwrap();
+
+        let store = ph_store::Store::open_in_memory().unwrap();
+        let place = store.add_project(&dir).unwrap();
+        let chat = store.create_session(place.id, "Bug", "claude").unwrap();
+        assert_eq!(
+            take_in(&store, chat.id, Format::Claude, &file, mark).unwrap(),
+            3
+        );
+        let said: Vec<(String, serde_json::Value)> = store
+            .messages(chat.id)
+            .unwrap()
+            .into_iter()
+            .map(|message| {
+                (
+                    message.role.clone(),
+                    serde_json::from_str(&message.body).unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(said.len(), 3);
+        assert_eq!(said[0].0, "user");
+        assert_eq!(said[0].1["entry"], "user");
+        assert_eq!(said[0].1["text"], "Now run the tests");
+        assert_eq!(said[1].1["entry"], "tool");
+        assert_eq!(said[1].1["title"], "Bash: cargo test");
+        assert_eq!(said[2].1["text"], "All pass.");
+        // Nothing new: nothing added. A file that is not the conversation
+        // the chat knew (fewer steps than its mark) is refused.
+        assert_eq!(
+            take_in(&store, chat.id, Format::Claude, &file, 5).unwrap(),
+            0
+        );
+        assert!(take_in(&store, chat.id, Format::Claude, &file, 9).is_err());
+        assert_eq!(store.messages(chat.id).unwrap().len(), 3);
+        // A file that is gone holds nothing.
+        assert_eq!(step_count(Format::Claude, &dir.join("none.jsonl")), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,5 +1,5 @@
-// Recording what the user does in a tab, only when they start it (the
-// right-click menu or the side panel), with a bar in the page saying so:
+// Recording what the user does in a tab, only when they start it (from the
+// popup), with a bar in the page saying so, and Stop and Cancel on it:
 //
 // - **A bug report**: the steps, a video of the tab with a few still frames,
 //   and the page's console errors and failed requests (read with Chrome's
@@ -34,7 +34,7 @@ let recording = null;
 let stopping = null;
 const watchers = new Set();
 
-/** The recording under way, for the side panel: kind, tab and start. */
+/** The recording under way, for the popup: kind, tab and start. */
 export function current() {
   if (!recording) return null;
   const { kind, tabId, startedAt, steps } = recording;
@@ -52,7 +52,7 @@ function changed() {
     try {
       watcher(now);
     } catch (error) {
-      // A closed panel.
+      // A closed popup.
     }
   }
 }
@@ -140,7 +140,7 @@ async function watchPage(tab) {
 /** A video of the tab, when Chrome allows it here. */
 async function startVideo(tab, given) {
   try {
-    // From the panel, the stream comes with the click (Chrome asks for one).
+    // From the popup, the stream comes with the click (Chrome asks for one).
     const streamId = given ?? await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
     await offscreen();
     const answer = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'start', streamId });
@@ -148,7 +148,7 @@ async function startVideo(tab, given) {
     recording.video = true;
   } catch (error) {
     recording.notes.push(notInvoked(error)
-      ? 'No video: Chrome lets PilotHouse record a tab’s video only when the recording starts from the PilotHouse menu on the page (right-click).'
+      ? 'No video: Chrome did not let PilotHouse record this tab’s video.'
       : `No video: ${String(error?.message ?? error).replace(/\.+$/, '')}.`);
   }
 }

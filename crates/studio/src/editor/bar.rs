@@ -446,22 +446,16 @@ impl ImageEditor {
     fn crop_to(&mut self, aspect: Option<f32>, cx: &mut Context<Self>) {
         self.crop_aspect = aspect;
         if let Some(aspect) = aspect {
+            let hand = self.hand_crop;
             self.doc.update(cx, |doc, cx| {
                 doc.update(
                     "crop",
                     |edit, size| {
-                        let current = edit.crop_rect(size);
-                        let (cx_, cy_) = (
-                            current.x + current.width / 2.,
-                            current.y + current.height / 2.,
-                        );
                         let (tw, th) = edit.turned_size(size);
-                        let (mut w, mut h) = (current.width, current.width / aspect);
-                        if h > current.height {
-                            (w, h) = (current.height * aspect, current.height);
-                        }
-                        let rect = Rect::new(cx_ - w / 2., cy_ - h / 2., w, h);
-                        edit.crop = Some(rect.clamped(tw as f32, th as f32));
+                        let whole = Rect::new(0., 0., tw as f32, th as f32);
+                        let within = aspect_base(hand, edit.crop_rect(size), whole);
+                        let rect = fitted(within, aspect).clamped(whole.width, whole.height);
+                        edit.set_crop(Some(rect), size);
                     },
                     cx,
                 )
@@ -500,7 +494,9 @@ impl ImageEditor {
                 Tool::Frame => self.frame_bar(cx),
                 Tool::Mark(kind) => {
                     let mut items = Vec::new();
-                    if kind.has_color() {
+                    // A highlight starts yellow whatever is picked here; its
+                    // color is changed once it is there, like any mark's.
+                    if kind.has_color() && kind != MarkType::Highlight {
                         let pick = cx.listener(|this, color: &Color, _, cx| {
                             this.color = *color;
                             cx.notify();
@@ -780,7 +776,7 @@ impl ImageEditor {
                 .ghost()
                 .small()
                 .icon(icon)
-                .tooltip(tip)
+                .tooltip(ph_ui::tip(tip))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.doc.update(cx, |doc, cx| {
                         doc.settle();
@@ -850,7 +846,7 @@ impl ImageEditor {
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.doc.update(cx, |doc, cx| {
                                     doc.settle();
-                                    doc.update("crop", |edit, _| edit.crop = None, cx);
+                                    doc.update("crop", |edit, size| edit.set_crop(None, size), cx);
                                 })
                             })),
                     )
@@ -959,7 +955,7 @@ impl ImageEditor {
             Switch::new("studio-frame")
                 .checked(frame.is_some())
                 .label("Frame")
-                .tooltip("Space, a background, round corners and a shadow: for screenshots in docs and slides")
+                .tooltip(ph_ui::tip("Space, a background, round corners and a shadow: for screenshots in docs and slides"))
                 .on_click(cx.listener(|this, checked: &bool, _, cx| {
                     let checked = *checked;
                     this.doc.update(cx, |doc, cx| {
@@ -1010,7 +1006,8 @@ impl ImageEditor {
                         })
                         .cursor_pointer()
                         .tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(*name).build(window, cx)
+                            gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(*name))
+                                .build(window, cx)
                         })
                         .child(fill.size_full().rounded(px(4.)))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1061,6 +1058,36 @@ impl MarkType {
     }
 }
 
+/// The largest rectangle of `aspect` (width over height) centered in
+/// `within`.
+fn fitted(within: Rect, aspect: f32) -> Rect {
+    let (mut width, mut height) = (within.width, within.width / aspect);
+    if height > within.height {
+        (width, height) = (within.height * aspect, within.height);
+    }
+    Rect::new(
+        within.x + (within.width - width) / 2.,
+        within.y + (within.height - height) / 2.,
+        width,
+        height,
+    )
+}
+
+/// What a proportion is fitted in. Not the crop as it is: each proportion
+/// tried would then be cut from the one before, smaller every time. The
+/// crop last made by `hand`, while the `current` one still lies in it (it
+/// is that crop, or a proportion of it); else the `whole` picture.
+fn aspect_base(hand: Option<Rect>, current: Rect, whole: Rect) -> Rect {
+    // (Half a pixel of slack for sums of floats.)
+    let lies_in = |outer: &Rect| {
+        current.x >= outer.x - 0.5
+            && current.y >= outer.y - 0.5
+            && current.right() <= outer.right() + 0.5
+            && current.bottom() <= outer.bottom() + 0.5
+    };
+    hand.filter(lies_in).unwrap_or(whole)
+}
+
 /// A box color that reads behind text of `color`.
 pub(crate) fn contrasting(color: Color) -> Color {
     let [r, g, b, _] = color.0.map(|c| c as f32 / 255.);
@@ -1091,7 +1118,7 @@ pub(crate) fn align_buttons(current: Align, pick: PickAlign) -> AnyElement {
                 .xsmall()
                 .icon(icon)
                 .selected(align == current)
-                .tooltip(name)
+                .tooltip(ph_ui::tip(name))
                 .accessibility_label(name)
                 .on_click(move |_, window, cx| pick(&align, window, cx))
         }))
@@ -1130,4 +1157,27 @@ pub(crate) fn swatches(chosen: Color, pick: Pick) -> AnyElement {
                 .on_click(move |_, window, cx| pick(&color, window, cx))
         }))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trying_proportions_never_shrinks_the_crop() {
+        let whole = Rect::new(0., 0., 1600., 900.);
+        // No crop made by hand: each proportion is cut from the picture.
+        let square = fitted(aspect_base(None, whole, whole), 1.);
+        assert_eq!(square, Rect::new(350., 0., 900., 900.));
+        let wide = fitted(aspect_base(None, square, whole), 2.);
+        assert_eq!(wide, Rect::new(0., 50., 1600., 800.));
+        // A crop made by hand: each is cut from that, the one after too.
+        let hand = Rect::new(100., 100., 800., 400.);
+        let square = fitted(aspect_base(Some(hand), hand, whole), 1.);
+        assert_eq!(square, Rect::new(300., 100., 400., 400.));
+        let two_to_one = fitted(aspect_base(Some(hand), square, whole), 2.);
+        assert_eq!(two_to_one, hand);
+        // The crop was cleared or made elsewhere since: the picture again.
+        assert_eq!(aspect_base(Some(hand), whole, whole), whole);
+    }
 }

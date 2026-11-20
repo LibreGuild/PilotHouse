@@ -17,6 +17,12 @@ const MAX_ENTRIES: usize = 100_000;
 /// How much of a compressed tar is unpacked to list it: listing reads past
 /// every file's contents, and a small file can unpack to a huge one.
 const MAX_UNPACKED: u64 = 2 * 1024 * 1024 * 1024;
+/// The longest name read from a tar. A tar keeps a long name as an entry
+/// of its own before the file's, of any size its header says: unread, a
+/// few megabytes of archive asked for gigabytes of memory.
+const MAX_NAME: u64 = 64 * 1024;
+/// The most the listed names of a tar take together.
+const MAX_NAMES: usize = 16 * 1024 * 1024;
 
 pub struct ArchiveView {
     path: PathBuf,
@@ -146,31 +152,66 @@ fn list_zip(path: &Path) -> anyhow::Result<(TableData, Option<String>)> {
 fn list_tar(reader: impl Read) -> anyhow::Result<(TableData, Option<String>)> {
     let mut archive = tar::Archive::new(reader);
     let mut rows = Vec::new();
-    let mut more = false;
-    for entry in archive.entries()? {
-        if rows.len() >= MAX_ENTRIES {
-            more = true;
+    // Why the listing stops before the archive's end, if it does.
+    let mut stopped = None;
+    // The name the next entry goes by, from an entry before it.
+    let mut long_name: Option<Vec<u8>> = None;
+    let mut names = 0;
+    // Raw: the entries that only carry a long name come as entries too,
+    // and are read here, up to `MAX_NAME`. (The library reads each whole.)
+    for entry in archive.entries()?.raw(true) {
+        if rows.len() >= MAX_ENTRIES || names > MAX_NAMES {
+            stopped = Some("");
             break;
         }
         // Cut short (past the unpacking limit, or a damaged end): what was
         // read is listed.
-        let Ok(entry) = entry else {
+        let Ok(mut entry) = entry else {
             if rows.is_empty() {
                 entry?;
             }
-            more = true;
+            stopped = Some("");
             break;
         };
+        let kind = entry.header().entry_type();
+        // A GNU long name (`L`), or PAX records (`x`) with a `path`.
+        if kind.is_gnu_longname() || kind.is_pax_local_extensions() {
+            let mut data = Vec::new();
+            if entry.size() > MAX_NAME || entry.read_to_end(&mut data).is_err() {
+                stopped = Some(": the next name is too long to list");
+                break;
+            }
+            if kind.is_gnu_longname() {
+                while data.last() == Some(&0) {
+                    data.pop();
+                }
+                long_name = Some(data);
+            } else if let Some(path) = tar::PaxExtensions::new(&data)
+                .filter_map(Result::ok)
+                .find(|record| record.key_bytes() == b"path")
+            {
+                long_name = Some(path.value_bytes().to_vec());
+            }
+            continue;
+        }
+        // A long link target, or records for the whole archive: not listed.
+        if kind.is_gnu_longlink() || kind.is_pax_global_extensions() {
+            continue;
+        }
         let header = entry.header();
-        let name = entry.path()?.to_string_lossy().into_owned();
-        let size = if header.entry_type().is_dir() {
+        let name = long_name
+            .take()
+            .unwrap_or_else(|| header.path_bytes().into_owned());
+        let name = String::from_utf8_lossy(&name).into_owned();
+        names += name.len();
+        let size = if kind.is_dir() {
             "folder".to_string()
         } else {
             byte_size(header.size().unwrap_or(0))
         };
         rows.push(vec![name.into(), size.into()]);
     }
-    let note = more.then(|| format!("the first {} entries", rows.len()));
+    let note = stopped.map(|why| format!("the first {} entries{why}", rows.len()));
     Ok((
         TableData {
             columns: vec!["Name".into(), "Size".into()],
@@ -197,6 +238,57 @@ impl Render for ArchiveView {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    /// A file entry of `size` bytes for a tar.
+    fn file(size: u64) -> tar::Header {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(size);
+        header.set_cksum();
+        header
+    }
+
+    #[test]
+    fn long_tar_names_are_read_within_limits() {
+        // A name too long for a header is kept in an entry before the
+        // file's (GNU), or in a record (PAX): both are listed in full.
+        let long = format!("{}/file.txt", "deep".repeat(60));
+        let mut builder = tar::Builder::new(Vec::new());
+        builder
+            .append_data(&mut file(3), &long, &b"abc"[..])
+            .unwrap();
+        builder
+            .append_pax_extensions([("path", "from/a/record.txt".as_bytes())])
+            .unwrap();
+        builder
+            .append_data(&mut file(0), "short.txt", &b""[..])
+            .unwrap();
+        let (data, note) = list_tar(&builder.into_inner().unwrap()[..]).unwrap();
+        assert_eq!(data.rows[0], [long.as_str(), "3 bytes"]);
+        assert_eq!(data.rows[1][0], "from/a/record.txt");
+        assert_eq!(data.rows.len(), 2);
+        assert!(note.is_none());
+
+        // A "name" larger than any name is not read: the listing ends
+        // there and says so.
+        let mut builder = tar::Builder::new(Vec::new());
+        builder
+            .append_data(&mut file(1), "first.txt", &b"a"[..])
+            .unwrap();
+        let name = vec![b'a'; MAX_NAME as usize + 1];
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::GNULongName);
+        header.set_path("././@LongLink").unwrap();
+        header.set_size(name.len() as u64);
+        header.set_cksum();
+        builder.append(&header, &name[..]).unwrap();
+        builder
+            .append_data(&mut file(1), "after.txt", &b"b"[..])
+            .unwrap();
+        let (data, note) = list_tar(&builder.into_inner().unwrap()[..]).unwrap();
+        assert_eq!(data.rows.len(), 1);
+        assert_eq!(data.rows[0][0], "first.txt");
+        assert!(note.unwrap().contains("too long"));
+    }
 
     #[test]
     fn lists_zip_and_tar_gz() {

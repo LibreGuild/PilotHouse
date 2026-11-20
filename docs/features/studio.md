@@ -46,7 +46,7 @@ Undo keeps 200 steps. A slider dragged, or a mark moved, is one step.
 
 ## Saving
 
-**Export** chooses the format and quality, then **Save a copy** asks where (`name-edited.png` beside the original by default):
+**Export** chooses the format and quality, then **Save a copy** asks where (`name-edited.png` beside the original by default): An agent's export (`studio_export`, `slides_export`) stays inside the file's folder or the workspace's folders, and never replaces the file being edited; anywhere else is refused with a message that says so.
 
 - PNG (optionally 256 colors: often a third of the size for screenshots), JPEG (quality), WebP (lossless), GIF, BMP, TIFF, ICO (16 to 256 pixels in one file).
 - **At most … KB**: JPEG lowers its quality, then PNG drops to 256 colors, then the picture gets smaller, until the file fits; Export says what gave way.

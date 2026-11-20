@@ -4,10 +4,11 @@
 //! is written until the agent (or the user) saves.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
-use gpui_kit::{App, Entity, Task, WeakEntity};
+use gpui_kit::{App, AppContext as _, Entity, Task, WeakEntity};
 use ph_control::ControlServer;
 use serde_json::{Value, json};
 
@@ -109,6 +110,133 @@ fn open_in(project: i64, cx: &mut App) -> Vec<Found> {
     open.into_iter()
         .filter(|found| found.about(cx).0 == Some(project))
         .collect()
+}
+
+/// How Studio finds a workspace's folders: it does not know the store, so
+/// the app says how (see [`set_workspace_folders`]).
+struct Folders(Rc<FolderLookup>);
+
+/// A workspace's folders by its id.
+type FolderLookup = dyn Fn(i64, &App) -> Vec<PathBuf>;
+
+impl gpui_kit::Global for Folders {}
+
+/// Tells Studio how to find the folders of a workspace (by its id). An
+/// agent's export may be written in them, as well as in the folder of the
+/// file it works on; until this is set, only there.
+pub fn set_workspace_folders(lookup: impl Fn(i64, &App) -> Vec<PathBuf> + 'static, cx: &mut App) {
+    cx.set_global(Folders(Rc::new(lookup)));
+}
+
+/// The folders of workspace `project`, as they are now.
+pub(crate) fn workspace_folders(project: Option<i64>, cx: &App) -> Vec<PathBuf> {
+    let lookup = cx.try_global::<Folders>().map(|folders| folders.0.clone());
+    project
+        .zip(lookup)
+        .map(|(project, lookup)| lookup(project, cx))
+        .unwrap_or_default()
+}
+
+/// Where an agent asked for an export to be written. The path is the
+/// agent's (or anything's on the control socket), so it is checked before
+/// a byte is written: see [`ExportTo::checked`].
+pub(crate) struct ExportTo {
+    /// The path as given.
+    pub given: PathBuf,
+    /// Where a relative path starts.
+    pub base: PathBuf,
+    /// The file being worked on: its folder may be written in, the file
+    /// itself is never written over this way.
+    pub source: PathBuf,
+    /// The workspace's folders, which may be written in too.
+    pub folders: Vec<PathBuf>,
+    /// Whether a file already there may be replaced.
+    pub overwrite: bool,
+    /// The answer when the path leads to `source` itself.
+    pub is_source: &'static str,
+}
+
+impl ExportTo {
+    /// The file to write, or why not. It is inside the folder of the file
+    /// being worked on or one of the workspace's folders, whatever `..`,
+    /// absolute path or link the given path goes through: folders are
+    /// compared as the disk has them, not as they are spelled. Reads the
+    /// disk, so this is for a background thread.
+    pub(crate) fn checked(&self) -> Result<PathBuf> {
+        // The folders that may be written in, and those for the refusal.
+        let allowed = || {
+            self.source
+                .parent()
+                .into_iter()
+                .chain(self.folders.iter().map(PathBuf::as_path))
+        };
+        let may = || {
+            let folders: Vec<String> = allowed()
+                .map(|folder| folder.display().to_string())
+                .collect();
+            format!(
+                "an agent may save only in {} (the user can save anywhere with Export)",
+                folders.join(", ")
+            )
+        };
+        // Before anything looks at the disk: on Windows, merely asking
+        // about a path on another computer sends the user's sign-in there.
+        if ph_ui::platform::is_network_path(&self.given.to_string_lossy()) {
+            bail!("{} is on another computer; {}", self.given.display(), may());
+        }
+        let path = self.base.join(&self.given);
+        let name = path
+            .file_name()
+            .with_context(|| format!("{} names no file", path.display()))?;
+        // Folders that exist are resolved (links and `..` followed). Ones
+        // still to be made are plain names below them, so they are where
+        // they say.
+        let mut folder = path
+            .parent()
+            .with_context(|| format!("{} has no folder", path.display()))?;
+        let mut to_make = Vec::new();
+        let mut target = loop {
+            match dunce::canonicalize(folder) {
+                Ok(real) => break real,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    let (Some(name), Some(parent)) = (folder.file_name(), folder.parent()) else {
+                        bail!("{} does not exist", folder.display());
+                    };
+                    to_make.push(name);
+                    folder = parent;
+                }
+                Err(err) => bail!("could not look at {}: {err}", folder.display()),
+            }
+        };
+        target.extend(to_make.into_iter().rev());
+        target.push(name);
+        // A file already there may be a link: what would be written over
+        // is the file it leads to.
+        let exists = std::fs::symlink_metadata(&target).is_ok();
+        if exists {
+            target = dunce::canonicalize(&target)
+                .with_context(|| format!("{} is a link that leads nowhere", target.display()))?;
+            if dunce::canonicalize(&self.source).is_ok_and(|source| source == target) {
+                bail!("{}", self.is_source);
+            }
+        }
+        let inside = allowed()
+            .filter_map(|folder| dunce::canonicalize(folder).ok())
+            .any(|folder| target.starts_with(folder));
+        if !inside {
+            bail!("not saved to {}: {}", target.display(), may());
+        }
+        if exists && target.is_dir() {
+            bail!("{} is a folder", target.display());
+        }
+        if exists && !self.overwrite {
+            bail!(
+                "{} exists already; choose another name, or overwrite: true if the user asked",
+                target.display()
+            );
+        }
+        Ok(target)
+    }
 }
 
 fn project(params: &Value) -> Result<i64> {
@@ -320,24 +448,27 @@ fn image_export(
     if params.get("replace_original").and_then(Value::as_bool) == Some(true) {
         let saving = document.update(cx, |document, cx| document.replace_original(cx));
         return cx.spawn(async move |_| {
-            let encoded = saving.await?;
-            Ok(json!({ "text": format!("Replaced the original ({}). Studio starts again from it.", kilobytes(encoded.bytes.len())) }))
+            let replaced = saving.await?;
+            let size = kilobytes(replaced.encoded.bytes.len());
+            let text = if replaced.changed_since {
+                format!(
+                    "Replaced the original ({size}). The picture was changed while the file was written: those changes are not in the file. They are still in Studio, not saved; replace again to write them."
+                )
+            } else {
+                format!("Replaced the original ({size}). Studio starts again from it.")
+            };
+            Ok(json!({ "text": text }))
         });
     }
-    let source = document.read(cx).path().to_path_buf();
-    let mut settings = document.read(cx).export().clone();
+    let doc = document.read(cx);
+    let source = doc.path().to_path_buf();
+    let mut settings = doc.export().clone();
     let Some(path) = params.get("path").and_then(Value::as_str) else {
         return Task::ready(Err(anyhow!(
             "give `path` (a new file; relative to the picture's folder) or replace_original: true"
         )));
     };
     let mut path = PathBuf::from(path);
-    if path.is_relative() {
-        path = source
-            .parent()
-            .map(|folder| folder.join(&path))
-            .unwrap_or(path);
-    }
     match path
         .extension()
         .and_then(|extension| Format::from_extension(&extension.to_string_lossy()))
@@ -347,16 +478,20 @@ fn image_export(
             path.set_extension(settings.format.extension());
         }
     }
-    if path == source {
-        return Task::ready(Err(anyhow!(
-            "that is the original; use replace_original: true if the user asked to overwrite it"
-        )));
-    }
     let replace = params.get("overwrite").and_then(Value::as_bool) == Some(true);
-    let saving = document.update(cx, |document, cx| {
-        document.save(path.clone(), settings, replace, cx)
-    });
-    cx.spawn(async move |_| {
+    let wanted = ExportTo {
+        given: path,
+        base: source.parent().map(PathBuf::from).unwrap_or_default(),
+        folders: workspace_folders(doc.project(), cx),
+        overwrite: replace,
+        is_source: "that is the original; use replace_original: true if the user asked to overwrite it",
+        source,
+    };
+    cx.spawn(async move |cx| {
+        let path = cx.background_spawn(async move { wanted.checked() }).await?;
+        let saving = document.update(cx, |document, cx| {
+            document.save(path.clone(), settings, replace, cx)
+        });
         let encoded = saving.await?;
         let note = encoded
             .note
@@ -538,12 +673,6 @@ fn video_export(
         )));
     };
     let mut path = PathBuf::from(path);
-    if path.is_relative() {
-        path = source
-            .parent()
-            .map(|folder| folder.join(&path))
-            .unwrap_or(path);
-    }
     let format = document.read(cx).export().format;
     match path
         .extension()
@@ -567,19 +696,17 @@ fn video_export(
             path.set_extension(format.extension());
         }
     }
-    if path == source {
-        return Task::ready(Err(anyhow!(
-            "that is the source; a video is never written over"
-        )));
-    }
-    if path.exists() && params.get("overwrite").and_then(Value::as_bool) != Some(true) {
-        return Task::ready(Err(anyhow!(
-            "{} exists already; choose another name, or overwrite: true if the user asked",
-            path.display()
-        )));
-    }
-    let exporting = document.update(cx, |document, cx| document.start_export(path.clone(), cx));
-    cx.spawn(async move |_| {
+    let wanted = ExportTo {
+        given: path,
+        base: source.parent().map(PathBuf::from).unwrap_or_default(),
+        folders: workspace_folders(document.read(cx).project(), cx),
+        overwrite: params.get("overwrite").and_then(Value::as_bool) == Some(true),
+        is_source: "that is the source; a video is never written over",
+        source,
+    };
+    cx.spawn(async move |cx| {
+        let path = cx.background_spawn(async move { wanted.checked() }).await?;
+        let exporting = document.update(cx, |document, cx| document.start_export(path, cx));
         let done = exporting.await.map_err(|err| anyhow!(err))?;
         Ok(json!({
             "text": format!(
@@ -592,4 +719,110 @@ fn video_export(
             ),
         }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A folder of its own for one test: `work/shots/photo.png` (the file
+    /// being edited), `work/docs` and `elsewhere/secret.png`.
+    fn folders(test: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("ph-studio-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("work/shots")).unwrap();
+        std::fs::create_dir_all(root.join("work/docs")).unwrap();
+        std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+        std::fs::write(root.join("work/shots/photo.png"), b"original").unwrap();
+        std::fs::write(root.join("elsewhere/secret.png"), b"secret").unwrap();
+        dunce::canonicalize(&root).unwrap()
+    }
+
+    fn export(
+        root: &std::path::Path,
+        given: &str,
+        workspace: bool,
+        overwrite: bool,
+    ) -> Result<PathBuf> {
+        ExportTo {
+            given: PathBuf::from(given),
+            base: root.join("work/shots"),
+            source: root.join("work/shots/photo.png"),
+            folders: if workspace {
+                vec![root.join("work")]
+            } else {
+                Vec::new()
+            },
+            overwrite,
+            is_source: "that is the original",
+        }
+        .checked()
+    }
+
+    #[test]
+    fn an_export_stays_in_the_files_folder_or_the_workspace() {
+        let root = folders("export-inside");
+        let shots = root.join("work/shots");
+        assert_eq!(
+            export(&root, "copy.png", false, false).unwrap(),
+            shots.join("copy.png")
+        );
+        // A folder still to be made, below one that is allowed.
+        assert_eq!(
+            export(&root, "out/small/copy.png", false, false).unwrap(),
+            shots.join("out/small/copy.png")
+        );
+        // Out of the picture's folder: only where the workspace reaches.
+        assert!(export(&root, "../docs/copy.png", false, false).is_err());
+        assert_eq!(
+            export(&root, "../docs/copy.png", true, false).unwrap(),
+            root.join("work/docs/copy.png")
+        );
+        let outside = root.join("elsewhere/new.png");
+        for workspace in [false, true] {
+            assert!(export(&root, "../../elsewhere/new.png", workspace, true).is_err());
+            assert!(export(&root, &outside.to_string_lossy(), workspace, true).is_err());
+            assert!(export(&root, "missing/../../../elsewhere/new.png", workspace, true).is_err());
+        }
+        let refused = export(&root, "//server/share/copy.png", true, true).unwrap_err();
+        assert!(
+            refused.to_string().contains("another computer"),
+            "{refused}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_export_never_writes_over_the_file_being_edited() {
+        let root = folders("export-source");
+        for given in ["photo.png", "out/../photo.png", "../shots/photo.png"] {
+            std::fs::create_dir_all(root.join("work/shots/out")).unwrap();
+            let refused = export(&root, given, true, true).unwrap_err();
+            assert_eq!(refused.to_string(), "that is the original", "{given}");
+        }
+        // Another file there is replaced only when asked.
+        std::fs::write(root.join("work/shots/copy.png"), b"copy").unwrap();
+        assert!(export(&root, "copy.png", false, false).is_err());
+        assert!(export(&root, "copy.png", false, true).is_ok());
+        assert!(export(&root, "out", false, true).is_err(), "a folder");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_export_does_not_leave_through_a_link() {
+        let root = folders("export-link");
+        let shots = root.join("work/shots");
+        // A folder that is a link out, and a file that is one.
+        std::os::unix::fs::symlink(root.join("elsewhere"), shots.join("away")).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere/secret.png"), shots.join("alias.png"))
+            .unwrap();
+        assert!(export(&root, "away/new.png", true, true).is_err());
+        assert!(export(&root, "alias.png", true, true).is_err());
+        assert_eq!(
+            std::fs::read(root.join("elsewhere/secret.png")).unwrap(),
+            b"secret"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

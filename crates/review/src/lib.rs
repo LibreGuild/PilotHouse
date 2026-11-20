@@ -12,8 +12,13 @@
 //! 4. [`post`]: the user picks findings and posts them as line comments in
 //!    one review, or as one conversation comment; fixed ones can be marked on
 //!    GitHub. Nothing is posted without the user asking.
+//!
+//! Beside reviews, what agents write *about* a change for a person to read:
+//! a pull request's [`walkthrough`] for whoever reviews it, and the
+//! [`explanation`] of one's own changes before committing them.
 
 pub mod comment;
+pub mod explanation;
 pub mod github;
 pub mod grounding;
 pub mod ledger;

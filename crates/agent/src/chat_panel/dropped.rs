@@ -144,7 +144,7 @@ impl ChatPanel {
 
 /// What a dropped `path` attaches as. Reads the disk.
 fn dropped(path: &Path, roots: &Roots) -> Attachment {
-    if is_image(path) {
+    if is_image(path) && starts_as_image(path) {
         Attachment::Image {
             label: file_name(path),
             path: path.to_path_buf(),
@@ -197,6 +197,22 @@ fn is_image(path: &Path) -> bool {
         })
 }
 
+/// Whether the file at `path` starts as an image agents take. Its name
+/// alone can lie (a drawing saved as `shot.png`), and what is attached as
+/// an image is drawn here and sent as one.
+fn starts_as_image(path: &Path) -> bool {
+    use std::io::Read as _;
+    // Only a file is opened: a pipe under that name may never answer.
+    if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
+    let mut start = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(16).read_to_end(&mut start))
+        .is_ok()
+        && crate::attachments::image_media_type(&start).is_some()
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -234,6 +250,32 @@ mod tests {
         std::fs::write(&note, "hello").unwrap();
         assert!(outside_file(&note).ends_with("hello"));
         assert!(outside_file(&dir).starts_with("A folder"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_drawing_named_as_a_picture_is_not_attached_as_one() {
+        let dir = std::env::temp_dir().join(format!("ph-dropped-kind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let roots = Roots::single(dir.join("workspace"));
+        let drawing = dir.join("shot.png");
+        std::fs::write(
+            &drawing,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="/dev/zero"/></svg>"#,
+        )
+        .unwrap();
+        assert!(matches!(dropped(&drawing, &roots), Attachment::Text { .. }));
+        let picture = dir.join("Real.PNG");
+        std::fs::write(&picture, b"\x89PNG\r\n\x1a\nthe rest").unwrap();
+        assert!(matches!(
+            dropped(&picture, &roots),
+            Attachment::Image { .. }
+        ));
+        // A folder named as a picture, and a name with nothing behind it.
+        let folder = dir.join("album.jpg");
+        std::fs::create_dir_all(&folder).unwrap();
+        assert!(!starts_as_image(&folder));
+        assert!(!starts_as_image(&dir.join("gone.gif")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

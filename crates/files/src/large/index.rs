@@ -4,7 +4,7 @@
 //! that is truncated while it is open cannot crash the app (a mapping
 //! faults). A background scan records where every [`STRIDE`]th line starts,
 //! which is all that stays in memory (a 1 GB file of 100-byte lines needs
-//! about 80 KB); any line is then found by scanning forward from the
+//! about 160 KB); any line is then found by scanning forward from the
 //! checkpoint before it.
 
 use std::fs::File;
@@ -15,12 +15,19 @@ use memchr::memmem;
 
 /// Lines between checkpoints.
 pub const STRIDE: u64 = 1024;
+/// A line that starts this far after the last checkpoint gets one too: with
+/// lines of megabytes (a dump, JSON lines), counting lines alone would leave
+/// a line gigabytes from the checkpoint before it.
+const BYTE_STRIDE: u64 = 4 << 20;
 /// Bytes read at a time.
 pub const CHUNK: usize = 1 << 20;
+/// Bytes [`read_lines`] reads first: a screen of ordinary lines fits, so a
+/// step of scrolling does not read a megabyte.
+const FIRST_CHUNK: usize = 64 << 10;
 /// Bytes of a line that are shown; the rest is cut.
 pub const MAX_LINE_BYTES: usize = 4 * 1024;
 /// Most bytes one call to [`read_lines`] scans, so a file of a few enormous
-/// lines cannot stall a frame.
+/// lines cannot keep one read going for long.
 const SCAN_BUDGET: u64 = 64 << 20;
 
 /// Fills `buf` from `offset`, returning fewer bytes only at the end.
@@ -46,8 +53,10 @@ pub fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
 /// scanned so far. Scanning can resume when the file grows (a log).
 #[derive(Debug, Clone)]
 pub struct LineIndex {
-    /// `checkpoints[k]` is where line `k * STRIDE` starts.
-    checkpoints: Vec<u64>,
+    /// Where some lines start, as `(line, offset)`, in order: every
+    /// [`STRIDE`]th line, and any line that starts [`BYTE_STRIDE`] or more
+    /// after the checkpoint before it.
+    checkpoints: Vec<(u64, u64)>,
     /// Newlines seen.
     newlines: u64,
     /// Where the line after the last newline starts.
@@ -59,7 +68,7 @@ pub struct LineIndex {
 impl Default for LineIndex {
     fn default() -> Self {
         Self {
-            checkpoints: vec![0],
+            checkpoints: vec![(0, 0)],
             newlines: 0,
             tail: 0,
             scanned: 0,
@@ -71,12 +80,14 @@ impl LineIndex {
     /// Indexes the next bytes of the file (`chunk` starts at `scanned()`).
     pub fn feed(&mut self, chunk: &[u8]) {
         let base = self.scanned;
+        let mut last = self.checkpoints.last().map_or(0, |&(_, start)| start);
         for newline in memchr::memchr_iter(b'\n', chunk) {
             let next = base + newline as u64 + 1;
             self.newlines += 1;
             self.tail = next;
-            if self.newlines.is_multiple_of(STRIDE) {
-                self.checkpoints.push(next);
+            if self.newlines.is_multiple_of(STRIDE) || next - last >= BYTE_STRIDE {
+                self.checkpoints.push((self.newlines, next));
+                last = next;
             }
         }
         self.scanned += chunk.len() as u64;
@@ -93,18 +104,19 @@ impl LineIndex {
 
     /// The checkpoint at or before `line`: `(its line, its offset)`.
     pub fn anchor(&self, line: u64) -> (u64, u64) {
-        let k = ((line / STRIDE) as usize).min(self.checkpoints.len() - 1);
-        (k as u64 * STRIDE, self.checkpoints[k])
+        // Line 0 is always there, so there is one at or before any line.
+        let after = self
+            .checkpoints
+            .partition_point(|&(number, _)| number <= line);
+        self.checkpoints[after.max(1) - 1]
     }
 
     /// The checkpoint at or before byte `offset`.
     pub fn anchor_of_offset(&self, offset: u64) -> (u64, u64) {
-        let k = self
+        let after = self
             .checkpoints
-            .partition_point(|&start| start <= offset)
-            .max(1)
-            - 1;
-        (k as u64 * STRIDE, self.checkpoints[k])
+            .partition_point(|&(_, start)| start <= offset);
+        self.checkpoints[after.max(1) - 1]
     }
 }
 
@@ -174,12 +186,13 @@ pub fn read_lines(
 ) -> io::Result<Vec<Line>> {
     let (mut line, mut offset) = anchor;
     let mut out = Vec::with_capacity(count);
-    let mut buf = vec![0u8; CHUNK];
+    let mut buf = vec![0u8; FIRST_CHUNK];
     let mut start = offset;
     let mut shown: Vec<u8> = Vec::new();
     let budget_end = offset.saturating_add(SCAN_BUDGET);
     while out.len() < count && offset < len && offset < budget_end {
-        let read = read_at(file, &mut buf[..CHUNK.min((len - offset) as usize)], offset)?;
+        let want = buf.len().min((len - offset) as usize);
+        let read = read_at(file, &mut buf[..want], offset)?;
         if read == 0 {
             break;
         }
@@ -201,6 +214,11 @@ pub fn read_lines(
             keep(&mut shown, &chunk[from..]);
         }
         offset += read as u64;
+        // The lines are longer, or further from the anchor, than a first
+        // read covers: read on in bigger steps.
+        if buf.len() < CHUNK {
+            buf.resize((buf.len() * 2).min(CHUNK), 0);
+        }
     }
     // The last line, without a newline (or cut by the scan budget).
     if out.len() < count && line >= first && start < offset {
@@ -441,6 +459,54 @@ mod tests {
             read_lines(&file, len, (3000, earlier.start), 3002, 1).unwrap()[0].text,
             "line 3002"
         );
+    }
+
+    #[test]
+    fn enormous_lines_get_checkpoints_of_their_own() {
+        // Three lines of 5 MB: counted by lines alone they would share the
+        // checkpoint at line 0, the third 10 MB after it.
+        let line = vec![b'x'; 5 << 20];
+        let each = line.len() as u64 + 1;
+        let mut index = LineIndex::default();
+        for _ in 0..3 {
+            index.feed(&line);
+            index.feed(b"\n");
+        }
+        index.feed(b"short\nlines\n");
+        assert_eq!(index.lines(), 5);
+        assert_eq!(index.anchor(1), (1, each));
+        assert_eq!(index.anchor(2), (2, 2 * each));
+        // Lines near a checkpoint share it, as before.
+        assert_eq!(index.anchor(4), (3, 3 * each));
+        assert_eq!(index.anchor_of_offset(each - 1), (0, 0));
+        assert_eq!(index.anchor_of_offset(2 * each + 7), (2, 2 * each));
+        assert_eq!(index.anchor_of_offset(u64::MAX), (3, 3 * each));
+    }
+
+    #[test]
+    fn a_read_grows_past_its_first_chunk() {
+        // Lines of 100 KB: the first read (64 KB) does not reach the end of
+        // one, and three of them cross every size the buffer grows through.
+        let mut bytes = Vec::new();
+        for n in 0..3u8 {
+            bytes.extend(std::iter::repeat_n(b'a' + n, 100_000));
+            bytes.push(b'\n');
+        }
+        bytes.extend_from_slice(b"end");
+        let (_, file) = file_with("grow-read.txt", &bytes);
+        let lines = read_lines(&file, bytes.len() as u64, (0, 0), 0, 10).unwrap();
+        let ends: Vec<_> = lines.iter().map(|line| (line.start, line.end)).collect();
+        assert_eq!(
+            ends,
+            [
+                (0, 100_000),
+                (100_001, 200_001),
+                (200_002, 300_002),
+                (300_003, 300_006)
+            ]
+        );
+        assert!(lines[1].text.starts_with('b') && lines[1].is_cut());
+        assert_eq!(lines[3].text, "end");
     }
 
     #[test]

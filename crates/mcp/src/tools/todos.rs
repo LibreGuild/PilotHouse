@@ -13,7 +13,7 @@ pub const TOOLS: &[Tool] = &[
             ph_brand::name!(),
             "'s inbox, for something only they can do: sign in somewhere, decide something, check a page, reply to someone. With remind_in_minutes, ",
             ph_brand::name!(),
-            " reminds them then. Do not use it for your own work steps (use the board for those)."
+            " reminds them then. Do not use it for your own work steps."
         ),
         schema: || {
             json!({ "type": "object", "required": ["text"], "properties": {

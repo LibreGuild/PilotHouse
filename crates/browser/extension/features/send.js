@@ -1,18 +1,12 @@
 // Send to PilotHouse: the selection, the page (as Markdown), a link, an
-// image, a screenshot of an area, or an element, from the right-click menu,
-// a keyboard shortcut or the side panel. What is sent goes into the
-// composer of a chat in PilotHouse (see the panel's "Send to" choice) and
-// waits there: nothing reaches an agent until the user sends the message.
+// image, a screenshot of an area, or an element, from the popup, the page's
+// right-click menu or a keyboard shortcut. What is sent goes into the
+// composer of a chat in PilotHouse (the popup's choice of where) and waits
+// there: nothing reaches an agent until the user sends the message.
 
 import { ask } from '../lib/link.js';
 import { base64, crop, dataOf, inMainWorld, inPage, viewportWidth, visible } from '../lib/page.js';
 import { settings } from '../lib/settings.js';
-
-export const DESTINATIONS = Object.freeze({
-  current: 'the chat on screen',
-  new: 'a new chat',
-  quick: 'quick chat',
-});
 
 /** Sends `items` to PilotHouse; resolves with where they went. */
 export async function deliver(tab, items, title) {

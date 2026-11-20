@@ -32,7 +32,7 @@ releases = "https://git.acme.example/tools/code-desk/releases/latest"
 The app reads this file when it is built (`crates/brand`), and so do the packaging scripts (`scripts/package/brand.sh`), so it is the one place to change. A mistake (an unknown key, a name with a `/`) stops the build with a message saying what is wrong.
 
 - **A new `data_folder` is a separate install.** Nothing is copied from the old folder. That is usually what you want: your build and PilotHouse can be installed side by side without touching each other's data. If your people already use PilotHouse and should keep their chats, keep `data_folder = "PilotHouse"` (and `keychain`).
-- **About** says "Acme Code Desk 0.6.4 · based on PilotHouse · Apache-2.0".
+- **About** says "Acme Code Desk 0.7.0 · based on PilotHouse · Apache-2.0".
 - The installers and their file names follow the name: `Acme Code Desk.app`, `AcmeCodeDesk-macOS-universal.dmg`, `AcmeCodeDesk-Windows-Setup-x64.exe`, `AcmeCodeDesk-Linux-x86_64.AppImage` (the name without spaces).
 
 **Icons** are in `brand/icons/`. Make them all from one square picture (a PNG, 1024 px or more):
@@ -72,8 +72,8 @@ A feature that is off is not in the app at all. It is not in the tools beside th
 
 | Key | What |
 |---|---|
-| `files`, `changes`, `pulls`, `board`, `browser`, `devices`, `runs`, `tests`, `terminal`, `logcat` | The tools beside the chat (`changes` is Git; `pulls` is pull requests; `devices` is Android; `runs` is run configurations and ports; `tests` is UI tests) |
-| `github` | The GitHub view beside Workspaces (agent reviews of pull requests run there too) |
+| `files`, `changes`, `pulls`, `browser`, `devices`, `runs`, `tests`, `terminal`, `logcat` | The tools beside the chat (`changes` is Git; `pulls` is pull requests; `devices` is Android; `runs` is run configurations and ports; `tests` is UI tests) |
+| `github` | Reviews, in the column of icons (agent reviews of pull requests run there) |
 | `schedules` | Schedules: agent prompts and test runs at set times or on events |
 | `utilities` | The offline utilities (formats, hashes, times…) and their agent tools |
 | `usage` | The usage dashboard |
@@ -81,6 +81,8 @@ A feature that is off is not in the app at all. It is not in the tools beside th
 | `parallel_runs` | One prompt to several agents, each in its own copy |
 | `presentations` | Slides in Studio, and their agent tools |
 | `chrome_extension` | Agents in the user's own Chrome, through PilotHouse's extension |
+| `quick_chat` | A small chat window over every app, opened with a global shortcut |
+| `explanations` | Changes explained in plain words: *Explain* in the Git tab and on a commit, *Why Is This Here?* in the editor |
 
 Your people can still switch tools off for themselves in *Settings → Features*; that list only shows the tools your build has.
 
@@ -137,7 +139,7 @@ pub fn views() -> Vec<CustomView> {
 
 `build` returns any GPUI view (`cx.new(|cx| ReportsView::new(...)).into()`). The view then shows:
 
-- as an icon in the column at the window's left edge, under Workspaces, Chats and GitHub. The view fills a rounded panel (an island of the window's frame) between the title bar and the status bar: draw it edge to edge, without a border or rounded corners of its own;
+- as an icon in the column at the window's left edge, after the Bridge and Reviews. The view fills a rounded panel (an island of the window's frame) between the title bar and the status bar: draw it edge to edge, without a border or rounded corners of its own;
 - in the command palette as *Show the Reports view*.
 
 From your own code, `window.dispatch_action(Box::new(ph_custom::ShowView { id: "reports".into() }), cx)` opens it.
@@ -178,16 +180,15 @@ Put SVG files in `brand/icons/custom/` (`reports.svg`; names in lowercase letter
 
 ### Deeper changes
 
-Some changes need PilotHouse's own code, such as a new tool beside the chat (like Board or Terminal) or a new Settings page. Make them, and list each file you changed in `CUSTOM.md`, so whoever merges the next release knows to keep them. A new tool beside the chat touches:
+Some changes need PilotHouse's own code, such as a new tool beside the chat (like Run or Terminal) or a new Settings page. Make them, and list each file you changed in `CUSTOM.md`, so whoever merges the next release knows to keep them. A new tool beside the chat touches:
 
 - `crates/workspace/src/context_panel.rs` (the `ContextTab` list)
 - `actions.rs` (a `Show…` action and its key)
 - `workspace.rs` (its handler)
 - `workspace_screen/panels.rs` and `render.rs` (making and drawing the panel)
-- `workspace_screen/dock.rs` (its saved name)
 - `shortcuts.rs`
 
-Copy what `Board` does in each.
+Copy what `Runs` does in each.
 
 ## 5. Your rules: `CUSTOM.md`
 

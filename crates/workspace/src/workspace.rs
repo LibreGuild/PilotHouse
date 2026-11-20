@@ -14,7 +14,6 @@ use std::rc::Rc;
 
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, TitleBar, WindowExt as _, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyView, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
     IntoElement, ParentElement as _, PathPromptOptions, Render, Styled as _, Subscription, Window,
@@ -35,25 +34,18 @@ use ph_files::{FindInProject, GoToSymbol, QuickOpen};
 /// A hidden workspace's screen is closed after this long with nothing going on.
 const UNLOAD_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
-/// Which view a window shows.
+/// What a window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
+    /// The Bridge: every task of every workspace, by where it stands.
     #[default]
+    Bridge,
+    /// A workspace's screen (the one in front), or the Chats space's.
     Workspaces,
+    /// Reviews: pull requests across repositories and their agent reviews.
     GitHub,
     /// One of the organisation's own (`ph_custom::views`), by its id.
     Custom(&'static str),
-}
-
-/// Which list the sidebar shows beside the screen in front (while the view
-/// is [`View::Workspaces`]): the workspaces, or the chats outside any. The
-/// left column switches between them, and the screen in front follows: a
-/// workspace's with Workspaces, the Chats space's with Chats.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum Section {
-    #[default]
-    Workspaces,
-    Chats,
 }
 
 /// Owns the project list and the open [`WorkspaceScreen`]s, and routes workspace
@@ -64,59 +56,58 @@ pub struct Workspace {
     handle: gpui_kit::AnyWindowHandle,
     /// The workspaces, newest first (the sidebar's order, and ⌃1–⌃9's).
     projects: Vec<Project>,
-    /// The space for chats outside any workspace.
-    chats_space: Option<Project>,
+    /// The workspace for chats that need no folder, as this window knows
+    /// it: it has a place of its own in the column of icons, over the
+    /// user's workspaces (kept here, not asked of the store while drawing).
+    chats: Option<ProjectId>,
     view: View,
-    section: Section,
-    /// The workspace last in front, shown again when the Workspaces list
-    /// is.
-    last_workspace: Option<ProjectId>,
+    /// What the Bridge shows.
+    bridge: crate::bridge::BridgeState,
     /// The GitHub view, made when first shown.
     github: Option<Entity<GithubView>>,
     /// The organisation's own views (`ph_custom::views`), each made when
     /// first shown.
     custom_views: HashMap<&'static str, AnyView>,
-    /// The sidebar: workspaces unfolded, those listing every chat, and those
-    /// listing the chats PilotHouse started (*Runs*).
-    pub(crate) expanded: HashSet<ProjectId>,
-    pub(crate) show_all: HashSet<ProjectId>,
-    pub(crate) runs_open: HashSet<ProjectId>,
-    /// Workspaces whose *Done* chats are listed.
-    pub(crate) done_open: HashSet<ProjectId>,
     /// Pinned chats, as last read (another window may pin one too).
     pub(crate) pinned: Vec<ph_store::sessions::Session>,
     /// Chats marked done.
     settled: HashSet<ph_store::sessions::SessionId>,
-    /// Sidebar panes collapsed and sections folded away (`chats`,
-    /// `workspaces`, `pinned`).
-    pub(crate) folded: HashSet<String>,
     /// What the agent CLIs in terminals looked like at the last check.
     terminal_agents_seen: u64,
     /// The changes to chats made away from their screen it has seen.
     session_changes_seen: crate::session_changes::Seen,
     /// Status checks so far (one a second).
     status_ticks: u32,
-    /// The chats of unfolded workspaces whose screen is closed, read again
-    /// each second (a schedule may add one).
+    /// The chats of the workspaces whose screen is closed, read again
+    /// every few seconds (a schedule may add one).
     sessions: HashMap<ProjectId, Rc<[ph_store::sessions::Session]>>,
     /// Spaces stay alive after switching away so their state survives.
     spaces: HashMap<ProjectId, Entity<WorkspaceScreen>>,
     active_project: Option<ProjectId>,
     /// The workspace shown before the one in front (Ctrl+Tab goes back).
     previous_project: Option<ProjectId>,
+    /// Reviews' list of repositories is hidden.
     sidebar_collapsed: bool,
-    /// The Agents popup (title bar) is open.
-    pub(crate) agents_open: bool,
     /// What each workspace is doing, read again every second.
     statuses: HashMap<ProjectId, WorkspaceStatus>,
     /// When each loaded but hidden workspace was last shown.
     hidden_since: HashMap<ProjectId, std::time::Instant>,
     _status_poll: gpui_kit::Task<()>,
+    /// The every-few-seconds read of the stored chats, while it runs.
+    _sessions_poll: Option<gpui_kit::Task<()>>,
     _subscriptions: Vec<Subscription>,
     /// The status bar follows the devices once something uses them.
     _devices: Option<Subscription>,
     /// The title bar's inbox and to-dos.
     pub(crate) inbox: Entity<crate::inbox::InboxView>,
+    /// The branch, pull request and checks of the folders tasks work in
+    /// (shared by the windows), for the cards and the title bar.
+    facts: Entity<crate::task_facts::TaskFacts>,
+    /// The workspaces with a folder in a Git repository, as last looked.
+    repositories: HashSet<ProjectId>,
+    /// The folders that look was for.
+    repositories_of: Vec<(ProjectId, Vec<std::path::PathBuf>)>,
+    _repositories_look: Option<gpui_kit::Task<()>>,
 }
 
 impl Workspace {
@@ -137,15 +128,20 @@ impl Workspace {
         if let Err(err) = store.heal_scratch_folders(&ph_store::paths::scratch_root()) {
             tracing::warn!("checking scratch folders failed: {err:#}");
         }
+        // The workspace for chats that need no folder is always there
+        // (made now when there is none): a quick chat's home, and where a
+        // first start opens straight into a chat.
+        let scratch = store
+            .scratch_workspace(&ph_store::paths::scratch_root())
+            .inspect_err(|err| tracing::error!("making the Chats workspace failed: {err:#}"))
+            .ok()
+            .map(|scratch| scratch.id);
         let projects = workspaces(store);
-        let chats_space = store
-            .chats_space(&ph_store::paths::scratch_root())
-            .inspect_err(|err| tracing::error!("opening the Chats space failed: {err:#}"))
-            .ok();
+        // No workspace of the user's own yet.
+        let first_start = projects.iter().all(|project| Some(project.id) == scratch);
         let last_project: Option<ProjectId> = store.setting(keys::LAST_PROJECT);
         let sidebar_collapsed: bool = store.setting(keys::SIDEBAR_COLLAPSED);
-        let expanded: Vec<ProjectId> = store.setting(keys::SIDEBAR_EXPANDED);
-        let folded: Vec<String> = store.setting(keys::SIDEBAR_FOLDED);
+        let front: String = store.setting(keys::FRONT_VIEW);
 
         // Follow OS light/dark changes while the preference is "System".
         let appearance_subscription = cx.observe_window_appearance(window, |_, window, cx| {
@@ -175,16 +171,11 @@ impl Workspace {
             focus_handle,
             handle: window.window_handle(),
             projects,
-            chats_space,
-            view: View::Workspaces,
-            section: Section::Workspaces,
-            last_workspace: None,
+            chats: scratch,
+            view: View::Bridge,
+            bridge: Default::default(),
             github: None,
             custom_views: HashMap::new(),
-            expanded: expanded.into_iter().collect(),
-            show_all: HashSet::new(),
-            runs_open: HashSet::new(),
-            done_open: HashSet::new(),
             pinned: Vec::new(),
             // Chats deleted since (their ids can be used again) are dropped.
             settled: {
@@ -195,7 +186,6 @@ impl Workspace {
                     .filter(|id| store.session(*id).ok().flatten().is_some())
                     .collect()
             },
-            folded: folded.into_iter().collect(),
             terminal_agents_seen: 0,
             session_changes_seen: crate::session_changes::current(cx),
             status_ticks: 0,
@@ -204,11 +194,11 @@ impl Workspace {
             active_project: None,
             previous_project: None,
             sidebar_collapsed,
-            agents_open: false,
             statuses: HashMap::new(),
             hidden_since: HashMap::new(),
             // Status comes from chats and test runs outside this window; a
             // cheap look each second catches every change.
+            _sessions_poll: None,
             _status_poll: cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor()
@@ -230,7 +220,25 @@ impl Workspace {
             ],
             _devices: None,
             inbox,
+            facts: {
+                let store = AppState::store(cx).clone();
+                crate::task_facts::hub(&store, cx)
+            },
+            repositories: HashSet::new(),
+            repositories_of: Vec::new(),
+            _repositories_look: None,
         };
+        workspace.look_for_repositories(true, cx);
+        // What a card says of its branch and pull request shows when found.
+        let facts = workspace.facts.clone();
+        cx.observe(&facts, |_, _, cx| cx.notify()).detach();
+        // A window that closes stops asking about its folders.
+        cx.on_release(move |this, cx| {
+            let window = this.handle.window_id();
+            facts.update(cx, |facts, _| facts.forget(window));
+        })
+        .detach();
+        workspace.want_facts(cx);
         // Copies made for agents that are no longer needed go, quietly.
         let tidy_store = AppState::store(cx).clone();
         cx.background_spawn(async move {
@@ -240,20 +248,64 @@ impl Workspace {
             }
         })
         .detach();
-        // The workspace shown last, else the Chats space, so a first start
-        // opens straight into a chat.
+        // The workspace shown last is ready behind whatever is in front,
+        // else the newest one.
         let initial = project
             .or(last_project)
-            .filter(|id| workspace.has_project(*id) || workspace.is_chats(*id))
-            .or(workspace.chats_space.as_ref().map(|chats| chats.id))
+            .filter(|id| workspace.has_project(*id))
             .or_else(|| workspace.projects.first().map(|project| project.id));
         if let Some(id) = initial {
             workspace.open_project(id, window, cx);
         }
-        // The sidebar lists the chats of spaces whose screen is not open
+        // In front: the workspace this window was opened for; else what was
+        // in front last. Someone who has workspaces and comes from a
+        // version without the Bridge meets it first; with no workspace yet
+        // the chat is the place to be.
+        let bridge = match front.as_str() {
+            "workspace" => false,
+            "bridge" => true,
+            // The chat, on a first start: its only workspace is the one
+            // for chats, and the Bridge would have nothing to show.
+            _ => !first_start && !workspace.projects.is_empty(),
+        };
+        if project.is_none() && bridge {
+            workspace.view = View::Bridge;
+            if let Some(space) = workspace.active_space().cloned() {
+                space.update(cx, |space, cx| space.set_visible(false, cx));
+            }
+            // Opening the workspace behind noted it as what is in front,
+            // and its chat may have taken the keyboard: neither holds. A
+            // chat that is not drawn would keep every shortcut from the
+            // window until something was clicked.
+            let _ = AppState::store(cx).set_setting(keys::FRONT_VIEW, &front_key(View::Bridge));
+            workspace.focus_handle.focus(window, cx);
+        }
+        // The Bridge lists the chats of spaces whose screen is not open
         // from the store, from the start.
         workspace.read_sessions(cx);
         workspace
+    }
+
+    /// Says which folders this window's tasks work in: each workspace's
+    /// first folder, and the folder of each open chat that has its own (a
+    /// worktree). Their branch and pull request are found for the cards.
+    fn want_facts(&mut self, cx: &mut Context<Self>) {
+        let mut folders = Vec::new();
+        for project in &self.projects {
+            folders.extend(project.folders().into_iter().next());
+            for session in self.sessions_of(project.id, cx).iter() {
+                if let Some(cwd) = &session.cwd
+                    && !self.is_settled(session.id)
+                {
+                    folders.push(std::path::PathBuf::from(cwd));
+                }
+            }
+        }
+        folders.sort();
+        folders.dedup();
+        let window = self.handle.window_id();
+        self.facts
+            .update(cx, |facts, cx| facts.want(window, folders, cx));
     }
 
     /// The workspaces (not the Chats space, nor GitHub repositories').
@@ -261,109 +313,184 @@ impl Workspace {
         &self.projects
     }
 
-    /// The space for chats outside any workspace.
-    pub fn chats_space(&self) -> Option<&Project> {
-        self.chats_space.as_ref()
-    }
-
-    /// Whether `id` is the Chats space.
-    pub fn is_chats(&self, id: ProjectId) -> bool {
-        self.chats_space
-            .as_ref()
-            .is_some_and(|chats| chats.id == id)
-    }
-
     pub fn view(&self) -> View {
         self.view
     }
 
-    /// The list the sidebar shows while a workspace or a chat is in front.
-    pub fn section(&self) -> Section {
-        self.section
+    /// What the Bridge shows.
+    pub(crate) fn bridge(&self) -> &crate::bridge::BridgeState {
+        &self.bridge
     }
 
-    /// An entry of the left column was pressed: shows it, or, with it in
-    /// front already, hides or shows its list (as VS Code's activity bar
-    /// does).
-    pub(crate) fn show(
-        &mut self,
-        target: crate::rail::Target,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        use crate::rail::Target;
-        let in_front = match target {
-            Target::Section(section) => self.view == View::Workspaces && self.section == section,
-            Target::View(view) => self.view == view,
-        };
-        if in_front {
-            self.set_sidebar_collapsed(!self.sidebar_collapsed, cx);
+    pub(crate) fn bridge_mut(&mut self) -> &mut crate::bridge::BridgeState {
+        &mut self.bridge
+    }
+
+    /// Whether workspace `id` has a folder in a Git repository, as last
+    /// looked (the Bridge asks while it draws; the disk is not).
+    pub(crate) fn is_repository(&self, id: ProjectId) -> bool {
+        self.repositories.contains(&id)
+    }
+
+    /// Looks again, off the UI thread, which workspaces have a folder in a
+    /// Git repository: when their folders changed since the last look, or
+    /// always with `again` (a folder can become one).
+    fn look_for_repositories(&mut self, again: bool, cx: &mut Context<Self>) {
+        let folders: Vec<(ProjectId, Vec<std::path::PathBuf>)> = self
+            .projects
+            .iter()
+            .map(|project| (project.id, project.folders()))
+            .collect();
+        // One look at a time: on a drive that does not answer, a look can
+        // take as long as the system waits for it.
+        if self._repositories_look.is_some() || (!again && folders == self.repositories_of) {
             return;
         }
-        if self.sidebar_collapsed {
-            self.set_sidebar_collapsed(false, cx);
-        }
-        match target {
-            Target::Section(section) => self.show_section(section, window, cx),
-            Target::View(view) => self.set_view(view, window, cx),
-        }
+        self.repositories_of = folders.clone();
+        let look = cx.background_spawn(async move {
+            folders
+                .into_iter()
+                .filter(|(_, folders)| folders.iter().any(|folder| ph_git::is_repository(folder)))
+                .map(|(id, _)| id)
+                .collect::<HashSet<ProjectId>>()
+        });
+        self._repositories_look = Some(cx.spawn(async move |this, cx| {
+            let found = look.await;
+            _ = this.update(cx, |this, cx| {
+                this._repositories_look = None;
+                if found != this.repositories {
+                    this.repositories = found;
+                    cx.notify();
+                }
+                // Folders changed while it looked: once more for them.
+                this.look_for_repositories(false, cx);
+            });
+        }));
     }
 
-    /// Shows the Workspaces or the Chats list, and in front what was last
-    /// seen there: the workspace last used, or the Chats space.
-    pub fn show_section(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
-        if self.view != View::Workspaces {
-            self.set_view(View::Workspaces, window, cx);
-        }
-        let front = match section {
-            Section::Chats => self.chats_space.as_ref().map(|chats| chats.id),
-            // One shown in another window stays there: opening it here
-            // would only raise that window, time after time.
-            Section::Workspaces => {
-                let wanted: Vec<ProjectId> = self
-                    .last_workspace
-                    .filter(|id| self.has_project(*id))
-                    .into_iter()
-                    .chain(self.projects.iter().map(|project| project.id))
-                    .collect();
-                wanted
-                    .into_iter()
-                    .find(|id| !self.shown_by_another(*id, cx))
-            }
-        };
-        self.section = section;
-        match front {
-            Some(id) if self.active_project != Some(id) => self.open_project(id, window, cx),
-            // Already the active one, but possibly hidden behind "no
-            // workspace yet": it streams frames again.
-            Some(id) => {
-                if let Some(space) = self.spaces.get(&id) {
-                    space.update(cx, |space, cx| space.set_visible(true, cx));
-                }
-            }
-            // Nothing to show there (no workspace yet): the screen in front
-            // makes way for the invitation to open one.
-            None => {
-                if let Some(space) = self.active_space().cloned() {
-                    space.update(cx, |space, cx| space.set_visible(false, cx));
-                }
-            }
-        }
-        self.focus_front(window, cx);
+    /// Narrows the Bridge to one workspace's tasks (`None`: all of them).
+    pub(crate) fn set_bridge_filter(&mut self, filter: Option<ProjectId>, cx: &mut Context<Self>) {
+        self.bridge.filter = filter;
         cx.notify();
     }
 
-    /// The screen to draw: the active one, unless the Workspaces list is
-    /// shown and no workspace is open (the Chats space's screen belongs to
-    /// the Chats list).
+    /// Lists every card of a Bridge column, or its newest again.
+    pub(crate) fn toggle_bridge_all(&mut self, column: &'static str, cx: &mut Context<Self>) {
+        if !self.bridge.all.remove(column) {
+            self.bridge.all.insert(column);
+        }
+        cx.notify();
+    }
+
+    /// A view's entry in the left column was pressed (the Bridge,
+    /// Reviews, one of the organisation's own).
+    pub(crate) fn show(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_view(view, window, cx);
+        self.focus_front(window, cx);
+    }
+
+    /// Opens what a card of the Bridge stands for.
+    pub(crate) fn open_task_card(
+        &mut self,
+        project: ProjectId,
+        target: &crate::bridge::Target,
+        github: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::bridge::Target;
+        match target {
+            Target::Chat(session) if github => self.show_session(*session, window, cx),
+            Target::Chat(session) => self.open_chat(project, *session, window, cx),
+            // The terminal takes the keyboard itself: what is typed next
+            // is the answer the agent waits for.
+            Target::Terminal(pane) => {
+                return self.open_terminal_agent(project, pane, false, window, cx);
+            }
+            // Its chat is beside the pull request.
+            Target::Preparing(_) => self.set_view(View::GitHub, window, cx),
+        }
+        self.focus_front(window, cx);
+    }
+
+    /// Opens a task with the review of its workspace's changes beside it.
+    pub(crate) fn review_task(
+        &mut self,
+        project: ProjectId,
+        session: ph_store::sessions::SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_chat(project, session, window, cx);
+        if let Some(space) = self.spaces.get(&project).cloned() {
+            space.update(cx, |space, cx| {
+                space.show_tab(crate::bridge::REVIEW_TOOL, window, cx)
+            });
+        }
+    }
+
+    /// Whether `id` is the workspace for chats that need no folder: it is
+    /// not removed and takes no folders (see `Store::scratch_workspace`).
+    pub(crate) fn is_scratch(&self, id: ProjectId, cx: &gpui_kit::App) -> bool {
+        AppState::store(cx).is_scratch(id)
+    }
+
+    /// The workspace for chats that need no folder, shown as *Chats* over
+    /// the user's workspaces in the column of icons.
+    pub(crate) fn chats_place(&self) -> Option<&Project> {
+        let chats = self.chats?;
+        self.projects.iter().find(|project| project.id == chats)
+    }
+
+    /// The user's workspaces, in the order the column of icons shows them:
+    /// all but the one for chats that need no folder.
+    pub(crate) fn listed(&self) -> impl Iterator<Item = &Project> {
+        self.projects
+            .iter()
+            .filter(|project| Some(project.id) != self.chats)
+    }
+
+    /// The workspace for chats that need no folder ("Chats"); this
+    /// window's list takes it up when it was made elsewhere.
+    pub(crate) fn scratch(&mut self, cx: &mut Context<Self>) -> Option<ProjectId> {
+        let store = AppState::store(cx).clone();
+        let project = store
+            .scratch_workspace(&ph_store::paths::scratch_root())
+            .inspect_err(|err| tracing::error!("making the Chats workspace failed: {err:#}"))
+            .ok()?;
+        self.chats = Some(project.id);
+        if !self.has_project(project.id) {
+            self.projects = workspaces(&store);
+            self.projects_changed(cx);
+            cx.notify();
+        }
+        Some(project.id)
+    }
+
+    /// Brings the workspace for chats that need no folder forward.
+    pub fn show_scratch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(scratch) = self.scratch(cx) {
+            self.open_project(scratch, window, cx);
+            self.focus_front(window, cx);
+        }
+    }
+
+    /// The screen to draw while a workspace is what the window shows.
     fn screen_in_front(&self) -> Option<&Entity<WorkspaceScreen>> {
-        self.active_project
-            .filter(|id| !(self.section == Section::Workspaces && self.is_chats(*id)))
+        (self.view == View::Workspaces)
+            .then_some(self.active_project)
+            .flatten()
             .and_then(|id| self.spaces.get(&id))
     }
 
-    /// Shows the Workspaces, Agents or GitHub view.
+    /// Shows the Bridge, the workspace last in front, Reviews, or one of
+    /// the organisation's views.
     pub fn set_view(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
+        // Nothing was in front yet to come back to.
+        let view = match view {
+            View::Workspaces if self.active_project.is_none() => View::Bridge,
+            view => view,
+        };
         // A build whose brand leaves the GitHub view out stays where it is.
         if view == View::GitHub && !ph_brand::enabled(ph_brand::Feature::GitHub) {
             return;
@@ -396,13 +523,8 @@ impl Workspace {
                 space.set_visible(view == View::Workspaces, cx)
             });
         }
+        let _ = AppState::store(cx).set_setting(keys::FRONT_VIEW, &front_key(view));
         self.focus_front(window, cx);
-        cx.notify();
-    }
-
-    /// Opens or closes the Agents popup.
-    pub(crate) fn set_agents_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        self.agents_open = open;
         cx.notify();
     }
 
@@ -415,8 +537,11 @@ impl Workspace {
         let github = cx.new(|cx| GithubView::new(weak, folders, cx));
         let shown = !self.sidebar_collapsed;
         github.update(cx, |github, cx| github.set_sidebar_shown(shown, cx));
-        self._subscriptions
-            .push(cx.observe(&github, |_, _, cx| cx.notify()));
+        self._subscriptions.push(cx.observe(&github, |this, _, cx| {
+            // Reviews being readied are cards of the Bridge.
+            this.bridge.changed();
+            cx.notify()
+        }));
         self.github = Some(github.clone());
         github
     }
@@ -478,6 +603,26 @@ impl Workspace {
         {
             return self.open_terminal_agent(project, &pane, true, window, cx);
         }
+        // A workspace made since this window last read them (by the quick
+        // chat, by another window): it is read now, not found missing.
+        if !self.has_project(project) {
+            self.reload_projects(cx);
+        }
+        // Shown in another window: the chat opens there, in the window
+        // that comes forward (not only the workspace, with whatever chat
+        // it had in front).
+        if let Some((handle, other)) = crate::windows::shown_elsewhere(project, self.handle, cx) {
+            // Deferred: that window may be this one's caller.
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    window.activate_window();
+                    other.update(cx, |other, cx| {
+                        other.open_chat(project, session, window, cx)
+                    });
+                });
+            });
+            return;
+        }
         self.open_project(project, window, cx);
         if let Some(space) = self.spaces.get(&project) {
             space.update(cx, |space, cx| space.select_session(session, cx));
@@ -528,7 +673,7 @@ impl Workspace {
         }
         let project = self
             .active_project
-            .or_else(|| self.chats_space().map(|chats| chats.id))
+            .or_else(|| self.scratch(cx))
             .ok_or_else(|| anyhow::anyhow!("Open a workspace in {} first.", ph_brand::NAME))?;
         self.open_project(project, window, cx);
         let space = self
@@ -536,11 +681,7 @@ impl Workspace {
             .get(&project)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("The workspace could not be opened."))?;
-        let name = if self.is_chats(project) {
-            "Chats".to_string()
-        } else {
-            space.read(cx).project().name.clone()
-        };
+        let name = space.read(cx).project().name.clone();
         // A read-only chat on screen (a closed terminal's): a new one.
         let new_chat = new_chat || !space.read(cx).chat_takes_messages(cx);
         space.update(cx, |space, cx| {
@@ -572,7 +713,7 @@ impl Workspace {
         }
         let project = self
             .active_project
-            .or_else(|| self.chats_space().map(|chats| chats.id))
+            .or_else(|| self.scratch(cx))
             .ok_or_else(|| anyhow::anyhow!("Open a workspace in {} first.", ph_brand::NAME))?;
         self.open_project(project, window, cx);
         let space = self
@@ -580,11 +721,7 @@ impl Workspace {
             .get(&project)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("The workspace could not be opened."))?;
-        let name = if self.is_chats(project) {
-            "Chats".to_string()
-        } else {
-            space.read(cx).project().name.clone()
-        };
+        let name = space.read(cx).project().name.clone();
         let new_chat = new_chat || !space.read(cx).chat_takes_messages(cx);
         space.update(cx, |space, cx| {
             if new_chat {
@@ -623,6 +760,11 @@ impl Workspace {
     }
 
     pub fn new_chat_in(&mut self, project: ProjectId, window: &mut Window, cx: &mut Context<Self>) {
+        // A workspace made since this window last read them (by the quick
+        // chat): read now.
+        if !self.has_project(project) {
+            self.reload_projects(cx);
+        }
         self.open_project(project, window, cx);
         if let Some(space) = self.spaces.get(&project) {
             space.update(cx, |space, cx| space.new_session(window, cx));
@@ -646,35 +788,24 @@ impl Workspace {
         }
     }
 
-    /// Folds or unfolds workspace `id` in the sidebar.
-    pub(crate) fn toggle_expanded(&mut self, id: ProjectId, cx: &mut Context<Self>) {
-        if !self.expanded.remove(&id) {
-            self.expanded.insert(id);
-            self.read_sessions(cx);
-        }
-        self.save_expanded(cx);
-        cx.notify();
+    /// The workspaces without a screen: their chats are read from the
+    /// store (a screen lists its own).
+    fn sessions_wanted(&self) -> Vec<ProjectId> {
+        self.projects
+            .iter()
+            .map(|project| project.id)
+            .filter(|id| !self.spaces.contains_key(id))
+            .collect()
     }
 
-    fn save_expanded(&self, cx: &mut Context<Self>) {
-        let mut ids: Vec<ProjectId> = self.expanded.iter().copied().collect();
-        ids.sort_unstable();
-        let _ = AppState::store(cx).set_setting(keys::SIDEBAR_EXPANDED, &ids);
-    }
-
-    /// Reads the chats of unfolded workspaces without a screen, and of the
-    /// Chats space.
+    /// Reads the chats of the workspaces without a screen, and of the
+    /// Chats space: the Bridge lists every task, loaded or not. At once,
+    /// for what the user just did; the look every few seconds is
+    /// [`Self::poll_sessions`].
     fn read_sessions(&mut self, cx: &mut Context<Self>) -> bool {
         let store = AppState::store(cx).clone();
         let mut changed = self.read_pinned(cx);
-        let chats = self.chats_space.as_ref().map(|chats| chats.id);
-        let wanted: Vec<ProjectId> = self
-            .expanded
-            .iter()
-            .copied()
-            .chain(chats)
-            .filter(|id| !self.spaces.contains_key(id))
-            .collect();
+        let wanted = self.sessions_wanted();
         self.sessions.retain(|id, _| wanted.contains(id));
         for id in wanted {
             let sessions = store.sessions(id).unwrap_or_default();
@@ -683,7 +814,58 @@ impl Workspace {
                 changed = true;
             }
         }
+        if changed {
+            self.bridge.changed();
+        }
         changed
+    }
+
+    /// Reads what [`Self::read_sessions`] reads off the UI thread and takes
+    /// it when it is there. Nobody waits for the look every few seconds
+    /// (for chats a schedule or another window changed), and a query that
+    /// waits behind a writer must not hold the window up.
+    fn poll_sessions(&mut self, cx: &mut Context<Self>) {
+        if self._sessions_poll.is_some() {
+            return;
+        }
+        let store = AppState::store(cx).clone();
+        let wanted = self.sessions_wanted();
+        let read = cx.background_spawn(async move {
+            let pinned: Vec<ph_store::sessions::SessionId> = store.setting(keys::SIDEBAR_PINNED);
+            let pinned: Vec<_> = pinned
+                .iter()
+                .filter_map(|id| store.session(*id).ok().flatten())
+                .collect();
+            let sessions: Vec<_> = wanted
+                .into_iter()
+                .map(|id| (id, store.sessions(id).unwrap_or_default()))
+                .collect();
+            (pinned, sessions)
+        });
+        self._sessions_poll = Some(cx.spawn(async move |this, cx| {
+            let (pinned, sessions) = read.await;
+            _ = this.update(cx, |this, cx| {
+                this._sessions_poll = None;
+                let mut changed = pinned != this.pinned;
+                this.pinned = pinned;
+                let wanted = this.sessions_wanted();
+                this.sessions.retain(|id, _| wanted.contains(id));
+                for (id, sessions) in sessions {
+                    // A screen opened meanwhile lists its own.
+                    if !wanted.contains(&id) {
+                        continue;
+                    }
+                    if this.sessions.get(&id).map(|known| &known[..]) != Some(&sessions[..]) {
+                        this.sessions.insert(id, sessions.into());
+                        changed = true;
+                    }
+                }
+                if changed {
+                    this.bridge.changed();
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     /// Re-reads the pinned chats (dropping ids whose chat is gone).
@@ -715,13 +897,39 @@ impl Workspace {
         id: ph_store::sessions::SessionId,
         cx: &mut Context<Self>,
     ) {
-        if !self.settled.remove(&id) {
-            self.settled.insert(id);
-            if let Some(chats) = ph_agent::ChatHub::existing(project, cx) {
-                chats.update(cx, |chats, cx| chats.mark_read(id, cx));
+        if self.settled.remove(&id) {
+            self.save_settled(cx);
+            self.bridge.changed();
+            cx.notify();
+        } else {
+            self.settle_all(&[(project, id)], cx);
+        }
+    }
+
+    /// Marks every one of `chats` (each with its workspace) done, whatever
+    /// it was: its news counts as seen. (A chat marked done before that
+    /// finished another turn since is put away again, not taken back out.)
+    pub(crate) fn settle_all(
+        &mut self,
+        chats: &[(ProjectId, ph_store::sessions::SessionId)],
+        cx: &mut Context<Self>,
+    ) {
+        for (project, id) in chats {
+            self.settled.insert(*id);
+            if let Some(chats) = ph_agent::ChatHub::existing(*project, cx) {
+                chats.update(cx, |chats, cx| chats.settle(*id, cx));
+            }
+            // One in its agent's CLI: what it finished counts as seen.
+            let pane = crate::terminal_agents::TerminalAgents::of_session(*id, cx)
+                .map(|agent| agent.pane.clone());
+            if let Some(pane) = pane {
+                crate::terminal_agents::TerminalAgents::seen(&pane, cx);
             }
         }
         self.save_settled(cx);
+        // The dots and counts follow at once, not at the next look.
+        self.refresh_statuses(cx);
+        self.bridge.changed();
         cx.notify();
     }
 
@@ -746,18 +954,7 @@ impl Workspace {
             tracing::warn!("saving the pinned chats failed: {err:#}");
         }
         self.read_pinned(cx);
-        cx.notify();
-    }
-
-    /// Folds sidebar section `name` away, or shows it again.
-    pub(crate) fn toggle_section(&mut self, name: &str, cx: &mut Context<Self>) {
-        if !self.folded.remove(name) {
-            self.folded.insert(name.to_string());
-        }
-        let mut names: Vec<&String> = self.folded.iter().collect();
-        names.sort();
-        let _ = AppState::store(cx).set_setting(keys::SIDEBAR_FOLDED, &names);
-        self.read_sessions(cx);
+        self.bridge.changed();
         cx.notify();
     }
 
@@ -770,7 +967,6 @@ impl Workspace {
         let project = self
             .projects
             .iter()
-            .chain(self.chats_space.as_ref())
             .find(|candidate| candidate.id == project)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("the workspace is gone"))?;
@@ -801,6 +997,10 @@ impl Workspace {
                     let renamed = workspace.chats_of(project, cx).and_then(|chats| {
                         chats.update(cx, |chats, cx| chats.rename(id, &title, cx))
                     });
+                    // One in its agent's CLI is called that there too.
+                    if renamed.is_ok() {
+                        crate::terminal_agents::TerminalAgents::renamed(id, &title, cx);
+                    }
                     if let Err(err) = renamed {
                         window.push_notification(
                             Notification::error(format!("Could not rename the chat: {err:#}")),
@@ -808,6 +1008,7 @@ impl Workspace {
                         );
                     }
                     workspace.read_sessions(cx);
+                    workspace.bridge.changed();
                     cx.notify();
                 });
             },
@@ -858,6 +1059,12 @@ impl Workspace {
         let deleted = self
             .chats_of(project, cx)
             .and_then(|chats| chats.update(cx, |chats, cx| chats.delete(id, cx)));
+        // Its agent's CLI, if it shows as one, goes with it.
+        if deleted.is_ok()
+            && let Some(space) = self.spaces.get(&project).cloned()
+        {
+            space.update(cx, |space, cx| space.close_cli(id, cx));
+        }
         if let Err(err) = deleted {
             window.push_notification(
                 Notification::error(format!("Could not delete the chat: {err:#}")),
@@ -873,6 +1080,7 @@ impl Workspace {
             self.save_settled(cx);
         }
         self.read_sessions(cx);
+        self.bridge.changed();
         cx.notify();
     }
 
@@ -906,9 +1114,12 @@ impl Workspace {
         }
         // The screen that is drawn: one hidden behind "no workspace yet"
         // cannot take the keyboard (no shortcut would reach the window).
-        match self.screen_in_front().cloned() {
-            Some(space) => space.update(cx, |space, cx| space.focus_chat(window, cx)),
-            None => self.focus_handle.focus(window, cx),
+        let taken = self
+            .screen_in_front()
+            .cloned()
+            .is_some_and(|space| space.update(cx, |space, cx| space.focus_chat(window, cx)));
+        if !taken {
+            self.focus_handle.focus(window, cx);
         }
     }
 
@@ -926,10 +1137,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The Chats space stays in the main window.
-        if self.is_chats(id) {
-            return;
-        }
         if let Some(space) = self.spaces.get(&id) {
             let unsaved = space.read(cx).unsaved_files(cx);
             if unsaved > 0 {
@@ -952,7 +1159,6 @@ impl Workspace {
             let next = self
                 .previous_project
                 .filter(|previous| *previous != id && self.has_project(*previous))
-                .or(self.chats_space.as_ref().map(|chats| chats.id))
                 .or_else(|| {
                     self.projects
                         .iter()
@@ -971,7 +1177,7 @@ impl Workspace {
         });
     }
 
-    fn has_project(&self, id: ProjectId) -> bool {
+    pub(crate) fn has_project(&self, id: ProjectId) -> bool {
         self.projects.iter().any(|project| project.id == id)
     }
 
@@ -982,13 +1188,18 @@ impl Workspace {
     /// Reads the workspace list again (another window changed it).
     pub(crate) fn reload_projects(&mut self, cx: &mut Context<Self>) {
         crate::attention::forget_names(cx);
-        let projects = workspaces(AppState::store(cx));
-        let chats = self.chats_space.as_ref().map(|chats| chats.id);
-        let kept =
-            |id: &ProjectId| Some(*id) == chats || projects.iter().any(|project| project.id == *id);
+        let store = AppState::store(cx);
+        let projects = workspaces(store);
+        let kept = |id: &ProjectId| projects.iter().any(|project| project.id == *id);
         self.spaces.retain(|id, _| kept(id));
         self.hidden_since.retain(|id, _| kept(id));
+        self.chats = projects
+            .iter()
+            .map(|project| project.id)
+            .find(|id| store.is_scratch(*id));
         self.projects = projects;
+        self.bridge.changed();
+        self.look_for_repositories(false, cx);
         cx.notify();
     }
 
@@ -1054,13 +1265,18 @@ impl Workspace {
         let statuses: HashMap<ProjectId, WorkspaceStatus> = self
             .projects
             .iter()
-            .chain(self.chats_space.as_ref())
             .map(|project| (project.id, WorkspaceStatus::of(project.id, cx)))
             .collect();
         // The store, for chats of spaces without a screen (changed by
         // schedules or another window): every few seconds, not each one.
         self.status_ticks = self.status_ticks.wrapping_add(1);
-        let sessions_changed = self.status_ticks.is_multiple_of(5) && self.read_sessions(cx);
+        if self.status_ticks.is_multiple_of(5) {
+            self.poll_sessions(cx);
+            self.want_facts(cx);
+        }
+        // Workspaces added or given folders meanwhile are looked at within
+        // a second; every few, all again (`git init` makes one a repository).
+        self.look_for_repositories(self.status_ticks.is_multiple_of(5), cx);
         // The sidebar lists agent CLIs in terminals: redrawn when they change.
         let agents = {
             use std::hash::{Hash as _, Hasher as _};
@@ -1085,9 +1301,10 @@ impl Workspace {
             space.update(cx, |space, cx| space.reload_sessions(cx));
         }
         let any = saved.is_none_or(|projects| !projects.is_empty());
-        let sessions_changed = sessions_changed || (any && self.read_sessions(cx));
+        let sessions_changed = any && self.read_sessions(cx);
         if statuses != self.statuses || sessions_changed || agents_changed {
             self.statuses = statuses;
+            self.bridge.changed();
             cx.notify();
         }
     }
@@ -1104,6 +1321,7 @@ impl Workspace {
         if let Some(space) = self.spaces.get(&id) {
             space.update(cx, |space, cx| space.set_color(color, cx));
         }
+        self.bridge.changed();
         self.projects_changed(cx);
         cx.notify();
     }
@@ -1121,15 +1339,18 @@ impl Workspace {
         let project = self
             .projects
             .iter()
-            .chain(self.chats_space.as_ref())
             .find(|project| project.id == id)
             .cloned()?;
-        let space = cx.new(|cx| WorkspaceScreen::new(project, window, cx));
+        let shell = cx.weak_entity();
+        let space = cx.new(|cx| WorkspaceScreen::new(project, shell, window, cx));
         let subscription = cx.subscribe_in(
             &space,
             window,
             move |this, _, event: &WorkspaceScreenEvent, window, cx| match event {
-                WorkspaceScreenEvent::SessionsChanged => cx.notify(),
+                WorkspaceScreenEvent::SessionsChanged => {
+                    this.bridge.changed();
+                    cx.notify()
+                }
                 WorkspaceScreenEvent::Agent { hosting, request } => {
                     let (hosting, request) = ((**hosting).clone(), request.clone());
                     if matches!(
@@ -1173,8 +1394,6 @@ impl Workspace {
                 }
             },
         );
-        let shown = !self.sidebar_collapsed;
-        space.update(cx, |space, cx| space.set_sidebar_shown(shown, cx));
         self._subscriptions.push(subscription);
         self.spaces.insert(id, space.clone());
         Some(space)
@@ -1202,16 +1421,6 @@ impl Workspace {
             return;
         }
         self.view = View::Workspaces;
-        // The sidebar's list follows what is in front.
-        if self.is_chats(id) {
-            self.section = Section::Chats;
-        } else {
-            self.section = Section::Workspaces;
-            self.last_workspace = Some(id);
-        }
-        if !self.is_chats(id) && self.expanded.insert(id) {
-            self.save_expanded(cx);
-        }
         crate::windows::set_shown_in(id, self.handle, cx);
         // Only the shown project streams browser and device frames.
         if let Some(previous) = self.active_project.filter(|previous| *previous != id)
@@ -1232,6 +1441,7 @@ impl Workspace {
         let store = AppState::store(cx);
         let _ = store.touch_project(id);
         let _ = store.set_setting(keys::LAST_PROJECT, &Some(id));
+        let _ = store.set_setting(keys::FRONT_VIEW, &front_key(View::Workspaces));
         cx.notify();
     }
 
@@ -1293,9 +1503,23 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.has_project(pick.project_id) && !self.is_chats(pick.project_id) {
+        if !self.has_project(pick.project_id) {
             // A GitHub repository's chat.
             return self.show_session(pick.session_id, window, cx);
+        }
+        // The window that shows that workspace shows the chat: opening the
+        // workspace here would only hand it over, without the message.
+        if let Some((handle, other)) =
+            crate::windows::shown_elsewhere(pick.project_id, self.handle, cx)
+        {
+            // Deferred: that window may be this one's caller.
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    window.activate_window();
+                    other.update(cx, |other, cx| other.show_message(pick, window, cx));
+                });
+            });
+            return;
         }
         self.open_project(pick.project_id, window, cx);
         if let Some(space) = self.spaces.get(&pick.project_id) {
@@ -1329,9 +1553,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(id) = self.active_project.filter(|id| !self.is_chats(*id)) else {
+        // From the workspace for chats that need no folder, a folder
+        // opens as a workspace of its own: that one stays without.
+        let Some(id) = self.active_project.filter(|id| !self.is_scratch(*id, cx)) else {
             return window.dispatch_action(Box::new(AddProject), cx);
         };
+        self.bring_forward(window, cx);
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -1416,6 +1643,8 @@ impl Workspace {
         if let Some(space) = self.spaces.get(&project.id) {
             space.update(cx, |space, cx| space.set_project(project, window, cx));
         }
+        self.bridge.changed();
+        self.look_for_repositories(false, cx);
         self.projects_changed(cx);
         cx.notify();
     }
@@ -1426,6 +1655,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.bring_forward(window, cx);
         let Some(project) = self
             .active_space()
             .map(|space| space.read(cx).project().clone())
@@ -1459,9 +1689,21 @@ impl Workspace {
         );
     }
 
-    /// Removes a project from PilotHouse (the folder on disk is untouched).
+    /// Removes a project from PilotHouse (the folder on disk is untouched;
+    /// its chats go with it).
     pub fn remove_project(&mut self, id: ProjectId, window: &mut Window, cx: &mut Context<Self>) {
         if !self.has_project(id) {
+            return;
+        }
+        // Its chats would have nowhere to be found.
+        if self.is_scratch(id, cx) {
+            window.push_notification(
+                Notification::info(
+                    "Chats holds the chats that need no folder, so it stays. \
+                     Delete its chats one by one from their menus.",
+                ),
+                cx,
+            );
             return;
         }
         if let Err(err) = AppState::store(cx).remove_project(id) {
@@ -1472,10 +1714,11 @@ impl Workspace {
             return;
         }
         self.projects.retain(|project| project.id != id);
+        self.bridge.changed();
         self.spaces.remove(&id);
         self.hidden_since.remove(&id);
-        if self.expanded.remove(&id) {
-            self.save_expanded(cx);
+        if self.bridge.filter == Some(id) {
+            self.bridge.filter = None;
         }
         // Its agents and shells stop.
         ph_agent::ChatHub::remove(id, cx);
@@ -1486,28 +1729,76 @@ impl Workspace {
         crate::schedules::Automation::global(cx).update(cx, |automation, _| automation.forget(id));
         if self.active_project == Some(id) {
             self.active_project = None;
-            // Another workspace first (one not in a window of its own):
-            // the Workspaces list stays in front.
-            let others: Vec<ProjectId> = self.projects.iter().map(|project| project.id).collect();
-            let next = others
-                .into_iter()
-                .find(|other| !self.shown_by_another(*other, cx))
-                .or(self.chats_space.as_ref().map(|chats| chats.id));
-            if let Some(next) = next {
-                self.open_project(next, window, cx);
+            // Back to the Bridge, where the others are: no other workspace
+            // is the obvious one to show instead. One is ready behind it
+            // all the same (the one shown before, else the Chats space), so
+            // a new chat and the other commands have somewhere to go.
+            let behind = self
+                .previous_project
+                .filter(|previous| *previous != id && self.has_project(*previous))
+                .or_else(|| {
+                    self.projects
+                        .iter()
+                        .map(|project| project.id)
+                        .find(|other| *other != id)
+                });
+            if let Some(behind) = behind {
+                self.open_project(behind, window, cx);
             }
+            self.set_view(View::Bridge, window, cx);
         }
         cx.notify();
     }
 
+    /// Runs `update` on the workspace last in front, bringing its screen
+    /// forward first: what a command does there is not done unseen behind
+    /// the Bridge or Reviews.
+    /// Updates `agent`'s CLI with its own updater, in a terminal of the
+    /// workspace in front (shown, so it is seen to run and to fail), and
+    /// looks again a while after for whether it is still behind.
+    pub(crate) fn update_agent_cli(
+        &mut self,
+        agent: &'static ph_agent::agents::AgentSpec,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(command) = crate::agent_updates::update_command(agent.id) else {
+            return;
+        };
+        if self.active_space().is_none() {
+            window.push_notification(
+                Notification::info("Open a workspace first: the update runs in its terminal."),
+                cx,
+            );
+            return;
+        }
+        self.with_active_space(window, cx, |space, window, cx| {
+            space.run_in_terminal(&format!("Update {}", agent.name), command, window, cx)
+        });
+        // The updater does not say when it is done: its CLI is asked its
+        // version until it is the newest, so the status bar follows.
+        crate::agent_updates::watch(agent.id, cx);
+    }
+
     fn with_active_space(
-        &self,
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         update: impl FnOnce(&mut WorkspaceScreen, &mut Window, &mut Context<WorkspaceScreen>),
     ) {
-        if let Some(space) = self.active_space() {
-            space.update(cx, |space, cx| update(space, window, cx));
+        let Some(space) = self.active_space().cloned() else {
+            return;
+        };
+        self.bring_forward(window, cx);
+        space.update(cx, |space, cx| update(space, window, cx));
+    }
+
+    /// Shows the workspace last in front where the Bridge or Reviews is: a
+    /// command that acts on "this workspace" is not carried out on one
+    /// nobody is looking at.
+    fn bring_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.view != View::Workspaces && self.active_project.is_some() {
+            self.set_view(View::Workspaces, window, cx);
         }
     }
 
@@ -1555,8 +1846,15 @@ impl Workspace {
             }
             return;
         }
+        // From the Bridge: in the workspace it is narrowed to, else the
+        // one last in front (its *New task* asks which).
+        if self.view == View::Bridge
+            && let Some(id) = self.bridge.filter.filter(|id| self.has_project(*id))
+        {
+            return self.new_chat_in(id, window, cx);
+        }
         self.with_active_space(window, cx, |space, window, cx| {
-            space.new_session(window, cx)
+            space.new_session_asked(window, cx)
         });
     }
 
@@ -1566,6 +1864,7 @@ impl Workspace {
         let Some(space) = self.active_space().cloned() else {
             return;
         };
+        self.bring_forward(window, cx);
         let (root, parent_name) = {
             let space = space.read(cx);
             let folders = space.project().folders();
@@ -1574,6 +1873,38 @@ impl Workspace {
                 space.project().name.clone(),
             )
         };
+        self.ask_for_task(root, parent_name, window, cx);
+    }
+
+    /// Asks for a task of workspace `id` on a branch of its own (from the
+    /// Bridge, where no workspace is in front): in its first folder that is
+    /// a repository.
+    pub(crate) fn new_task_in(
+        &mut self,
+        id: ProjectId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.projects.iter().find(|project| project.id == id) else {
+            return;
+        };
+        let root = project
+            .folders()
+            .into_iter()
+            .find(|folder| ph_git::is_repository(folder));
+        let name = project.name.clone();
+        self.ask_for_task(root, name, window, cx);
+    }
+
+    /// Asks the task's name, then makes its branch and worktree from
+    /// `root` and opens it as a workspace beside `parent_name`'s.
+    fn ask_for_task(
+        &mut self,
+        root: Option<std::path::PathBuf>,
+        parent_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = root.filter(|root| ph_git::is_repository(root)) else {
             window.push_notification(
                 Notification::error("A task needs a workspace whose folder is a Git repository."),
@@ -1780,33 +2111,28 @@ impl Workspace {
         if let Err(err) = crate::tasks::remember(&store, task) {
             tracing::warn!("saving the task failed: {err:#}");
         }
-        let setup = crate::tasks::config(root)
+        let asked = crate::tasks::config(root)
             .ok()
             .and_then(|config| config.setup)
-            .unwrap_or_default();
-        let command = if setup.trim().is_empty() {
+            .filter(|setup| !setup.trim().is_empty());
+        // Only the user's own repository says what runs here. Someone
+        // else's (a GitHub clone, a folder that may hold a pull request
+        // author's files) has its command shown in a notice instead: text
+        // from it never reaches the shell, not even as a comment.
+        let own = crate::tasks::is_own(root);
+        let command = match asked.as_deref().filter(|_| own) {
+            Some(setup) => crate::tasks::setup_command(setup, port),
             // The number itself: every shell echoes that the same way.
-            crate::tasks::setup_command(&format!("echo \"Port for this task: {port}\""), port)
-        } else if ph_store::paths::is_untrusted_copy(root) {
-            // Someone else's repository says what to run: it is typed as a
-            // comment, to read first and then run by hand.
-            let remark = if cfg!(windows)
-                && ph_env::default_shell()
-                    .0
-                    .file_stem()
-                    .is_some_and(|name| name.eq_ignore_ascii_case("cmd"))
-            {
-                "rem"
-            } else {
-                "#"
-            };
-            format!(
-                "{remark} pilothouse.toml asks to run this; read it, then run it yourself: {}",
-                setup.replace(['\n', '\r'], " ")
-            )
-        } else {
-            crate::tasks::setup_command(&setup, port)
+            None => {
+                crate::tasks::setup_command(&format!("echo \"Port for this task: {port}\""), port)
+            }
         };
+        if let Some(theirs) = asked.as_deref().filter(|_| !own) {
+            window.push_notification(
+                Notification::warning(crate::tasks::setup_notice(theirs)).autohide(false),
+                cx,
+            );
+        }
         if let Some(space) = self.spaces.get(&project).cloned() {
             space.update(cx, |space, cx| {
                 space.run_in_terminal("Setup", &command, window, cx)
@@ -1821,6 +2147,7 @@ impl Workspace {
         let Some(project) = self.active_project else {
             return;
         };
+        self.bring_forward(window, cx);
         let store = AppState::store(cx).clone();
         let Some(task) = crate::tasks::of(&store, project) else {
             return;
@@ -1910,7 +2237,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.projects.get(action.index).map(|project| project.id) {
+        // By its place among the user's workspaces, as the column of
+        // icons numbers them (Chats has a key of its own).
+        let id = self.listed().nth(action.index).map(|project| project.id);
+        if let Some(id) = id {
             self.open_project(id, window, cx);
         }
     }
@@ -1921,6 +2251,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // From the Bridge or Reviews, the one shown before is the one
+        // still behind them.
+        if self.view != View::Workspaces && self.active_project.is_some() {
+            return self.bring_forward(window, cx);
+        }
         let previous = self
             .previous_project
             .filter(|id| self.projects.iter().any(|project| project.id == *id));
@@ -1935,21 +2270,61 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(id) = self.active_project {
-            self.remove_project(id, window, cx);
+        let Some(id) = self.active_project else {
+            return;
+        };
+        // Its chats go with it: said first, and asked, when it has any.
+        let chats = self.sessions_of(id, cx).len();
+        if chats == 0 || self.is_scratch(id, cx) {
+            return self.remove_project(id, window, cx);
         }
+        let name = self
+            .projects
+            .iter()
+            .find(|project| project.id == id)
+            .map(|project| project.name.clone())
+            .unwrap_or_default();
+        let workspace = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, _| {
+            let workspace = workspace.clone();
+            dialog
+                .title(format!("Remove {name}?"))
+                .w(ph_ui::scaled_px(460., window))
+                .child(format!(
+                    "Its {} deleted with it. The folders on disk are not touched.",
+                    if chats == 1 {
+                        "chat is".to_string()
+                    } else {
+                        format!("{chats} chats are")
+                    }
+                ))
+                .footer(ph_ui::dialog_buttons("Remove", true))
+                .on_ok(move |_, window, cx| {
+                    _ = workspace
+                        .update(cx, |workspace, cx| workspace.remove_project(id, window, cx));
+                    true
+                })
+        });
     }
 
-    fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
-        self.set_sidebar_collapsed(!self.sidebar_collapsed, cx);
+    /// ⌘B: folds what is at the left of the view in front away, or brings
+    /// it back: a workspace's chat, Reviews' list. The key was the
+    /// sidebar's, and still makes room the same way.
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
+        match self.view {
+            View::Workspaces => {
+                self.with_active_space(window, cx, |space, _, cx| space.toggle_chat(cx));
+                // The composer is gone with the chat, or back with it.
+                self.focus_front(window, cx);
+            }
+            View::GitHub => self.set_sidebar_collapsed(!self.sidebar_collapsed, cx),
+            View::Bridge | View::Custom(_) => {}
+        }
     }
 
     fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
         self.sidebar_collapsed = collapsed;
         let _ = AppState::store(cx).set_setting(keys::SIDEBAR_COLLAPSED, &collapsed);
-        for space in self.spaces.values() {
-            space.update(cx, |space, cx| space.set_sidebar_shown(!collapsed, cx));
-        }
         if let Some(github) = &self.github {
             github.update(cx, |github, cx| github.set_sidebar_shown(!collapsed, cx));
         }
@@ -1971,6 +2346,7 @@ impl Workspace {
         self.with_active_space(window, cx, |space, window, cx| {
             space.toggle_zoom(window, cx)
         });
+        self.focus_front(window, cx);
     }
 
     fn reset_layout(&mut self, _: &ResetLayout, window: &mut Window, cx: &mut Context<Self>) {
@@ -2098,36 +2474,6 @@ impl Workspace {
     }
 }
 
-/// The gradient or image behind the frame, under the frame's veil.
-fn backdrop_layer(cx: &gpui_kit::App) -> Option<gpui_kit::AnyElement> {
-    use gpui_kit::StyledImage as _;
-    use ph_theme::preferences::BackdropPaint;
-    let backdrop = ph_theme::preferences::backdrop(cx)?;
-    let layer = || div().absolute().top_0().left_0().size_full();
-    let picture = match &backdrop.paint {
-        BackdropPaint::Gradient { from, to } => layer()
-            .bg(gpui_kit::linear_gradient(
-                135.,
-                gpui_kit::linear_color_stop(*from, 0.),
-                gpui_kit::linear_color_stop(*to, 1.),
-            ))
-            .into_any_element(),
-        BackdropPaint::Image(path) => layer()
-            .child(
-                gpui_kit::img(path.clone())
-                    .size_full()
-                    .object_fit(gpui_kit::ObjectFit::Cover),
-            )
-            .into_any_element(),
-    };
-    Some(
-        layer()
-            .child(picture)
-            .child(layer().bg(backdrop.veil))
-            .into_any_element(),
-    )
-}
-
 /// The light (or dark) version of the theme in use: its partner, else
 /// Modern Light (or Modern Dark).
 fn switch_mode(dark: bool, cx: &mut gpui_kit::App) {
@@ -2186,16 +2532,12 @@ impl Render for Workspace {
                 .h_full()
                 .child(space.clone())
                 .into_any_element(),
+            // The Bridge, also when there is no workspace to show.
             (None, None) => div()
                 .flex_1()
                 .min_w_0()
                 .h_full()
-                .pr_2()
-                .pb(crate::frame::gap())
-                .child(
-                    crate::frame::island(window, cx)
-                        .child(no_workspace_in_front(!self.projects.is_empty())),
-                )
+                .child(crate::bridge::render(self, window, cx))
                 .into_any_element(),
         };
 
@@ -2219,11 +2561,6 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::finish_task))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_context_panel))
-            .on_action(cx.listener(|this, _: &ToggleBottomPanel, window, cx| {
-                this.with_active_space(window, cx, |space, window, cx| {
-                    space.toggle_bottom_panel(window, cx)
-                })
-            }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 this.with_active_space(window, cx, |space, window, cx| {
                     space.toggle_terminal(window, cx)
@@ -2241,11 +2578,11 @@ impl Render for Workspace {
                 this.show_tab(ContextTab::Files, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowWorkspacesView, window, cx| {
-                this.show_section(Section::Workspaces, window, cx)
+                this.set_view(View::Bridge, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &ShowChatsView, window, cx| {
-                this.show_section(Section::Chats, window, cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &ShowChatsView, window, cx| this.show_scratch(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ShowGitHubView, window, cx| {
                 this.set_view(View::GitHub, window, cx)
             }))
@@ -2257,14 +2594,8 @@ impl Render for Workspace {
                     this.set_view(View::Custom(custom.id), window, cx)
                 }
             }))
-            .on_action(cx.listener(|this, _: &ShowAgentsView, _, cx| {
-                this.set_agents_open(!this.agents_open, cx)
-            }))
             .on_action(cx.listener(|this, _: &ShowChanges, window, cx| {
                 this.show_tab(ContextTab::Changes, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ShowBoard, window, cx| {
-                this.show_tab(ContextTab::Board, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowTerminal, window, cx| {
                 this.show_tab(ContextTab::Terminal, window, cx)
@@ -2285,6 +2616,7 @@ impl Render for Workspace {
                 this.show_tab(ContextTab::Tests, window, cx)
             }))
             .on_action(cx.listener(|this, _: &CaptureToChat, window, cx| {
+                this.bring_forward(window, cx);
                 if let Some(space) = this.active_space() {
                     space.update(cx, |space, cx| space.capture_to_chat(window, cx));
                 }
@@ -2325,12 +2657,14 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &ShowArchitecture, window, cx| {
+                this.bring_forward(window, cx);
                 if let Some(space) = this.active_space() {
                     let root = space.read(cx).project().path.clone();
                     crate::arch_map::open(space.downgrade(), root, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &ShowParallelRuns, window, cx| {
+                this.bring_forward(window, cx);
                 if let Some(space) = this.active_space() {
                     let (project, root) = {
                         let project = space.read(cx).project();
@@ -2340,6 +2674,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &ShowInstructions, window, cx| {
+                this.bring_forward(window, cx);
                 if let Some(space) = this.active_space() {
                     let root = space.read(cx).project().path.clone();
                     crate::instructions_view::open(root, window, cx);
@@ -2347,10 +2682,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &SearchChats, window, cx| {
                 // Beside a workspace the search starts with its chats (one
-                // click widens it); from the Chats list or GitHub it is of
-                // every chat, as the list itself is of no one workspace.
-                let workspace = (this.view == View::Workspaces
-                    && this.section == Section::Workspaces)
+                // click widens it); from the Bridge, Reviews or the Chats
+                // space it is of every chat.
+                let workspace = (this.view == View::Workspaces)
                     .then(|| this.active_project_id())
                     .flatten();
                 crate::chat_search::open(workspace, window, cx)
@@ -2359,6 +2693,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_workspace))
             .on_action(cx.listener(Self::remove_workspace))
             .on_action(cx.listener(|this, _: &OpenInNewWindow, window, cx| {
+                this.bring_forward(window, cx);
                 if let Some(id) = this.active_project {
                     this.open_in_new_window(id, window, cx);
                 }
@@ -2367,25 +2702,34 @@ impl Render for Workspace {
             // A gradient or picture behind the frame, when the user chose
             // one, then the frame's own light: first, so everything is
             // drawn over them.
-            .children(backdrop_layer(cx))
             .children(crate::frame::layers(self, cx))
-            .child(
-                TitleBar::new()
+            .child({
+                let bar = TitleBar::new()
                     .h(ph_theme::layout::TITLE_BAR_HEIGHT)
                     // Clear, with no line under it: the bar, the columns of
                     // icons and the status bar are one frame, painted once
                     // behind them all (`frame::layers`).
                     .bg(gpui_kit::transparent_black())
-                    .border_b_0()
-                    .child(title_bar::render(self, window, cx)),
-            )
+                    .border_b_0();
+                // On macOS the bar starts after the window's buttons. On
+                // Windows and Linux those are on the right, and the bar
+                // would start a fixed 12 px in: the app's mark then stood
+                // right of the line the icons under it are on. It starts at
+                // the window's edge there, and the mark is centred over the
+                // column (`title_bar::app_icon`).
+                let bar = if cfg!(target_os = "macos") {
+                    bar
+                } else {
+                    bar.pl_0()
+                };
+                bar.child(title_bar::render(self, window, cx))
+            })
             .child(
                 h_flex()
                     .items_stretch()
                     .flex_1()
                     .min_h_0()
-                    // Dragging a sidebar's edge (this one's or the GitHub
-                    // view's, which share the width) resizes it.
+                    // Dragging the edge of Reviews' list resizes it.
                     .on_drag_move(cx.listener(
                         |_, event: &gpui_kit::DragMoveEvent<sidebar::SidebarEdge>, window, cx| {
                             // The list starts after the column of icons.
@@ -2399,59 +2743,21 @@ impl Render for Workspace {
                             );
                         },
                     ))
-                    .child(crate::rail::render_views(self, cx))
-                    // The GitHub view draws its own sidebar; an organisation's
-                    // view has none.
-                    .when(
-                        !self.sidebar_collapsed && github.is_none() && custom.is_none(),
-                        |this| {
-                            let list = sidebar::render(self, cx).into_any_element();
-                            this.child(crate::frame::list_island(list, window, cx))
-                        },
-                    )
+                    .child(crate::rail::render_places(self, cx))
                     .child(content),
             )
             .child(status_bar::render(self, cx))
     }
 }
 
-/// What fills the window while the Workspaces list is shown and none is
-/// open: how to get one.
-fn no_workspace_in_front(some_exist: bool) -> impl IntoElement {
-    use gpui_kit::component::button::{Button, ButtonVariants as _};
-    let (title, description) = if some_exist {
-        (
-            "Pick a workspace",
-            "Choose one in the list on the left, or open another folder.",
-        )
-    } else {
-        (
-            "No workspace yet",
-            "A workspace is a folder you work on with agents: its files, Git, runs and tests sit beside the chat.",
-        )
-    };
-    ph_ui::EmptyState::new(title)
-        .icon(ph_ui::Icons::LayoutGrid)
-        .description(description)
-        .action(
-            h_flex()
-                .gap_2()
-                .child(
-                    Button::new("empty-open-folder")
-                        .primary()
-                        .icon(ph_ui::Icons::FolderOpen)
-                        .label("Open a folder")
-                        .on_click(|_, window, cx| window.dispatch_action(Box::new(AddProject), cx)),
-                )
-                .child(
-                    Button::new("empty-new-workspace")
-                        .outline()
-                        .label("New workspace")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(NewWorkspace), cx)
-                        }),
-                ),
-        )
+/// How the view in front is remembered between runs: the Bridge, or a
+/// workspace (which one is `LAST_PROJECT`). Reviews and an organisation's
+/// views are not come back to: they are places to visit.
+fn front_key(view: View) -> &'static str {
+    match view {
+        View::Workspaces => "workspace",
+        _ => "bridge",
+    }
 }
 
 /// Where to make a task for `hosting`'s pull requests: the first of

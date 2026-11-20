@@ -52,7 +52,7 @@ pub fn chip(
 ) -> AnyElement {
     let id = id.into();
     let leading: AnyElement = match &thumbnail {
-        Some(path) => img(path.clone())
+        Some(path) => img(ph_ui::images_safe::attached(path))
             .size_6()
             .rounded(cx.theme().radius)
             .object_fit(ObjectFit::Cover)
@@ -124,7 +124,12 @@ pub fn thumbnail(id: impl Into<ElementId>, label: String, path: PathBuf, cx: &Ap
         .cursor_pointer()
         .hover(|style| style.border_color(cx.theme().ring))
         .on_click(open)
-        .child(img(path).h_24().max_w_48().object_fit(ObjectFit::Cover));
+        .child(
+            img(ph_ui::images_safe::attached(&path))
+                .h_24()
+                .max_w_48()
+                .object_fit(ObjectFit::Cover),
+        );
     hover(id, label, body.into_any_element(), preview)
 }
 
@@ -160,7 +165,7 @@ fn card(preview: Preview, cx: &App) -> AnyElement {
         Preview::Image(path) => v_flex()
             .gap_1p5()
             .child(
-                img(path)
+                img(ph_ui::images_safe::attached(&path))
                     .max_w(ph_ui::rems_from_px(480.))
                     .max_h(ph_ui::rems_from_px(340.))
                     .object_fit(ObjectFit::Contain)
@@ -243,7 +248,7 @@ pub fn open_dialog(label: String, preview: Preview, window: &mut Window, cx: &mu
                 .flex()
                 .justify_center()
                 .child(
-                    img(path.clone())
+                    img(ph_ui::images_safe::attached(&path))
                         .max_w_full()
                         .max_h(ph_ui::rems_from_px(620.))
                         .object_fit(ObjectFit::Contain)
@@ -305,6 +310,33 @@ fn full_text(text: SharedString, cut: Option<&PathBuf>, cx: &App) -> AnyElement 
         .into_any_element()
 }
 
+/// The files of the pictures `entries` show: what was sent as an image and
+/// what tools gave back (a subagent's calls too). GPUI keeps every picture
+/// it drew decoded until told, so a chat that goes lets go of these
+/// ([`ph_ui::images::release_paths`]).
+pub(crate) fn pictures(entries: &[crate::transcript::Entry]) -> Vec<PathBuf> {
+    use crate::transcript::{Entry, ToolEntry};
+    fn of_tool(tool: &ToolEntry, found: &mut Vec<PathBuf>) {
+        found.extend(tool.images.iter().cloned());
+        for child in &tool.children {
+            of_tool(child, found);
+        }
+    }
+    let mut found = Vec::new();
+    for entry in entries {
+        match entry {
+            Entry::User { attachments, .. } => found.extend(
+                attachments
+                    .iter()
+                    .filter_map(|attachment| attachment.image.clone()),
+            ),
+            Entry::Tool(tool) => of_tool(tool, &mut found),
+            _ => {}
+        }
+    }
+    found
+}
+
 /// The start of a text file, and whether it was cut. Binary files are not
 /// shown.
 fn read_text(path: &Path) -> Result<(String, bool), String> {
@@ -341,5 +373,41 @@ mod tests {
         std::fs::write(&binary, [0u8, 1, 2]).unwrap();
         assert!(read_text(&binary).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_chats_pictures_are_its_sent_images_and_its_tools() {
+        use crate::transcript::{AttachmentSummary, Entry, ToolEntry};
+        let summary = |image: Option<&str>| AttachmentSummary {
+            label: "x".into(),
+            image: image.map(PathBuf::from),
+            text: None,
+            file: Some(PathBuf::from("/w/notes.md")),
+        };
+        let tool = |images: &[&str], children: Vec<ToolEntry>| ToolEntry {
+            images: images.iter().map(PathBuf::from).collect(),
+            children,
+            ..ToolEntry::placeholder()
+        };
+        let entries = [
+            Entry::User {
+                text: "look".into(),
+                attachments: vec![summary(Some("/c/pasted-1.png")), summary(None)],
+                checkpoint: None,
+            },
+            Entry::Notice {
+                text: "…".into(),
+                is_error: false,
+            },
+            // A subagent's calls are inside the call that started it.
+            Entry::Tool(tool(
+                &["/c/tool-a-0.png"],
+                vec![tool(&["/c/tool-b-0.jpg"], Vec::new())],
+            )),
+        ];
+        assert_eq!(
+            pictures(&entries),
+            ["/c/pasted-1.png", "/c/tool-a-0.png", "/c/tool-b-0.jpg"].map(PathBuf::from)
+        );
     }
 }

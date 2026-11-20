@@ -6,8 +6,9 @@
 //! questions to the [`ChatThread`] that owns each ACP session.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use agent_client_protocol_schema::ProtocolVersion;
 use agent_client_protocol_schema::v1::{
@@ -22,9 +23,13 @@ use gpui_kit::{App, AppContext as _, Context, SharedString, Task, WeakEntity};
 use serde_json::{Value, json};
 
 use crate::agents::{AgentSpec, Availability};
-use crate::rpc::{Incoming, RpcError, RpcProcess};
+use crate::rpc::{Incoming, IncomingMessages, RpcError, RpcProcess};
 use crate::thread::ChatThread;
-use crate::transcript::parse_update;
+
+/// How long the agent's messages are applied in one go before the window
+/// gets its turn: a burst (a long history played back, a command that
+/// prints a lot) must leave room for frames and for Stop to be pressed.
+const BATCH: Duration = Duration::from_millis(4);
 
 /// What a ready agent offers.
 #[derive(Clone)]
@@ -81,53 +86,74 @@ impl AgentConnection {
         env: Vec<(String, String)>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let launched = match spec.availability() {
-            Availability::Ready { program, args } => {
-                let mut vars = ph_env::shell_env().clone();
-                vars.extend(
-                    spec.env
-                        .iter()
-                        .map(|(name, value)| (name.to_string(), value.to_string()))
-                        .chain(env),
-                );
-                RpcProcess::spawn(&program, &args, &cwd, &vars).map_err(|err| {
-                    SharedString::from(format!("Could not start {}: {err:#}", spec.name))
-                })
-            }
-            Availability::Missing(reason) => Err(reason.into()),
-        };
+        Self::start_prepared(spec, move || (cwd, env), cx)
+    }
 
-        let (process, ready, incoming) = match launched {
-            Ok((process, incoming)) => {
-                let handshake = initialize(process.clone(), spec);
-                let ready = cx.background_spawn(handshake).shared();
-                (Some(process), ready, Some(incoming))
-            }
-            Err(reason) => (None, Task::ready(Err(reason)).shared(), None),
-        };
+    /// [`Self::start_with`], with the folder and the environment worked
+    /// out by `prepare` where the process is started: on a background
+    /// task. Finding the program waits for the login shell's environment
+    /// (seconds, right after the app started), and starting it takes a
+    /// while too; neither may hold the window, nor may what `prepare`
+    /// reads or writes.
+    pub(crate) fn start_prepared(
+        spec: &'static AgentSpec,
+        prepare: impl FnOnce() -> (PathBuf, Vec<(String, String)>) + Send + 'static,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (started, starting) = futures::channel::oneshot::channel();
+        let ready = cx
+            .background_spawn(async move {
+                let (cwd, env) = prepare();
+                let (process, incoming) = launch(spec, &cwd, env)?;
+                // Its messages are taken on the UI's thread, the answer to
+                // the handshake among them.
+                let _ = started.send((process.clone(), incoming));
+                initialize(process, spec).await
+            })
+            .shared();
 
-        let incoming_task = incoming.map(|incoming| {
-            cx.spawn(async move |this, cx| {
-                while let Ok(message) = incoming.recv().await {
-                    let closed = matches!(message, Incoming::Closed);
-                    if this
-                        .update(cx, |this, cx| this.handle(message, cx))
-                        .is_err()
-                        || closed
-                    {
-                        break;
+        let incoming_task = cx.spawn(async move |this, cx| {
+            // Not started: `ready` says why.
+            let Ok((process, incoming)) = starting.await else {
+                return;
+            };
+            let kept = this.update(cx, |this, _| {
+                // Ended while it was starting: it is not to run on.
+                if this.exited.is_some() {
+                    process.stop();
+                    return false;
+                }
+                this.process = Some(process);
+                true
+            });
+            if !matches!(kept, Ok(true)) {
+                return;
+            }
+            while let Some(first) = incoming.next().await {
+                let began = Instant::now();
+                let mut message = Some(first);
+                while let Some(next) = message.take() {
+                    let closed = matches!(next, Incoming::Closed);
+                    if this.update(cx, |this, cx| this.handle(next, cx)).is_err() || closed {
+                        return;
+                    }
+                    if began.elapsed() < BATCH {
+                        message = incoming.next_now();
                     }
                 }
-            })
+                // The window draws and takes input before the next ones,
+                // and whoever got an answer among these acts on it.
+                smol::future::yield_now().await;
+            }
         });
 
         Self {
             spec,
             ready,
-            process,
+            process: None,
             threads: HashMap::new(),
             exited: None,
-            _incoming: incoming_task,
+            _incoming: Some(incoming_task),
         }
     }
 
@@ -160,6 +186,20 @@ impl AgentConnection {
         if self.busy(asking, cx) {
             return false;
         }
+        self.end(asking, format!("{} restarted.", self.spec.name).into(), cx);
+        true
+    }
+
+    /// Ends the agent's process, whatever its chats are doing: those other
+    /// than `asking` are told `message`, and a turn of theirs ends with it.
+    /// For a restart nothing is at work; a chat whose turn does not stop
+    /// when asked ends the process under the others too.
+    pub fn end(
+        &mut self,
+        asking: Option<gpui_kit::EntityId>,
+        message: SharedString,
+        cx: &mut Context<Self>,
+    ) {
         let threads: Vec<_> = self
             .threads
             .values()
@@ -169,14 +209,12 @@ impl AgentConnection {
         if let Some(process) = self.process.take() {
             process.stop();
         }
-        let message = SharedString::from(format!("{} restarted.", self.spec.name));
         self.exited = Some(message.clone());
         // Its output closing later finds no chat to tell.
         self.threads.clear();
         for thread in threads {
             thread.update(cx, |thread, cx| thread.agent_exited(message.clone(), cx));
         }
-        true
     }
 
     /// Ends the agent session `session` (once known: it may still be being
@@ -205,6 +243,51 @@ impl AgentConnection {
             }
         })
         .detach();
+    }
+
+    /// Whether the agent can end one session and go on with its others
+    /// (`session/close`); `None` while it has not started far enough to
+    /// say.
+    pub(crate) fn closes_sessions(&self) -> Option<bool> {
+        self.ready
+            .clone()
+            .now_or_never()
+            .and_then(Result::ok)
+            .map(|ready| ready.close_session)
+    }
+
+    /// [`Self::close_session`], waited for: resolves once the agent said
+    /// the session is closed (or will not: it cannot, it went away, or it
+    /// took longer than a program should to let go of a conversation).
+    /// What is started on the conversation next waits for this.
+    pub(crate) fn closed_session(
+        &self,
+        session: impl Future<Output = Option<String>> + Send + 'static,
+        cx: &App,
+    ) -> Task<()> {
+        let ready = self.ready.clone();
+        let timeout = cx
+            .background_executor()
+            .timer(std::time::Duration::from_secs(5));
+        cx.background_spawn(async move {
+            let close = async {
+                let (Some(session_id), Ok(ready)) = (session.await, ready.await) else {
+                    return;
+                };
+                if !ready.close_session {
+                    return;
+                }
+                if let Err(err) = ready
+                    .process
+                    .request("session/close", json!({ "sessionId": session_id }))
+                    .await
+                {
+                    tracing::debug!("closing agent session {session_id}: {err:#}");
+                }
+            };
+            futures::pin_mut!(close);
+            futures::future::select(close, timeout).await;
+        })
     }
 
     /// Runs an agent-handled sign-in (it may open the browser).
@@ -239,10 +322,8 @@ impl AgentConnection {
 
     fn handle(&mut self, message: Incoming, cx: &mut Context<Self>) {
         match message {
-            Incoming::Notification { method, params } if method == "session/update" => {
-                let Some(parsed) = parse_update(&params) else {
-                    return;
-                };
+            Incoming::Update(parsed) => {
+                let parsed = *parsed;
                 if let Some(info) = &parsed.rate_limit {
                     crate::rate_limits::RateLimits::record(self.spec.name, info, cx);
                 }
@@ -364,6 +445,31 @@ impl AgentConnection {
     }
 }
 
+/// Starts `spec`'s program in `cwd`, with the login shell's environment,
+/// the agent's own variables and `env` over it. Called on a background
+/// task: it waits for the login shell and for the system.
+fn launch(
+    spec: &'static AgentSpec,
+    cwd: &Path,
+    env: Vec<(String, String)>,
+) -> Result<(Arc<RpcProcess>, IncomingMessages), SharedString> {
+    match spec.availability() {
+        Availability::Ready { program, args } => {
+            let mut vars = ph_env::shell_env().clone();
+            vars.extend(
+                spec.env
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .chain(env),
+            );
+            RpcProcess::spawn(&program, &args, cwd, &vars).map_err(|err| {
+                SharedString::from(format!("Could not start {}: {err:#}", spec.name))
+            })
+        }
+        Availability::Missing(reason) => Err(reason.into()),
+    }
+}
+
 /// The ACP handshake. We offer no file-system or terminal capabilities:
 /// agents use their own tools, and PilotHouse watches the results.
 async fn initialize(
@@ -380,6 +486,13 @@ async fn initialize(
                 // Questions with forms are answered in the chat.
                 .elicitation(
                     ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
+                )
+                // What a command prints comes as it is printed, with the
+                // command's exit code at its end (see `CommandRun`).
+                .meta(
+                    json!({ "terminal_output_delta": true })
+                        .as_object()
+                        .cloned(),
                 ),
         )
         .client_info(Implementation::new("pilothouse", env!("CARGO_PKG_VERSION")));

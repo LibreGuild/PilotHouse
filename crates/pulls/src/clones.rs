@@ -134,6 +134,33 @@ fn auth_env(host: &str, token: &str) -> Vec<(String, String)> {
     ]
 }
 
+/// `git args…` in `root` with the token's settings `env`, always run on
+/// this computer. [`ph_git::git_env`] sends a call for a folder on a mapped
+/// network drive to the server over SSH, which writes every variable into
+/// the remote command line: the token would then be in the argument list of
+/// the local `ssh` and of the server's shell, readable by anyone on either
+/// machine. Here the variables stay in this process's child's environment
+/// and git works on the mounted folder.
+fn git_with_token(root: &Path, args: &[&str], env: &[(String, String)]) -> Result<String> {
+    let output = ph_env::command("git")
+        .args(["-c", "core.fsmonitor=false"])
+        .args(args)
+        .current_dir(root)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .envs(env.iter().map(|(key, value)| (key, value)))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .context("running git (is it installed?)")?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// One clone or fetch at a time: two chats getting the same repository
 /// ready would otherwise clone it into one folder together.
 static GIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -152,7 +179,7 @@ fn ensure_locked(hosting: &Hosting) -> Result<PathBuf> {
     let env = auth_env(&id.host, &hosting.account.token()?);
     let clone = id.clone_dir();
     if clone.join(".git").exists() {
-        ph_git::git_env(&clone, &["fetch", "--quiet", "--prune", "origin"], &env)
+        git_with_token(&clone, &["fetch", "--quiet", "--prune", "origin"], &env)
             .context("updating the clone")?;
         return Ok(clone);
     }
@@ -163,7 +190,7 @@ fn ensure_locked(hosting: &Hosting) -> Result<PathBuf> {
         std::fs::remove_dir_all(&clone)?;
     }
     let url = format!("https://{}/{}/{}.git", id.host, id.owner, id.name);
-    ph_git::git_env(&folder, &["clone", "--quiet", "--", &url, "repo"], &env)
+    git_with_token(&folder, &["clone", "--quiet", "--", &url, "repo"], &env)
         .with_context(|| format!("cloning {}", id.full_name()))?;
     Ok(clone)
 }
@@ -188,23 +215,66 @@ pub const AGENT_SETTINGS: &[&str] = &[
     ".vscode/mcp.json",
 ];
 
-/// [`AGENT_SETTINGS`] and the root's `.env` files, as present in `folder`.
+/// [`AGENT_SETTINGS`] and the root's `.env` files, as present in `folder`,
+/// spelled as on disk. Names match in any letter case: macOS and Windows
+/// open `.Claude/settings.json` for `.claude/settings.json`, so the agent
+/// reads it. A link standing where a folder of an entry would be is listed
+/// itself (`.claude`), since what it points to is read through it.
 fn agent_files(folder: &Path) -> Vec<String> {
-    let env_files = std::fs::read_dir(folder)
+    let mut found: Vec<String> = Vec::new();
+    let mut add = |path: String| {
+        if !found.contains(&path) {
+            found.push(path);
+        }
+    };
+    for setting in AGENT_SETTINGS {
+        let (top, inner) = match setting.split_once('/') {
+            Some((top, inner)) => (top, Some(inner)),
+            None => (*setting, None),
+        };
+        for name in names_like(folder, |name| name.eq_ignore_ascii_case(top)) {
+            let Some(inner) = inner else {
+                add(name);
+                continue;
+            };
+            let Ok(meta) = std::fs::symlink_metadata(folder.join(&name)) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                add(name);
+            } else if meta.is_dir() {
+                for file in names_like(&folder.join(&name), |file| file.eq_ignore_ascii_case(inner))
+                {
+                    add(format!("{name}/{file}"));
+                }
+            }
+        }
+    }
+    for name in names_like(folder, is_env_file) {
+        add(name);
+    }
+    found
+}
+
+/// `.env` or `.env.*`, in any letter case.
+fn is_env_file(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == ".env" || name.starts_with(".env.")
+}
+
+/// The names in `dir` that `like` accepts, sorted.
+fn names_like(dir: &Path, like: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
         .map(|entries| {
             entries
                 .flatten()
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .filter(|name| name == ".env" || name.starts_with(".env."))
-                .collect::<Vec<_>>()
+                .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+                .filter(|name| like(name))
+                .collect()
         })
         .unwrap_or_default();
-    AGENT_SETTINGS
-        .iter()
-        .map(|path| path.to_string())
-        .chain(env_files)
-        .filter(|path| std::fs::symlink_metadata(folder.join(path)).is_ok())
-        .collect()
+    names.sort();
+    names
 }
 
 /// Removes [`AGENT_SETTINGS`] and the root's `.env` files from checkout
@@ -214,23 +284,76 @@ pub fn sanitize(folder: &Path) -> Vec<String> {
 }
 
 fn remove(folder: &Path, paths: Vec<String>) -> Vec<String> {
-    let mut removed = Vec::new();
-    for relative in paths {
-        let path = folder.join(&relative);
-        // A link is removed itself, never what it points to.
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        let gone = if meta.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
+    let Ok(root) = ph_store::paths::canonical(folder) else {
+        return Vec::new();
+    };
+    paths
+        .iter()
+        .filter_map(|relative| remove_inside(&root, relative))
+        .collect()
+}
+
+/// Removes `relative` (`/`-separated) from checkout `root` (resolved), never
+/// through a link: the pull request decides which of its folders are links,
+/// and one pointing at `~/.claude` must not cost the user their own
+/// settings. A link met on the way is removed itself, never what it points
+/// to; what is removed is returned.
+fn remove_inside(root: &Path, relative: &str) -> Option<String> {
+    let parts: Vec<&str> = relative.split('/').collect();
+    if parts
+        .iter()
+        .any(|part| part.is_empty() || *part == "." || *part == "..")
+    {
+        return None;
+    }
+    let mut path = root.to_path_buf();
+    for (ix, part) in parts.iter().enumerate() {
+        path.push(part);
+        let meta = std::fs::symlink_metadata(&path).ok()?;
+        // Every folder walked was checked not to be a link; this is the
+        // last word that nothing removed lies outside the checkout.
+        let parent = ph_store::paths::canonical(path.parent()?).ok()?;
+        if !parent.starts_with(root) {
+            return None;
+        }
+        if meta.file_type().is_symlink() {
+            // A link to a folder is a directory entry on Windows.
             std::fs::remove_file(&path)
-        };
-        if gone.is_ok() {
-            removed.push(relative);
+                .or_else(|_| std::fs::remove_dir(&path))
+                .ok()?;
+            return Some(parts[..=ix].join("/"));
+        }
+        if ix + 1 == parts.len() {
+            // `remove_dir_all` removes links inside the folder as links.
+            let gone = if meta.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            return gone.ok().map(|()| relative.to_string());
+        }
+        if !meta.is_dir() {
+            return None;
         }
     }
-    removed
+    None
+}
+
+/// The paths of `index` (as `git ls-files` spells them) that are `path` or
+/// under it, in any letter case.
+fn tracked_under<'a>(index: &[&'a str], path: &str) -> Vec<&'a str> {
+    let path = path.to_ascii_lowercase();
+    index
+        .iter()
+        .copied()
+        .filter(|tracked| {
+            let tracked = tracked.to_ascii_lowercase();
+            tracked == path
+                || tracked
+                    .strip_prefix(path.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+        .collect()
 }
 
 /// [`sanitize`] for a checkout someone will commit in (a task fixing
@@ -238,20 +361,25 @@ fn remove(folder: &Path, paths: Vec<String>) -> Vec<String> {
 /// (`--skip-worktree`), so it is never committed as deleted.
 pub fn sanitize_worktree(folder: &Path) -> Vec<String> {
     // Only what the pull request carries: files the task copied in from
-    // the user's own checkout (an `.env`) are theirs and stay.
+    // the user's own checkout (an `.env`) are theirs and stay. Read from the
+    // index, not by asking git about one spelling: git answers nothing for
+    // `.claude/settings.json` when the index has `.Claude/settings.json`,
+    // or a `.claude` that is a link.
+    let index = ph_git::git(folder, &["ls-files", "-z"]).unwrap_or_default();
+    let index: Vec<&str> = index.split('\0').filter(|path| !path.is_empty()).collect();
     let mut tracked = Vec::new();
     let mut theirs = Vec::new();
     for path in agent_files(folder) {
-        let files = ph_git::git(folder, &["ls-files", "--", &path]).unwrap_or_default();
-        if !files.trim().is_empty() {
-            tracked.extend(files.lines().map(str::to_string));
+        let carried = tracked_under(&index, &path);
+        if !carried.is_empty() {
+            tracked.extend(carried);
             theirs.push(path);
         }
     }
     let removed = remove(folder, theirs);
     if !tracked.is_empty() {
         let mut args = vec!["update-index", "--skip-worktree", "--"];
-        args.extend(tracked.iter().map(String::as_str));
+        args.extend(tracked);
         if let Err(err) = ph_git::git(folder, &args) {
             tracing::warn!("hiding the agent settings taken out from git failed: {err:#}");
         }
@@ -271,7 +399,7 @@ pub fn check_out_pull(hosting: &Hosting, number: u64) -> Result<(PathBuf, String
     let id = RepoId::of(hosting);
     let env = auth_env(&id.host, &hosting.account.token()?);
     let local = format!("refs/pilothouse/pr/{number}");
-    ph_git::git_env(
+    git_with_token(
         &clone,
         &[
             "fetch",
@@ -481,6 +609,69 @@ mod tests {
     }
 
     #[test]
+    fn names_match_in_any_letter_case() {
+        let folder = std::env::temp_dir().join(format!("ph-sanitize-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join(".Claude")).unwrap();
+        for file in [
+            ".Claude/Settings.json",
+            ".MCP.json",
+            ".ENV",
+            ".Env.Local",
+            "envoy",
+        ] {
+            std::fs::write(folder.join(file), "x").unwrap();
+        }
+        let mut removed = sanitize(&folder);
+        removed.sort();
+        assert_eq!(
+            removed,
+            [".Claude/Settings.json", ".ENV", ".Env.Local", ".MCP.json"]
+        );
+        assert!(folder.join("envoy").exists());
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn the_index_decides_what_the_pull_request_carries() {
+        let index = [".Claude/settings.json", ".claude-notes", "cfg/a", ".claude"];
+        assert_eq!(
+            tracked_under(&index, ".claude/settings.json"),
+            [".Claude/settings.json"]
+        );
+        assert_eq!(
+            tracked_under(&index, ".CLAUDE"),
+            [".Claude/settings.json", ".claude"]
+        );
+        assert_eq!(tracked_under(&index, "cfg"), ["cfg/a"]);
+        assert!(tracked_under(&index, ".mcp.json").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nothing_is_removed_through_a_link() {
+        let base = std::env::temp_dir().join(format!("ph-sanitize-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (folder, outside) = (base.join("pr-1"), base.join("home"));
+        std::fs::create_dir_all(outside.join(".claude/hooks")).unwrap();
+        std::fs::create_dir_all(&folder).unwrap();
+        for file in [".claude/settings.json", ".claude/hooks/run.sh", "mcp.json"] {
+            std::fs::write(outside.join(file), "mine").unwrap();
+        }
+        std::os::unix::fs::symlink(outside.join(".claude"), folder.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(&outside, folder.join(".vscode")).unwrap();
+        std::os::unix::fs::symlink(outside.join("mcp.json"), folder.join(".mcp.json")).unwrap();
+        let mut removed = sanitize(&folder);
+        removed.sort();
+        assert_eq!(removed, [".claude", ".mcp.json", ".vscode"]);
+        for file in [".claude/settings.json", ".claude/hooks/run.sh", "mcp.json"] {
+            assert!(outside.join(file).exists(), "{file} was removed");
+        }
+        assert!(std::fs::symlink_metadata(folder.join(".claude")).is_err());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
     fn a_task_keeps_its_own_files_and_never_commits_the_removal() {
         let folder = std::env::temp_dir().join(format!("ph-sanitize-task-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
@@ -510,6 +701,42 @@ mod tests {
         std::fs::write(folder.join(".env"), "MINE=1").unwrap();
         assert_eq!(sanitize_worktree(&folder), [".mcp.json"]);
         assert!(folder.join(".env").exists() && !folder.join(".mcp.json").exists());
+        assert_eq!(git(&["status", "--porcelain", "--untracked-files=no"]), "");
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_task_takes_out_a_linked_or_differently_spelled_setting() {
+        let folder = std::env::temp_dir().join(format!("ph-sanitize-spell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("cfg")).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "user.email=t@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(&folder)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&ok.stdout).into_owned()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(folder.join("cfg/settings.json"), "{}").unwrap();
+        std::os::unix::fs::symlink("cfg", folder.join(".claude")).unwrap();
+        std::fs::write(folder.join(".MCP.json"), "{}").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "pr"]);
+        let mut removed = sanitize_worktree(&folder);
+        removed.sort();
+        assert_eq!(removed, [".MCP.json", ".claude"]);
+        assert!(folder.join("cfg/settings.json").exists());
         assert_eq!(git(&["status", "--porcelain", "--untracked-files=no"]), "");
         std::fs::remove_dir_all(&folder).unwrap();
     }

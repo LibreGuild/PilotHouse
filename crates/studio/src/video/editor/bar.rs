@@ -31,7 +31,7 @@ pub(crate) use crate::editor::bar::contrasting;
 use crate::editor::bar::{align_buttons, swatches};
 use crate::editor::to_hsla;
 use crate::video::document::THUMB_HEIGHT;
-use crate::video::edit::{SPEEDS, VideoEdit, VideoFormat};
+use crate::video::edit::{SPEEDS, Segment, VideoEdit, VideoFormat};
 use crate::video::export::Plan;
 
 /// What a slider changes on the selected mark.
@@ -275,7 +275,11 @@ impl VideoEditor {
         let frame = doc.frame_at(self.position).map(|(ix, _)| ix + 1);
         let playing = self.playing();
         let button = |id: &'static str, icon: Icons, tip: &'static str| {
-            Button::new(id).ghost().small().icon(icon).tooltip(tip)
+            Button::new(id)
+                .ghost()
+                .small()
+                .icon(icon)
+                .tooltip(ph_ui::tip(tip))
         };
         let (a, b) = self.marks_ab;
         let between = a.zip(b).map(|(a, b)| (b - a).abs());
@@ -504,25 +508,12 @@ impl VideoEditor {
             // A kept part's edge, else the part itself.
             let mut at = 0.;
             let pieces = doc.edit().pieces(duration);
+            if let Some((part, end)) = edge_near(&pieces, t, reach) {
+                self.drag = Some(Drag::Edge { part, end, at: t });
+                return;
+            }
             for (ix, piece) in pieces.iter().enumerate() {
                 let end = at + piece.length();
-                if (t - at).abs() <= reach && ix > 0 || (t - at).abs() <= reach && ix == 0 && t > at
-                {
-                    self.drag = Some(Drag::Edge {
-                        part: ix,
-                        end: false,
-                        at: t,
-                    });
-                    return;
-                }
-                if (t - end).abs() <= reach {
-                    self.drag = Some(Drag::Edge {
-                        part: ix,
-                        end: true,
-                        at: t,
-                    });
-                    return;
-                }
                 if t >= at && t < end {
                     self.select(Selection::Part(ix), window, cx);
                 }
@@ -1455,6 +1446,33 @@ const LANES: usize = 3;
 /// The bar under the timeline: room for two rows of controls.
 pub(crate) const BAR_HEIGHT: f32 = 92.;
 
+/// The edge of a kept part within `reach` of result time `t`: the part's
+/// place, and whether it is its end. Where something was cut, the end of
+/// one part and the start of the next are at the same place on the
+/// timeline: the side pressed says which is meant, so both can be moved.
+/// (At a split the two move as one, whichever is taken.)
+fn edge_near(pieces: &[Segment], t: f64, reach: f64) -> Option<(usize, bool)> {
+    let mut at = 0.;
+    for (ix, piece) in pieces.iter().enumerate() {
+        let end = at + piece.length();
+        if ix == 0 && (t - at).abs() <= reach && t > at {
+            return Some((0, false));
+        }
+        if (t - end).abs() <= reach {
+            let cut_after = pieces
+                .get(ix + 1)
+                .is_some_and(|next| (next.start - piece.end).abs() > 1e-6);
+            return Some(if cut_after && t >= end {
+                (ix + 1, false)
+            } else {
+                (ix, true)
+            });
+        }
+        at = end;
+    }
+    None
+}
+
 /// The Export dialog's settings, read each time it draws.
 fn export_body(editor: &Entity<VideoEditor>, cx: &mut App) -> AnyElement {
     let theme = cx.theme().clone();
@@ -1630,4 +1648,30 @@ fn export_body(editor: &Entity<VideoEditor>, cx: &mut App) -> AnyElement {
                 .child(sound),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Segment, edge_near};
+
+    #[test]
+    fn both_sides_of_a_cut_can_be_grabbed() {
+        // 0–10 s and 20–60 s of a minute are kept: on the timeline the
+        // cut is at 10 s, and the result is 50 s long.
+        let cut = [Segment::new(0., 10., 1.), Segment::new(20., 60., 1.)];
+        assert_eq!(edge_near(&cut, 9.8, 0.5), Some((0, true)));
+        assert_eq!(edge_near(&cut, 10.2, 0.5), Some((1, false)));
+        assert_eq!(edge_near(&cut, 10., 0.5), Some((1, false)));
+        // The two ends of the result, and nothing in between.
+        assert_eq!(edge_near(&cut, 0.3, 0.5), Some((0, false)));
+        assert_eq!(edge_near(&cut, 49.9, 0.5), Some((1, true)));
+        assert_eq!(edge_near(&cut, 30., 0.5), None);
+        // A split: the parts touch, and the one edge moves both.
+        let split = [Segment::new(0., 10., 1.), Segment::new(10., 60., 1.)];
+        assert_eq!(edge_near(&split, 9.8, 0.5), Some((0, true)));
+        assert_eq!(edge_near(&split, 10.2, 0.5), Some((0, true)));
+        // A part at twice the speed takes half the room.
+        let fast = [Segment::new(0., 10., 2.), Segment::new(20., 60., 1.)];
+        assert_eq!(edge_near(&fast, 5.1, 0.5), Some((1, false)));
+    }
 }

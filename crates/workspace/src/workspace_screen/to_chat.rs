@@ -71,7 +71,7 @@ impl WorkspaceScreen {
                     .update(cx, |chat, cx| chat.new_chat_in(folder.clone(), window, cx));
             }
             FilesPanelEvent::CompareWithHead(root, path) => {
-                self.open_diff(root.clone(), Some(path.clone()), true, window, cx)
+                self.open_changes_since_commit(root.clone(), path.clone(), window, cx)
             }
             FilesPanelEvent::CompareFiles(first, second) => {
                 let (first, second) = (first.clone(), second.clone());
@@ -119,6 +119,7 @@ impl WorkspaceScreen {
             FilesPanelEvent::OpenFilesChanged
             | FilesPanelEvent::Opened
             | FilesPanelEvent::Ask(_)
+            | FilesPanelEvent::Why(..)
             | FilesPanelEvent::MakePrimary(_)
             | FilesPanelEvent::RemoveFolder(_) => {}
         }
@@ -196,7 +197,7 @@ impl WorkspaceScreen {
 
     /// ⌘⇧S: send the visible browser or device (with its marks) to chat.
     pub fn capture_to_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tools = match self.context_tab {
+        let tools = match self.context_tab() {
             tab if !self.shown.contains(&Pane::Tool(tab)) => None,
             ContextTab::Browser => self
                 .browser
@@ -223,7 +224,7 @@ impl WorkspaceScreen {
     pub(super) fn live_screenshot(&self, cx: &gpui_kit::App) -> Option<Attachment> {
         let browser = || Some(("browser", self.browser.as_ref()?.read(cx).composite(cx)?));
         let device = || Some(("device", self.devices.as_ref()?.read(cx).composite(cx)?));
-        let (source, frame) = if self.context_tab == ContextTab::Devices {
+        let (source, frame) = if self.context_tab() == ContextTab::Devices {
             device().or_else(browser)
         } else {
             browser().or_else(device)

@@ -305,6 +305,60 @@ const MIGRATIONS: &[&str] = &[
     // 15: a chat's last line, for chats whose messages are not kept here
     // (an agent CLI's in a terminal, shown under its title once closed).
     "ALTER TABLE sessions ADD COLUMN last_line TEXT;",
+    // 16: what a chat did, in numbers (files and lines changed, tests,
+    // commands, screenshots), as JSON: written when a turn ends so its
+    // card can say so without reading the transcript.
+    "ALTER TABLE sessions ADD COLUMN facts TEXT;",
+    // 17: the space for chats outside any workspace ("Chats", a kind of
+    // its own) becomes an ordinary workspace without folders, noted as the
+    // place for chats that need no folder. Its chats and its name stay.
+    r#"
+    INSERT INTO settings (key, value)
+        SELECT 'workspace.scratch', CAST(id AS TEXT) FROM projects
+        WHERE kind = 'chats' ORDER BY id LIMIT 1
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+    UPDATE projects SET kind = 'empty', name = 'Chats' WHERE kind = 'chats';
+    "#,
+    // 18: explanations of changes, written by an agent and kept here until
+    // the user shares one as a file in the repository. Each is filed under
+    // the content it explains (a file's path and its Git blob id), so the
+    // one for a commit is found by what the commit holds.
+    r#"
+    CREATE TABLE explanations (
+        id          INTEGER PRIMARY KEY,
+        root        TEXT NOT NULL,
+        subject     TEXT NOT NULL,
+        title       TEXT NOT NULL DEFAULT '',
+        markdown    TEXT NOT NULL DEFAULT '',
+        agent       TEXT NOT NULL DEFAULT '',
+        session_id  INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
+        asked       TEXT NOT NULL DEFAULT '[]',
+        finished    INTEGER NOT NULL DEFAULT 0,
+        created_at  INTEGER NOT NULL
+    );
+    CREATE INDEX explanations_by_root ON explanations(root, subject);
+
+    CREATE TABLE explanation_files (
+        explanation_id  INTEGER NOT NULL REFERENCES explanations(id) ON DELETE CASCADE,
+        path            TEXT NOT NULL,
+        blob            TEXT NOT NULL
+    );
+    CREATE INDEX explanation_files_by_blob ON explanation_files(blob);
+    CREATE INDEX explanation_files_by_path ON explanation_files(path);
+    CREATE INDEX explanation_files_by_explanation ON explanation_files(explanation_id);
+    "#,
+    // 19: which of an agent's accounts a session is in (Settings → Agents;
+    // empty: the agent's own). A session stays in the account it started
+    // in: the agent keeps its conversation in that account's files.
+    r#"
+    ALTER TABLE sessions ADD COLUMN account TEXT NOT NULL DEFAULT '';
+    "#,
+    // 20: a chat's own choices (its mode, model and the like, as JSON by
+    // option id). A chat keeps what was chosen in it: another chat's
+    // choice, or a new default for the agent, does not change it.
+    r#"
+    ALTER TABLE sessions ADD COLUMN options TEXT NOT NULL DEFAULT '';
+    "#,
 ];
 
 /// Backups kept of a database file, newest first; older ones are deleted.
@@ -627,5 +681,49 @@ mod tests {
         // 1 January 2026, 00:00 UTC: that day or the one before, by time zone.
         assert!(day == "2026-01-01" || day == "2025-12-31", "{day}");
         assert_eq!((input, cost), (900, 0.5));
+    }
+    #[test]
+    fn the_chats_space_becomes_the_scratch_workspace() {
+        let connection = Connection::open_in_memory().unwrap();
+        // A database just before migration 17, with the Chats space and a
+        // chat in it.
+        let before = 16;
+        for sql in &MIGRATIONS[..before] {
+            connection.execute_batch(sql).unwrap();
+        }
+        connection
+            .execute_batch(&format!(
+                "PRAGMA user_version = {before};
+                 INSERT INTO projects (id, name, path, created_at, last_opened_at, kind)
+                    VALUES (1, 'Chats', '/tmp/ws/1', 0, 0, 'chats');
+                 INSERT INTO projects (id, name, path, created_at, last_opened_at, kind)
+                    VALUES (2, 'shop', '/tmp/shop', 0, 0, 'folder');
+                 INSERT INTO sessions (id, project_id, title, agent_id, created_at, updated_at)
+                    VALUES (7, 1, 'One', 'codex', 0, 0);"
+            ))
+            .unwrap();
+        apply(&connection).unwrap();
+        let (name, kind): (String, String) = connection
+            .query_row("SELECT name, kind FROM projects WHERE id = 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((name.as_str(), kind.as_str()), ("Chats", "empty"));
+        let noted: String = connection
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'workspace.scratch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(noted, "1");
+        let chats: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sessions WHERE project_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(chats, 1, "its chats stay");
     }
 }

@@ -65,6 +65,9 @@ pub fn tidy(store: &Store) -> usize {
     if !own {
         return 0;
     }
+    // Pictures kept for behind the window, from before 0.7 (the window
+    // has no picture any more).
+    let _ = std::fs::remove_dir_all(data.join("backdrops"));
     // Without the list every copy would look orphaned: tidy another time.
     let projects = match store.projects() {
         Ok(projects) => projects,

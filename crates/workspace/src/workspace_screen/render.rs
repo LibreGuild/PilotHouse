@@ -1,14 +1,18 @@
-//! How a workspace's screen is drawn: what each pane shows (the chat, with
-//! what finished while away; the editor; each tool), the dock they are
-//! arranged in, and the icon bar.
+//! How a workspace's screen is drawn: the chat's island (with what finished
+//! while away) and the result pane's, with its row of names and what the
+//! one in front shows (the review of the changes, the browser or a phone,
+//! the terminal, the files and their editor, another tool).
 
 use super::*;
 
 impl WorkspaceScreen {
-    /// The chat, under what finished while the workspace was away.
+    /// The chat, under what finished while the workspace was away. (Not
+    /// kept from one draw to the next: its header shows the workspace's
+    /// open chats as tabs, whose states change without the panel hearing
+    /// of it.)
     pub(super) fn render_chat(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(away) = &self.away else {
-            return self.chat.clone().cached(filled()).into_any_element();
+            return self.chat.clone().into_any_element();
         };
         v_flex()
             .size_full()
@@ -121,19 +125,80 @@ impl WorkspaceScreen {
             .into_any_element()
     }
 
-    /// The tools down the window's right edge: icons, with names in their
-    /// tooltips (or under them, in Settings).
-    pub(super) fn render_tool_rail(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The names over the result pane and, among the workspace's other
+    /// tools, those under *More*.
+    fn result_names(&self, cx: &App) -> (Vec<ResultTab>, Vec<ContextTab>) {
+        let enabled = AppState::enabled_tabs(cx);
+        let on = |tab: ContextTab| enabled.contains(&tab);
+        let front = self.layout.result_open.then(|| self.layout.tab());
+        let mut names = Vec::new();
+        let git = on(ContextTab::Changes);
+        let changes =
+            git && (self.is_relevant(ContextTab::Changes) || front == Some(ResultTab::Git));
+        if changes {
+            names.push(ResultTab::Git);
+        }
+        if on(ContextTab::Browser) || on(ContextTab::Devices) {
+            names.push(ResultTab::Preview);
+        }
+        if on(ContextTab::Terminal) {
+            names.push(ResultTab::Terminal);
+        }
+        // An open file shows also where the Files tool is switched off.
+        if (on(ContextTab::Files) && self.is_relevant(ContextTab::Files))
+            || front == Some(ResultTab::Files)
+            || self.has_open_files(cx)
+        {
+            names.push(ResultTab::Files);
+        }
+        let mut more = Vec::new();
+        for tab in enabled {
+            match ResultTab::of(tab) {
+                // The one in front has a name of its own, beside the four.
+                other @ ResultTab::Other(_) if front == Some(other) => names.push(other),
+                ResultTab::Other(_) => more.push(tab),
+                _ => {}
+            }
+        }
+        // Git without a repository (as far as was seen when the folders
+        // were looked at) has no name, but is not out of reach: a folder
+        // may have become one since.
+        if git && !changes {
+            more.push(ContextTab::Changes);
+        }
+        // Those the workspace has a use for lead the menu.
+        more.sort_by_key(|tab| !self.is_relevant(*tab));
+        (names, more)
+    }
+
+    /// The row over the result pane: what it can show, and what the tool
+    /// in front adds (the browser or a phone; the tree beside the editor).
+    fn render_result_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let space = cx.entity();
-        let labels = crate::rail::labels(cx);
+        let (names, more) = self.result_names(cx);
+        let front = self.layout.tab();
         let changes = self
             .changes
             .get(&self.git_folder)
             .map(|changes| changes.read(cx).change_count())
             .unwrap_or_default();
-        let (shown_tabs, more): (Vec<ContextTab>, Vec<ContextTab>) = AppState::enabled_tabs(cx)
-            .into_iter()
-            .partition(|tab| self.is_relevant(*tab));
+        let tabs = names.into_iter().map(|tab| {
+            let space = space.clone();
+            let label = match tab {
+                ResultTab::Git if changes > 0 => format!("{} {changes}", tab.label()),
+                _ => tab.label().to_string(),
+            };
+            ph_ui::PillTab::new(
+                format!("context-tab-{}", tab.key()),
+                label,
+                move |window, cx| {
+                    space.update(cx, |space, cx| space.show_result_tab(tab, window, cx))
+                },
+            )
+            .name(tab.label())
+            .icon(Icon::new(tab.icon()))
+            .selected(tab == front)
+        });
         let more_menu = (!more.is_empty()).then(|| {
             let space = space.clone();
             Button::new("more-tools")
@@ -142,51 +207,161 @@ impl WorkspaceScreen {
                 .icon(IconName::Ellipsis)
                 .tooltip("More tools")
                 .accessibility_label("More tools")
-                .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                .menu(gpui_kit::Anchor::TopLeft, move |menu, _, _| {
                     more.iter().fold(menu, |menu, tab| {
                         let (space, tab) = (space.clone(), *tab);
-                        menu.item(
-                            gpui_kit::component::menu::PopupMenuItem::new(tab.label())
-                                .icon(Icon::new(tab.icon()))
-                                .on_click(move |_, window, cx| {
-                                    space.update(cx, |space, cx| space.show_tab(tab, window, cx))
-                                }),
-                        )
+                        let item = gpui_kit::component::menu::PopupMenuItem::new(tab.label())
+                            .icon(Icon::new(tab.icon()))
+                            .on_click(move |_, window, cx| {
+                                space.update(cx, |space, cx| space.show_tab(tab, window, cx))
+                            });
+                        menu.item(item)
                     })
                 })
         });
-        let first_bottom_seen = std::cell::Cell::new(false);
-        let items = shown_tabs.into_iter().enumerate().flat_map(|(ix, tab)| {
-            // A line between the column's tools and the bottom panel's.
-            let divider = (tab.in_bottom_panel() && ix > 0 && !first_bottom_seen.replace(true))
-                .then(|| {
-                    div()
-                        .flex_none()
-                        .w(ph_ui::rems_from_px(20.))
-                        .h_px()
-                        .my_1()
-                        .bg(cx.theme().border)
-                        .into_any_element()
-                });
+        let enabled = AppState::enabled_tabs(cx);
+        // Preview: the browser or a phone, when the build has both; the
+        // one switch other panes have for two views of one thing (a
+        // file's changes, unified or split).
+        let preview = (front == ResultTab::Preview
+            && enabled.contains(&ContextTab::Browser)
+            && enabled.contains(&ContextTab::Devices))
+        .then(|| {
             let space = space.clone();
-            let item = crate::rail::Item {
-                id: SharedString::from(format!("context-tab-{}", tab.key())),
-                label: tab.label().into(),
-                icon: Icon::new(tab.icon()),
-                hint: tab_shortcut(tab),
-                selected: self.shown.contains(&Pane::Tool(tab)),
-                badge: (tab == ContextTab::Changes && changes > 0)
-                    .then(|| crate::rail::count_badge(changes, None, cx)),
-            }
-            .render(
-                labels,
-                move |window, cx| space.update(cx, |space, cx| space.show_tab(tab, window, cx)),
-                cx,
-            );
-            divider.into_iter().chain(std::iter::once(item))
+            gpui_kit::component::tab::TabBar::new("preview-kind")
+                .segmented()
+                .small()
+                .selected_index(usize::from(self.layout.tool == ContextTab::Devices))
+                .on_click(move |ix: &usize, window, cx| {
+                    let tool = if *ix == 1 {
+                        ContextTab::Devices
+                    } else {
+                        ContextTab::Browser
+                    };
+                    space.update(cx, |space, cx| space.show_tab(tool, window, cx))
+                })
+                .child(gpui_kit::component::tab::Tab::new().label("Browser"))
+                .child(gpui_kit::component::tab::Tab::new().label("Phone"))
+                .into_any_element()
         });
-        crate::rail::column("context-tabs", labels, items.collect::<Vec<_>>())
+        // Files: the tree makes way for the editor.
+        let tree = (front == ResultTab::Files && self.has_tree(cx)).then(|| {
+            let label = if self.layout.tree_open {
+                "Hide the folders' tree"
+            } else {
+                "Show the folders' tree"
+            };
+            Button::new("toggle-file-tree")
+                .ghost()
+                .small()
+                .icon(if self.layout.tree_open {
+                    IconName::PanelLeftClose
+                } else {
+                    IconName::PanelLeftOpen
+                })
+                .tooltip(ph_ui::tip(label))
+                .accessibility_label(label)
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_tree(cx)))
+                .into_any_element()
+        });
+        h_flex()
+            .id("context-tabs")
+            .flex_none()
+            .px_2()
+            .py_1p5()
+            .gap_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(ph_ui::PillTabs::new("result-tabs", tabs.collect())),
+            )
             .children(more_menu)
+            .children(preview)
+            .children(tree)
+            .into_any_element()
+    }
+
+    /// The Files tool is in this build and the workspace has folders to
+    /// list.
+    fn has_tree(&self, cx: &App) -> bool {
+        AppState::enabled_tabs(cx).contains(&ContextTab::Files)
+    }
+
+    /// What the result pane shows under its names.
+    fn render_result(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        use gpui_kit::component::resizable::{h_resizable, resizable_panel};
+        use ph_theme::layout::{SIDE_LIST_MAX, SIDE_LIST_MIN};
+        match self.layout.tool {
+            // The folders' tree and, beside it, the files open from it.
+            ContextTab::Files => {
+                let editor = self.render_pane(Pane::Editor, window, cx);
+                if !(self.layout.tree_open && self.has_tree(cx)) {
+                    return editor;
+                }
+                let tree = self.render_pane(Pane::Tool(ContextTab::Files), window, cx);
+                h_resizable("files-split")
+                    .with_state(&self.tree_split)
+                    .child(
+                        resizable_panel()
+                            .size(ph_ui::scaled_px(240., window))
+                            .size_range(SIDE_LIST_MIN..SIDE_LIST_MAX)
+                            .child(tree),
+                    )
+                    .child(resizable_panel().child(editor))
+                    .into_any_element()
+            }
+            tool => self.render_pane(Pane::Tool(tool), window, cx),
+        }
+    }
+
+    /// The chat folded away: a strip that says what it is doing and brings
+    /// it back.
+    fn render_chat_strip(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let status = crate::status::WorkspaceStatus::of(self.project.id, cx);
+        let theme = cx.theme();
+        let state = if status.waiting > 0 {
+            Some(theme.warning)
+        } else if status.working > 0 {
+            Some(theme.info)
+        } else if status.unseen > 0 {
+            Some(theme.success)
+        } else {
+            None
+        };
+        let label = format!(
+            "Show the chat ({})",
+            ph_ui::platform::shortcut("secondary-b")
+        );
+        div()
+            .flex_none()
+            .w(ph_ui::rems_from_px(44.))
+            .h_full()
+            .child(
+                crate::frame::island(window, cx).child(
+                    v_flex()
+                        .size_full()
+                        .items_center()
+                        .py_2()
+                        .gap_2()
+                        .child(
+                            Button::new("unfold-chat")
+                                .ghost()
+                                .small()
+                                .icon(Icons::MessagesSquare)
+                                .tooltip(ph_ui::tip(label.clone()))
+                                .accessibility_label(label)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.show_chat(window, cx)),
+                                ),
+                        )
+                        .children(state.map(|color| {
+                            div().size(ph_ui::rems_from_px(8.)).rounded_full().bg(color)
+                        })),
+                ),
+            )
             .into_any_element()
     }
 
@@ -201,7 +376,7 @@ impl WorkspaceScreen {
             return ph_ui::EmptyState::new("No folders in this workspace")
                 .icon(Icons::FolderPlus)
                 .description(
-                    "Add a folder to see its files, Git changes, branches and pull requests. Chat, the board, the browser and devices work without one.",
+                    "Add a folder to see its files, Git changes, branches and pull requests. Chat, the browser and devices work without one.",
                 )
                 .action(
                     Button::new("empty-add-folder")
@@ -226,7 +401,6 @@ impl WorkspaceScreen {
             ContextTab::Changes => self.changes.get(&self.git_folder).cloned().map(|panel| {
                 self.with_folder_picker(panel.cached(filled()).into_any_element(), cx)
             }),
-            ContextTab::Board => cached(&self.board),
             ContextTab::Terminal => cached(&self.terminal),
             ContextTab::Browser => cached(&self.browser),
             ContextTab::Devices => cached(&self.devices),
@@ -312,45 +486,78 @@ impl WorkspaceScreen {
 
 impl Render for WorkspaceScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if std::mem::take(&mut self.reveal_pending) {
-            self.panes.show(Pane::Chat, window, cx);
-        }
-        // The panes are an island between the list and the tools' column,
-        // which is part of the window's frame (`frame`).
+        use gpui_kit::component::resizable::{h_resizable, resizable_panel};
+        let gap = crate::frame::gap();
+        let chat = (!self.layout.chat_folded).then(|| {
+            crate::frame::island(window, cx)
+                .child(self.render_chat(cx))
+                .into_any_element()
+        });
+        let result = self.layout.result_open.then(|| {
+            let bar = self.render_result_bar(cx);
+            let content = self.render_result(window, cx);
+            crate::frame::island(window, cx)
+                .child(bar)
+                .child(div().flex_1().min_h_0().child(content))
+                .into_any_element()
+        });
+        let strip = self
+            .layout
+            .chat_folded
+            .then(|| self.render_chat_strip(window, cx));
+        let panes = match (chat, result) {
+            // Side by side, the line between them dragged to share the
+            // room: the chat starts with two fifths of it.
+            (Some(chat), Some(result)) => {
+                let room = window.viewport_size().width;
+                // In a small window neither pane may ask for more than
+                // its part: the two least widths together would not fit.
+                let chat_min = ph_theme::layout::CHAT_MIN.min(room * 0.45);
+                let result_min = ph_theme::layout::CONTEXT_PANEL_MIN.min(room * 0.4);
+                let chat_width = match self.layout.chat_share {
+                    // Where the line between them was last left.
+                    Some(share) => (room * share).max(chat_min),
+                    None => {
+                        (room * 0.4).clamp(chat_min, ph_ui::scaled_px(640., window).max(chat_min))
+                    }
+                };
+                let screen = cx.entity().downgrade();
+                h_resizable(("space-split", self.project.id as u64))
+                    .on_resize(move |state, window, cx| {
+                        // Of the window's width, as the size it starts
+                        // with is worked out above.
+                        let room = f32::from(window.viewport_size().width);
+                        let chat = state.read(cx).sizes().first().copied();
+                        if let Some(chat) = chat.filter(|_| room > 0.) {
+                            let share = f32::from(chat) / room;
+                            _ = screen.update(cx, |screen, cx| screen.set_chat_share(share, cx));
+                        }
+                    })
+                    .child(
+                        resizable_panel()
+                            .size(chat_width)
+                            .size_range(chat_min..gpui_kit::Pixels::MAX)
+                            .child(div().size_full().pr(gap / 2.).child(chat)),
+                    )
+                    .child(
+                        resizable_panel()
+                            .size_range(result_min..gpui_kit::Pixels::MAX)
+                            .child(div().size_full().pl(gap / 2.).child(result)),
+                    )
+                    .into_any_element()
+            }
+            (Some(only), None) | (None, Some(only)) => only,
+            (None, None) => div().into_any_element(),
+        };
         h_flex()
             .size_full()
             .items_stretch()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .pb(crate::frame::gap())
-                    .child(crate::frame::island(window, cx).child(self.panes.area.clone())),
-            )
-            .child(self.render_tool_rail(cx))
+            .pr_2()
+            .pb(gap)
+            .gap(gap)
+            .children(strip)
+            .child(div().flex_1().min_w_0().h_full().child(panes))
     }
-}
-
-/// The shortcut that shows `tab` (see `actions::bind_keys`), if it has one.
-pub(super) fn tab_shortcut(tab: ContextTab) -> Option<String> {
-    let key = match tab {
-        ContextTab::Files => 1,
-        ContextTab::Changes => 2,
-        ContextTab::Board => 3,
-        ContextTab::Terminal => 4,
-        ContextTab::Browser => 5,
-        ContextTab::Devices => 6,
-        ContextTab::Runs => 7,
-        ContextTab::Pulls => 8,
-        ContextTab::Tests => 9,
-        ContextTab::Logcat => return None,
-    };
-    Some(if cfg!(target_os = "macos") {
-        format!("⌘{key}")
-    } else {
-        format!("Ctrl+{key}")
-    })
 }
 
 /// `text` cut to `max` characters, with an ellipsis.

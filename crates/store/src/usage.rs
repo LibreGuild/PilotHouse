@@ -1,11 +1,14 @@
 //! What chats used: tokens, cost and the context window, per session, and
 //! totals by agent or project.
 //!
-//! Agents report running totals for their own session (ACP `usage_update`
-//! and the prompt reply's `usage`). A chat can span several agent sessions
+//! Most reports are running totals for the agent's own session (ACP
+//! `usage_update`'s cost, and the prompt reply's `usage` from agents not
+//! known to do otherwise). A chat can span several agent sessions
 //! (restarts), and a resumed one reports totals that include turns already
-//! counted, so each report is compared with the last one from the same
-//! agent session and only the difference is added.
+//! counted, so each such report is compared with the last one from the same
+//! agent session and only the difference is added. A prompt reply that
+//! counts its own turn's tokens only ([`UsageReport::per_turn`], as the
+//! protocol describes it) is added in full: it comes once per turn.
 //!
 //! What each report adds is also kept by local day and model
 //! (`usage_days`), for the usage dashboard's charts and breakdowns.
@@ -41,6 +44,8 @@ pub struct UsageReport {
     pub context: Option<(u64, u64)>,
     /// The model the chat used when the report came, when known.
     pub model: Option<String>,
+    /// The tokens are this turn's alone, not a running total.
+    pub per_turn: bool,
 }
 
 /// What one chat used on one (local) day with one model.
@@ -147,21 +152,23 @@ impl Store {
         let usage = &mut row.usage;
         // What this report adds, for the day's row.
         let mut added = (0u64, 0u64, 0u64, 0f64);
-        if let Some(input) = report.input_tokens {
-            added.0 = grew(input, *base_input);
-            usage.input_tokens += added.0;
-            *base_input = input;
-        }
-        if let Some(output) = report.output_tokens {
-            added.1 = grew(output, *base_output);
-            usage.output_tokens += added.1;
-            *base_output = output;
-        }
-        if let Some(cached) = report.cached_tokens {
-            added.2 = grew(cached, *base_cached);
-            usage.cached_tokens += added.2;
-            *base_cached = cached;
-        }
+        // A turn's own count is added whole and leaves the running totals'
+        // last values alone.
+        let count = |now: Option<u64>, base: &mut u64, total: &mut u64| -> u64 {
+            let Some(now) = now else { return 0 };
+            let added = if report.per_turn {
+                now
+            } else {
+                let added = grew(now, *base);
+                *base = now;
+                added
+            };
+            *total += added;
+            added
+        };
+        added.0 = count(report.input_tokens, base_input, &mut usage.input_tokens);
+        added.1 = count(report.output_tokens, base_output, &mut usage.output_tokens);
+        added.2 = count(report.cached_tokens, base_cached, &mut usage.cached_tokens);
         if let Some((cost, currency)) = &report.cost {
             added.3 = if *cost >= *base_cost {
                 cost - *base_cost
@@ -302,6 +309,30 @@ mod tests {
             cost: Some((cost, "USD".into())),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_turns_own_tokens_are_added_whole() {
+        let store = Store::open_in_memory().unwrap();
+        let folder = std::env::temp_dir().join(format!("ph-usage-turn-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let project = store.add_project(&folder).unwrap();
+        let chat = store.create_session(project.id, "One", "claude").unwrap();
+        let turn = |input| UsageReport {
+            agent_session: "a".into(),
+            input_tokens: Some(input),
+            output_tokens: Some(10),
+            per_turn: true,
+            ..Default::default()
+        };
+        for input in [1_000, 1_500, 1_500, 800] {
+            store.record_usage(chat.id, &turn(input)).unwrap();
+        }
+        // The cost, a running total, still counts once beside them.
+        store.record_usage(chat.id, &report("a", 0, 0.05)).unwrap();
+        let usage = store.record_usage(chat.id, &report("a", 0, 0.07)).unwrap();
+        assert_eq!((usage.input_tokens, usage.output_tokens), (4_800, 40));
+        assert!((usage.cost - 0.07).abs() < 1e-9);
     }
 
     #[test]

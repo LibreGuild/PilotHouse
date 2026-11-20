@@ -29,7 +29,7 @@ keychain = "PilotHouse"
 # feature arrives on in a merged build until it is listed here as false.
 #
 # The tools beside the chat:
-#   files, changes (Git), pulls (pull requests), board, browser, devices
+#   files, changes (Git), pulls (pull requests), browser, devices
 #   (Android), runs (run configurations and ports), tests (UI tests),
 #   terminal, logcat
 # Elsewhere:
@@ -37,7 +37,9 @@ keychain = "PilotHouse"
 #   usage (the usage dashboard), network_drives, parallel_runs (one prompt to
 #   several agents), presentations (slides in Studio), chrome_extension
 #   (agents in the user's own Chrome), quick_chat (a small chat window over
-#   every app, opened with a global shortcut)
+#   every app, opened with a global shortcut), explanations (changes
+#   explained in plain words: Explain in the Git tab, Why Is This Here? in
+#   the editor)
 
 [links]
 # The project's page (Settings → About).

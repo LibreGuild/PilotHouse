@@ -79,10 +79,13 @@ pub fn paragraphs(body: &TextBody, cx: &Context) -> Vec<Para> {
         .unwrap_or_else(|| theme.resolve(&base.color));
     let base_style = Style {
         font: theme.font(&base.font).to_string(),
-        size: place
-            .and_then(|place| place.size)
-            .or(cx.size)
-            .unwrap_or(base.size),
+        // A paragraph without runs is laid out at this size.
+        size: drawn_size(
+            place
+                .and_then(|place| place.size)
+                .or(cx.size)
+                .unwrap_or(base.size),
+        ),
         bold: place
             .and_then(|place| place.bold)
             .or(cx.bold)
@@ -167,6 +170,17 @@ pub fn paragraphs(body: &TextBody, cx: &Context) -> Vec<Para> {
         .collect()
 }
 
+/// A text size the layout takes, whatever a deck, a theme or a file says:
+/// cosmic-text stops the program on a line of height 0, and a size that is
+/// not a number has no line at all.
+fn drawn_size(size: f32) -> f32 {
+    if size.is_nan() {
+        1.
+    } else {
+        size.clamp(1., 400.)
+    }
+}
+
 fn style(run: &Run, base: &Style, theme: &Theme) -> Style {
     Style {
         font: run
@@ -174,7 +188,7 @@ fn style(run: &Run, base: &Style, theme: &Theme) -> Style {
             .as_deref()
             .map(|font| theme.font(font).to_string())
             .unwrap_or_else(|| base.font.clone()),
-        size: run.size.unwrap_or(base.size).clamp(1., 400.),
+        size: drawn_size(run.size.unwrap_or(base.size)),
         bold: run.bold.unwrap_or(base.bold),
         italic: run.italic.unwrap_or(base.italic),
         underline: run.underline.unwrap_or(run.link.is_some()),
@@ -251,8 +265,14 @@ fn lay_out_at(paras: &[Para], width: f32, wrap: bool, scale: f32) -> Laid {
     let mut lines = Vec::new();
     let mut y = 0f32;
     for (index, para) in paras.iter().enumerate() {
-        let base = para.style.size * scale;
-        let spacing = para.line_spacing;
+        // Never 0, also for a paragraph not made by `paragraphs`: the line
+        // height below must not be (see `drawn_size`).
+        let base = (para.style.size * scale).max(0.1);
+        let spacing = if para.line_spacing > 0. {
+            para.line_spacing
+        } else {
+            1.
+        };
         if index > 0 {
             y += para.space_before * scale;
         }
@@ -378,7 +398,10 @@ fn attrs<'a>(
     spacing: f32,
 ) -> cosmic_text::Attrs<'a> {
     use cosmic_text::{Attrs, Family, Metrics, Style as Slant, Weight};
-    let size = run_size(style) * scale;
+    // Never 0, as the paragraph's own size in `lay_out_at`: a run of height
+    // 0 does not stop the layout with an error, it never comes back from it
+    // (holding the fonts, so no other text is laid out either).
+    let size = (run_size(style) * scale).max(0.1);
     Attrs::new()
         .family(Family::Name(family))
         .weight(Weight(super::fonts::fonts().weight(family, style.bold)))
@@ -437,6 +460,47 @@ mod tests {
             .collect();
         let text = text.join(" ");
         assert_eq!(text.split_whitespace().count(), 15);
+    }
+
+    #[test]
+    fn a_size_of_zero_is_still_laid_out() {
+        // A blank line in a table or a code block whose size a deck gives
+        // as 0 (or worse) once stopped the program in the text layout.
+        let theme = Theme::default();
+        let body = TextBody {
+            paragraphs: vec![Paragraph::default()],
+            ..TextBody::default()
+        };
+        for size in [0., -4., f32::NAN, f32::INFINITY] {
+            let paras = paragraphs(
+                &body,
+                &Context {
+                    theme: &theme,
+                    place: None,
+                    color: None,
+                    size: Some(size),
+                    bold: None,
+                },
+            );
+            assert!((1. ..=400.).contains(&paras[0].style.size), "{size}");
+            let laid = lay_out(&paras, 200., true, None);
+            assert_eq!(laid.lines.len(), 1, "{size}");
+            assert!(laid.height > 0., "{size}");
+        }
+        // A paragraph made elsewhere, with nothing checked.
+        let mut para = paragraphs(
+            &body,
+            &Context {
+                theme: &theme,
+                place: None,
+                color: None,
+                size: None,
+                bold: None,
+            },
+        );
+        para[0].style.size = 0.;
+        para[0].line_spacing = 0.;
+        assert_eq!(lay_out(&para, 200., true, None).lines.len(), 1);
     }
 
     #[test]

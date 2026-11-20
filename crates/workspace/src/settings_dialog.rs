@@ -15,9 +15,7 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use ph_theme::preferences::{self, installed_fonts};
-use ph_theme::{
-    Accent, Appearance, ChatWidth, Corners, Density, Gradient, Preferences, WindowStyle,
-};
+use ph_theme::{Accent, Appearance, ChatWidth, Corners, Density, Preferences};
 use ph_ui::Icons;
 
 use crate::app_state::AppState;
@@ -41,7 +39,7 @@ impl Page {
         let drives = usize::from(enabled(Feature::NetworkDrives));
         match self {
             Page::First => 0,
-            Page::Chrome => 5,
+            Page::Chrome => 6,
             Page::GitHub => 6 + chrome,
             Page::Storage => 8 + chrome + drives,
         }
@@ -57,25 +55,82 @@ pub(crate) fn open(
     window: &mut Window,
     cx: &mut App,
 ) {
-    // Listing fonts touches the OS font database: do it once per opening.
+    // The system's fonts, as listed once in this run (listing them takes
+    // about 100 ms on a Mac with many installed).
     let fonts = font_options(cx);
     let themes = theme_options(cx);
     let store = AppState::store(cx).clone();
-    let accounts = cx.new(|cx| ph_pulls::AccountsView::new(store.clone(), window, cx));
-    let templates = cx.new(|_| ph_pulls::TemplatesView::new(store.clone()));
-    let drives =
-        cx.new(|cx| crate::network_drives::NetworkDrivesView::new(store.clone(), window, cx));
+    // Each page's view is made when its page is first shown: several start
+    // work of their own (a walk of every clone's size, a request to each
+    // account's host, a search for MCP configs), for pages not opened.
+    let accounts = {
+        let store = store.clone();
+        Lazy::new(move |window, cx| cx.new(|cx| ph_pulls::AccountsView::new(store, window, cx)))
+    };
+    let templates = {
+        let store = store.clone();
+        Lazy::new(move |_, cx| cx.new(|_| ph_pulls::TemplatesView::new(store)))
+    };
+    let drives = {
+        let store = store.clone();
+        Lazy::new(move |window, cx| {
+            cx.new(|cx| crate::network_drives::NetworkDrivesView::new(store, window, cx))
+        })
+    };
     let open_file: ph_agent::tools_view::OpenFile = std::rc::Rc::new(|path, window, cx| {
         use gpui_kit::component::WindowExt as _;
         window.close_dialog(cx);
-        if let Err(err) = crate::open::open_paths(&[path], cx) {
-            tracing::warn!("opening the file failed: {err:#}");
-        }
+        // Once this window's handler is done: the file may open in it,
+        // which cannot be reached while it handles the click.
+        cx.defer(move |cx| {
+            if let Err(err) = crate::open::open_paths(&[path], cx) {
+                tracing::warn!("opening the file failed: {err:#}");
+            }
+        });
     });
-    let tools =
-        cx.new(|cx| ph_agent::tools_view::ToolsView::new(store, project, open_file, window, cx));
-    let storage = cx.new(crate::storage::StorageView::new);
-    let chrome = cx.new(ph_browser::ChromeExtensionView::new);
+    // An agent is installed where it can be watched: in a terminal of the
+    // workspace in front, with Settings out of the way.
+    let install: Option<ph_agent::agents_view::Install> =
+        ph_brand::enabled(ph_brand::Feature::Terminal).then(|| {
+            let workspace = workspace.clone();
+            std::rc::Rc::new(
+                move |spec: &'static ph_agent::agents::AgentSpec,
+                      window: &mut Window,
+                      cx: &mut App| {
+                    use gpui_kit::component::WindowExt as _;
+                    let space = workspace
+                        .upgrade()
+                        .and_then(|workspace| workspace.read(cx).active_space().cloned());
+                    let Some(space) = space else {
+                        window.push_notification(
+                            "Open a workspace first: the command runs in its terminal.",
+                            cx,
+                        );
+                        return;
+                    };
+                    window.close_dialog(cx);
+                    space.update(cx, |space, cx| {
+                        space.run_in_terminal(
+                            &format!("Install {}", spec.name),
+                            spec.install_command(),
+                            window,
+                            cx,
+                        )
+                    });
+                },
+            ) as ph_agent::agents_view::Install
+        });
+    let agents = {
+        let store = store.clone();
+        Lazy::new(move |window, cx| {
+            cx.new(|cx| ph_agent::agents_view::AgentsView::new(store, install, window, cx))
+        })
+    };
+    let tools = Lazy::new(move |window, cx| {
+        cx.new(|cx| ph_agent::tools_view::ToolsView::new(store, project, open_file, window, cx))
+    });
+    let storage = Lazy::new(|_, cx| cx.new(crate::storage::StorageView::new));
+    let chrome = Lazy::new(|_, cx| cx.new(ph_browser::ChromeExtensionView::new));
     window.open_dialog(cx, move |dialog, window, cx| {
         // As large as the interface size asks for, within the window.
         // Worked out as it is drawn: the size is changed in this dialog.
@@ -92,7 +147,7 @@ pub(crate) fn open(
         let (fonts, themes, workspace) = (fonts.clone(), themes.clone(), workspace.clone());
         // Opaque, also when the window lets something show through: a
         // dialog over the window must not.
-        let frame_color = ph_theme::preferences::opaque_frame(cx);
+        let frame_color = cx.theme().sidebar;
         let theme = cx.theme();
         let sidebar = gpui_kit::StyleRefinement {
             background: Some(frame_color.into()),
@@ -151,19 +206,14 @@ pub(crate) fn open(
                                     .pages(
                                         // In this order: see `Page::index`.
                                         [
-                                            Some(appearance_page(
-                                                &fonts,
-                                                &themes,
-                                                workspace,
-                                                prefs(cx).window,
-                                            )),
+                                            Some(appearance_page(&fonts, &themes, workspace)),
                                             Some(editor_page(&fonts)),
                                             Some(terminal_page()),
                                             Some(chat_page()),
-                                            Some(agents_page()),
+                                            Some(agents_page(agents.clone())),
+                                            Some(tools_page(tools.clone())),
                                             ph_brand::enabled(ph_brand::Feature::ChromeExtension)
                                                 .then(|| chrome_page(chrome.clone())),
-                                            Some(tools_page(tools.clone())),
                                             Some(github_page(accounts.clone())),
                                             Some(templates_page(templates.clone())),
                                             ph_brand::enabled(ph_brand::Feature::NetworkDrives)
@@ -189,6 +239,42 @@ pub(crate) fn open(
                     ),
             )
     });
+}
+
+/// A page's view, made the first time it is asked for (when its page is
+/// drawn) and kept while Settings is open.
+struct Lazy<V: 'static>(std::rc::Rc<std::cell::RefCell<LazyView<V>>>);
+
+type MakeView<V> = Box<dyn FnOnce(&mut Window, &mut App) -> gpui_kit::Entity<V>>;
+
+enum LazyView<V: 'static> {
+    Later(Option<MakeView<V>>),
+    Made(gpui_kit::Entity<V>),
+}
+
+impl<V: 'static> Clone for Lazy<V> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<V: 'static> Lazy<V> {
+    fn new(make: impl FnOnce(&mut Window, &mut App) -> gpui_kit::Entity<V> + 'static) -> Self {
+        Self(std::rc::Rc::new(std::cell::RefCell::new(LazyView::Later(
+            Some(Box::new(make)),
+        ))))
+    }
+
+    fn get(&self, window: &mut Window, cx: &mut App) -> Option<gpui_kit::Entity<V>> {
+        let make = match &mut *self.0.borrow_mut() {
+            LazyView::Made(view) => return Some(view.clone()),
+            // Being made (asked again from within its own making): none yet.
+            LazyView::Later(make) => make.take()?,
+        };
+        let view = make(window, cx);
+        *self.0.borrow_mut() = LazyView::Made(view.clone());
+        Some(view)
+    }
 }
 
 /// The accent choices as swatches: the theme's own, then each color in the
@@ -219,7 +305,8 @@ fn accent_swatches(cx: &App) -> impl IntoElement + use<> {
                 })
                 .p(px(2.))
                 .tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(accent.label()).build(window, cx)
+                    gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(accent.label()))
+                        .build(window, cx)
                 })
                 .on_click(move |_, _, cx| AppState::update_preferences(cx, |p| p.accent = accent));
             match accent.color(dark) {
@@ -341,7 +428,6 @@ fn appearance_page(
     fonts: &[(SharedString, SharedString)],
     themes: &[(SharedString, SharedString)],
     workspace: gpui_kit::WeakEntity<crate::Workspace>,
-    style: WindowStyle,
 ) -> SettingPage {
     // The system's own font is not among the installed families on macOS
     // (its name is hidden there), so it gets a row of its own.
@@ -350,114 +436,23 @@ fn appearance_page(
         Some((ph_theme::fonts::SYSTEM_INTERFACE, "System font")),
         fonts,
     );
-    // What shows behind the window, and under it the picture's own row.
-    let mut window_group = SettingGroup::new().title("Window").item(
-        SettingItem::new(
-            "Background",
-            SettingField::dropdown(
-                WindowStyle::available()
-                    .into_iter()
-                    .map(|style| (style.label().into(), style.label().into()))
-                    .collect(),
-                |cx| prefs(cx).window.label().into(),
-                |picked, cx| {
-                    let Some(style) = WindowStyle::available()
-                        .into_iter()
-                        .find(|style| style.label() == picked.as_ref())
-                    else {
-                        return;
-                    };
-                    // An image needs one: ask for it first.
-                    if style == WindowStyle::Image && prefs(cx).backdrop_image.is_empty() {
-                        crate::theme_mods::choose_backdrop(cx);
-                    } else {
-                        AppState::update_preferences(cx, |p| p.window = style);
-                    }
-                },
-            ),
-        )
-        .description(if cfg!(windows) {
-            "Translucent lets the desktop show through, blurred; Mica uses Windows 11's material. Gradient and Image show behind the frame, the panels stay easy to read."
-        } else {
-            "Translucent lets the desktop show through, blurred. Gradient and Image show behind the frame, the panels stay easy to read."
-        })
-        .keywords(["transparency", "opacity", "blur", "vibrancy", "mica", "gradient", "image", "wallpaper", "backdrop"]),
-    );
-    match style {
-        WindowStyle::Gradient => {
-            window_group = window_group.item(
-                SettingItem::new(
-                    "Gradient",
-                    choice(
-                        &Gradient::ALL,
-                        Gradient::label,
-                        |p| p.gradient,
-                        |p, v| p.gradient = v,
-                    ),
-                )
-                .description(
-                    "Its colors follow the theme: deep on a dark one, soft on a light one.",
-                )
-                .keywords(["gradient", "backdrop", "colors"]),
-            );
-        }
-        WindowStyle::Image => {
-            window_group = window_group.item(
-                SettingItem::new(
-                    "Image",
-                    SettingField::render(|_, _, _| {
-                        Button::new("choose-backdrop")
-                            .small()
-                            .icon(IconName::FolderOpen)
-                            .label("Choose image")
-                            .on_click(|_, _, cx| crate::theme_mods::choose_backdrop(cx))
-                    }),
-                )
-                .description(format!(
-                    "PNG, JPEG, WebP, GIF or BMP. {} keeps its own copy, sized for a screen.",
-                    ph_brand::NAME
-                ))
-                .keywords(["image", "wallpaper", "picture", "backdrop"]),
-            );
-        }
-        _ => {}
-    }
-    if style != WindowStyle::Solid {
-        window_group = window_group.item(
-            SettingItem::new(
-                "Panel opacity (%)",
-                number(
-                    55.0,
-                    100.0,
-                    5.0,
-                    |p| (p.opacity * 100.0).round() as f64,
-                    |p, v| p.opacity = (v / 100.0) as f32,
-                ),
-            )
-            .description("How solid the panels are over what shows behind them.")
-            .keywords(["transparency", "alpha"]),
-        );
-    }
     SettingPage::new("Appearance")
         .icon(Icon::new(Icons::Palette))
-        .default_open(true)
         .group(
             SettingGroup::new()
                 .title("Layout")
                 .item(
                     SettingItem::new("Density", choice(&Density::ALL, Density::label, |p| p.density, |p, v| p.density = v))
-                        .description("How much room rows and spacing take in the sidebar, the file tree, the Git lists and the chat.")
+                        .description("How much room rows take in lists, the file tree and the chat.")
                         .keywords(["density", "compact", "spacing", "padding", "rows"]),
                 )
                 .item(
                     SettingItem::new(
-                        "Names under tool icons",
-                        switch(|p| p.tool_labels, |p, v| p.tool_labels = v),
+                        "Names under the icons",
+                        switch(|p| p.rail_names, |p, v| p.rail_names = v),
                     )
-                    .description(
-                        "Show each tool's name under its icon on the right, not only when pointing at it.",
-                    )
-                    .keywords(["layout", "labels", "tools", "icons", "activity bar"]),
+                    .description("In the column at the window's left edge. Off, a name shows when you point at its icon.")
+                    .keywords(["layout", "labels", "tools", "tool icons", "icons", "activity bar"]),
                 ),
         )
         .group(
@@ -483,12 +478,12 @@ fn appearance_page(
                             },
                         ),
                     )
-                    .description("Match system follows your computer's light or dark mode with Modern Light and Modern Dark. Themes you design are listed too.")
+                    .description("Match system follows your computer's light or dark mode.")
                     .keywords(["dark", "light", "mode", "theme", "palette", "colors", "dracula", "one dark", "warm", "studio"]),
                 )
                 .item(
                     SettingItem::new("Accent", SettingField::render(|_, _, cx| accent_swatches(cx)))
-                        .description("One color for focus, links, selection and highlights, over the theme's own.")
+                        .description("The color of focus, links and selection. The first one is the theme's own.")
                         .keywords(["accent", "color", "highlight", "tint"]),
                 )
                 .item(
@@ -536,15 +531,17 @@ fn appearance_page(
                                 )
                         }),
                     )
-                    .description(format!("Describe the look you want in a chat: the agent changes {} as you talk, and saves it as a theme of your own. Or import a VS Code theme.", ph_brand::NAME))
-                    .keywords(["theme", "design", "customize", "colors", "mod", "agent"]),
+                    .description("Describe the look you want in a chat and the agent builds the theme as you talk, or import a VS Code theme.")
+                    // Its three buttons are wider than the room a row
+                    // leaves beside its text: they go under it.
+                    .layout(gpui_kit::Axis::Vertical)
+                    .keywords(["theme", "design", "customize", "colors", "mod", "agent", "vs code", "import"]),
                 )
                 .item(
                     SettingItem::new("Corners", choice(&Corners::ALL, Corners::label, |p| p.corners, |p, v| p.corners = v))
                         .description("How rounded panels, buttons and cards are."),
                 ),
         )
-        .group(window_group)
         .group(
             SettingGroup::new()
                 .title("Text")
@@ -557,12 +554,12 @@ fn appearance_page(
                             |picked, cx| AppState::update_preferences(cx, |p| p.ui_font = picked.to_string()),
                         ),
                     )
-                    .description("Used for menus, chat and labels. The default looks the same on macOS, Windows and Linux.")
+                    .description("For menus, chat and labels.")
                     .keywords(["font", "typeface", "family"]),
                 )
                 .item(
                     SettingItem::new("Interface size", number(11.0, ph_theme::preferences::MAX_UI_FONT_SIZE as f64, 1.0, |p| p.ui_font_size as f64, |p, v| p.ui_font_size = v as f32))
-                        .description("Text, icons and spacing across the app grow and shrink together.")
+                        .description("Text, icons and spacing grow and shrink together.")
                         .keywords(["font size", "zoom", "bigger", "smaller"]),
                 ),
         )
@@ -588,9 +585,7 @@ fn editor_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {
                             },
                         ),
                     )
-                    .description(
-                        "Used for code, diffs and terminals. A monospaced font reads best.",
-                    )
+                    .description("For code, diffs and terminals.")
                     .keywords(["font", "monospace", "family"]),
                 )
                 .item(
@@ -662,7 +657,7 @@ fn editor_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {
                             |p, v| p.editor.auto_save = v,
                         ),
                     )
-                    .description("Writes a file's changes without ⌘S: a moment after you stop typing, or when you leave the editor. A file that changed on disk meanwhile is never written over by itself.")
+                    .description("Saves a file a moment after you stop typing, or when you leave the editor. A file that changed on disk meanwhile is never overwritten.")
                     .keywords(["autosave", "save", "write"]),
                 ),
         )
@@ -688,110 +683,244 @@ fn terminal_page() -> SettingPage {
                     .keywords(["terminal", "shell", "console"]),
                 )
                 .item(
-                    SettingItem::render(|_, _, cx| {
-                        let (shell, _) = ph_env::default_shell();
-                        note(format!("Shell: {}", shell.display()), cx)
-                    })
+                    SettingItem::new(
+                        "Shell",
+                        SettingField::render(|_, _, cx| {
+                            let (shell, _) = ph_env::default_shell();
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(shell.display().to_string())
+                        }),
+                    )
+                    .description("New terminals start your system's default shell.")
                     .keywords(["shell", "powershell", "zsh", "bash"]),
                 ),
         )
 }
 
-/// GitHub and GitHub Enterprise accounts, for pull requests.
-fn tools_page(tools: gpui_kit::Entity<ph_agent::tools_view::ToolsView>) -> SettingPage {
-    SettingPage::new("MCP & skills")
-        .icon(Icon::new(Icons::Plug))
-        .group(
-            SettingGroup::new().item(SettingItem::render(move |_, _, _| {
-                div().w_full().py_1().child(tools.clone())
-            })),
-        )
+/// A page that is one view of its own. `keywords` are what Search finds it
+/// by: a view has no titles for it to read, and without any the page is in
+/// no search result.
+fn view_page<V: gpui_kit::Render>(
+    title: &'static str,
+    icon: Icons,
+    keywords: &'static [&'static str],
+    view: Lazy<V>,
+) -> SettingPage {
+    SettingPage::new(title).icon(Icon::new(icon)).group(
+        SettingGroup::new().item(
+            SettingItem::render(move |_, window, cx| {
+                div().w_full().py_1().children(view.get(window, cx))
+            })
+            .keywords(keywords.iter().copied()),
+        ),
+    )
 }
 
-fn github_page(accounts: gpui_kit::Entity<ph_pulls::AccountsView>) -> SettingPage {
-    SettingPage::new("GitHub")
-        .icon(Icon::new(Icons::GitPullRequest))
-        .group(
-            SettingGroup::new().item(SettingItem::render(move |_, _, _| {
-                div().w_full().py_1().child(accounts.clone())
-            })),
-        )
+/// Settings → MCP & skills: what every agent is given to work with.
+fn tools_page(tools: Lazy<ph_agent::tools_view::ToolsView>) -> SettingPage {
+    view_page(
+        "MCP & skills",
+        Icons::Plug,
+        &["mcp", "server", "skill", "tool", "plugin"],
+        tools,
+    )
 }
 
-/// Settings → Network drives (see [`crate::network_drives`]).
-fn templates_page(view: gpui_kit::Entity<ph_pulls::TemplatesView>) -> SettingPage {
-    SettingPage::new("Templates")
-        .icon(Icon::new(Icons::ScrollText))
-        .group(
-            SettingGroup::new().item(SettingItem::render(move |_, _, _| {
-                div().w_full().py_1().child(view.clone())
-            })),
-        )
+/// Settings → GitHub: GitHub and GitHub Enterprise accounts, for pull
+/// requests.
+fn github_page(accounts: Lazy<ph_pulls::AccountsView>) -> SettingPage {
+    view_page(
+        "GitHub",
+        Icons::GitPullRequest,
+        &[
+            "github",
+            "account",
+            "token",
+            "enterprise",
+            "sign in",
+            "pull request",
+        ],
+        accounts,
+    )
+}
+
+/// Settings → Review templates (see [`ph_pulls::TemplatesView`]). Named for
+/// what they are templates of: "Templates" alone said nothing in a list
+/// that also has themes and run configurations.
+fn templates_page(view: Lazy<ph_pulls::TemplatesView>) -> SettingPage {
+    view_page(
+        "Review templates",
+        Icons::ScrollText,
+        &["template", "review", "prompt", "pull request", "starter"],
+        view,
+    )
 }
 
 /// Settings → Storage (see [`crate::storage`]).
-fn storage_page(view: gpui_kit::Entity<crate::storage::StorageView>) -> SettingPage {
-    SettingPage::new("Storage")
-        .icon(Icon::new(Icons::HardDrive))
-        .group(SettingGroup::new().item(
-            SettingItem::render(move |_, _, _| div().w_full().py_1().child(view.clone())).keywords(
-                [
-                    "disk",
-                    "space",
-                    "clean",
-                    "clones",
-                    "worktrees",
-                    "tasks",
-                    "storage",
-                ],
-            ),
-        ))
+fn storage_page(view: Lazy<crate::storage::StorageView>) -> SettingPage {
+    view_page(
+        "Storage",
+        Icons::HardDrive,
+        &[
+            "disk",
+            "space",
+            "clean",
+            "clear",
+            "clones",
+            "worktrees",
+            "tasks",
+            "storage",
+            "logs",
+            "cache",
+        ],
+        view,
+    )
 }
 
-fn drives_page(view: gpui_kit::Entity<crate::network_drives::NetworkDrivesView>) -> SettingPage {
-    SettingPage::new("Network drives")
-        .icon(Icon::new(Icons::HardDrive))
-        .group(
-            SettingGroup::new().item(SettingItem::render(move |_, _, _| {
-                div().w_full().py_1().child(view.clone())
-            })),
-        )
+/// Settings → Network drives (see [`crate::network_drives`]).
+fn drives_page(view: Lazy<crate::network_drives::NetworkDrivesView>) -> SettingPage {
+    view_page(
+        "Network drives",
+        Icons::Server,
+        &[
+            "network", "drive", "share", "ssh", "samba", "smb", "server", "mapped",
+        ],
+        view,
+    )
 }
 
 /// Settings → Chrome extension (see [`ph_browser::ChromeExtensionView`]).
-fn chrome_page(view: gpui_kit::Entity<ph_browser::ChromeExtensionView>) -> SettingPage {
-    SettingPage::new("Chrome extension")
-        .icon(Icon::new(IconName::Globe))
-        .group(SettingGroup::new().item(
-            SettingItem::render(move |_, _, _| div().w_full().py_1().child(view.clone())).keywords(
-                [
-                    "chrome",
-                    "edge",
-                    "brave",
-                    "browser",
-                    "extension",
-                    "tab group",
-                    "agents",
-                ],
-            ),
-        ))
+fn chrome_page(view: Lazy<ph_browser::ChromeExtensionView>) -> SettingPage {
+    view_page(
+        "Chrome extension",
+        Icons::Globe,
+        &[
+            "chrome",
+            "edge",
+            "brave",
+            "browser",
+            "extension",
+            "tab group",
+        ],
+        view,
+    )
 }
 
-/// Each agent's setup status, checked when the page renders.
-fn agents_page() -> SettingPage {
+/// Settings → Agents: how a session opens, the agents found here (each with
+/// what can be set for it) and those that are not, with how to install
+/// them. What was found is remembered for a few seconds; *Check again*
+/// asks anew.
+fn agents_page(agents: Lazy<ph_agent::agents_view::AgentsView>) -> SettingPage {
     SettingPage::new("Agents")
         .icon(Icon::new(Icons::Bot))
+        .title_suffix(|_, _| {
+            div().pl_2().child(
+                Button::new("agents-recheck")
+                    .xsmall()
+                    .ghost()
+                    .icon(IconName::Redo)
+                    .label("Check again")
+                    .tooltip("Look again for agents installed or signed in since")
+                    .on_click(|_, window, cx| {
+                        ph_agent::installed::recheck(cx);
+                        window.refresh();
+                    }),
+            )
+        })
         .group(
-            SettingGroup::new().items(ph_agent::agents::AGENTS.iter().map(|spec| {
-                SettingItem::render(move |_, _, cx| {
-                    let checks = ph_agent::setup::checks(spec);
-                    div()
-                        .w_full()
-                        .py_1()
-                        .child(ph_agent::setup_view::card(spec, &checks, None, cx))
+            SettingGroup::new().item(
+                SettingItem::render(move |_, window, cx| {
+                    div().w_full().py_1().children(agents.get(window, cx))
                 })
-            })),
+                .keywords(
+                    [
+                        "agent",
+                        "install",
+                        "sign in",
+                        "cli",
+                        "chat",
+                        "account",
+                        "command",
+                        "environment",
+                        "arguments",
+                    ]
+                    .into_iter()
+                    .chain(
+                        ph_agent::agents::AGENTS
+                            .iter()
+                            .flat_map(|spec| [spec.name, spec.id]),
+                    ),
+                ),
+            ),
         )
+        .groups(agent_updates_group())
+        .groups(web_pages_group())
+}
+
+/// Settings → Agents → Updates: whether to look for newer versions of the
+/// agents' CLIs (`agent_updates`). Not in a build whose brand turns
+/// updates off, which never looks.
+fn agent_updates_group() -> Option<SettingGroup> {
+    ph_brand::UPDATES_ENABLED.then(|| {
+        SettingGroup::new().title("Updates").item(
+            SettingItem::new(
+                "Look for new versions of the agents' CLIs",
+                SettingField::switch(
+                    crate::agent_updates::enabled,
+                    crate::agent_updates::set_enabled,
+                ),
+            )
+            .description(
+                "Once a day each installed CLI is asked its version, and the npm registry the newest one of its package. Nothing about you or this computer is sent. A CLI that is behind shows at the bottom of the window, where you can update it.",
+            )
+            .keywords(["update", "version", "upgrade", "cli", "npm", "registry"]),
+        )
+    })
+}
+
+/// Settings → Agents → Web pages: which browser agents open pages in first
+/// (see [`ph_browser::preference`]). Only in a build with both browsers:
+/// with one, there is nothing to choose.
+fn web_pages_group() -> Option<SettingGroup> {
+    use ph_brand::{Feature, enabled};
+    use ph_browser::preference::{self, Preferred};
+    if !(enabled(Feature::ChromeExtension) && enabled(Feature::Browser)) {
+        return None;
+    }
+    Some(
+        SettingGroup::new().title("Web pages").item(
+            SettingItem::new(
+                "Preferred browser",
+                SettingField::dropdown(
+                    Preferred::ALL
+                        .iter()
+                        .map(|browser| (browser.label().into(), browser.label().into()))
+                        .collect(),
+                    |cx| preference::preferred(AppState::store(cx)).label().into(),
+                    |picked, cx| {
+                        let Some(browser) = Preferred::ALL
+                            .into_iter()
+                            .find(|browser| browser.label() == picked.as_ref())
+                        else {
+                            return;
+                        };
+                        if let Err(err) = preference::set_preferred(AppState::store(cx), browser)
+                        {
+                            tracing::warn!("saving the preferred browser failed: {err:#}");
+                        }
+                    },
+                ),
+            )
+            .description(
+                "Where agents open web pages first. Chrome is your own, with your sign-ins, through the PilotHouse extension; when it is not connected, agents use the built-in browser.",
+            )
+            .keywords([
+                "browser", "chrome", "built-in", "inbuilt", "preferred", "default", "web", "extension",
+            ]),
+        ),
+    )
 }
 
 fn chat_page() -> SettingPage {
@@ -808,7 +937,9 @@ fn chat_page() -> SettingPage {
                         |p, v| p.chat_width = v,
                     ),
                 )
-                .description("How wide messages get on a large window.")
+                .description(
+                    "How wide messages get in a pane with room to spare: a column, a wider one, or the whole pane. Also under ⋯ in the chat.",
+                )
                 .keywords(["chat", "width", "column"]),
             ),
         );
@@ -822,8 +953,15 @@ fn chat_page() -> SettingPage {
                         SettingField::render(|_, _, _| crate::quick_chat::ShortcutRecorder),
                     )
                     .description(format!(
-                        "Opens a small chat window over every app, from anywhere, while {app} runs; again, it hides it. Its chats are under Chats. The command “pilothouse quick-chat” opens it too: give that a shortcut in your system's keyboard settings (on Wayland, the only way).",
-                        app = ph_brand::NAME
+                        "Opens a small chat window over any app while {app} runs, and hides it again. Its chats are kept under Chats.{wayland}",
+                        app = ph_brand::NAME,
+                        // Only where it matters: a Wayland session gives
+                        // an app no key of its own.
+                        wayland = if cfg!(target_os = "linux") {
+                            " On Wayland, give the command “pilothouse quick-chat” a shortcut in your system's keyboard settings instead."
+                        } else {
+                            ""
+                        }
                     ))
                     .keywords(["quick", "chat", "shortcut", "hotkey", "global", "floating", "popup", "spotlight"]),
                 ),
@@ -835,8 +973,10 @@ fn features_page() -> SettingPage {
         .icon(Icon::new(Icons::LayoutGrid))
         .group(
             SettingGroup::new()
+                // A group's description shows only under a title.
+                .title("Workspace tools")
                 .description(
-                    "Turn off tools you do not use. Nothing runs for a tool until you open it.",
+                    "Turn off the ones you do not use. Nothing runs for a tool until you open it.",
                 )
                 .items(ContextTab::available().map(|tab| {
                     SettingItem::new(
@@ -846,7 +986,8 @@ fn features_page() -> SettingPage {
                             move |enabled, cx| AppState::set_tab_enabled(tab, enabled, cx),
                         ),
                     )
-                    .keywords(["feature", "tab", "panel"])
+                    .description(tab.about())
+                    .keywords(["feature", "tab", "panel", "tool"])
                 })),
         )
         .group(system_group())
@@ -857,20 +998,18 @@ fn system_group() -> SettingGroup {
     use crate::shell_integration as shell;
     let group = SettingGroup::new().title("System");
     if !shell::SUPPORTED {
+        // Nothing to switch on macOS: Finder offers it by itself. Said as
+        // text across the row (as a value beside it, it ran off the page).
         return group.item(
             SettingItem::new(
                 format!("Open with {}", ph_brand::NAME),
-                SettingField::render(|_, _, cx| {
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!(
-                            "In Finder: right-click → Open With → {}",
-                            ph_brand::NAME
-                        ))
-                }),
+                SettingField::render(|_, _, _| div()),
             )
-            .description("Folders open as workspaces, files in the editor. From a terminal: pilothouse <path>.")
+            .description(format!(
+                "In Finder, right-click a folder or a file, then Open With → {}. Folders open as workspaces, files in the editor. From a terminal: pilothouse <path>.",
+                ph_brand::NAME
+            ))
+            .layout(gpui_kit::Axis::Vertical)
             .keywords(["finder", "open with", "context menu"]),
         );
     }
@@ -986,24 +1125,24 @@ fn about_page() -> SettingPage {
                 }))
                 .item(
                     SettingItem::new(
-                        "Check for updates",
+                        "Check for updates automatically",
                         SettingField::switch(
                             crate::updates::auto_check,
                             crate::updates::set_auto_check,
                         ),
                     )
-                    .description("Looks at the project's GitHub releases, or its mirrors, at start and every six hours. Nothing is sent.")
+                    .description("At start and every six hours, from the project's GitHub releases. Nothing about you is sent.")
                     .keywords(["update", "version", "release", "github", "mirror"]),
                 )
                 .item(
                     SettingItem::new(
-                        "Download updates by themselves",
+                        "Install updates automatically",
                         SettingField::switch(
                             crate::updates::auto_install,
                             crate::updates::set_auto_install,
                         ),
                     )
-                    .description("A new version downloads in the background and installs when you quit (or at once with Restart to update). Each download is checked against the SHA-256 in the release's signed manifest.")
+                    .description("A new version downloads in the background and installs when you quit. Each download is verified against the release's signed manifest.")
                     .keywords(["update", "install", "download"]),
                 ),
         )

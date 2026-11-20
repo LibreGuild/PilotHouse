@@ -52,6 +52,21 @@ fn main() {
 }
 
 fn run_app(open: Vec<std::path::PathBuf>, quick_chat: bool) -> Result<()> {
+    // One app per data folder, settled before the database or a window is
+    // opened: two launches at once (several files opened from Explorer, an
+    // icon clicked twice) found no app to hand over to, and each would
+    // become one on the same database. Held until the app exits.
+    let _instance = match instance_lock() {
+        Ok(Some(lock)) => Some(lock),
+        Ok(None) => std::process::exit(cli::hand_over_once_started(&open, quick_chat)),
+        Err(err) => {
+            tracing::warn!("no instance lock: {err:#}");
+            None
+        }
+    };
+    // Started from a terminal inside an agent's session (or by an agent):
+    // the agents this app starts are not that session's children.
+    ph_env::forget_parent_session();
     logs::write_to_file();
     // Agents and terminals need the login shell's PATH; read it while the UI starts.
     ph_env::warm_up();
@@ -64,7 +79,14 @@ fn run_app(open: Vec<std::path::PathBuf>, quick_chat: bool) -> Result<()> {
     app.on_open_urls(move |urls| {
         let _ = opened.send_blocking(urls);
     });
+    // The Dock icon clicked with every window closed (macOS): a window again.
+    app.on_reopen(|cx| {
+        if let Err(err) = ph_workspace::main_workspace_or_open(cx) {
+            tracing::warn!("opening a window failed: {err:#}");
+        }
+    });
     app.run(move |cx| {
+        ph_theme::before_init(cx);
         gpui_kit::init(cx);
         ph_ui::rich_copy::use_system_clipboard();
         ph_theme::init(cx);
@@ -110,7 +132,7 @@ fn run_app(open: Vec<std::path::PathBuf>, quick_chat: bool) -> Result<()> {
         })
         .detach();
         if let Err(err) = ph_control::ControlServer::start(&paths::control_socket_path(), cx) {
-            // The app is fully usable without it; agents just can't reach the board.
+            // The app is fully usable without it; agents just can't reach its tools.
             tracing::warn!("control socket unavailable: {err:#}");
         }
         cx.activate(true);
@@ -119,6 +141,26 @@ fn run_app(open: Vec<std::path::PathBuf>, quick_chat: bool) -> Result<()> {
         }
     });
     Ok(())
+}
+
+/// Takes the data folder's instance lock (`None`: another launch holds
+/// it). The system lets go of it when the app exits, also by a crash, so a
+/// lock is never left behind.
+fn instance_lock() -> std::io::Result<Option<std::fs::File>> {
+    let path = paths::database_path().with_extension("lock");
+    if let Some(parent) = path.parent() {
+        paths::ensure_private_dir(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(err)) => Err(err),
+    }
 }
 
 fn open_main_window(cx: &mut App) -> Result<()> {

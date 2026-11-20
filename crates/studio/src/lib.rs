@@ -20,7 +20,7 @@ pub mod render;
 pub mod slides;
 pub mod video;
 
-pub use control::register_control_methods;
+pub use control::{register_control_methods, set_workspace_folders};
 pub use document::{Estimate, ImageDocument, View};
 pub use edit::ImageEdit;
 pub use editor::{ImageEditor, bind_keys};

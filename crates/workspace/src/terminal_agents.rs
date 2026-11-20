@@ -1,5 +1,5 @@
 //! Coding agents run as their own CLI in a workspace terminal, followed by
-//! PilotHouse. Their state shows on the terminal tab, on the Agents board
+//! PilotHouse. Their state shows on the terminal tab, on the Bridge
 //! and in notifications, like a chat's. How PilotHouse knows, best first:
 //!
 //! 1. **Hooks** (Claude Code started from PilotHouse): per-launch settings
@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use gpui_kit::{App, AppContext as _, Entity, Global, WeakEntity};
+use gpui_kit::{App, AppContext as _, Entity, Global, Task, WeakEntity};
 use ph_agent::ChatState;
 use ph_agent::agents::AgentSpec;
 use ph_store::paths;
@@ -50,11 +50,19 @@ pub(crate) struct TerminalAgent {
     pub state: ChatState,
     /// The first thing asked, as its name.
     pub title: Option<String>,
+    /// Whether what the program calls itself (its status' title, the
+    /// title it gives its terminal) is its name: so for an agent started
+    /// by hand in a terminal. One started as a chat's CLI is not named by
+    /// its terminal: a chat named "zsh" says nothing.
+    pub named_by_program: bool,
     /// What it is doing, asks, or said last.
     pub line: Option<String>,
     /// The agent's own session id and its session file.
     pub session_id: Option<String>,
     pub transcript: Option<PathBuf>,
+    /// What it was started with beside the user's own environment (its
+    /// account): where its files are is read from this.
+    pub environment: Vec<(String, String)>,
     pub updated_at: i64,
     /// When PilotHouse first saw it (Unix milliseconds).
     pub since: i64,
@@ -186,6 +194,39 @@ impl TerminalAgents {
     }
 
     /// The user looked at agent `pane`: its news is seen.
+    /// Chat `session` was given the name `title` by the user: its CLI, if
+    /// one runs, goes by it, and no longer by what the program calls
+    /// itself.
+    pub(crate) fn renamed(session: SessionId, title: &str, cx: &mut App) {
+        if let Some(agent) = cx
+            .default_global::<Self>()
+            .agents
+            .iter_mut()
+            .find(|agent| agent.session == Some(session))
+        {
+            agent.title = Some(title.to_string());
+            // As saved already: it is not written over the name again.
+            agent.saved.title = agent.title.clone();
+            agent.named_by_program = false;
+        }
+    }
+
+    /// Chat `session` goes on in the chat from here: the agent in its CLI
+    /// (closed with this) is no longer followed, so nothing more of the
+    /// CLI is kept with the chat. Its transcript is the chat's own again,
+    /// and what [`sync`] keeps of an agent whose terminal went (its record
+    /// as text, in the transcript's place) would write over it.
+    pub(crate) fn let_go(session: SessionId, cx: &mut App) {
+        if Self::list(cx)
+            .iter()
+            .any(|agent| agent.session == Some(session))
+        {
+            cx.default_global::<Self>()
+                .agents
+                .retain(|agent| agent.session != Some(session));
+        }
+    }
+
     pub(crate) fn seen(pane: &str, cx: &mut App) {
         let Some(agent) = cx
             .default_global::<Self>()
@@ -199,6 +240,13 @@ impl TerminalAgents {
         let terminal = agent.terminal.clone();
         _ = terminal.update(cx, |terminal, cx| terminal.acknowledge(cx));
     }
+}
+
+/// Keeps now what is known of the agents in terminals (their names, their
+/// own sessions): for one whose program is about to be closed before the
+/// next look, which would have kept it.
+pub(crate) fn save_now(cx: &mut App) {
+    remember(cx);
 }
 
 /// The id of an agent found from its terminal.
@@ -386,7 +434,11 @@ pub(crate) fn sync(cx: &mut App) {
                     if found.line.is_some() || found.source == Source::ProgramStatus {
                         agent.line = found.line;
                     }
-                    if found.title.is_some() {
+                    // What the program calls itself names an agent
+                    // started by hand. A session started from a chat is
+                    // named as chats are: it keeps the chat's name, or
+                    // takes the first thing asked (its hooks, its file).
+                    if found.title.is_some() && agent.named_by_program {
                         agent.title = found.title;
                     }
                 }
@@ -400,9 +452,12 @@ pub(crate) fn sync(cx: &mut App) {
                         agent: found.agent,
                         state: found.state,
                         title: found.title,
+                        named_by_program: true,
                         line: found.line,
                         session_id,
                         transcript: None,
+                        // Started by hand: in the user's own environment.
+                        environment: Vec::new(),
                         updated_at: now(),
                         since: now(),
                         session: None,
@@ -581,6 +636,11 @@ fn remember(cx: &mut App) {
 /// chat: the last thing it said (under its title), and what was asked and
 /// answered, for Search chats. Read from its session file (found by its id
 /// in its folder when not known), off the UI thread.
+///
+/// What was asked and answered takes the place of the chat's stored
+/// messages, so only for a session that was a CLI's from its start: a chat
+/// that went on in its agent's CLI has its own transcript there, which
+/// stays (see `workspace_screen::cli`).
 fn keep_last_reply(
     session: SessionId,
     agent: &'static str,
@@ -601,27 +661,40 @@ fn keep_last_reply(
         let job_store = store.clone();
         let line = cx
             .background_spawn(async move {
+                // Deleted meanwhile: there is no chat to keep it with.
+                let row = job_store.session(session).ok().flatten()?;
+                // A chat's own transcript (it went on in its agent's CLI,
+                // or is back in the chat by now) is not written over: what
+                // was said in the CLI is added to it on the way back.
+                let own_transcript =
+                    crate::workspace_screen::cli::has_chat_transcript(&job_store, &row);
                 let path = transcript.or_else(|| {
-                    let row = job_store.session(session).ok().flatten()?;
-                    let (cwd, cli) = (PathBuf::from(row.cwd?), cli?);
-                    ph_agent::cli_sessions::sessions(agent, &cwd)
+                    // Its files are where its account keeps them.
+                    let environment = ph_agent::profiles::Profiles::load(&job_store)
+                        .of(agent)
+                        .environment_for(&row.account);
+                    let (cwd, cli) = (PathBuf::from(row.cwd.clone()?), cli?);
+                    ph_agent::cli_sessions::sessions_in(agent, &cwd, &environment)
                         .into_iter()
                         .find(|past| past.id == cli)?
                         .path
                 })?;
                 let said = ph_agent::cli_transcript::said(format, &path);
                 let line = ph_agent::cli_transcript::first_line_of_last_reply(&said);
-                // For Search: the start of each message is enough, and keeps
-                // the write (under the store's lock) short for a long session.
-                const KEPT_CHARS: usize = 8_000;
-                let messages: Vec<(&str, String)> = said
-                    .into_iter()
-                    .map(|(role, text)| {
-                        let text: String = text.chars().take(KEPT_CHARS).collect();
-                        (role, serde_json::json!({ "text": text }).to_string())
-                    })
-                    .collect();
-                let _ = job_store.replace_messages(session, &messages);
+                if !own_transcript {
+                    // For Search: the start of each message is enough, and
+                    // keeps the write (under the store's lock) short for a
+                    // long session.
+                    const KEPT_CHARS: usize = 8_000;
+                    let messages: Vec<(&str, String)> = said
+                        .into_iter()
+                        .map(|(role, text)| {
+                            let text: String = text.chars().take(KEPT_CHARS).collect();
+                            (role, serde_json::json!({ "text": text }).to_string())
+                        })
+                        .collect();
+                    let _ = job_store.replace_messages(session, &messages);
+                }
                 if line.is_some() {
                     let _ = job_store.set_session_line(session, line.as_deref());
                 }
@@ -636,100 +709,181 @@ fn keep_last_reply(
     .detach();
 }
 
+/// What is needed to look for a terminal agent's own session in its files.
+#[derive(Clone)]
+struct Look {
+    pane: String,
+    agent: &'static str,
+    project: ProjectId,
+    since: i64,
+    cwd: PathBuf,
+    environment: Vec<(String, String)>,
+}
+
+impl Look {
+    fn of(agent: &TerminalAgent, cx: &App) -> Option<Self> {
+        let terminal = agent.terminal.upgrade()?;
+        Some(Self {
+            pane: agent.pane.clone(),
+            agent: agent.agent.id,
+            project: agent.project,
+            since: agent.since,
+            cwd: terminal.read(cx).cwd().to_path_buf(),
+            environment: agent.environment.clone(),
+        })
+    }
+
+    /// The agent's session this terminal is in: the newest in its folder
+    /// since it started that no other terminal agent (`taken`) and no chat
+    /// of the workspace has. Reads the agent's files: off the UI thread.
+    fn run(
+        self,
+        taken: Vec<String>,
+        store: &ph_store::Store,
+    ) -> Option<ph_agent::cli_sessions::PastSession> {
+        // The workspace's chats with this agent (ACP sessions are its
+        // CLI's own) are not this terminal's.
+        let chats: Vec<String> = store
+            .sessions(self.project)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|chat| chat.kind != "terminal" && chat.agent_id == self.agent)
+            .filter_map(|chat| chat.acp_session_id)
+            .collect();
+        ph_agent::cli_sessions::sessions_in(self.agent, &self.cwd, &self.environment)
+            .into_iter()
+            // Sessions keep their file's time; slack for the clock.
+            .find(|session| {
+                session.updated_at >= self.since - 5_000
+                    && !taken.contains(&session.id)
+                    && !chats.contains(&session.id)
+            })
+    }
+}
+
+/// The sessions terminal agents are known to be in: not another's.
+fn taken_sessions(cx: &App) -> Vec<String> {
+    TerminalAgents::list(cx)
+        .iter()
+        .filter_map(|agent| agent.session_id.clone())
+        .collect()
+}
+
+/// The agent in `pane` is in session `found` of its own.
+fn take_session(pane: &str, found: ph_agent::cli_sessions::PastSession, cx: &mut App) {
+    if let Some(agent) = cx
+        .default_global::<TerminalAgents>()
+        .agents
+        .iter_mut()
+        .find(|agent| agent.pane == pane && agent.session_id.is_none())
+    {
+        agent.session_id = Some(found.id);
+        if agent.transcript.is_none() {
+            agent.transcript = found.path;
+        }
+        // Agents that do not say what they were asked (Gemini).
+        if agent.title.is_none() && !found.title.is_empty() {
+            agent.title = Some(found.title);
+        }
+        if found.updated_at > agent.updated_at {
+            agent.updated_at = found.updated_at;
+        }
+    }
+}
+
 /// For agents whose own session is not known yet: looks for it in their
-/// files (off the UI thread; 30 seconds after the last look, then twice as
-/// long each time up to 10 minutes, again soon once it is asked something),
-/// the newest in their folder since they started that no other agent and no
-/// chat of the workspace has, so their chat is saved and can be resumed and
-/// read once the terminal closes. One never asked anything has none, so it
-/// is not saved.
+/// files (off the UI thread), the newest in their folder since they
+/// started that no other agent and no chat of the workspace has, so their
+/// chat is saved and can be resumed and read once the terminal closes. One
+/// never asked anything has none, so it is not saved.
+///
+/// Looked for two seconds after the last look, then twice as long each
+/// time up to ten minutes, and from two seconds again once it is asked
+/// something: an agent writes its session down with the first thing it is
+/// asked, and who goes back to the chat then should find it known.
 fn find_sessions(cx: &mut App) {
-    const FIRST: i64 = 30_000;
+    const FIRST: i64 = 2_000;
     const LONGEST: i64 = 600_000;
     let now = now();
     let due = |agent: &TerminalAgent| {
-        let wait = (FIRST << agent.looks.min(5)).min(LONGEST);
+        let wait = (FIRST << agent.looks.min(9)).min(LONGEST);
         agent.session_id.is_none() && now - agent.looked_at >= wait
     };
     if !TerminalAgents::list(cx).iter().any(due) {
         return;
     }
-    let mut jobs = Vec::new();
     let store = crate::AppState::store(cx).clone();
-    let state = cx.default_global::<TerminalAgents>();
-    let taken: Vec<String> = state
-        .agents
+    let taken = taken_sessions(cx);
+    let looks: Vec<Look> = TerminalAgents::list(cx)
         .iter()
-        .filter_map(|agent| agent.session_id.clone())
+        .filter(|agent| due(agent))
+        .filter_map(|agent| Look::of(agent, cx))
         .collect();
-    for agent in &mut state.agents {
-        if !due(agent) {
-            continue;
+    for agent in &mut cx.default_global::<TerminalAgents>().agents {
+        if due(agent) {
+            agent.looked_at = now;
+            agent.looks = agent.looks.saturating_add(1);
         }
-        agent.looked_at = now;
-        agent.looks = agent.looks.saturating_add(1);
-        let Some(terminal) = agent.terminal.upgrade() else {
-            continue;
-        };
-        jobs.push((
-            agent.pane.clone(),
-            agent.agent.id,
-            agent.project,
-            agent.since,
-            terminal,
-        ));
     }
-    for (pane, agent_id, project, since, terminal) in jobs {
-        let cwd = terminal.read(cx).cwd().to_path_buf();
-        let (taken, store) = (taken.clone(), store.clone());
+    for look in looks {
+        let (taken, store, pane) = (taken.clone(), store.clone(), look.pane.clone());
         cx.spawn(async move |cx| {
             let found = cx
-                .background_spawn(async move {
-                    // The workspace's chats with this agent (ACP sessions
-                    // are its CLI's own) are not this terminal's.
-                    let chats: Vec<String> = store
-                        .sessions(project)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|chat| chat.kind != "terminal" && chat.agent_id == agent_id)
-                        .filter_map(|chat| chat.acp_session_id)
-                        .collect();
-                    ph_agent::cli_sessions::sessions(agent_id, &cwd)
-                        .into_iter()
-                        // Sessions keep their file's time; slack for the clock.
-                        .find(|session| {
-                            session.updated_at >= since - 5_000
-                                && !taken.contains(&session.id)
-                                && !chats.contains(&session.id)
-                        })
-                })
+                .background_spawn(async move { look.run(taken, &store) })
                 .await;
-            let Some(found) = found else {
-                return;
-            };
-            cx.update(|cx| {
-                if let Some(agent) = cx
-                    .default_global::<TerminalAgents>()
-                    .agents
-                    .iter_mut()
-                    .find(|agent| agent.pane == pane && agent.session_id.is_none())
-                {
-                    agent.session_id = Some(found.id);
-                    if agent.transcript.is_none() {
-                        agent.transcript = found.path;
-                    }
-                    // Agents that do not say what they were asked (Gemini).
-                    if agent.title.is_none() && !found.title.is_empty() {
-                        agent.title = Some(found.title);
-                    }
-                    if found.updated_at > agent.updated_at {
-                        agent.updated_at = found.updated_at;
-                    }
-                }
-            });
+            if let Some(found) = found {
+                cx.update(|cx| take_session(&pane, found, cx));
+            }
         })
         .detach();
     }
+}
+
+/// Looks now for the agent's own session of the CLI that chat `session`
+/// shows as, a few times over a few seconds (an agent just asked something
+/// may still be writing it down). `true` once it is known. For going back
+/// to the chat right after the first thing was said in the CLI, without
+/// waiting for the next look of [`find_sessions`].
+pub(crate) fn find_session_now(session: SessionId, cx: &mut App) -> Task<bool> {
+    const TRIES: usize = 8;
+    const BETWEEN: std::time::Duration = std::time::Duration::from_millis(400);
+    let known = move |cx: &App| {
+        TerminalAgents::of_session(session, cx).is_some_and(|agent| agent.session_id.is_some())
+    };
+    if known(cx) {
+        return Task::ready(true);
+    }
+    let store = crate::AppState::store(cx).clone();
+    cx.spawn(async move |cx| {
+        for attempt in 0..TRIES {
+            if attempt > 0 {
+                cx.background_executor().timer(BETWEEN).await;
+            }
+            let look = cx.update(|cx| {
+                if known(cx) {
+                    return Err(true);
+                }
+                let look = TerminalAgents::of_session(session, cx)
+                    .and_then(|agent| Look::of(agent, cx))
+                    // Its terminal went meanwhile: nothing to look for.
+                    .ok_or(false)?;
+                Ok((look, taken_sessions(cx)))
+            });
+            let (look, taken) = match look {
+                Ok(look) => look,
+                Err(known) => return known,
+            };
+            let (pane, store) = (look.pane.clone(), store.clone());
+            let found = cx
+                .background_spawn(async move { look.run(taken, &store) })
+                .await;
+            if let Some(found) = found {
+                cx.update(|cx| take_session(&pane, found, cx));
+                return cx.update(|cx| known(cx));
+            }
+        }
+        false
+    })
 }
 
 /// Answers `agent.event` from `pilothouse agent-hook`, and clears the
@@ -754,63 +908,206 @@ fn settings_dir() -> PathBuf {
     paths::data_dir().join("terminal-agents")
 }
 
-/// Starts agent `agent_id`'s CLI in a new terminal of `terminals` in `cwd`,
-/// followed by PilotHouse; `resume` continues one of its sessions.
+/// What an agent's CLI is started with.
+pub(crate) struct Launch<'a> {
+    pub agent_id: &'a str,
+    pub project: ProjectId,
+    /// Where it works.
+    pub cwd: PathBuf,
+    /// One of its own sessions to go on with.
+    pub resume: Option<&'a str>,
+    /// The chat this CLI is the other form of: what it does is kept with
+    /// that chat, instead of a chat of its own. `named` says the chat has
+    /// its name already, which the first thing asked here must not change.
+    pub chat: Option<(SessionId, bool)>,
+    /// The model and the mode to start with, as the agent names them in a
+    /// chat (a session that changes form keeps both).
+    pub model: Option<&'a str>,
+    pub mode: Option<&'a str>,
+}
+
+/// The command that starts an agent's CLI: its program, the session to go
+/// on with, the model and mode asked for, and `more` (hooks, PilotHouse's
+/// own tools), each already written as the shell takes it.
+fn command(
+    start: &Launch,
+    profile: &ph_agent::profiles::Profile,
+    more: &[String],
+) -> anyhow::Result<String> {
+    let name = |id: &str| {
+        ph_agent::agents::find(id).map_or_else(|| id.to_string(), |agent| agent.name.to_string())
+    };
+    let usual = ph_agent::agents::cli_of(start.agent_id)
+        .ok_or_else(|| anyhow::anyhow!("{} has no CLI", name(start.agent_id)))?;
+    // The user's own command for it (Settings → Agents), as they typed it:
+    // a shell reads it, as it would in their terminal.
+    let program = match profile.command.trim() {
+        "" => usual,
+        command => command,
+    };
+    // Only what could be a flag's value: these are typed into a shell.
+    let plain = |value: &&str| {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-:/[]".contains(c))
+    };
+    let model = start
+        .model
+        .filter(plain)
+        .filter(|model| *model != "default");
+    let mode = start.mode.filter(plain);
+    // Each value as the shell is to take it: quoted unless no shell reads
+    // any of its characters as more than itself (zsh reads `opus[1m]` as
+    // a file pattern, and runs nothing when no file matches).
+    let word = |value: &str| {
+        if value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-:/".contains(c))
+        {
+            value.to_string()
+        } else {
+            quoted(Path::new(value))
+        }
+    };
+    let mut words = vec![program.to_string()];
+    match start.agent_id {
+        "claude" => {
+            if let Some(session) = start.resume {
+                words.extend(["--resume".into(), word(session)]);
+            }
+            if let Some(model) = model {
+                words.extend(["--model".into(), word(model)]);
+            }
+            // The modes a chat and the CLI name alike; the plain one
+            // ("default", the CLI's "manual") is what it starts in anyway.
+            if let Some(mode) = mode.filter(|mode| {
+                [
+                    "acceptEdits",
+                    "plan",
+                    "bypassPermissions",
+                    "auto",
+                    "dontAsk",
+                ]
+                .contains(mode)
+            }) {
+                words.extend(["--permission-mode".into(), word(mode)]);
+            }
+        }
+        "codex" => {
+            if let Some(session) = start.resume {
+                words.extend(["resume".into(), word(session)]);
+            }
+            if let Some(model) = model {
+                words.extend(["--model".into(), word(model)]);
+            }
+        }
+        "gemini" => {
+            if let Some(session) = start.resume {
+                words.extend(["--resume".into(), word(session)]);
+            }
+            if let Some(model) = model {
+                words.extend(["--model".into(), word(model)]);
+            }
+        }
+        "antigravity" => {
+            if let Some(session) = start.resume {
+                words.extend(["--conversation".into(), word(session)]);
+            }
+        }
+        "cline" => {
+            if let Some(session) = start.resume {
+                words.extend(["--id".into(), word(session)]);
+            }
+        }
+        _ => anyhow::bail!("{} cannot run in a terminal", name(start.agent_id)),
+    }
+    // What the user adds to every start of it, each word kept whole.
+    words.extend(profile.arguments.iter().map(|argument| {
+        let plain = !argument.is_empty()
+            && argument
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-:/=@+,".contains(c));
+        if plain {
+            argument.clone()
+        } else {
+            quoted(Path::new(argument))
+        }
+    }));
+    words.extend(more.iter().cloned());
+    Ok(words.join(" "))
+}
+
+/// PilotHouse's own tools (the browser, devices, tests) for an agent's CLI,
+/// as the flags it takes MCP servers by: a chat gets them when its session
+/// is set up, and a session's CLI form must not have less. `file` is where
+/// a CLI that reads its servers from a file finds them.
+fn own_tools(agent_id: &str, cwd: &Path, project: ProjectId, file: &Path) -> Vec<String> {
+    let Some((program, args, env)) = ph_agent::own_tools_command(cwd, agent_id, project) else {
+        return Vec::new();
+    };
+    match agent_id {
+        "claude" => {
+            let servers = serde_json::json!({ "mcpServers": { "pilothouse": {
+                "command": program,
+                "args": args,
+                "env": env.into_iter().collect::<HashMap<String, String>>(),
+            } } });
+            match serde_json::to_vec_pretty(&servers)
+                .ok()
+                .and_then(|json| std::fs::write(file, json).ok())
+            {
+                Some(()) => vec!["--mcp-config".into(), quoted(file)],
+                None => Vec::new(),
+            }
+        }
+        // Settings given for this run only (`-c key=value`, the value as
+        // TOML): nothing is written to the user's own configuration.
+        "codex" => {
+            let text = |value: &str| serde_json::Value::from(value).to_string();
+            let list = |values: &[String]| {
+                let items: Vec<String> = values.iter().map(|value| text(value)).collect();
+                format!("[{}]", items.join(","))
+            };
+            let mut flags = vec![
+                "-c".to_string(),
+                quoted(Path::new(&format!(
+                    "mcp_servers.pilothouse.command={}",
+                    text(&program.to_string_lossy())
+                ))),
+                "-c".to_string(),
+                quoted(Path::new(&format!(
+                    "mcp_servers.pilothouse.args={}",
+                    list(&args)
+                ))),
+            ];
+            for (name, value) in env {
+                flags.push("-c".into());
+                flags.push(quoted(Path::new(&format!(
+                    "mcp_servers.pilothouse.env.{name}={}",
+                    text(&value)
+                ))));
+            }
+            flags
+        }
+        // The others read their servers from their own settings.
+        _ => Vec::new(),
+    }
+}
+
+/// Starts an agent's CLI in a new terminal of `terminals`, followed by
+/// PilotHouse.
 pub(crate) fn launch(
-    agent_id: &str,
-    project: ProjectId,
+    start: Launch,
     terminals: &Entity<WorkspaceTerminals>,
-    cwd: PathBuf,
-    resume: Option<&str>,
     cx: &mut App,
 ) -> anyhow::Result<Entity<Terminal>> {
-    let agent = ph_agent::agents::find(agent_id)
-        .ok_or_else(|| anyhow::anyhow!("{agent_id} is not a known agent"))?;
-    let resume = resume.filter(|session| is_session_id(session));
-    if agent_id != "claude" {
-        // Followed by what it says in the terminal (program status, title).
-        let command = match (agent_id, resume) {
-            ("codex", Some(session)) => format!("codex resume {session}"),
-            ("codex", None) => "codex".to_string(),
-            ("gemini", Some(session)) => format!("gemini --resume {session}"),
-            ("gemini", None) => "gemini".to_string(),
-            ("antigravity", Some(session)) => format!("agy --conversation {session}"),
-            ("antigravity", None) => "agy".to_string(),
-            ("cline", Some(session)) => format!("cline --id {session}"),
-            ("cline", None) => "cline".to_string(),
-            _ => anyhow::bail!("{} cannot run in a terminal", agent.name),
-        };
-        let label = free_label(agent.name, terminals, cx);
-        let terminal = terminals
-            .update(cx, |terminals, cx| {
-                terminals.run_in(&label, &command, Some(cwd), cx)
-            })
-            .ok_or_else(|| anyhow::anyhow!("Could not open a terminal"))?;
-        // Known from the start, even if it never says how it is doing in
-        // its output (Cline): its chat is saved once its session is found.
-        // (Agents whose terminal closed are left to `sync`, which keeps
-        // what they said.)
-        let agents = cx.default_global::<TerminalAgents>();
-        agents.agents.push(TerminalAgent {
-            pane: terminal_pane(&terminal),
-            source: Source::Launched,
-            project,
-            terminal: terminal.downgrade(),
-            agent,
-            state: ChatState::Idle,
-            title: None,
-            line: None,
-            session_id: resume.map(str::to_string),
-            transcript: None,
-            updated_at: now(),
-            since: now(),
-            session: None,
-            saved: Saved::default(),
-            looked_at: 0,
-            looks: 0,
-        });
-        return Ok(terminal);
-    }
+    let agent = ph_agent::agents::find(start.agent_id)
+        .ok_or_else(|| anyhow::anyhow!("{} is not a known agent", start.agent_id))?;
+    let start = Launch {
+        resume: start.resume.filter(|session| is_session_id(session)),
+        ..start
+    };
     let pane = format!(
         "p{}",
         std::time::SystemTime::now()
@@ -818,39 +1115,84 @@ pub(crate) fn launch(
             .map(|time| time.as_nanos())
             .unwrap_or_default()
     );
-    let settings = settings_dir().join(format!("{pane}.json"));
     std::fs::create_dir_all(settings_dir())?;
-    std::fs::write(
-        &settings,
-        serde_json::to_vec_pretty(&hook_settings(&hook_command(&pane)?))?,
-    )?;
-    let mut command = format!("claude --settings {}", quoted(&settings));
-    if let Some(session) = resume {
-        command.push_str(&format!(" --resume {session}"));
+    let mut more = Vec::new();
+    // Claude Code tells PilotHouse what it does through hooks, set for
+    // this run only; the others are followed by what they say in the
+    // terminal (program status, title).
+    let hooked = start.agent_id == "claude";
+    if hooked {
+        let settings = settings_dir().join(format!("{pane}.json"));
+        std::fs::write(
+            &settings,
+            serde_json::to_vec_pretty(&hook_settings(&hook_command(&pane)?))?,
+        )?;
+        more.extend(["--settings".to_string(), quoted(&settings)]);
     }
+    more.extend(own_tools(
+        start.agent_id,
+        &start.cwd,
+        start.project,
+        &settings_dir().join(format!("{pane}.mcp.json")),
+    ));
+    // As Settings → Agents says it runs, in the account its chat is in.
+    let store = crate::AppState::store(cx).clone();
+    let chat = start
+        .chat
+        .and_then(|(chat, _)| store.session(chat).ok().flatten());
+    let profile = ph_agent::profiles::Profiles::load(&store).of(start.agent_id);
+    let environment =
+        profile.environment_for(chat.as_ref().map_or("", |chat| chat.account.as_str()));
+    let command = command(&start, &profile, &more)?;
     let label = free_label(agent.name, terminals, cx);
     let terminal = terminals
         .update(cx, |terminals, cx| {
-            terminals.run_in(&label, &command, Some(cwd), cx)
+            terminals.run_program(&label, &command, start.cwd.clone(), &environment, cx)
         })
         .ok_or_else(|| anyhow::anyhow!("Could not open a terminal"))?;
+    // A chat that has its name keeps it; its row is there already.
+    let (session, title) = match start.chat {
+        Some((id, named)) => (
+            Some(id),
+            named.then(|| chat.map(|chat| chat.title)).flatten(),
+        ),
+        None => (None, None),
+    };
+    // Known from the start, even if it never says how it is doing in its
+    // output (Cline): its chat is saved once its session is found. (Agents
+    // whose terminal closed are left to `sync`, which keeps what they
+    // said.)
     cx.default_global::<TerminalAgents>()
         .agents
         .push(TerminalAgent {
-            pane,
-            source: Source::Hooks,
-            project,
+            pane: if hooked {
+                pane
+            } else {
+                terminal_pane(&terminal)
+            },
+            source: if hooked {
+                Source::Hooks
+            } else {
+                Source::Launched
+            },
+            project: start.project,
             terminal: terminal.downgrade(),
             agent,
             state: ChatState::Idle,
-            title: None,
+            title: title.clone(),
+            named_by_program: false,
             line: None,
-            session_id: resume.map(str::to_string),
+            session_id: start.resume.map(str::to_string),
             transcript: None,
+            environment,
             updated_at: now(),
             since: now(),
-            session: None,
-            saved: Saved::default(),
+            session,
+            saved: Saved {
+                title,
+                session_id: session.and(start.resume.map(str::to_string)),
+                ..Saved::default()
+            },
             looked_at: 0,
             looks: 0,
         });
@@ -871,8 +1213,9 @@ pub(crate) fn session_file(
     }
     let (agent_id, cwd) = (agent.agent.id, terminal.read(cx).cwd().to_path_buf());
     let (session_id, since) = (agent.session_id.clone(), agent.since);
+    let environment = agent.environment.clone();
     Some(Box::new(move || {
-        let sessions = ph_agent::cli_sessions::sessions(agent_id, &cwd);
+        let sessions = ph_agent::cli_sessions::sessions_in(agent_id, &cwd, &environment);
         if let Some(session) = session_id
             .as_ref()
             .and_then(|id| sessions.iter().find(|session| &session.id == id))
@@ -1132,6 +1475,117 @@ fn last_reply(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn start<'a>(agent_id: &'a str, resume: Option<&'a str>) -> Launch<'a> {
+        Launch {
+            agent_id,
+            project: 1,
+            cwd: PathBuf::from("/work"),
+            resume,
+            chat: None,
+            model: None,
+            mode: None,
+        }
+    }
+
+    #[test]
+    fn each_agents_cli_goes_on_with_its_session_its_own_way() {
+        let id = "0199a213-81c0-7800-8aa1-bbab2a035a53";
+        let usual = ph_agent::profiles::Profile::default();
+        for (agent, fresh, resumed) in [
+            ("claude", "claude", format!("claude --resume {id}")),
+            ("codex", "codex", format!("codex resume {id}")),
+            ("gemini", "gemini", format!("gemini --resume {id}")),
+            ("antigravity", "agy", format!("agy --conversation {id}")),
+            ("cline", "cline", format!("cline --id {id}")),
+        ] {
+            assert_eq!(command(&start(agent, None), &usual, &[]).unwrap(), fresh);
+            assert_eq!(
+                command(&start(agent, Some(id)), &usual, &[]).unwrap(),
+                resumed
+            );
+        }
+        assert!(command(&start("nobody", None), &usual, &[]).is_err());
+
+        // The user's own command for it, and what they add to every start.
+        let mut theirs = ph_agent::profiles::Profile::default();
+        theirs.command = "claude-beta".into();
+        theirs.arguments = vec![
+            "--verbose".into(),
+            "--append-system-prompt".into(),
+            "Be brief; it's late".into(),
+        ];
+        assert_eq!(
+            command(
+                &start("claude", Some(id)),
+                &theirs,
+                &["--settings 'h.json'".to_string()]
+            )
+            .unwrap(),
+            if cfg!(windows) {
+                format!(
+                    "claude-beta --resume {id} --verbose --append-system-prompt 'Be brief; it''s late' --settings 'h.json'"
+                )
+            } else {
+                format!(
+                    "claude-beta --resume {id} --verbose --append-system-prompt 'Be brief; it'\\''s late' --settings 'h.json'"
+                )
+            }
+        );
+    }
+
+    #[test]
+    fn a_session_keeps_its_model_and_mode_in_its_cli() {
+        let with = |agent, model, mode| {
+            command(
+                &Launch {
+                    model,
+                    mode,
+                    ..start(agent, None)
+                },
+                &ph_agent::profiles::Profile::default(),
+                &["--settings 'hooks.json'".to_string()],
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            with("claude", Some("opus"), Some("plan")),
+            "claude --model opus --permission-mode plan --settings 'hooks.json'"
+        );
+        // The plain mode is what the CLI starts in; "default" is no model.
+        assert_eq!(
+            with("claude", Some("default"), Some("default")),
+            "claude --settings 'hooks.json'"
+        );
+        assert_eq!(
+            with("codex", Some("gpt-5.6-luna"), Some("read-only")),
+            "codex --model gpt-5.6-luna --settings 'hooks.json'"
+        );
+        // Nothing that the shell would read as more than a value.
+        assert_eq!(
+            with("claude", Some("opus; rm -rf ~"), Some("plan && true")),
+            "claude --settings 'hooks.json'"
+        );
+        // A model with brackets (Claude Code's 1M-context ones) is quoted:
+        // zsh would read it as a file pattern.
+        assert_eq!(
+            with("claude", Some("opus[1m]"), None),
+            format!(
+                "claude --model {} --settings 'hooks.json'",
+                quoted(Path::new("opus[1m]"))
+            )
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            with("claude", Some("opus[1m]"), None),
+            "claude --model 'opus[1m]' --settings 'hooks.json'"
+        );
+        // An agent whose CLI takes neither.
+        assert_eq!(
+            with("cline", Some("x"), Some("plan")),
+            "cline --settings 'hooks.json'"
+        );
+    }
 
     #[test]
     #[cfg(not(windows))]

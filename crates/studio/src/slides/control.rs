@@ -102,13 +102,9 @@ fn round(value: f32) -> f64 {
 /// An element in a line of the outline.
 fn sketch(element: &Element) -> Value {
     let frame = element.frame;
-    let kind = serde_json::to_value(&element.kind)
-        .ok()
-        .and_then(|kind| kind.get("type").cloned())
-        .unwrap_or(Value::Null);
     let mut out = json!({
         "id": element.id,
-        "type": kind,
+        "type": element.kind.tag(),
         "frame": [round(frame.x), round(frame.y), round(frame.w), round(frame.h)],
     });
     if frame.rotation.abs() > 0.01 {
@@ -524,25 +520,23 @@ fn export(params: Value, cx: &mut App) -> Task<Result<Value>> {
             .unwrap_or(ExportFormat::Pptx),
     };
     let mut path = match params.get("path").and_then(Value::as_str) {
-        Some(path) => {
-            let path = PathBuf::from(path);
-            if path.is_relative() {
-                doc.space().exports().join(path)
-            } else {
-                path
-            }
-        }
+        Some(path) => PathBuf::from(path),
         None => doc.export_path(format.extension()),
     };
     if path.extension().is_none() {
         path.set_extension(format.extension());
     }
-    if path.exists() && params.get("overwrite").and_then(Value::as_bool) != Some(true) {
-        return Task::ready(Err(anyhow!(
-            "{} exists; give overwrite: true to replace it, or another path",
-            path.display()
-        )));
-    }
+    // The path is the agent's: it is checked off the UI thread before a
+    // byte is written (inside the presentation's folder or the workspace's,
+    // never on another computer, nothing replaced unless asked).
+    let wanted = crate::control::ExportTo {
+        given: path,
+        base: doc.space().exports(),
+        source: doc.space().path.join(super::space::DECK),
+        folders: crate::control::workspace_folders(doc.project(), cx),
+        overwrite: params.get("overwrite").and_then(Value::as_bool) == Some(true),
+        is_source: "that is the presentation itself; give another name",
+    };
     let slides = match params.get("slides") {
         Some(slides) => match slides_named(doc.deck(), slides, 10_000) {
             Ok(slides) => slides,
@@ -555,10 +549,11 @@ fn export(params: Value, cx: &mut App) -> Task<Result<Value>> {
         .get("width")
         .and_then(Value::as_u64)
         .map_or(1920, |width| width.clamp(320, 7680) as u32);
-    let writing = document.update(cx, |document, cx| {
-        document.export(format, path, slides, notes, width, cx)
-    });
-    cx.spawn(async move |_| {
+    cx.spawn(async move |cx| {
+        let path = cx.background_spawn(async move { wanted.checked() }).await?;
+        let writing = document.update(cx, |document, cx| {
+            document.export(format, path, slides, notes, width, cx)
+        });
         let written = writing.await?;
         let size = std::fs::metadata(&written)
             .map(|meta| {
@@ -571,4 +566,28 @@ fn export(params: Value, cx: &mut App) -> Task<Result<Value>> {
             .unwrap_or_default();
         Ok(json!({ "text": format!("Wrote {}{size}.", written.display()) }))
     })
+}
+
+#[cfg(test)]
+mod outline_tests {
+    use super::*;
+
+    #[test]
+    fn the_outline_names_a_kind_as_its_json_does() {
+        for kind in [
+            Kind::Shape(Shape::default()),
+            Kind::Text(TextBox::default()),
+            Kind::Picture(Picture::default()),
+            Kind::Table(Table::default()),
+            Kind::Chart(Chart::default()),
+            Kind::Code(Code::default()),
+            Kind::Icon(Icon::default()),
+            Kind::Svg(SvgArt::default()),
+            Kind::Group(Group::default()),
+            Kind::Raw(Raw::default()),
+        ] {
+            let json = serde_json::to_value(&kind).expect("a kind is JSON");
+            assert_eq!(json["type"], kind.tag());
+        }
+    }
 }

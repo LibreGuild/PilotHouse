@@ -81,6 +81,55 @@ pub fn card(
         .into_any_element()
 }
 
+/// An agent in Settings → Agents: a line when it is ready (its name, and
+/// where it was found), the whole card with the way to set it up when it
+/// is not. (Every check of every agent, passed ones too, made a page of
+/// green ticks several screens long.)
+pub fn status(spec: &AgentSpec, checks: &[Check], cx: &App) -> AnyElement {
+    if !crate::setup::ready(checks) {
+        return card(spec, checks, None, cx);
+    }
+    let found = checks
+        .first()
+        .map(|check| check.detail.clone())
+        .unwrap_or_default();
+    h_flex()
+        .w_full()
+        .gap_2()
+        .child(spec.mark(ph_ui::rems_from_px(16.)))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_sm().child(spec.name))
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(found),
+                ),
+        )
+        .child(
+            h_flex()
+                .flex_none()
+                .gap_1p5()
+                .child(
+                    div()
+                        .size(ph_ui::rems_from_px(6.))
+                        .rounded_full()
+                        .bg(cx.theme().success),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Ready"),
+                ),
+        )
+        .into_any_element()
+}
+
 /// The first-run card, shown while no agent is installed: every agent
 /// PilotHouse works with, whether it was found, and how to install it.
 /// `checks` are each agent's [`crate::setup::checks`].
@@ -196,7 +245,7 @@ fn agent_entry(spec: &AgentSpec, checks: &[Check], divided: bool, cx: &App) -> A
                         .xsmall()
                         .ghost()
                         .icon(IconName::ExternalLink)
-                        .tooltip(format!("{}'s page", spec.name))
+                        .tooltip(ph_ui::tip(format!("{}'s page", spec.name)))
                         .accessibility_label(SharedString::from(format!(
                             "Open {}'s page",
                             spec.name

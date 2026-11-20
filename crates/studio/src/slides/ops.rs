@@ -10,6 +10,7 @@
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::model::*;
@@ -343,8 +344,49 @@ fn apply_op(deck: &mut Deck, op: Op) -> Result<Option<String>> {
             let index = slide_index(deck, &slide)?;
             let mut copy = (*deck.slides[index]).clone();
             copy.id = deck.new_id("s");
+            // What names an element by its id (animations, comments,
+            // lines' ends) names the copy's own from here on.
+            let mut renamed: HashMap<String, String> = HashMap::new();
             for element in &mut copy.elements {
+                let mut before = Vec::new();
+                visit(element, &mut |element| before.push(element.id.clone()));
                 renumber(deck, element);
+                let mut before = before.into_iter();
+                visit(element, &mut |element| {
+                    if let Some(old) = before.next() {
+                        renamed.insert(old, element.id.clone());
+                    }
+                });
+            }
+            let rename = |id: &mut String| {
+                if let Some(new) = renamed.get(id) {
+                    *id = new.clone();
+                }
+            };
+            for animation in &mut copy.animations {
+                rename(&mut animation.id);
+            }
+            for comment in &mut copy.comments {
+                // An id of its own: with the original's, a reply here
+                // would go to the original.
+                comment.id = deck.new_id("c");
+                if let Some(element) = &mut comment.element {
+                    rename(element);
+                }
+            }
+            for element in &mut copy.elements {
+                each_element(element, &mut |element| {
+                    if let Kind::Shape(Shape {
+                        connect: Some(connect),
+                        ..
+                    }) = &mut element.kind
+                    {
+                        for (end, _) in [&mut connect.start, &mut connect.end].into_iter().flatten()
+                        {
+                            rename(end);
+                        }
+                    }
+                });
             }
             let id = copy.id.clone();
             deck.slides.insert(index + 1, Arc::new(copy));
@@ -353,8 +395,14 @@ fn apply_op(deck: &mut Deck, op: Op) -> Result<Option<String>> {
         Op::RemoveSlide { slide } => {
             let index = slide_index(deck, &slide)?;
             let removed = deck.slides.remove(index);
-            // A section starting there starts at the next slide.
-            let next = deck.slides.get(index).map(|slide| slide.id.clone());
+            // A section starting there starts at the next slide, unless
+            // one starts there already: it was this slide alone, and goes
+            // with it (two sections on one slide would show as one).
+            let next = deck
+                .slides
+                .get(index)
+                .map(|slide| slide.id.clone())
+                .filter(|next| !deck.sections.iter().any(|section| &section.slide == next));
             deck.sections.retain_mut(|section| {
                 if section.slide != removed.id {
                     return true;
@@ -392,6 +440,7 @@ fn apply_op(deck: &mut Deck, op: Op) -> Result<Option<String>> {
             }
             let slide = Arc::make_mut(&mut deck.slides[index]);
             if let Some(background) = background {
+                in_range(&background).context("background")?;
                 slide.background = if background.is_null() {
                     None
                 } else {
@@ -490,7 +539,12 @@ fn apply_op(deck: &mut Deck, op: Op) -> Result<Option<String>> {
                         .with_context(|| missing(id))?;
                     (element.frame.x + element.frame.w, element.frame.y)
                 }
-                None => (x.unwrap_or(24.), y.unwrap_or(24.)),
+                // A number too large to hold reads as infinite, and would
+                // be saved as `null`.
+                None => (
+                    x.filter(|x| x.is_finite()).unwrap_or(24.),
+                    y.filter(|y| y.is_finite()).unwrap_or(24.),
+                ),
             };
             let comment = Comment {
                 id: deck.new_id("c"),
@@ -554,8 +608,17 @@ fn apply_op(deck: &mut Deck, op: Op) -> Result<Option<String>> {
             Ok(Some(id))
         }
         Op::UpdateElement { id, set } => {
-            let element = find_mut(deck, &id).with_context(|| missing(&id))?;
-            let mut value = serde_json::to_value(&*element)?;
+            // Anything but an object would take the whole element's place
+            // (a string or a number, which cannot even hold its id).
+            if !set.is_object() {
+                bail!("{id}: `set` is an object of the fields to change");
+            }
+            if set.get("kind").is_some_and(|kind| !kind.is_object()) {
+                bail!("{id}: `kind` is an object with a `type`");
+            }
+            in_range(&set).with_context(|| id.clone())?;
+            let (_, element) = deck.element(&id).with_context(|| missing(&id))?;
+            let mut value = serde_json::to_value(element)?;
             let set = flatten_kind(set, value.get("kind").and_then(|kind| kind.get("type")));
             if let Some(kind) = set.get("kind")
                 && let (Some(new), Some(old)) = (
@@ -569,10 +632,24 @@ fn apply_op(deck: &mut Deck, op: Op) -> Result<Option<String>> {
             }
             crate::edit::merge(&mut value, &set);
             value["id"] = Value::String(id.clone());
-            let updated: Element =
+            let mut updated: Element =
                 serde_json::from_value(value).map_err(|err| anyhow!("{id}: {err}"))?;
-            check(&updated)?;
-            *element = updated;
+            // What the change left as it was has been checked before (an
+            // SVG is not parsed again to move it).
+            if updated.kind != element.kind {
+                check(&updated)?;
+                clamp_sizes(&mut updated);
+            }
+            // A group given another frame takes its children along, unless
+            // the change placed them itself.
+            if let (Kind::Group(before), Kind::Group(after)) = (&element.kind, &updated.kind)
+                && before.children == after.children
+                && updated.frame != element.frame
+            {
+                let to = std::mem::replace(&mut updated.frame, element.frame);
+                set_frame(&mut updated, to);
+            }
+            *find_mut(deck, &id).with_context(|| missing(&id))? = updated;
             Ok(None)
         }
         Op::RemoveElement { id } => {
@@ -610,6 +687,8 @@ fn apply_op(deck: &mut Deck, op: Op) -> Result<Option<String>> {
             run,
             paragraph,
         } => {
+            in_range(&run).context("run")?;
+            in_range(&paragraph).context("paragraph")?;
             let element = find_mut(deck, &id).with_context(|| missing(&id))?;
             let body = element
                 .kind
@@ -740,7 +819,7 @@ fn apply_op(deck: &mut Deck, op: Op) -> Result<Option<String>> {
             };
             for id in &ids {
                 let element = find_mut(deck, id).expect("found above");
-                let frame = &mut element.frame;
+                let mut frame = element.frame;
                 match to.as_str() {
                     "left" => frame.x = against.x,
                     "center" => frame.x = against.x + (against.w - frame.w) / 2.,
@@ -750,6 +829,7 @@ fn apply_op(deck: &mut Deck, op: Op) -> Result<Option<String>> {
                     "bottom" => frame.y = against.y + against.h - frame.h,
                     other => bail!("align to `{other}`"),
                 }
+                set_frame(element, frame);
             }
             Ok(None)
         }
@@ -781,11 +861,13 @@ fn apply_op(deck: &mut Deck, op: Op) -> Result<Option<String>> {
             let mut at = first;
             for (id, frame) in items {
                 let element = find_mut(deck, &id).expect("found above");
+                let mut placed = element.frame;
                 if horizontal {
-                    element.frame.x = at;
+                    placed.x = at;
                 } else {
-                    element.frame.y = at;
+                    placed.y = at;
                 }
+                set_frame(element, placed);
                 at += length(&frame) + gap;
             }
             Ok(None)
@@ -810,7 +892,8 @@ fn apply_op(deck: &mut Deck, op: Op) -> Result<Option<String>> {
                 })?;
                 set_theme(deck, fresh);
             }
-            if let Some(custom) = custom {
+            if let Some(mut custom) = custom {
+                check_theme(&mut custom)?;
                 set_theme(deck, *custom);
             }
             if let Some(name) = saved {
@@ -844,6 +927,7 @@ fn apply_op(deck: &mut Deck, op: Op) -> Result<Option<String>> {
                 deck.theme.fonts = serde_json::from_value(value).context("fonts")?;
             }
             if let Some(background) = background {
+                in_range(&background).context("background")?;
                 deck.theme.background = serde_json::from_value(background).context("background")?;
             }
             Ok(None)
@@ -1221,6 +1305,7 @@ pub fn is_empty(element: &Element) -> bool {
 
 /// An element from an agent's JSON, with a new id.
 pub fn element_from(deck: &mut Deck, value: Value) -> Result<Element> {
+    in_range(&value).context("element")?;
     let value = flatten_kind(value, None);
     let kind = value.get("kind");
     let shape_text = kind
@@ -1248,11 +1333,30 @@ pub fn element_from(deck: &mut Deck, value: Value) -> Result<Element> {
         }
     }
     check(&element)?;
+    clamp_sizes(&mut element);
     renumber(deck, &mut element);
     if element.name.is_empty() {
         element.name = element.kind.label().into();
     }
     Ok(element)
+}
+
+/// Refuses JSON holding a number an `f32` cannot hold: read into one it
+/// becomes infinite, which is saved as `null`, and the deck would not open
+/// again.
+fn in_range(value: &Value) -> Result<()> {
+    let fits = match value {
+        Value::Number(number) => number
+            .as_f64()
+            .is_some_and(|number| number.abs() <= f32::MAX as f64),
+        Value::Array(items) => return items.iter().try_for_each(in_range),
+        Value::Object(fields) => return fields.values().try_for_each(in_range),
+        _ => true,
+    };
+    if !fits {
+        bail!("the number {value} is out of range");
+    }
+    Ok(())
 }
 
 /// The largest SVG graphic taken.
@@ -1264,6 +1368,11 @@ fn check(element: &Element) -> Result<()> {
         Kind::Svg(art) => {
             if art.source.len() > SVG_LARGEST {
                 bail!("the SVG is over 2 MB; simplify it");
+            }
+            // Before it is read: reading one that nests very deeply uses
+            // up the stack, which ends the app.
+            if super::raster::too_deep(art.source.as_bytes()) {
+                bail!("the SVG nests too deeply to draw; flatten its groups");
             }
             resvg::usvg::Tree::from_str(&art.source, &super::raster::inert_options())
                 .map_err(|err| anyhow!("the SVG does not draw: {err}"))?;
@@ -1282,6 +1391,93 @@ fn check(element: &Element) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// Text sizes an element's kind sets itself, kept to what the layout
+/// takes (as runs' sizes are when drawn): a size of 0 has no line height,
+/// and the layout ends the app on one.
+fn clamp_sizes(element: &mut Element) {
+    each_element(element, &mut |element| match &mut element.kind {
+        Kind::Table(table) => table.font_size = table.font_size.clamp(1., 400.),
+        Kind::Code(code) => code.font_size = code.font_size.clamp(1., 400.),
+        _ => {}
+    });
+}
+
+/// A whole theme from an agent: its text sizes kept to what the layout
+/// takes, and refused when a number in it would not read back once saved
+/// (one too large for an `f32` is infinite, and saved as `null`).
+fn check_theme(theme: &mut Theme) -> Result<()> {
+    let reads_back = serde_json::to_value(&*theme)
+        .ok()
+        .and_then(|json| serde_json::from_value::<Theme>(json).ok())
+        .is_some();
+    if !reads_back {
+        bail!("custom: a number is out of range");
+    }
+    let clamp = |size: &mut f32| *size = size.clamp(1., 400.);
+    clamp(&mut theme.title.size);
+    clamp(&mut theme.body.size);
+    theme.decorations.iter_mut().for_each(clamp_sizes);
+    for layout in &mut theme.layouts {
+        layout.decorations.iter_mut().for_each(clamp_sizes);
+        for place in &mut layout.placeholders {
+            if let Some(size) = &mut place.size {
+                clamp(size);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Gives `element` the frame `to`. A group's children are placed on the
+/// slide, not in the group, so they go with its box: moved as far, and
+/// scaled with it when its size changed (turning it moves none of them:
+/// the group is drawn turned about its centre).
+pub fn set_frame(element: &mut Element, to: Frame) {
+    let from = std::mem::replace(&mut element.frame, to);
+    let Kind::Group(group) = &mut element.kind else {
+        return;
+    };
+    // A box that is not a number (a division by a zero size somewhere)
+    // would take every child with it.
+    if ![from.x, from.y, from.w, from.h, to.x, to.y, to.w, to.h]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return;
+    }
+    // A box without a size keeps its children's sizes: scaled to nothing,
+    // they would never come back.
+    let scale = |from: f32, to: f32| {
+        if from > 0. && to > 0. { to / from } else { 1. }
+    };
+    let (sx, sy) = (scale(from.w, to.w), scale(from.h, to.h));
+    if sx == 1. && sy == 1. && from.x == to.x && from.y == to.y {
+        return;
+    }
+    for child in &mut group.children {
+        each_element(child, &mut |child| {
+            let frame = &mut child.frame;
+            frame.x = to.x + (frame.x - from.x) * sx;
+            frame.y = to.y + (frame.y - from.y) * sy;
+            frame.w *= sx;
+            frame.h *= sy;
+        });
+    }
+}
+
+/// Moves `element` by (`dx`, `dy`), a group's children with it.
+pub fn move_by(element: &mut Element, dx: f32, dy: f32) {
+    let frame = element.frame;
+    set_frame(
+        element,
+        Frame {
+            x: frame.x + dx,
+            y: frame.y + dy,
+            ..frame
+        },
+    );
 }
 
 /// New ids for an element and all inside it.
@@ -1444,11 +1640,14 @@ pub fn resize(deck: &mut Deck, size: SlideSize, scale: bool) {
                 if element.placeholder.is_some() {
                     continue;
                 }
-                let frame = &mut element.frame;
-                frame.x = frame.x * factor + dx;
-                frame.y = frame.y * factor + dy;
-                frame.w *= factor;
-                frame.h *= factor;
+                // A group's children too: they are placed on the slide.
+                each_element(element, &mut |element| {
+                    let frame = &mut element.frame;
+                    frame.x = frame.x * factor + dx;
+                    frame.y = frame.y * factor + dy;
+                    frame.w *= factor;
+                    frame.h *= factor;
+                });
             }
         }
     }
@@ -1647,5 +1846,267 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.as_deref(), Some("1 replaced"));
+    }
+
+    fn shape(deck: &mut Deck, slide: usize, frame: [f32; 4]) -> String {
+        let [x, y, w, h] = frame;
+        apply(
+            deck,
+            op(json!({"op": "add_element", "slide": slide, "element": {
+                "type": "shape", "frame": {"x": x, "y": y, "w": w, "h": h}}})),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    fn frame_of(deck: &Deck, id: &str) -> [f32; 4] {
+        let frame = deck.element(id).unwrap().1.frame;
+        [frame.x, frame.y, frame.w, frame.h]
+    }
+
+    #[test]
+    fn update_element_takes_only_an_object() {
+        let mut deck = new_deck("T", "clean", SlideSize::default());
+        let id = shape(&mut deck, 1, [10., 10., 50., 50.]);
+        let before = deck.clone();
+        // A patch sent as a string, a number or nothing: refused, where it
+        // once took the element's place (or ended the app).
+        for set in [
+            json!("{\"fill\":\"accent2\"}"),
+            json!(3),
+            json!([1]),
+            json!(null),
+        ] {
+            let result = apply(
+                &mut deck,
+                op(json!({"op": "update_element", "id": id, "set": set})),
+            );
+            assert!(result.is_err(), "{set}");
+        }
+        assert!(
+            apply(
+                &mut deck,
+                op(json!({"op": "update_element", "id": id, "set": {"kind": null}})),
+            )
+            .is_err()
+        );
+        assert_eq!(deck, before);
+    }
+
+    #[test]
+    fn a_copied_slide_names_its_own_elements() {
+        let mut deck = new_deck("T", "clean", SlideSize::default());
+        let a = shape(&mut deck, 1, [0., 0., 10., 10.]);
+        let b = shape(&mut deck, 1, [100., 0., 10., 10.]);
+        let line = apply(
+            &mut deck,
+            op(json!({"op": "add_element", "slide": 1, "element": {
+                "type": "shape", "geometry": "line", "frame": {"x": 10, "y": 5, "w": 90, "h": 0},
+                "connect": {"start": [a, 1], "end": [b, 3]}}})),
+        )
+        .unwrap()
+        .unwrap();
+        apply(&mut deck, op(json!({"op": "animate", "id": a}))).unwrap();
+        let comment = apply(
+            &mut deck,
+            op(json!({"op": "add_comment", "slide": 1, "id": b, "text": "Bigger?"})),
+        )
+        .unwrap()
+        .unwrap();
+        apply(&mut deck, op(json!({"op": "duplicate_slide", "slide": 1}))).unwrap();
+
+        let (original, copy) = (&deck.slides[0], &deck.slides[1]);
+        let twin = |id: &str| {
+            let at = original.elements.iter().position(|e| e.id == id).unwrap();
+            copy.elements[at].id.clone()
+        };
+        assert_ne!(twin(&a), a);
+        assert_eq!(copy.animations.len(), 1, "the copy keeps its animations");
+        assert_eq!(copy.animations[0].id, twin(&a));
+        assert_eq!(copy.comments[0].element, Some(twin(&b)));
+        assert_ne!(copy.comments[0].id, comment);
+        let Kind::Shape(Shape {
+            connect: Some(connect),
+            ..
+        }) = &deck.element(&twin(&line)).unwrap().1.kind
+        else {
+            panic!("a line fixed to shapes")
+        };
+        assert_eq!(connect.start, Some((twin(&a), 1)));
+        assert_eq!(connect.end, Some((twin(&b), 3)));
+
+        // Resolving the copy's comment leaves the original's open.
+        let copied = copy.comments[0].id.clone();
+        apply(
+            &mut deck,
+            op(json!({"op": "resolve_comment", "comment": copied})),
+        )
+        .unwrap();
+        assert!(!deck.slides[0].comments[0].resolved);
+        assert!(deck.slides[1].comments[0].resolved);
+    }
+
+    #[test]
+    fn a_group_takes_its_children_along() {
+        let mut deck = new_deck("T", "clean", SlideSize::default());
+        apply(&mut deck, op(json!({"op": "add_slide", "layout": "blank"}))).unwrap();
+        let a = shape(&mut deck, 2, [100., 100., 20., 20.]);
+        let b = shape(&mut deck, 2, [180., 140., 20., 20.]);
+        let group = apply(&mut deck, op(json!({"op": "group", "ids": [a, b]})))
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame_of(&deck, &group), [100., 100., 100., 60.]);
+
+        // Aligned to the slide's left: moved, its children as far.
+        apply(
+            &mut deck,
+            op(json!({"op": "align", "ids": [group], "to": "left"})),
+        )
+        .unwrap();
+        assert_eq!(frame_of(&deck, &group), [0., 100., 100., 60.]);
+        assert_eq!(frame_of(&deck, &a), [0., 100., 20., 20.]);
+        assert_eq!(frame_of(&deck, &b), [80., 140., 20., 20.]);
+
+        // Given a frame twice the size elsewhere: scaled inside it.
+        apply(
+            &mut deck,
+            op(json!({"op": "update_element", "id": group, "set": {
+                "frame": {"x": 200, "y": 0, "w": 200, "h": 120}}})),
+        )
+        .unwrap();
+        assert_eq!(frame_of(&deck, &a), [200., 0., 40., 40.]);
+        assert_eq!(frame_of(&deck, &b), [360., 80., 40., 40.]);
+        // Turned only: the group is drawn turned, its children stay.
+        apply(
+            &mut deck,
+            op(json!({"op": "update_element", "id": group, "set": {"frame": {"rotation": 90}}})),
+        )
+        .unwrap();
+        assert_eq!(frame_of(&deck, &b), [360., 80., 40., 40.]);
+
+        // Another slide size scales what is in the group as well.
+        apply(&mut deck, op(json!({"op": "set_size", "preset": "4:3"}))).unwrap();
+        let (outer, inner) = (frame_of(&deck, &group), frame_of(&deck, &b));
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        assert!(
+            near(outer[2], 150.) && near(inner[2], 30.),
+            "{outer:?} {inner:?}"
+        );
+        assert!(
+            near(inner[0] + inner[2], outer[0] + outer[2])
+                && near(inner[1] + inner[3], outer[1] + outer[3]),
+            "still in its corner of the group: {outer:?} {inner:?}"
+        );
+
+        // A group that is a number short stays where it is.
+        let mut element = deck.element(&group).unwrap().1.clone();
+        let children = element.kind.clone();
+        set_frame(&mut element, Frame::new(f32::NAN, 0., 10., 10.));
+        assert_eq!(element.kind, children);
+    }
+
+    #[test]
+    fn numbers_too_large_are_refused() {
+        let mut deck = new_deck("T", "clean", SlideSize::default());
+        let id = shape(&mut deck, 1, [10., 10., 50., 50.]);
+        let before = deck.clone();
+        // Above what an `f32` holds: read as infinite, saved as `null`,
+        // and the deck would not open again.
+        for change in [
+            json!({"op": "update_element", "id": id, "set": {"opacity": 1e39}}),
+            json!({"op": "update_element", "id": id, "set": {"line": {"width": -1e39}}}),
+            json!({"op": "add_element", "slide": 1, "element": {
+                "type": "picture", "media": "a.png", "radius": 1e300}}),
+            json!({"op": "update_slide", "slide": 1, "background": {
+                "type": "solid", "color": "accent1", "opacity": 1e39}}),
+            json!({"op": "style_text", "id": id, "run": {"size": 1e39}}),
+            json!({"op": "set_theme", "custom": {"title": {"size": 20, "space_after": 1e39}}}),
+        ] {
+            assert!(apply(&mut deck, op(change.clone())).is_err(), "{change}");
+        }
+        assert_eq!(deck, before);
+        // A comment placed out of range is put where one without a place is.
+        apply(
+            &mut deck,
+            op(json!({"op": "add_comment", "slide": 1, "text": "Here", "x": 1e39, "y": 5})),
+        )
+        .unwrap();
+        assert_eq!(deck.slides[0].comments[0].x, 24.);
+        let saved = serde_json::to_string(&deck).unwrap();
+        assert_eq!(serde_json::from_str::<Deck>(&saved).unwrap(), deck);
+    }
+
+    #[test]
+    fn text_sizes_stay_what_the_layout_takes() {
+        let mut deck = new_deck("T", "clean", SlideSize::default());
+        let code = apply(
+            &mut deck,
+            op(json!({"op": "add_element", "slide": 1, "element": {
+                "type": "code", "code": "a\n\nb", "font_size": 0}})),
+        )
+        .unwrap()
+        .unwrap();
+        let size = |deck: &Deck, id: &str| match &deck.element(id).unwrap().1.kind {
+            Kind::Code(code) => code.font_size,
+            Kind::Table(table) => table.font_size,
+            _ => panic!("code or a table"),
+        };
+        assert_eq!(size(&deck, &code), 1.);
+        apply(
+            &mut deck,
+            op(json!({"op": "update_element", "id": code, "set": {"font_size": 5000}})),
+        )
+        .unwrap();
+        assert_eq!(size(&deck, &code), 400.);
+        // In a group too (children are given in full, with their `kind`).
+        let table = json!({"kind": {"type": "table", "rows": [[{"text": "a"}]], "font_size": 0}});
+        let group = apply(
+            &mut deck,
+            op(json!({"op": "add_element", "slide": 1, "element": {
+                "type": "group", "children": [table]}})),
+        )
+        .unwrap()
+        .unwrap();
+        let Kind::Group(group) = &deck.element(&group).unwrap().1.kind else {
+            panic!("a group")
+        };
+        assert_eq!(size(&deck, &group.children[0].id), 1.);
+        // And a whole theme's sizes.
+        let mut theme = serde_json::to_value(&deck.theme).unwrap();
+        theme["title"]["size"] = json!(0);
+        theme["layouts"][0]["placeholders"][0]["size"] = json!(0);
+        apply(&mut deck, op(json!({"op": "set_theme", "custom": theme}))).unwrap();
+        assert_eq!(deck.theme.title.size, 1.);
+        assert_eq!(deck.theme.layouts[0].placeholders[0].size, Some(1.));
+    }
+
+    #[test]
+    fn an_emptied_section_goes_with_its_slide() {
+        let mut deck = new_deck("T", "clean", SlideSize::default());
+        for _ in 0..2 {
+            apply(&mut deck, op(json!({"op": "add_slide"}))).unwrap();
+        }
+        apply(
+            &mut deck,
+            op(json!({"op": "add_section", "name": "One", "slide": 2})),
+        )
+        .unwrap();
+        apply(
+            &mut deck,
+            op(json!({"op": "add_section", "name": "Two", "slide": 3})),
+        )
+        .unwrap();
+        let third = deck.slides[2].id.clone();
+        apply(&mut deck, op(json!({"op": "remove_slide", "slide": 2}))).unwrap();
+        let sections: Vec<(&str, &str)> = deck
+            .sections
+            .iter()
+            .map(|section| (section.name.as_str(), section.slide.as_str()))
+            .collect();
+        assert_eq!(sections, [("Two", third.as_str())]);
+        // With no section after it, the section moves on to the next slide.
+        apply(&mut deck, op(json!({"op": "add_slide"}))).unwrap();
+        apply(&mut deck, op(json!({"op": "remove_slide", "slide": 2}))).unwrap();
+        assert_eq!(deck.sections[0].slide, deck.slides[1].id);
     }
 }

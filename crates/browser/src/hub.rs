@@ -70,6 +70,11 @@ impl BrowserHub {
     }
 
     /// The project's browser, created (but not started) on first use.
+    /// The app's store (settings the browsers share).
+    pub(crate) fn store(cx: &App) -> Store {
+        cx.global::<Self>().store.clone()
+    }
+
     pub fn browser(project_id: i64, cx: &mut App) -> Entity<Browser> {
         if let Some(browser) = cx.global::<Self>().browsers.get(&project_id) {
             return browser.clone();

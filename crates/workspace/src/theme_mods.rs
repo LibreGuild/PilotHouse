@@ -15,12 +15,12 @@ use crate::AppState;
 /// Where PilotHouse takes its colors from, for the agent.
 const GUIDE: &str = "\
 Where PilotHouse takes its colors from (`colors`):
-- sidebar.background: the window's frame: the left sidebar, the strip of tools on the right and around the panels. title_bar.background, status_bar.background and tab_bar.background are part of it: change them together.
+- sidebar.background: the window's frame: the column of icons on the left, the title and status bars, and around the panels. title_bar.background, status_bar.background and tab_bar.background are part of it: change them together.
 - background: the panels on the frame (chat, editor, files, the settings page) and dialogs; border: their outlines and the lines between things.
 - foreground: text; muted.foreground: secondary text (descriptions, times, placeholders).
 - muted.background: the user's messages in a chat, segmented switches, code in text.
 - popover.background / popover.foreground: menus, pop-ups and dropdowns.
-- list.hover.background / list.active.background: a row under the pointer / the selected row (sidebar, lists, menus).
+- list.hover.background / list.active.background: a row under the pointer / the selected row (lists, menus).
 - primary.background / primary.foreground (and .hover / .active): filled main buttons (Send, Add).
 - secondary.background (and .hover / .active): plain buttons; input.border: text fields' outline.
 - ring: the focus outline; info.background: highlights; link: links; selection.background: selected text.
@@ -94,40 +94,6 @@ pub(crate) fn import_vscode_file(cx: &mut App) {
                     cx,
                 ),
             }
-        });
-    })
-    .detach();
-}
-
-/// Asks for an image to show behind the frame; PilotHouse's own copy
-/// (made to fit a screen, off the UI thread) is what shows.
-pub(crate) fn choose_backdrop(cx: &mut App) {
-    use gpui_kit::component::notification::Notification;
-    let paths = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-        files: true,
-        directories: false,
-        multiple: false,
-        prompt: Some("Use as background".into()),
-    });
-    let dir = ph_store::paths::data_dir().join("backdrops");
-    cx.spawn(async move |cx| {
-        let Ok(Ok(Some(paths))) = paths.await else {
-            return;
-        };
-        let Some(source) = paths.into_iter().next() else {
-            return;
-        };
-        let prepared = cx
-            .background_spawn(async move {
-                ph_theme::preferences::prepare_backdrop_image(&source, &dir)
-            })
-            .await;
-        cx.update(|cx| match prepared {
-            Ok(path) => AppState::update_preferences(cx, |preferences| {
-                preferences.window = ph_theme::WindowStyle::Image;
-                preferences.backdrop_image = path.to_string_lossy().into_owned();
-            }),
-            Err(err) => tell(Notification::warning(format!("{err:#}")), cx),
         });
     })
     .detach();

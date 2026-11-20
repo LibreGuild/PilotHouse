@@ -91,7 +91,16 @@ impl ChatHub {
     ) -> bool {
         let mut running: Vec<Entity<AgentConnection>> = Self::all(cx)
             .into_iter()
-            .filter_map(|(_, chats)| chats.read(cx).connections.get(id).cloned())
+            .flat_map(|(_, chats)| {
+                // Every account's process of the agent.
+                chats
+                    .read(cx)
+                    .connections
+                    .iter()
+                    .filter(|(key, _)| key.split('#').next() == Some(id))
+                    .map(|(_, connection)| connection.clone())
+                    .collect::<Vec<_>>()
+            })
             .collect();
         running.extend(also);
         running.dedup_by_key(|connection| connection.entity_id());
@@ -118,7 +127,7 @@ impl ChatHub {
 
 #[derive(Debug, Clone)]
 pub enum WorkspaceChatsEvent {
-    /// A chat was made (here or by its first message).
+    /// A chat was made (here or by its first message), or one's turn ended.
     SessionsChanged,
     /// A chat started with [`WorkspaceChats::start_background`] finished its
     /// turn; `reply` is the start of the agent's last message.
@@ -131,8 +140,8 @@ pub enum WorkspaceChatsEvent {
 
 /// Work under way before a chat's turn can start: a repository cloned and a
 /// pull request checked out for a review. It is part of the run to whoever
-/// asked for it, so the workspace's status counts it as work and the Agents
-/// board lists it, though no agent has started yet.
+/// asked for it, so the workspace's status counts it as work and the Bridge
+/// lists it, though no agent has started yet.
 #[derive(Debug, Clone)]
 pub struct Preparing {
     /// What it is for: `Review of #42`.
@@ -167,7 +176,7 @@ pub enum ChatState {
     Idle,
 }
 
-/// A chat in a few words, for lists and boards.
+/// A chat in a few words, for lists and the Bridge.
 #[derive(Debug, Clone)]
 pub struct ChatSummary {
     pub state: ChatState,
@@ -188,7 +197,8 @@ pub struct WorkspaceChats {
     store: Store,
     project: ThreadProject,
     /// One process per agent, started on first use (and again if it exited).
-    connections: HashMap<&'static str, Entity<AgentConnection>>,
+    /// The agents' processes, by agent and account ([`connection_key`]).
+    connections: HashMap<String, Entity<AgentConnection>>,
     /// Chats opened or started, with their watches and when last used.
     threads: HashMap<SessionId, Kept>,
     /// Counts uses, to know which kept chat was used least lately.
@@ -220,6 +230,9 @@ impl WorkspaceChats {
             for kept in this.threads.values() {
                 kept.thread.update(cx, |thread, cx| thread.persist_now(cx));
             }
+            // Nothing is dropped when the app quits, so nothing else ends
+            // the agents (each in a process group of its own).
+            crate::rpc::stop_all_before_exit();
             async {}
         });
         Self {
@@ -272,6 +285,14 @@ impl WorkspaceChats {
         thread
     }
 
+    /// Lets go of the loaded chat of `session`: its conversation went on
+    /// in its agent's CLI and its transcript was added to in the store, so
+    /// it is read from there when it is next shown.
+    pub fn forget(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        self.threads.remove(&session);
+        cx.notify();
+    }
+
     /// Keeps `thread` (now stored as `session`) loaded, so it keeps working
     /// off screen.
     pub(crate) fn keep(
@@ -296,6 +317,14 @@ impl WorkspaceChats {
                     if !(this.on_screen && this.viewing == Some(session)) {
                         this.unread.insert(session);
                     }
+                    // Its stored row changed (when it last did something,
+                    // what it did): lists of the chats read it again.
+                    cx.emit(WorkspaceChatsEvent::SessionsChanged);
+                    cx.notify();
+                }
+                // Its agent named it: the lists show the name.
+                if let ThreadEvent::Renamed = event {
+                    cx.emit(WorkspaceChatsEvent::SessionsChanged);
                     cx.notify();
                 }
             }),
@@ -343,58 +372,52 @@ impl WorkspaceChats {
     pub(crate) fn connection(
         &mut self,
         spec: &'static AgentSpec,
+        account: &str,
         cx: &mut Context<Self>,
     ) -> Entity<AgentConnection> {
-        if let Some(connection) = self.connections.get(spec.id)
+        let key = connection_key(spec.id, account);
+        if let Some(connection) = self.connections.get(&key)
             && !connection.read(cx).has_exited()
         {
             return connection.clone();
         }
-        // A copy PilotHouse made (a GitHub clone, a task folder that may
-        // hold a pull request author's tree): the agent's launcher starts
-        // outside it, so its `.npmrc` or a vendored copy of the adapter
-        // never runs; each chat still works in the folder (the session's
-        // own folder).
-        let cwd = if self.project.read_only || ph_store::paths::is_copy(&self.project.path) {
-            let neutral = ph_store::paths::data_dir().join("agents");
-            let _ = std::fs::create_dir_all(&neutral);
-            neutral
-        } else {
-            self.project.path.clone()
-        };
-        let mut env = self.mcp_settings_env(spec);
-        if spec.id == "cline" {
-            env.extend(crate::cline::env_for(&self.store));
-        }
-        let connection = cx.new(|cx| AgentConnection::start_with(spec, cwd, env, cx));
-        self.connections.insert(spec.id, connection.clone());
-        connection
-    }
-
-    /// For an agent that reads MCP servers only from its own settings file
-    /// (Cline): a copy of that file with PilotHouse's servers and those from
-    /// Settings → MCP & skills, named in the variable the agent reads.
-    fn mcp_settings_env(&self, spec: &'static AgentSpec) -> Vec<(String, String)> {
-        let Some(var) = spec.quirks.mcp_settings_env else {
-            return Vec::new();
-        };
-        let servers: Vec<_> =
-            crate::thread::pilothouse_mcp_server(&self.project.path, spec.id, self.project.id)
-                .into_iter()
-                .chain(crate::mcp_config::for_session(&self.store))
-                .collect();
-        let key = format!("{}:{}", self.project.id, self.project.path.display());
-        match crate::cline::write_mcp_settings(
-            &crate::cline::Paths::of_this_computer(),
-            &servers,
-            &key,
-        ) {
-            Ok(path) => vec![(var.to_string(), path.to_string_lossy().into_owned())],
-            Err(err) => {
-                tracing::warn!("{} gets no MCP servers: {err:#}", spec.name);
-                Vec::new()
+        // Where it starts and with what is worked out with the start, off
+        // the UI's thread: folders and Cline's settings file are written,
+        // and Cline's variables wait for the login shell's environment.
+        let (store, project, account) = (
+            self.store.clone(),
+            self.project.clone(),
+            account.to_string(),
+        );
+        let prepare = move || {
+            // A copy PilotHouse made (a GitHub clone, a task folder that
+            // may hold a pull request author's tree): the agent's launcher
+            // starts outside it, so its `.npmrc` or a vendored copy of the
+            // adapter never runs; each chat still works in the folder (the
+            // session's own folder).
+            let cwd = if project.read_only || ph_store::paths::is_copy(&project.path) {
+                let neutral = ph_store::paths::data_dir().join("agents");
+                let _ = std::fs::create_dir_all(&neutral);
+                neutral
+            } else {
+                project.path.clone()
+            };
+            let mut env = mcp_settings_env(&store, &project, spec);
+            if spec.id == "cline" {
+                env.extend(crate::cline::env_for(&store));
             }
-        }
+            // What Settings → Agents sets for the agent, and for the
+            // account the chat is in: one process serves one account.
+            env.extend(
+                crate::profiles::Profiles::load(&store)
+                    .of(spec.id)
+                    .environment_for(&account),
+            );
+            (cwd, env)
+        };
+        let connection = cx.new(|cx| AgentConnection::start_prepared(spec, prepare, cx));
+        self.connections.insert(key, connection.clone());
+        connection
     }
 
     /// Starts a chat named `title` with `prompt` and the default agent,
@@ -408,7 +431,7 @@ impl WorkspaceChats {
     ) -> Option<SessionId> {
         let agent = default_agent(&self.store);
         let thread = self.draft(agent, cx);
-        let connection = self.connection(agent, cx);
+        let connection = self.connection(agent, "", cx);
         let blocks = vec![agent_client_protocol_schema::v1::ContentBlock::Text(
             agent_client_protocol_schema::v1::TextContent::new(prompt.clone()),
         )];
@@ -450,8 +473,13 @@ impl WorkspaceChats {
     /// counts as seeing what finished: the chats whose turn ended while it
     /// was away are returned (and forgotten).
     /// Counts chat `session`'s news as seen.
-    pub fn mark_read(&mut self, session: SessionId, cx: &mut Context<Self>) {
-        if self.unread.remove(&session) {
+    /// Chat `session` was put away (marked done): its news is neither
+    /// unread nor waiting to be told about.
+    pub fn settle(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        let unread = self.unread.remove(&session);
+        let before = self.unseen.len();
+        self.unseen.retain(|unseen| *unseen != session);
+        if unread || self.unseen.len() != before {
             cx.notify();
         }
     }
@@ -514,6 +542,20 @@ impl WorkspaceChats {
             agent: thread.agent(),
             line,
         })
+    }
+
+    /// What chat `session` asks, when it waits for an answer: for a card
+    /// that offers the answers where the task is listed.
+    pub fn pending_request(
+        &self,
+        session: SessionId,
+        cx: &App,
+    ) -> Option<Entity<crate::permission::PermissionRequest>> {
+        self.threads
+            .get(&session)?
+            .thread
+            .read(cx)
+            .pending_request(cx)
     }
 
     /// Whether `session` is the chat on screen.
@@ -609,13 +651,51 @@ impl WorkspaceChats {
     }
 }
 
+/// For an agent that reads MCP servers only from its own settings file
+/// (Cline): a copy of that file with PilotHouse's servers and those from
+/// Settings → MCP & skills, named in the variable the agent reads.
+fn mcp_settings_env(
+    store: &Store,
+    project: &ThreadProject,
+    spec: &'static AgentSpec,
+) -> Vec<(String, String)> {
+    let Some(var) = spec.quirks.mcp_settings_env else {
+        return Vec::new();
+    };
+    let servers: Vec<_> = crate::thread::pilothouse_mcp_server(&project.path, spec.id, project.id)
+        .into_iter()
+        .chain(crate::mcp_config::for_session(store))
+        .collect();
+    let key = format!("{}:{}", project.id, project.path.display());
+    match crate::cline::write_mcp_settings(&crate::cline::Paths::of_this_computer(), &servers, &key)
+    {
+        Ok(path) => vec![(var.to_string(), path.to_string_lossy().into_owned())],
+        Err(err) => {
+            tracing::warn!("{} gets no MCP servers: {err:#}", spec.name);
+            Vec::new()
+        }
+    }
+}
+
+/// What an agent's process is kept by: the agent, and the account it runs
+/// in when not the agent's own.
+fn connection_key(agent: &str, account: &str) -> String {
+    if account.is_empty() {
+        agent.to_string()
+    } else {
+        format!("{agent}#{account}")
+    }
+}
+
 /// The first non-empty line of `text`, without Markdown emphasis marks, cut
-/// to a list row's length.
+/// to a list row's length. A line that is only a comment is passed over:
+/// the marks around an explanation or a walkthrough are for the app, and a
+/// card that quoted one would say nothing.
 fn first_line(text: &str) -> String {
     let line = text
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
+        .find(|line| !line.is_empty() && !(line.starts_with("<!--") && line.ends_with("-->")))
         .unwrap_or_default()
         .trim_start_matches(['#', '>', '-', '*', ' '])
         .replace("**", "")
@@ -638,6 +718,10 @@ mod tests {
             "Done. PR is green"
         );
         assert_eq!(first_line(""), "");
+        assert_eq!(
+            first_line("<!-- pilothouse-explanation -->\n# Deleting a note\n"),
+            "Deleting a note"
+        );
         assert_eq!(first_line(&"x".repeat(200)).chars().count(), 141);
     }
 }

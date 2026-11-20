@@ -85,31 +85,50 @@ pub fn parse_json(text: &str) -> Result<Node, String> {
     }
 }
 
-/// How deep brackets nest in `text`, outside quoted strings.
+/// How deep brackets nest in `text`, outside quoted strings and comments
+/// (comments are what sends a text to the JSON5 parser: a quote inside one
+/// opens no string, and a bracket after it counts).
 fn nesting(text: &str) -> usize {
     let (mut depth, mut deepest) = (0usize, 0usize);
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for c in text.chars() {
-        match quote {
-            Some(open) => {
-                if escaped {
-                    escaped = false;
-                } else if c == '\\' {
-                    escaped = true;
-                } else if c == open {
-                    quote = None;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                let mut escaped = false;
+                for inner in chars.by_ref() {
+                    if escaped {
+                        escaped = false;
+                    } else if inner == '\\' {
+                        escaped = true;
+                    } else if inner == c {
+                        break;
+                    }
                 }
             }
-            None => match c {
-                '"' | '\'' => quote = Some(c),
-                '[' | '{' => {
-                    depth += 1;
-                    deepest = deepest.max(depth);
+            // To the end of the line, as JSON5 ends lines.
+            '/' if chars.peek() == Some(&'/') => {
+                for inner in chars.by_ref() {
+                    if matches!(inner, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+                        break;
+                    }
                 }
-                ']' | '}' => depth = depth.saturating_sub(1),
-                _ => {}
-            },
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut star = false;
+                for inner in chars.by_ref() {
+                    if star && inner == '/' {
+                        break;
+                    }
+                    star = inner == '*';
+                }
+            }
+            '[' | '{' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
         }
     }
     deepest
@@ -136,6 +155,7 @@ pub fn parse_toml(text: &str) -> Result<Node, String> {
 
 /// YAML; a file of several documents is a list of them.
 pub fn parse_yaml(text: &str) -> Result<Node, String> {
+    check_yaml_nesting(text)?;
     let docs = yaml_rust2::YamlLoader::load_from_str(text).map_err(|err| err.to_string())?;
     let mut nodes: Vec<Node> = docs.iter().map(from_yaml).collect();
     Ok(match nodes.len() {
@@ -143,6 +163,30 @@ pub fn parse_yaml(text: &str) -> Result<Node, String> {
         1 => nodes.remove(0),
         _ => Node::Array(nodes),
     })
+}
+
+/// Refuses YAML nested deeper than a tree of it can be built. The loader
+/// calls itself once for every level, and so do reading and dropping what
+/// it built: `- - - - x` is four levels at two bytes each, and a few
+/// kilobytes of that overflowed the stack and ended the app. The events
+/// are read here first, in a loop, only to count the levels.
+fn check_yaml_nesting(text: &str) -> Result<(), String> {
+    use yaml_rust2::parser::{Event, Parser};
+    let mut parser = Parser::new_from_str(text);
+    let mut depth = 0usize;
+    loop {
+        match parser.next_token().map_err(|err| err.to_string())?.0 {
+            Event::SequenceStart(..) | Event::MappingStart(..) => {
+                depth += 1;
+                if depth > 128 {
+                    return Err("nested too deeply to show as a tree".into());
+                }
+            }
+            Event::SequenceEnd | Event::MappingEnd => depth = depth.saturating_sub(1),
+            Event::StreamEnd => return Ok(()),
+            _ => {}
+        }
+    }
 }
 
 fn from_yaml(yaml: &yaml_rust2::Yaml) -> Node {
@@ -267,6 +311,33 @@ mod tests {
         let deep = format!("{}1{}", "[".repeat(20_000), "]".repeat(19_999));
         assert!(parse_json(&deep).is_err());
         assert_eq!(nesting(r#"{"a": "[[[", "b": [1, {"c": 2}]}"#), 3);
+        // A quote in a comment opens no string: the brackets after it
+        // count (and a bracket in a comment does not).
+        for comment in ["// '\n", "/* \" */", "// \"\r", "/* ' *//* [[ */"] {
+            let deep = format!("{comment}{}", "[".repeat(100_000));
+            assert_eq!(nesting(&deep), 100_000, "{comment}");
+            assert!(parse_json(&deep).is_err());
+        }
+        assert_eq!(nesting("// [[[\n[1, /* [[ */ [2]]"), 2);
+        assert!(parse_json("// note\n[1, /* two */ [2, 3,],]").is_ok());
+    }
+
+    #[test]
+    fn deep_yaml_is_refused_not_overflowed() {
+        // Block sequences on one line, two bytes a level.
+        let deep = format!("{}x", "- ".repeat(20_000));
+        assert!(parse_yaml(&deep).unwrap_err().contains("nested too deeply"));
+        let deep = format!("{}x", "a: {b: ".repeat(200));
+        assert!(parse_yaml(&deep).is_err());
+        // As deep as a tree goes.
+        let nested = format!("{}x", "- ".repeat(128));
+        let mut node = &parse_yaml(&nested).unwrap();
+        let mut depth = 0;
+        while let Node::Array(items) = node {
+            node = &items[0];
+            depth += 1;
+        }
+        assert_eq!(depth, 128);
     }
 
     use super::*;

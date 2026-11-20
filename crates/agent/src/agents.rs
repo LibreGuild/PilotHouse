@@ -268,6 +268,23 @@ static INSTALLED: std::sync::RwLock<Option<Vec<&'static str>>> = std::sync::RwLo
 /// PilotHouse quits; a chat with one offers its terminal instead.
 static NO_CHAT_MODE: std::sync::RwLock<Vec<&'static str>> = std::sync::RwLock::new(Vec::new());
 
+/// Whether agent `id` has a program of its own to run in a terminal, with
+/// the command that starts it: a session's other form (`chat_panel::Form`).
+pub fn cli_of(id: &str) -> Option<&'static str> {
+    match id {
+        "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        "gemini" => Some("gemini"),
+        "antigravity" => Some("agy"),
+        "cline" => Some("cline"),
+        _ => None,
+    }
+}
+
+pub fn has_cli(id: &str) -> bool {
+    cli_of(id).is_some()
+}
+
 /// Whether agent `id`'s CLI here cannot run in a chat (it can in a
 /// terminal).
 pub fn chat_unsupported(id: &str) -> bool {
@@ -334,14 +351,35 @@ impl AgentSpec {
 /// remembers it for [`installed`]. Blocking: it may wait seconds for the
 /// login shell, so call it off the UI thread.
 pub fn detect() -> Vec<&'static AgentSpec> {
-    let found: Vec<&'static AgentSpec> = AGENTS
-        .iter()
-        .filter(|spec| matches!(spec.availability(), Availability::Ready { .. }))
-        .collect();
+    let assumed = ASSUMED.read().ok().and_then(|assumed| assumed.clone());
+    let found: Vec<&'static AgentSpec> = match assumed {
+        Some(ids) => ids.iter().filter_map(|id| find(id)).collect(),
+        None => AGENTS
+            .iter()
+            .filter(|spec| matches!(spec.availability(), Availability::Ready { .. }))
+            .collect(),
+    };
     if let Ok(mut installed) = INSTALLED.write() {
         *installed = Some(found.iter().map(|spec| spec.id).collect());
     }
     found
+}
+
+/// What [`assume_installed`] said, in place of looking.
+static ASSUMED: std::sync::RwLock<Option<Vec<&'static str>>> = std::sync::RwLock::new(None);
+
+/// Says which agents are installed, for this run, without looking. For
+/// tests of views: a chat draws a greeting in place of its message box when
+/// no agent is found, so a test that looked would pass on a developer's
+/// machine and fail on one with no agent on it. What an agent needs to
+/// start (`availability`) is still looked for.
+pub fn assume_installed(ids: &[&'static str]) {
+    if let Ok(mut assumed) = ASSUMED.write() {
+        *assumed = Some(ids.to_vec());
+    }
+    if let Ok(mut installed) = INSTALLED.write() {
+        *installed = Some(ids.to_vec());
+    }
 }
 
 /// What the last [`detect`] found, in [`AGENTS`] order; `None` before it ran.

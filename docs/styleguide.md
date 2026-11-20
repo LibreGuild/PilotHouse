@@ -19,8 +19,8 @@ The look is a calm graphite, cool rather than warm: near-black with a faint blue
 | Hairlines | `border` | every divider and outline | emphasis |
 | Text | `foreground`, `muted_foreground` | text; secondary text, captions, paths | |
 | The one action | `primary` | the single affirmative button of a surface (Send, Commit, Save): near-white on dark, near-black on light | decoration, secondary actions |
-| Accent | `ring`, `selection`, `info`, filled info buttons: a plain blue as in VS Code (`#0078d4` dark, `#005fb8` light); `link` is `#4daafc` on dark; not a setting. The logo's violet is the logo's only, never the UI's (focus and links stay the accent blue) | focus, text selection, links, "working" spinners, progress | backgrounds, icons for decoration, selected tabs |
-| State | `success`, `warning`, `danger` | done / needs you / failed, git added / modified / deleted, errors | anything that is not state |
+| Accent | `ring` (focus, a border that marks), `link` (links, and an icon or a word tinted to draw the eye), `selection`, `progress_bar`, and `primary` on what shows a choice (a switch, a checked box, a tab's line): the theme's own, a plain blue as in VS Code (`#0078d4` dark, `#005fb8` light), or the accent chosen in Settings → Appearance, which is laid over all of these. The logo's violet is the logo's only, never the UI's | focus, text selection, links, progress, the thing to click in a drawing | backgrounds, selected tabs, a state |
+| State | `success`, `warning`, `danger`, `info` | done / needs you / failed / working, git added / modified / deleted / renamed, errors and notes. They are the theme's and never follow the accent: a green accent must not make *working* look like *done* | anything that is not state, a tint that should follow the accent (that is `link`) |
 
 - A workspace's colour is a small mark beside its name, never a wash over chrome.
 - Agents' brand marks identify the agent, at 14–18 px, and nowhere else.
@@ -46,7 +46,7 @@ The interface size setting (`ui_font_size`, 16 by default on every system) is th
 
 ## 3. Space and density
 
-- 4 px rhythm (`gap_1` = 4 px). Rows are 28 px (`h_7`), compact rows 24 px (`h_6`), sidebar cards two or three lines.
+- 4 px rhythm (`gap_1` = 4 px). Rows are 28 px (`h_7`), compact rows 24 px (`h_6`), Bridge cards two to four lines.
 - **Everything follows the interface size**, as a web page does when it is zoomed: text, rows, icons, marks, paddings, dialogs. Use the rem helpers (`h_7()`, `gap_2()`, `size_4()`), and for a size off that scale `ph_ui::rems_from_px(14.)` (or `ph_ui::scaled_px(560., window)` where only pixels are taken, such as a dialog's width). A length in `px(…)` stays as it is at every size, so it is only for what must not scale: hairlines and strokes, corner radii, a window's size and the limits of its panes (`crates/theme/src/layout.rs`), and marks drawn on a picture.
 - Panels run edge to edge; padding belongs inside lists (`px_2`), not around panels.
 - Line up text to a visible left edge; right-align numbers, counts, shortcuts and ages.
@@ -69,15 +69,17 @@ Three levels, no fourth:
 - **Destructive** (`danger`) only for irreversible actions, and they ask first.
 - Icons are at least as large as the text beside them: 14 to 16 px (`small()`, or `size_4()`) with row text, 12 to 14 px (`xsmall()`, `small()`) with captions, 18 px in the columns of icons; they inherit the text's colour.
 - Tooltips name icon-only controls. Never repeat a visible label; never put information only in a tooltip.
+- **A tooltip grows downwards, not sideways.** Its text is at most 52 characters a line (`ph_ui::tip`): broken at spaces, and inside a word longer than a line (a path, a URL) after a separator. Pass every tooltip whose text is made up as the app runs (a title, a path, a command, a state) through `ph_ui::tip(…)`, and any fixed one longer than a line; a short fixed label needs nothing.
+- **A row of Settings** is a name, one sentence under it, and its control at the right. A control wider than a dropdown (several buttons, a sentence) goes under the text (`.layout(Axis::Vertical)`), or it runs off the page. A group's description shows only under a title. A page that is one view (`view_page` in `settings_dialog.rs`) lists the words Search finds it by. A form that fills a page keeps its way back and its Save over its fields, not under them.
 
 ## 6. One way to each place
 
-Each tool has one launcher on screen: the icon bar on the right. Panes show one tab strip; zoom, split and move live in the pane's ⋯ menu. Do not add a second switcher for the same thing.
+Each place has one way in on screen: the column of icons for what the window shows (the Bridge, Reviews, a workspace), the row of names over the result pane for a workspace's tools. Do not add a second switcher for the same thing.
 
 ## 7. Feedback
 
 - Match feedback to duration: nothing under 100 ms; disabled under 1 s; the working mark from 1 to 3 s; a stage label ("Building… 12s") beyond.
-- **The working mark** is `ph_ui::Loader`: a pennant of four bars that flutters, after the app's icon, in the accent colour. Use it wherever something is under way (`xsmall()` beside captions, `small()` beside row text, plain over a label, `large()` alone in a pane); a bare 12 px spinner went unnoticed. It stands still when the system asks for less motion.
+- **The working mark** is `ph_ui::Loader`: a pennant of four bars that flutters, after the app's icon, in the icon's own colours: violet at the mast running through purple and fuchsia to a hot pink at the fly (`loader.rs`, `HUES`). One family of hue, so it reads as one mark and as this app's; four different hues side by side read as other products' marks. The colours keep clear of red, amber, green and blue, which mean something here. A colour passed in (`.color(…)`, on a filled button) is every bar's. Use it wherever something is under way (`xsmall()` beside captions, `small()` beside row text, plain over a label, `large()` alone in a pane); a bare 12 px spinner went unnoticed. It stands still when the system asks for less motion.
 - Copy never claims more than is known: "Installing…" while it runs, "Installed" only after.
 - Empty states say what goes here and offer the action that fills them.
 - Transient results are notifications; errors the user must read or act on stay inline.
@@ -90,13 +92,13 @@ Short and functional: expanding rows, a spinner, the working shimmer. Nothing de
 
 The window is a frame with islands in it (`crates/workspace/src/frame.rs`; the [workspace page](features/workspace.md) says what each is):
 
-- **The frame** is the title bar, the two columns of icons and the status bar. It is painted once, behind them all; none of them has a fill or a border of its own, and nothing draws a line across it. Its paint is the theme's `sidebar` colour, a little lighter at the top than at the bottom, and over it the colour of the workspace in front, faint, fading downwards.
+- **The frame** is the title bar, the column of icons and the status bar. It is painted once, behind them all; none of them has a fill or a border of its own, and nothing draws a line across it. Its paint is the theme's `sidebar` colour, a little lighter at the top than at the bottom, and over it the colour of the workspace in front, faint, fading downwards.
 - **An island** is `frame::island(window, cx)`: a `ph_ui::Surface` (rounded by `radius_lg`, hairline border, the theme's `background`) that knows what is behind its corners. Whatever a view shows between the frame's parts goes in one; islands are `frame::gap()` apart and end the same distance over the status bar. Do not round or fill the corners of what is inside: the island does it.
-- A workspace's colour belongs to the frame, its row in the list and its dot. Do not use it for fills, buttons or text inside an island.
+- A workspace's colour belongs to the frame, its badge in the column of icons and its dot. Do not use it for fills, buttons or text inside an island.
 
 ## 10. Room
 
-A pane is as narrow as 100 px (the dock's least) and as wide as the window, and every view holds up across that:
+A pane is as narrow as 320 px (`CONTEXT_PANEL_MIN`; less in a small window) and as wide as the window, and every view holds up across that:
 
 - Text in a row gives way before it is cut: `div().flex_1().min_w_0().truncate()` for a name, `min_w_0()` without `truncate()` for a sentence that should wrap. A bare string in an `h_flex` does neither.
 - A row of named buttons folds to icons when the pane is narrow (`ph_ui::measure::narrower_than`, the breakpoint in pixels at the default interface size); each keeps its name in its tooltip and `accessibility_label`.

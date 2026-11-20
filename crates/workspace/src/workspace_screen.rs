@@ -1,22 +1,19 @@
-//! Everything shown for one open workspace: the chat, the editor (while a
-//! file is open) and the tools (Files, Git, the board…), each a pane of a
-//! dockable layout the user arranges (see [`dock`]), and the icon bar that
-//! shows a tool. The window's sidebar lists its chats.
-//!
-//! The Chats space (chats outside any workspace) has a screen too: the chat
-//! and the tools that need no folder.
+//! Everything shown for one open workspace: the chat and, beside it, one
+//! result pane for what the task produced, under a row of names (Git,
+//! Preview, Terminal, Files and the workspace's other tools; see
+//! [`layout`]). The Bridge lists its chats with every other workspace's.
 //!
 //! A `WorkspaceScreen` is the screen of a workspace. Its running work (chats,
 //! shells, test runs) belongs to the workspace and outlives the screen (see
 //! [`ph_agent::chats`], [`ph_terminal::TerminalHub`],
 //! [`ph_uitest::runner`]), so a space can be rebuilt without stopping any.
 //!
-//! Tool panels (board, terminal, ...) are created the first time their tool
+//! Tool panels (Git, terminal, ...) are created the first time their tool
 //! is shown. A workspace that never opens the terminal never starts a shell.
 //!
 //! The code is split by concern: `panels` makes the tool panels, `to_chat`
-//! sends what they produce to the chat, `dock` arranges the panes, `render`
-//! draws the screen.
+//! sends what they produce to the chat, `layout` says which panes show,
+//! `render` draws the screen.
 
 use std::collections::{HashMap, HashSet};
 
@@ -25,6 +22,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     notification::Notification,
+    resizable::ResizableState,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -34,7 +32,6 @@ use gpui_kit::{
     Styled as _, Subscription, Window, div,
 };
 use ph_agent::{Attachment, ChatPanel, ChatPanelEvent, LiveSources, WorkspaceChatsEvent};
-use ph_board::{BoardPanel, BoardPanelEvent};
 use ph_browser::BrowserPanel;
 use ph_changes::{BranchPicker, ChangesPanel, ChangesPanelEvent, Repo, RepoEvent};
 use ph_devices::DevicesPanel;
@@ -52,12 +49,15 @@ use crate::app_state::AppState;
 use crate::context_panel::ContextTab;
 use crate::detect::{Stack, detect};
 
-mod dock;
+pub(crate) mod cli;
+pub(crate) mod explain;
+mod layout;
 mod panels;
 mod render;
+mod tabs;
 mod to_chat;
 
-use dock::{Pane, Panes};
+use layout::{Layout, Pane, ResultTab};
 
 pub(crate) use panels::briefs;
 
@@ -107,19 +107,32 @@ struct Away {
 
 pub struct WorkspaceScreen {
     project: Project,
+    /// The window it is in, for what the window knows of its chats (which
+    /// are marked done or pinned) and does with them. Read while drawing
+    /// and in what a click does, never in what the window calls: the
+    /// window is being changed then.
+    shell: gpui_kit::WeakEntity<crate::workspace::Workspace>,
+    /// Where the tabs over the chat are scrolled to, and the chat they
+    /// were last scrolled to show.
+    tabs_scroll: gpui_kit::ScrollHandle,
+    /// The chat in front and how long its name was when its tab was last
+    /// scrolled into view.
+    tabs_front: std::cell::Cell<Option<(SessionId, usize)>>,
+    /// The chats whose tab was closed (see `tabs`).
+    closed_tabs: std::collections::HashSet<SessionId>,
     /// Shared with the sidebar, which lists them on each draw.
     sessions: std::rc::Rc<[Session]>,
     active_session: Option<SessionId>,
-    /// The tool shown last (for ⌘J, ⌘⇧J and the saved layout).
-    context_tab: ContextTab,
-    /// The panes on screen: the displayed tab of a group in view.
+    /// Which panes show: the chat, the result pane and the tool in it.
+    layout: Layout,
+    /// The panes on screen, as the layout last had them: what tells which
+    /// came into view or left it.
     shown: HashSet<Pane>,
-    /// The dockable layout and its panes.
-    panes: Panes,
-    /// The chat is to be brought into view on the next frame.
-    reveal_pending: bool,
-    /// Saves the layout once a change has settled.
-    save_dock_task: Option<gpui_kit::Task<()>>,
+    /// Writes the panes' sizes once a drag of the line between them rests.
+    _save_split: Option<gpui_kit::Task<()>>,
+    /// Where the line between the folders' tree and the editor was dragged
+    /// to: kept while another tool is in front.
+    pub(super) tree_split: Entity<ResizableState>,
     away: Option<Away>,
     /// What the workspace's folders hold, once looked at.
     traits: Option<Traits>,
@@ -139,13 +152,17 @@ pub struct WorkspaceScreen {
     /// The Files tool's tree over `files`.
     file_tree: Option<Entity<FileTree>>,
     changes: HashMap<usize, Entity<ChangesPanel>>,
-    board: Option<Entity<BoardPanel>>,
+    /// The explanation of each Git panel's changes, by its folder (where
+    /// the build explains changes).
+    explanations: HashMap<usize, Entity<ph_explain::ExplanationView>>,
+    /// The explanation of the commit History shows, with what it asks for.
+    commit_explanation: Option<(Entity<ph_explain::ExplanationView>, Subscription)>,
+    /// What the open *Why Is This Here?* pop-up asks for.
+    _why: Option<Subscription>,
     terminal: Option<Entity<TerminalPanel>>,
     browser: Option<Entity<BrowserPanel>>,
     devices: Option<Entity<DevicesPanel>>,
     logcat: Option<Entity<ph_devices::LogcatPanel>>,
-    /// The column tool shown last: what the column comes back with.
-    column_tab: ContextTab,
     runs: Option<Entity<RunsPanel>>,
     pulls: HashMap<usize, Entity<PullsPanel>>,
     tests: Option<Entity<ph_uitest::TestsPanel>>,
@@ -154,13 +171,17 @@ pub struct WorkspaceScreen {
     /// Its window is the one in front (the status bar's looks at ports
     /// and CI slow down when not).
     window_active: bool,
-    /// The window shows its sidebar (with the chat lists); the chat offers
-    /// its own history menu only when not.
-    sidebar_shown: bool,
     /// Ports and CI, for the status bar.
     signals: crate::signals::Signals,
     _signals: gpui_kit::Task<()>,
     _subscriptions: Vec<Subscription>,
+    /// The views of the agent CLIs the chat shows (see `cli`).
+    cli_views: cli::CliViews,
+    /// The chat on its way to its agent's CLI (its side is letting go of
+    /// the conversation): asking again meanwhile starts nothing more.
+    cli_opening: Option<SessionId>,
+    /// Watches the workspace's agent terminals, once one was started.
+    _cli_watch: Option<Subscription>,
     /// Each shown agent transcript's "Continue in a chat", by terminal.
     pub(crate) transcript_subscriptions: HashMap<gpui_kit::EntityId, Subscription>,
 }
@@ -168,7 +189,12 @@ pub struct WorkspaceScreen {
 impl EventEmitter<WorkspaceScreenEvent> for WorkspaceScreen {}
 
 impl WorkspaceScreen {
-    pub fn new(project: Project, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        project: Project,
+        shell: gpui_kit::WeakEntity<crate::workspace::Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let store = AppState::store(cx);
         let saved = store.project_ui_state(project.id).unwrap_or_default();
         let sessions = store.sessions(project.id).unwrap_or_default();
@@ -178,9 +204,32 @@ impl WorkspaceScreen {
             .or_else(|| sessions.first().map(|session| session.id));
 
         let store = store.clone();
+        let screen = cx.weak_entity();
+        let cli_views = cli::CliViews::default();
         let chat = cx.new(|cx| {
             let mut chat = ChatPanel::new(store.clone(), project.clone(), window, cx);
-            chat.set_runs_terminals(true);
+            // Its sessions have their other form here: the agent's CLI.
+            if ph_brand::enabled(ph_brand::Feature::Terminal) {
+                chat.set_cli_view(Self::cli_view(
+                    project.id,
+                    screen.clone(),
+                    cli_views.clone(),
+                    window.window_handle(),
+                ));
+            }
+            // Past chats says which are marked done, as the Bridge has it.
+            let marks = screen.clone();
+            chat.set_chat_marks(std::rc::Rc::new(move |id, cx| {
+                marks
+                    .upgrade()
+                    .and_then(|screen| screen.read(cx).shell.upgrade())
+                    .is_some_and(|shell| shell.read(cx).is_settled(id))
+            }));
+            // Its header shows the workspace's open chats as tabs.
+            chat.set_header_tabs(
+                std::rc::Rc::new(move |window, cx| tabs::render(&screen, window, cx)),
+                cx,
+            );
             let session = active_session
                 .and_then(|id| sessions.iter().find(|session| session.id == id).cloned());
             chat.set_session(session, cx);
@@ -192,63 +241,30 @@ impl WorkspaceScreen {
             |this, _, event: &ChatPanelEvent, window, cx| match event {
                 ChatPanelEvent::SessionsChanged => this.reload_sessions(cx),
                 ChatPanelEvent::SelectSession(Some(id)) => this.select_session(*id, cx),
-                ChatPanelEvent::SelectSession(None) => this.new_session(window, cx),
+                ChatPanelEvent::SelectSession(None) => this.new_session_asked(window, cx),
                 ChatPanelEvent::TurnEnded => {
-                    // A UI test being recorded ends with the agent's turn.
-                    if ph_uitest::record::current(cx).is_some()
-                        && let Some(tests) = this.tests.clone()
-                    {
+                    this.refresh_evidence(cx);
+                    // A UI test being recorded ends with its agent's turn,
+                    // not another chat's.
+                    let chat = this.chat.read(cx).active_session_id(cx);
+                    let ours = ph_uitest::record::current(cx)
+                        .is_some_and(|recording| recording.chat.is_none_or(|id| Some(id) == chat));
+                    if ours && let Some(tests) = this.tests.clone() {
                         tests.update(cx, |tests, cx| tests.finish_recording(cx));
                     }
                 }
                 ChatPanelEvent::WantPulls => this.feed_pulls(window, cx),
-                // A closed terminal's chat goes on.
-                ChatPanelEvent::ResumeInTerminal {
-                    agent,
-                    session,
-                    cwd,
-                } => {
-                    if !ph_brand::enabled(ph_brand::Feature::Terminal) {
-                        return;
-                    }
-                    // Already going on in a terminal: that one.
-                    let open = session.as_deref().and_then(|session| {
-                        crate::terminal_agents::TerminalAgents::of_cli_session(agent, session, cx)
-                            .and_then(|running| running.terminal.upgrade())
-                    });
-                    match open {
-                        Some(terminal) => this.show_terminal(&terminal, window, cx),
-                        None => this.start_terminal_agent(
-                            agent,
-                            cwd.clone(),
-                            session.clone(),
-                            window,
-                            cx,
-                        ),
-                    }
+                ChatPanelEvent::ShowAs(form) => this.show_as(*form, window, cx),
+                ChatPanelEvent::TypeInCli(text) => this.type_in_cli(text, window, cx),
+                ChatPanelEvent::ChatAction(session, action) => {
+                    this.chat_action(session, *action, window, cx)
                 }
-                ChatPanelEvent::ContinueInChat {
-                    agent,
-                    recap,
-                    title,
-                } => {
-                    let from = format!("{} in a terminal", agent.name);
-                    this.chat.update(cx, |chat, cx| {
-                        chat.continue_with(agent, recap.clone(), title.clone(), &from, window, cx)
-                    });
+                ChatPanelEvent::StartCli { agent, account } => {
+                    this.start_new_cli(agent, account, window, cx)
                 }
-                ChatPanelEvent::ResumeInChat {
-                    agent,
-                    session,
-                    title,
-                } => {
-                    let past = ph_agent::cli_sessions::PastSession {
-                        id: session.clone(),
-                        title: title.clone(),
-                        updated_at: 0,
-                        path: None,
-                    };
-                    this.resume_in_chat(agent, &past, window, cx);
+                ChatPanelEvent::PickOutsideSession(agent) => {
+                    let cwd = this.project.path.clone();
+                    this.pick_agent_session(agent, cwd, window, cx)
                 }
                 // A workspace's chat has no starters of its own.
                 ChatPanelEvent::Starter(_) => {}
@@ -320,36 +336,41 @@ impl WorkspaceScreen {
             })
         });
 
-        let (area, skin) = gpui_kit::component::dock::DockSkin::dock_area(
-            SharedString::from(format!("space-{}", project.id)),
-            Some(dock::LAYOUT_VERSION),
-            window,
-            cx,
-        );
-        // Always a tab bar, even for one pane: its tab is what drags.
-        skin.set_panel_style(gpui_kit::component::dock::PanelStyle::TabBar, cx);
-        skin.set_close_button_visible(true, cx);
-        let panes = Panes::new(area.clone(), cx.weak_entity(), cx);
-        let dock_subscription = cx.subscribe(
-            &area,
-            |this, _, event: &gpui_kit::component::dock::DockEvent, cx| {
-                if let gpui_kit::component::dock::DockEvent::LayoutChanged = event {
-                    this.save_dock_soon(cx);
-                    cx.notify();
-                }
-            },
-        );
         let rounds = ph_agent::review_rounds::ReviewRounds::global(cx);
+        // The tool shown last beside the chat (a workspace without folders
+        // starts with the chat alone); never one the brand leaves out.
+        let tool = saved
+            .context_tab
+            .as_deref()
+            .and_then(ContextTab::from_key)
+            .filter(|tab| tab.in_build())
+            .or_else(|| AppState::enabled_tabs(cx).into_iter().next())
+            .unwrap_or_default();
+        let mut layout = Layout::new(tool, saved.context_panel_open.unwrap_or(!project.empty));
+        layout.chat_folded = saved.chat_folded.unwrap_or(false) && layout.result_open;
+        layout.tree_open = saved.tree_open.unwrap_or(true);
+        layout.chat_share = saved
+            .chat_share
+            .filter(|share| (0.05..=0.95).contains(share));
+        if let Some(preview) = saved
+            .preview
+            .as_deref()
+            .and_then(ContextTab::from_key)
+            .filter(|tab| matches!(tab, ContextTab::Browser | ContextTab::Devices))
+        {
+            layout.preview = preview;
+        }
+        // Its chats are on the Bridge, so the chat always offers its own.
+        chat.update(cx, |chat, cx| chat.set_history_menu(true, cx));
+        let closed_tabs = saved.closed_tabs.iter().copied().collect();
         let mut space = Self {
-            context_tab: saved
-                .context_tab
-                .as_deref()
-                .and_then(ContextTab::from_key)
-                .unwrap_or_default(),
+            cli_views,
+            _cli_watch: None,
+            cli_opening: None,
+            layout,
             shown: HashSet::new(),
-            panes,
-            reveal_pending: false,
-            save_dock_task: None,
+            _save_split: None,
+            tree_split: cx.new(|_| ResizableState::default()),
             away: None,
             traits: None,
             git_folder: 0,
@@ -357,6 +378,10 @@ impl WorkspaceScreen {
             branch_pickers: HashMap::new(),
             saved,
             project,
+            shell,
+            tabs_scroll: gpui_kit::ScrollHandle::new(),
+            tabs_front: std::cell::Cell::new(None),
+            closed_tabs,
             sessions: sessions.into(),
             active_session,
             chat,
@@ -364,25 +389,24 @@ impl WorkspaceScreen {
             files: None,
             file_tree: None,
             changes: HashMap::new(),
-            board: None,
+            explanations: HashMap::new(),
+            commit_explanation: None,
+            _why: None,
             terminal: None,
             browser: None,
             devices: None,
             logcat: None,
-            column_tab: ContextTab::Files,
             runs: None,
             pulls: HashMap::new(),
             tests: None,
             visible: true,
             window_active: window.is_window_active(),
-            sidebar_shown: true,
             signals: Default::default(),
             _signals: crate::signals::watch(store.clone(), cx),
             transcript_subscriptions: HashMap::new(),
             _subscriptions: vec![
                 chat_subscription,
                 chats_subscription,
-                dock_subscription,
                 // Back from another program, where files may have changed
                 // without the system saying so (a network drive): Git is
                 // read once for the workspace on screen.
@@ -405,28 +429,9 @@ impl WorkspaceScreen {
             ],
         };
         space.git_folder = space.first_repo_folder();
-        if !space.context_tab.in_bottom_panel() {
-            space.column_tab = space.context_tab;
-        }
-        // Never a tool the brand leaves out (Files, by default, may be).
-        if !space.column_tab.in_build()
-            && let Some(tab) = first_column_tool(cx)
-        {
-            space.column_tab = tab;
-        }
-        let saved_dock = store.setting::<Option<gpui_kit::component::dock::DockAreaState>>(
-            &dock_key(space.project.id),
-        );
-        if !space.panes.load(saved_dock, window, cx) {
-            // A workspace without folders starts with the chat alone.
-            let open = space
-                .saved
-                .context_panel_open
-                .unwrap_or(!space.project.empty);
-            let bottom = Some(space.context_tab).filter(|tab| tab.in_bottom_panel());
-            space
-                .panes
-                .set_default(space.column_tab, bottom, open, window, cx);
+        space.shown = space.layout.panes();
+        if space.layout.result_open {
+            space.ensure_panel(space.layout.tool, window, cx);
         }
         // Files (the editor and the tree) from the start: open files come
         // back with the screen.
@@ -479,9 +484,9 @@ impl WorkspaceScreen {
     /// tests or an app to test. Until the folders are looked at, every tool
     /// shows; the tool in view always does.
     fn is_relevant(&self, tab: ContextTab) -> bool {
-        // In the Chats space there is no folder to show or add.
+        // Files is where a folder is added, too.
         if tab == ContextTab::Files {
-            return self.project.is_workspace();
+            return true;
         }
         let Some(traits) = &self.traits else {
             return true;
@@ -496,7 +501,7 @@ impl WorkspaceScreen {
             ContextTab::Files => true,
             ContextTab::Changes => traits.git,
             ContextTab::Pulls => traits.remote,
-            ContextTab::Board | ContextTab::Terminal => true,
+            ContextTab::Terminal => true,
             ContextTab::Browser => empty || web,
             ContextTab::Devices | ContextTab::Logcat => empty || has(Stack::Android),
             ContextTab::Runs => !traits.stacks.is_empty(),
@@ -641,67 +646,99 @@ impl WorkspaceScreen {
         self.active_session
     }
 
+    /// The tool the result pane shows (or showed, while it is hidden).
     pub fn context_tab(&self) -> ContextTab {
-        self.context_tab
+        self.layout.tool
     }
 
-    /// Some tool is on screen.
+    /// The result pane is on screen.
     pub fn is_context_open(&self) -> bool {
-        self.shown.iter().any(|pane| matches!(pane, Pane::Tool(_)))
+        self.layout.result_open
     }
 
-    /// Shows `tab` where it is docked (on the right if it is not).
+    /// The chat is folded away, for the result pane to have the screen.
+    pub fn is_chat_folded(&self) -> bool {
+        self.layout.chat_folded
+    }
+
+    /// Shows `tab` in the result pane.
     pub fn show_tab(&mut self, tab: ContextTab, window: &mut Window, cx: &mut Context<Self>) {
         if !AppState::enabled_tabs(cx).contains(&tab) {
             return;
         }
-        self.ensure_panel(tab, window, cx);
-        self.context_tab = tab;
-        self.panes.show(Pane::Tool(tab), window, cx);
-        self.save_layout(cx);
-        cx.notify();
+        self.show_tool(tab, window, cx);
     }
 
-    /// Back to the starting layout: the chat and the editor as tabs, the
-    /// tool in view beside them (or in the bottom panel).
-    pub fn reset_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let bottom = Some(self.context_tab).filter(|tab| tab.in_bottom_panel());
-        self.panes
-            .set_default(self.column_tab, bottom, true, window, cx);
-        cx.notify();
+    /// Shows `tool` in the result pane, whatever Settings lists (an open
+    /// file shows in the editor also where the Files tool is switched
+    /// off).
+    fn show_tool(&mut self, tool: ContextTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_panel(tool, window, cx);
+        self.layout.show_tool(tool);
+        self.layout_changed(cx);
     }
 
-    /// Moves `pane` where its menu said.
-    fn move_pane(
-        &mut self,
-        pane: Pane,
-        to: dock::MoveTo,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.panes.move_to(pane, to, window, cx);
-        cx.notify();
-    }
-
-    /// A pane came into view or left it (its tab, its dock, its group).
-    fn pane_shown(&mut self, pane: Pane, shown: bool, cx: &mut Context<Self>) {
-        let changed = if shown {
-            self.shown.insert(pane)
-        } else {
-            self.shown.remove(&pane)
-        };
-        if !changed {
-            return;
-        }
-        if shown && let Pane::Tool(tab) = pane {
-            self.context_tab = tab;
-            if !tab.in_bottom_panel() {
-                self.column_tab = tab;
+    /// A name over the result pane was pressed.
+    fn show_result_tab(&mut self, tab: ResultTab, window: &mut Window, cx: &mut Context<Self>) {
+        // Preview is the browser or a phone: whichever was shown last, as
+        // long as it is switched on.
+        if tab == ResultTab::Preview {
+            let enabled = AppState::enabled_tabs(cx);
+            if !enabled.contains(&self.layout.preview) {
+                let other = match self.layout.preview {
+                    ContextTab::Browser => ContextTab::Devices,
+                    _ => ContextTab::Browser,
+                };
+                if !enabled.contains(&other) {
+                    return;
+                }
+                self.layout.preview = other;
             }
         }
-        self.update_live_panes(cx);
+        self.layout.show_tab(tab);
+        self.ensure_panel(self.layout.tool, window, cx);
+        self.layout_changed(cx);
+    }
+
+    /// Back to the screen a workspace starts with: the chat, and the tool
+    /// in view beside it.
+    pub fn reset_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.layout = Layout::new(self.layout.tool, true);
+        self.ensure_panel(self.layout.tool, window, cx);
+        self.layout_changed(cx);
+    }
+
+    /// The layout changed: what came into view starts (a browser's frames,
+    /// Git's reads), what left it stops, and the layout is kept.
+    fn layout_changed(&mut self, cx: &mut Context<Self>) {
+        let shown = self.layout.panes();
+        if shown != self.shown {
+            self.shown = shown;
+            self.update_live_panes(cx);
+        }
         self.save_layout(cx);
         cx.notify();
+    }
+
+    /// The line between the chat and the result pane was dragged: the
+    /// chat's share of the room is kept, written once the drag rests.
+    pub(crate) fn set_chat_share(&mut self, share: f32, cx: &mut Context<Self>) {
+        if self.layout.chat_share == Some(share) {
+            return;
+        }
+        self.layout.chat_share = Some(share);
+        self._save_split = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+            _ = this.update(cx, |this, cx| this.save_layout(cx));
+        }));
+    }
+
+    /// Shows or hides the folders' tree beside the editor.
+    fn toggle_tree(&mut self, cx: &mut Context<Self>) {
+        self.layout.tree_open = !self.layout.tree_open;
+        self.layout_changed(cx);
     }
 
     /// Reads Git's state again for the folder the Git tool shows, as when
@@ -715,27 +752,6 @@ impl WorkspaceScreen {
         }
     }
 
-    /// Saves the layout in a moment: a split made by a drop has its sizes
-    /// only once it has been laid out, and a drag makes many changes.
-    fn save_dock_soon(&mut self, cx: &mut Context<Self>) {
-        self.save_dock_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(600))
-                .await;
-            _ = this.update(cx, |this, cx| this.save_dock(cx));
-        }));
-    }
-
-    /// Keeps the layout for next time.
-    fn save_dock(&self, cx: &mut Context<Self>) {
-        let state = self.panes.area.read(cx).dump(cx);
-        if let Err(err) = AppState::store(cx).set_setting(&dock_key(self.project.id), &Some(state))
-        {
-            tracing::warn!("saving the layout failed: {err:#}");
-        }
-    }
-
-    /// A file is open in the editor.
     pub(crate) fn has_open_files(&self, cx: &App) -> bool {
         self.files
             .as_ref()
@@ -774,18 +790,25 @@ impl WorkspaceScreen {
     }
 
     /// Gives the keyboard to what is in front: the chat's composer, or the
-    /// open file when the editor is on screen and the chat is not (they
-    /// may share a tab group). The layout stays as it is.
-    pub fn focus_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.shown.contains(&Pane::Chat)
-            && self.shown.contains(&Pane::Editor)
+    /// open file when the editor is on screen and the chat is folded away.
+    /// The layout stays as it is.
+    ///
+    /// Says whether something took it. With the chat folded away and no
+    /// text in front there is nothing here to hold the keyboard, and the
+    /// window must: a composer that is not drawn would keep every shortcut
+    /// from reaching it.
+    pub fn focus_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.layout.chat_folded {
+            self.chat
+                .update(cx, |chat, cx| chat.focus_composer(window, cx));
+            return true;
+        }
+        if self.shown.contains(&Pane::Editor)
             && let Some(files) = self.files.clone()
         {
-            files.update(cx, |files, cx| files.focus_active(window, cx));
-            return;
+            return files.update(cx, |files, cx| files.focus_active(window, cx));
         }
-        self.chat
-            .update(cx, |chat, cx| chat.focus_composer(window, cx));
+        false
     }
 
     /// Brings the chat forward and puts the keyboard in its composer.
@@ -795,25 +818,23 @@ impl WorkspaceScreen {
             .update(cx, |chat, cx| chat.focus_composer(window, cx));
     }
 
-    /// The window's sidebar was shown or hidden.
-    pub fn set_sidebar_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
-        self.sidebar_shown = shown;
-        self.chat
-            .update(cx, |chat, cx| chat.set_history_menu(!shown, cx));
-        cx.notify();
-    }
-
     /// The workspace's colour changed.
     pub fn set_color(&mut self, color: Option<u8>, cx: &mut Context<Self>) {
         self.project.color = color;
         cx.notify();
     }
 
-    /// Brings the chat into view, for something sent to it (on the next
-    /// frame, where the dock can be changed).
+    /// Brings the chat into view, for something sent to it.
     fn reveal_chat(&mut self, cx: &mut Context<Self>) {
-        self.reveal_pending = true;
-        cx.notify();
+        self.layout.show_chat();
+        self.layout_changed(cx);
+    }
+
+    /// ⌘B (and the title bar's button): folds the chat to a strip, so the
+    /// result pane has the screen, or brings it back.
+    pub fn toggle_chat(&mut self, cx: &mut Context<Self>) {
+        self.layout.toggle_chat();
+        self.layout_changed(cx);
     }
 
     /// Streams frames only into a pane the user can see.
@@ -853,62 +874,45 @@ impl WorkspaceScreen {
         }
     }
 
-    /// ⌥⌘B (and the title bar's button): hides the column of tools beside
-    /// the chat, or brings it back as it was.
+    /// ⌥⌘B (and the title bar's button): hides the result pane, so the chat
+    /// has the screen, or brings it back as it was.
     pub fn toggle_context_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // A tool the brand leaves out gives way to the first one switched on.
-        let tab = if self.column_tab.in_build() {
-            self.column_tab
-        } else if let Some(tab) = first_column_tool(cx) {
-            tab
-        } else {
-            return;
-        };
-        self.ensure_panel(tab, window, cx);
-        let shown = self.shown.clone();
-        self.panes
-            .toggle_column(tab, |pane| shown.contains(&pane), window, cx);
-        self.save_layout(cx);
-        cx.notify();
-    }
-
-    /// ⌘J: opens or closes the bottom panel; the first time, with a
-    /// terminal in it.
-    pub fn toggle_bottom_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.panes.toggle_bottom(window, cx) {
-            return self.show_tab(ContextTab::Terminal, window, cx);
+        self.layout.toggle_result();
+        if self.layout.result_open {
+            // A tool the brand leaves out gives way to the first one
+            // switched on.
+            if !self.layout.tool.in_build() {
+                let Some(tool) = AppState::enabled_tabs(cx).into_iter().next() else {
+                    self.layout.result_open = false;
+                    return;
+                };
+                self.layout.tool = tool;
+            }
+            self.ensure_panel(self.layout.tool, window, cx);
         }
-        self.save_layout(cx);
-        cx.notify();
+        self.layout_changed(cx);
     }
 
-    /// ⌃`: the terminal; hides the bottom panel when the terminal is in
-    /// front there.
+    /// ⌘J and ⌃`: the terminal; with it in front already, what was there
+    /// before it.
     pub fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let terminal = Pane::Tool(ContextTab::Terminal);
-        if self.shown.contains(&terminal)
-            && self.panes.placement(terminal, cx)
-                == Some(gpui_kit::component::dock::DockPlacement::Bottom)
-        {
-            self.panes.toggle_bottom(window, cx);
-            self.save_layout(cx);
-            cx.notify();
+        if !AppState::enabled_tabs(cx).contains(&ContextTab::Terminal) {
             return;
         }
-        self.show_tab(ContextTab::Terminal, window, cx);
+        self.layout.toggle_terminal();
+        if self.layout.result_open {
+            self.ensure_panel(self.layout.tool, window, cx);
+        }
+        self.layout_changed(cx);
     }
 
-    /// ⌘⇧J: the tool shown last fills the screen, or gives it back.
+    /// ⌘⇧J: the result pane fills the screen (the chat folds away), or
+    /// gives the chat its place back.
     pub fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let pane = Pane::Tool(self.context_tab);
-        if !self.panes.is_docked_open(pane, cx) {
-            self.show_tab(self.context_tab, window, cx);
+        if !self.layout.result_open {
+            self.toggle_context_panel(window, cx);
         }
-        let group = self.panes.pane(pane).read(cx).group();
-        if let Some(group) = group {
-            group.update(cx, |group, cx| group.toggle_zoom(window, cx));
-        }
-        cx.notify();
+        self.toggle_chat(cx);
     }
 
     /// The files panel, created on first use.
@@ -934,8 +938,11 @@ impl WorkspaceScreen {
             window,
             |this, _, event: &FilesPanelEvent, window, cx| match event {
                 FilesPanelEvent::OpenFilesChanged => this.save_layout(cx),
-                FilesPanelEvent::Opened => this.panes.show(Pane::Editor, window, cx),
+                FilesPanelEvent::Opened => this.show_tool(ContextTab::Files, window, cx),
                 FilesPanelEvent::Ask(ask) => this.ask_about_code(ask.clone(), window, cx),
+                FilesPanelEvent::Why(path, line) => {
+                    this.why_is_this_here(path.clone(), *line, window, cx)
+                }
                 FilesPanelEvent::MakePrimary(path) => {
                     cx.emit(WorkspaceScreenEvent::MakePrimary(path.clone()))
                 }
@@ -965,10 +972,6 @@ impl WorkspaceScreen {
     /// The Files tool's tree (none for a workspace without folders).
     pub fn file_tree(&self) -> Option<&Entity<FileTree>> {
         self.file_tree.as_ref()
-    }
-
-    pub fn files_panel(&self) -> Option<&Entity<FilesPanel>> {
-        self.files.as_ref()
     }
 
     /// One watcher per folder, in the order of the workspace's roots. Their
@@ -1036,7 +1039,7 @@ impl WorkspaceScreen {
         }
         self.git_folder = ix;
         self.repo(window, cx);
-        self.ensure_panel(self.context_tab, window, cx);
+        self.ensure_panel(self.layout.tool, window, cx);
         self.update_live_panes(cx);
         cx.notify();
     }
@@ -1092,7 +1095,7 @@ impl WorkspaceScreen {
 
     /// ⌘T from anywhere: Go to Symbol over the workspace's folders.
     pub fn go_to_symbol(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.project.is_workspace() || self.project.folders().is_empty() {
+        if self.project.folders().is_empty() {
             return;
         }
         let files = self.files(window, cx);
@@ -1101,44 +1104,31 @@ impl WorkspaceScreen {
 
     /// ⌘⇧F from anywhere: the Files tool's tree turns into workspace search.
     pub fn find_in_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.project.is_workspace() {
-            return;
-        }
         self.show_tab(ContextTab::Files, window, cx);
         let files = self.files(window, cx);
         files.update(cx, |files, cx| files.find_in_project(window, cx));
     }
 
-    /// Opens `relative` in the editor beside the chat, optionally at a
-    /// 0-based line.
-    /// Shows the changes in `root` (one file's, else every file's, against
-    /// the index) in the editor's Changes tab.
-    pub(crate) fn open_diff(
+    /// Shows `path`'s changes since the last commit (kept or not) in the
+    /// editor's Changes tab.
+    pub(crate) fn open_changes_since_commit(
         &mut self,
         root: std::path::PathBuf,
-        path: Option<String>,
-        against_head: bool,
+        path: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let title = match &path {
-            Some(path) => {
-                let name = path.rsplit('/').next().unwrap_or(path);
-                if against_head {
-                    format!("{name} since the last commit")
-                } else {
-                    format!("{name} (changes)")
-                }
-            }
-            None => "All changes".to_string(),
-        };
+        let name = path.rsplit('/').next().unwrap_or(&path);
+        let title = format!("{name} since the last commit");
         let load: ph_files::diff_tab::LoadDiff =
-            std::sync::Arc::new(move || ph_git::files::patch(&root, path.as_deref(), against_head));
+            std::sync::Arc::new(move || ph_git::files::patch(&root, Some(&path), true));
         let files = self.files(window, cx);
         // The panel says it opened something, and the editor comes into view.
         files.update(cx, |files, cx| files.show_diff(title, load, cx));
     }
 
+    /// Opens `relative` in the editor beside the chat, optionally at a
+    /// 0-based line.
     pub fn open_file(
         &mut self,
         relative: &str,
@@ -1163,33 +1153,118 @@ impl WorkspaceScreen {
     }
 
     pub fn select_session(&mut self, id: SessionId, cx: &mut Context<Self>) {
+        // A chat asked for is shown, also where the chat was folded away.
+        if self.layout.chat_folded {
+            self.reveal_chat(cx);
+        }
         if self.active_session == Some(id) {
             return;
         }
-        let session = self
+        // A chat made a moment ago away from this screen (the quick chat's,
+        // a terminal agent's) is not in its list until the next look: read
+        // now, or the chat asked for would show as a new, empty one.
+        if !self.sessions.iter().any(|session| session.id == id) {
+            self.sessions = AppState::store(cx)
+                .sessions(self.project.id)
+                .unwrap_or_default()
+                .into();
+        }
+        let Some(session) = self
             .sessions
             .iter()
             .find(|session| session.id == id)
-            .cloned();
+            .cloned()
+        else {
+            // Deleted since: there is nothing to show.
+            return;
+        };
+        let session = Some(session);
         self.active_session = Some(id);
+        // Opened again: it has its tab again.
+        self.closed_tabs.remove(&id);
         self.chat
             .update(cx, |chat, cx| chat.set_session(session, cx));
+        self.refresh_evidence(cx);
         self.save_layout(cx);
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
     }
 
+    /// Closes chat `id`'s tab over the chat: the chat stays as it is (in
+    /// *Past chats*, on the Bridge), only its tab goes, until the chat is
+    /// opened again or needs the user. The one in front gives way to the
+    /// tab beside it, or to a new chat.
+    pub(crate) fn close_tab(&mut self, id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
+        let beside = self.shell.upgrade().and_then(|shell| {
+            let open = crate::bridge::open_chats(
+                shell.read(cx),
+                self.project.id,
+                &self.sessions,
+                self.active_session,
+                cx,
+            );
+            let shown: Vec<SessionId> = open
+                .iter()
+                .map(|chat| chat.session.id)
+                .filter(|open| *open == id || !self.closed_tabs.contains(open))
+                .collect();
+            let at = shown.iter().position(|open| *open == id)?;
+            shown
+                .get(at + 1)
+                .or_else(|| at.checked_sub(1).and_then(|at| shown.get(at)))
+                .copied()
+        });
+        self.closed_tabs.insert(id);
+        if self.active_session == Some(id) {
+            match beside {
+                Some(beside) => self.select_session(beside, cx),
+                None => self.new_session(window, cx),
+            }
+        }
+        self.save_layout(cx);
+        cx.notify();
+    }
+
+    /// Whether chat `id`'s tab was closed.
+    pub(crate) fn tab_closed(&self, id: SessionId) -> bool {
+        self.closed_tabs.contains(&id)
+    }
+
     /// Clears the chat so the next message starts a new session (with the
     /// agent picked in the composer). Nothing is stored until it is sent.
     pub fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.layout.chat_folded {
+            self.reveal_chat(cx);
+        }
         self.active_session = None;
         self.chat.update(cx, |chat, cx| {
             chat.set_session(None, cx);
             chat.focus_composer(window, cx);
         });
+        self.refresh_evidence(cx);
         self.save_layout(cx);
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
+    }
+
+    /// A new session the user asked for (*New chat*, ⌘N): it opens as
+    /// Settings → Agents says its agent's sessions do, so in the agent's
+    /// CLI where that was chosen. One made for something (a message to
+    /// finish, the chat after one was deleted) is a chat.
+    pub fn new_session_asked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_session(window, cx);
+        let agent = self.chat.read(cx).active_thread().read(cx).agent().id;
+        let opens = ph_agent::profiles::Profiles::load(AppState::store(cx)).opens_as(agent);
+        if opens != ph_agent::Form::Cli {
+            return;
+        }
+        // Which agent's CLI is asked first, where there is more than one
+        // to start: the one last used is not always the one wanted, and
+        // a CLI started for nothing is a session to put away.
+        let asked = self.chat.update(cx, |chat, cx| chat.ask_cli_agent(cx));
+        if !asked {
+            self.show_as(ph_agent::Form::Cli, window, cx);
+        }
     }
 
     /// Begins a message in the chat for the user to finish.
@@ -1265,6 +1340,7 @@ impl WorkspaceScreen {
                     }
                 ),
                 from_review: true,
+                removed: false,
             })
             .collect();
         let changes = self.changes(window, cx);
@@ -1306,8 +1382,33 @@ impl WorkspaceScreen {
             self.active_session = active;
             self.save_layout(cx);
         }
+        // A list of chats that shows is read again.
+        self.chat.update(cx, |chat, cx| chat.sessions_changed(cx));
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
+    }
+
+    /// What was asked of chat `session` from its row in Past chats: the
+    /// same as from its card on the Bridge.
+    fn chat_action(
+        &mut self,
+        session: &ph_store::sessions::Session,
+        action: ph_agent::ChatAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(shell) = self.shell.upgrade() else {
+            return;
+        };
+        let (project, session) = (self.project.id, session.clone());
+        // After this update: the shell reads this screen while it acts.
+        cx.defer_in(window, move |_, window, cx| {
+            shell.update(cx, |shell, cx| match action {
+                ph_agent::ChatAction::ToggleDone => shell.toggle_settled(project, session.id, cx),
+                ph_agent::ChatAction::Rename => shell.rename_chat(project, &session, window, cx),
+                ph_agent::ChatAction::Delete => shell.delete_chat(project, &session, window, cx),
+            });
+        });
     }
 
     fn save_layout(&mut self, cx: &mut Context<Self>) {
@@ -1323,11 +1424,20 @@ impl WorkspaceScreen {
             ),
         };
         self.saved = ProjectUiState {
-            context_tab: Some(self.context_tab.key().to_string()),
-            context_panel_open: Some(self.is_context_open()),
+            context_tab: Some(self.layout.tool.key().to_string()),
+            context_panel_open: Some(self.layout.result_open),
             session_id: self.active_session,
             open_files,
             active_file,
+            chat_folded: Some(self.layout.chat_folded),
+            tree_open: Some(self.layout.tree_open),
+            preview: Some(self.layout.preview.key().to_string()),
+            chat_share: self.layout.chat_share,
+            closed_tabs: {
+                let mut closed: Vec<SessionId> = self.closed_tabs.iter().copied().collect();
+                closed.sort_unstable();
+                closed
+            },
         };
         if let Err(err) = AppState::store(cx).save_project_ui_state(self.project.id, &self.saved) {
             tracing::warn!(
@@ -1336,19 +1446,6 @@ impl WorkspaceScreen {
             );
         }
     }
-}
-
-/// The settings key of workspace `id`'s dock layout.
-fn dock_key(id: ph_store::projects::ProjectId) -> String {
-    format!("workspace.dock.{id}")
-}
-
-/// The first tool for the column beside the chat that this build has and
-/// the user has switched on (Settings → Features), if any.
-fn first_column_tool(cx: &App) -> Option<ContextTab> {
-    AppState::enabled_tabs(cx)
-        .into_iter()
-        .find(|tab| !tab.in_bottom_panel())
 }
 
 /// `@tabs`: the text of the Chrome tabs the user shared with PilotHouse,

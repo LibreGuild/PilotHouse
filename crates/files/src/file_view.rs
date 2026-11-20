@@ -38,7 +38,7 @@ use crate::line_changes::{LineChange, line_changes};
 use crate::{
     AskAboutSelection, CopyAsMarkdown, CopyFilePath, CopyFileRelativePath, CopyLinkToLines,
     CopyReference, ExplainSelection, FindBugsInSelection, FindReferences, RenameSymbol, RevealFile,
-    RevealInFiles, ShowOutline, WriteTestsForSelection,
+    RevealInFiles, ShowOutline, WhyIsThisHere, WriteTestsForSelection,
 };
 
 /// What the user wants to know about selected code.
@@ -141,6 +141,8 @@ impl Ask {
 #[derive(Debug, Clone)]
 pub enum FileViewEvent {
     Ask(Ask),
+    /// Say why this 1-based line of the file is there.
+    Why(u32),
     /// Show this HTML file in the workspace's browser.
     OpenInBrowser(PathBuf),
     /// Edit this picture or video in Studio.
@@ -150,6 +152,16 @@ pub enum FileViewEvent {
     /// The cursor jumped far (to a definition, a line): it was on this
     /// 0-based line, for Back.
     Jumped(u32),
+}
+
+/// Whether the editor offers *Why Is This Here?*: where the build has
+/// explanations of changes (this crate does not know the brand's features;
+/// whoever shows editors says so once).
+static EXPLAINS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Says whether editors offer *Why Is This Here?* (see [`EXPLAINS`]).
+pub fn set_explains(explains: bool) {
+    EXPLAINS.store(explains, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// A cursor move of at least this many lines counts as a jump for Back.
@@ -649,6 +661,20 @@ impl FileView {
         self.ask(AskIntent::WriteTests, cx);
     }
 
+    /// Asks why the line at the cursor is there (the first line of a
+    /// selection).
+    fn why_is_this_here(&mut self, _: &WhyIsThisHere, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.asks || !EXPLAINS.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let editor = self.editor.read(cx);
+        let text = editor.value();
+        let start = editor.selected_range().start.min(text.len());
+        let rope = gpui_kit::component::input::Rope::from(text.as_ref());
+        let line = rope.offset_to_position(start).line + 1;
+        cx.emit(FileViewEvent::Why(line));
+    }
+
     /// Sends the selection (or the cursor's line) to the chat.
     pub fn ask(&mut self, intent: AskIntent, cx: &mut Context<Self>) {
         if !self.asks {
@@ -885,8 +911,21 @@ impl FileView {
                     });
                     this._intel = Some(cx.spawn_in(window, async move |this, cx| {
                         let result = request.await;
+                        let Ok(Some((edit, path, text))) = this
+                            .update_in(cx, |this, window, cx| this.rename_edit(result, window, cx))
+                        else {
+                            return;
+                        };
+                        // The other files are read and written off the UI
+                        // thread: a rename can touch many, on a slow disk.
+                        let before = text.clone();
+                        let applied = cx
+                            .background_spawn(
+                                async move { code_intel::apply_edit(edit, &path, &text) },
+                            )
+                            .await;
                         _ = this.update_in(cx, |this, window, cx| {
-                            this.apply_rename(result, window, cx)
+                            this.apply_rename(applied, &before, window, cx)
                         });
                     }));
                 });
@@ -895,30 +934,66 @@ impl FileView {
         code_intel::ask_new_name(current, rename, window, cx);
     }
 
-    fn apply_rename(
+    /// The server's answer to a rename with what applying it needs, or
+    /// `None` after telling the user there is nothing to apply.
+    fn rename_edit(
         &mut self,
         result: anyhow::Result<Option<lsp_types::WorkspaceEdit>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(lsp_types::WorkspaceEdit, PathBuf, Rope)> {
+        use gpui_kit::component::WindowExt as _;
+        use gpui_kit::component::notification::Notification;
+        match result {
+            Ok(Some(edit)) => Some((
+                edit,
+                self.absolute.clone(),
+                self.editor.read(cx).text().clone(),
+            )),
+            Ok(None) => {
+                window.push_notification(Notification::warning("Nothing to rename here."), cx);
+                None
+            }
+            Err(err) => {
+                window.push_notification(Notification::error(format!("{err:#}")), cx);
+                None
+            }
+        }
+    }
+
+    fn apply_rename(
+        &mut self,
+        applied: anyhow::Result<(Option<String>, usize)>,
+        before: &Rope,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         use gpui_kit::component::WindowExt as _;
         use gpui_kit::component::notification::Notification;
-        let edit = match result {
-            Ok(Some(edit)) => edit,
-            Ok(None) => {
-                return window
-                    .push_notification(Notification::warning("Nothing to rename here."), cx);
-            }
-            Err(err) => {
-                return window.push_notification(Notification::error(format!("{err:#}")), cx);
-            }
-        };
-        let text = self.editor.read(cx).text().clone();
-        match code_intel::apply_edit(edit, &self.absolute, &text) {
+        match applied {
             Ok((own, files)) => {
+                // Typed into while the other files were written: the new
+                // text was made from the old one and would drop the typing.
+                let typed = {
+                    let text = self.editor.read(cx).text();
+                    text.len() != before.len() || text != before
+                };
+                if own.is_some() && typed {
+                    window.push_notification(
+                        Notification::warning(format!(
+                            "Renamed in the other files; {} changed meanwhile, so rename in it again.",
+                            self.relative
+                        )),
+                        cx,
+                    );
+                    cx.notify();
+                    return;
+                }
                 if let Some(own) = own {
-                    self.editor
-                        .update(cx, |editor, cx| editor.set_value(own, window, cx));
+                    // As an edit: the other files are already on disk, so
+                    // this one has to show as unsaved, reach the language
+                    // server and be kept or saved like typed text.
+                    self.replace_text(own, window, cx);
                 }
                 window.push_notification(
                     Notification::success(format!(
@@ -939,6 +1014,11 @@ impl FileView {
     }
 
     /// The file's path as Files names it.
+    /// The file's full path.
+    pub fn absolute_path(&self) -> &std::path::Path {
+        &self.absolute
+    }
+
     pub fn relative_path(&self) -> &SharedString {
         if !self.label.is_empty() {
             return &self.label;
@@ -1016,6 +1096,11 @@ impl FileView {
             self.pending_line = Some(line);
             return;
         }
+        // A move the caller asked for is not a jump of the user's: whoever
+        // asks keeps the place left for Back. The cursor is only seen to
+        // have moved after this returns, when it would count as one.
+        let last = self.editor.read(cx).text().lines_len().saturating_sub(1) as u32;
+        self.cursor_line = Some(line.min(last));
         self.editor.update(cx, |editor, cx| {
             editor.set_cursor_position(Position { line, character: 0 }, window, cx);
             center_line(editor, line, cx);
@@ -1821,6 +1906,22 @@ struct LineMarkColors {
     deleted: gpui_kit::Hsla,
 }
 
+/// The marks (sorted by line) on the laid-out `rows` of a text of `lines`
+/// lines. The editor places a line above the ones it laid out on the first
+/// of them, so a mark outside must never be asked for; and a file changed
+/// throughout has far more marks than rows. A mark past the last line (lines
+/// deleted at the end) is drawn under the last one.
+fn marks_on_rows<'a>(
+    marks: &'a [(usize, LineChange)],
+    rows: &std::ops::Range<usize>,
+    lines: usize,
+) -> &'a [(usize, LineChange)] {
+    let row = |line: usize| line.min(lines.saturating_sub(1));
+    let first = marks.partition_point(|(line, _)| row(*line) < rows.start);
+    let end = marks.partition_point(|(line, _)| row(*line) < rows.end);
+    &marks[first..end.max(first)]
+}
+
 /// Paints the changed-line bars just left of the text, on the lines the
 /// editor laid out this frame (it paints first).
 fn paint_line_marks(
@@ -1836,8 +1937,11 @@ fn paint_line_marks(
     let text = state.text();
     let lines = text.lines_len();
     let scroll_x = state.scroll_offset().x;
+    let Some(rows) = state.visible_row_range() else {
+        return;
+    };
     let mut quads = Vec::new();
-    for &(line, change) in marks {
+    for &(line, change) in marks_on_rows(marks, &rows, lines) {
         let offset = if line < lines {
             text.line_start_offset(line)
         } else {
@@ -1930,9 +2034,14 @@ fn write_rope(path: &std::path::Path, text: &Rope) -> std::io::Result<()> {
 /// Reads a file as text (and whether it was not UTF-8, so shown with
 /// replacement characters), or explains why it cannot be shown as text.
 fn read_text(path: &std::path::Path) -> Result<(String, bool), Content> {
-    let size = std::fs::metadata(path)
-        .map_err(|err| Content::Failed(err.to_string().into()))?
-        .len();
+    use std::io::Read as _;
+    // The file a link points at. A device, a pipe or a socket says it is
+    // empty and then never ends (or never answers): none is opened.
+    let meta = std::fs::metadata(path).map_err(|err| Content::Failed(err.to_string().into()))?;
+    if !meta.is_file() {
+        return Err(Content::Failed("Not a regular file".into()));
+    }
+    let size = meta.len();
     if size > MAX_EDITABLE_BYTES {
         // Only text goes to the large-file viewer.
         let mut head = vec![0u8; BINARY_SNIFF_BYTES];
@@ -1945,9 +2054,17 @@ fn read_text(path: &std::path::Path) -> Result<(String, bool), Content> {
         }
         return Err(Content::TooLarge(size));
     }
-    let bytes = std::fs::read(path).map_err(|err| Content::Failed(err.to_string().into()))?;
+    // Never more than the limit, whatever the length said: the file may
+    // have grown since it was asked.
+    let mut bytes = Vec::with_capacity(size as usize);
+    std::fs::File::open(path)
+        .and_then(|file| file.take(MAX_EDITABLE_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|err| Content::Failed(err.to_string().into()))?;
     if bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
         return Err(Content::Binary);
+    }
+    if bytes.len() as u64 > MAX_EDITABLE_BYTES {
+        return Err(Content::TooLarge(bytes.len() as u64));
     }
     match String::from_utf8(bytes) {
         Ok(text) => Ok((text, false)),
@@ -2022,8 +2139,13 @@ fn editor_menu_lines(asks: bool, navigates: bool) -> Vec<MenuLine> {
             item("Explain", Box::new(ExplainSelection)),
             item("Find Bugs", Box::new(FindBugsInSelection)),
             item("Write Tests", Box::new(WriteTestsForSelection)),
-            None,
         ]);
+        // What an agent says the code does is asked above; who asked for
+        // this line and why is looked up, with no agent run.
+        if EXPLAINS.load(std::sync::atomic::Ordering::Relaxed) {
+            lines.push(item("Why Is This Here?", Box::new(WhyIsThisHere)));
+        }
+        lines.push(None);
     }
     lines.extend([
         // Without a language server they still find declarations and
@@ -2135,6 +2257,7 @@ impl Render for FileView {
             .on_action(cx.listener(Self::explain_selection))
             .on_action(cx.listener(Self::find_bugs_in_selection))
             .on_action(cx.listener(Self::write_tests_for_selection))
+            .on_action(cx.listener(Self::why_is_this_here))
             .on_action(cx.listener(Self::copy_as_markdown))
             .on_action(cx.listener(Self::copy_reference))
             .on_action(cx.listener(Self::copy_link_to_lines))
@@ -2537,12 +2660,12 @@ impl FileView {
                         .xsmall()
                         .label(view.label())
                         .selected(current)
-                        .tooltip(match view {
+                        .tooltip(ph_ui::tip(match view {
                             View::Source => "The file's text",
                             View::Preview => "The file rendered",
                             View::Split => "The text and the rendering side by side",
                             View::Rich => "Edit the document as formatted text",
-                        })
+                        }))
                         .on_click(
                             cx.listener(move |this, _, window, cx| this.set_view(view, window, cx)),
                         )
@@ -2607,11 +2730,11 @@ impl FileView {
                     .xsmall()
                     .icon(Icons::SlidersHorizontal)
                     .label("Edit")
-                    .tooltip(if self.kind == Kind::Video {
+                    .tooltip(ph_ui::tip(if self.kind == Kind::Video {
                         "Cut, speed up, mark up, crop or compress it in Studio, by hand or with an agent"
                     } else {
                         "Crop, mark up, resize or compress it in Studio, by hand or with an agent"
-                    })
+                    }))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(FileViewEvent::EditMedia(path.clone()))
                     }))
@@ -2626,7 +2749,9 @@ impl FileView {
                     .xsmall()
                     .icon(Icons::SlidersHorizontal)
                     .label("Edit")
-                    .tooltip("Open the deck in Studio Slides, to edit it by hand or with an agent")
+                    .tooltip(ph_ui::tip(
+                        "Open the deck in Studio Slides, to edit it by hand or with an agent",
+                    ))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(FileViewEvent::EditMedia(path.clone()))
                     }))
@@ -2714,7 +2839,7 @@ impl FileView {
                     .when_some(tip, |this, tip| {
                         use gpui_kit::StatefulInteractiveElement as _;
                         this.tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                            gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tip.clone()))
                                 .build(window, cx)
                         })
                     })
@@ -2883,6 +3008,23 @@ mod tests {
     }
 
     #[test]
+    fn only_marks_on_laid_out_rows_are_painted() {
+        let marks = [
+            (2, LineChange::Added),
+            (40, LineChange::Modified),
+            (59, LineChange::Added),
+            (60, LineChange::Added),
+            (100, LineChange::Deleted),
+        ];
+        // Scrolled down: the mark near the top is not among them.
+        assert_eq!(marks_on_rows(&marks, &(30..60), 100), &marks[1..3]);
+        assert_eq!(marks_on_rows(&marks, &(3..30), 100), &[]);
+        // Lines deleted at the end show under the last line.
+        assert_eq!(marks_on_rows(&marks, &(70..100), 100), &marks[4..]);
+        assert_eq!(marks_on_rows(&marks, &(0..0), 0), &[]);
+    }
+
+    #[test]
     fn binary_and_large_files_are_refused() {
         let dir = std::env::temp_dir().join(format!("ph-fileview-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2898,5 +3040,21 @@ mod tests {
             read_text(&latin1).unwrap(),
             ("caf\u{fffd}".to_string(), true)
         );
+        // Not a file with an end: never read (a folder here; a device or a
+        // pipe is refused by the same test).
+        assert_eq!(
+            read_text(&dir),
+            Err(Content::Failed("Not a regular file".into()))
+        );
+        #[cfg(unix)]
+        {
+            let device = dir.join("zero.txt");
+            let _ = std::fs::remove_file(&device);
+            std::os::unix::fs::symlink("/dev/zero", &device).unwrap();
+            assert_eq!(
+                read_text(&device),
+                Err(Content::Failed("Not a regular file".into()))
+            );
+        }
     }
 }

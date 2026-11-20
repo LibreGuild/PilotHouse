@@ -1,9 +1,11 @@
-//! The Git tab. **Changes**: the commit box, merge conflicts, then unstaged
-//! edits hunk by hunk. **History**: commits with a graph. **Stashes**.
+//! The Git tab. **Changes**: the commit box, merge conflicts and the list of
+//! unstaged files, with their changes in one diff beside it (see [`review`]).
+//! **History**: commits with a graph. **Stashes**.
 //!
-//! **Keep** stages a hunk (it leaves this list and is ready to commit).
-//! **Discard** reverts it in the working tree; the last discards can be undone
-//! from the header, since the reverted text exists nowhere else.
+//! **Keep** stages a file or a hunk (it leaves this list and is ready to
+//! commit). **Discard** reverts it in the working tree; the last discards
+//! can be undone from the header, since the reverted text exists nowhere
+//! else.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -35,21 +37,37 @@ use crate::conflict_view::{ConflictEvent, ConflictView};
 use crate::history_view::HistoryView;
 use crate::repo::Repo;
 use crate::stash_view::StashView;
-use ph_preview::diff as diff_view;
-/// How many discards can be undone.
+
+mod review;
+
+pub use review::{Evidence, EvidenceKind};
+
+/// How many discards can be undone (each a click: a hunk, a file or a
+/// folder, whatever its size).
 const UNDO_DEPTH: usize = 20;
+
+/// The Git pane shows the diff beside the list of files from this width
+/// (pixels at the default interface size); narrower, under it.
+const REVIEW_BESIDE: f32 = 720.;
 
 #[derive(Debug, Clone)]
 pub enum ChangesPanelEvent {
     /// Open this project-relative file in the editor at a 0-based line.
     OpenFile { path: String, line: u32 },
-    /// Show this file's changes (`None`: every file's) in the editor.
-    OpenDiff(Option<String>),
     /// Give the review notes (as one message) to the chat in front.
     SendNotes(String),
     /// Have an agent review the changes before they are pushed; its
     /// findings come back as notes on the lines.
     ReviewChanges,
+    /// Have an agent explain the changes in plain words; what it writes is
+    /// shown in place of the diff (see [`ChangesPanel::set_explanation`]).
+    ExplainChanges,
+    /// The working tree was read and is not as it was.
+    ChangesRead,
+    /// History shows this commit (its id and first line), or none now: its
+    /// explanation can be given with
+    /// [`ChangesPanel::set_commit_explanation`].
+    CommitShown(Option<(String, String)>),
 }
 
 enum State {
@@ -68,9 +86,6 @@ enum Row {
     /// A folder of View as Tree (an index into the panel's `tree`).
     Folder(usize),
     File(usize),
-    /// A binary file's note, in place of its hunks.
-    Binary(usize),
-    Hunk(usize, usize),
     /// The new files.
     Untracked,
 }
@@ -107,11 +122,23 @@ pub struct ChangesPanel {
     /// The file whose conflicts are being resolved.
     conflict: Option<Entity<ConflictView>>,
     writer: Option<Writer>,
-    /// Files unfolded to show their hunks here (the rest are one line:
-    /// clicked, their diff opens in the editor).
-    expanded: HashSet<String>,
-    /// Patches that were discarded, newest last.
-    undo: Vec<String>,
+    /// The changes drawn beside the list, and what was picked and ticked
+    /// there.
+    review: review::Review,
+    /// What the task's chat did to check its work, said over the changes.
+    evidence: Vec<Evidence>,
+    /// The changes explained in plain words, as whoever shows the panel
+    /// gives it (this crate knows no agents); `None` where the build has no
+    /// explanations, and then nothing here offers one.
+    explanation: Option<gpui_kit::AnyView>,
+    /// The explanation shows in place of the diff.
+    explaining: bool,
+    /// The pane has the room to show the diff beside the list (under it
+    /// otherwise); not known until it was drawn once.
+    wide: Option<bool>,
+    /// What each discard reverted, newest last: its patches in the order
+    /// they were applied.
+    undo: Vec<Vec<String>>,
     /// A refresh was asked for while one was running.
     refresh_again: bool,
     /// Review notes on changed lines, waiting to go to a chat.
@@ -128,9 +155,9 @@ pub struct ChangesPanel {
     narrow: bool,
     /// Folders folded in View as Tree (new files' with a `new:` prefix).
     folded: HashSet<String>,
-    /// The branch against its base, once looked at (`None` inside: there
-    /// is no base, or this is it).
-    branch: Option<Result<Option<git::diff::BranchChanges>, SharedString>>,
+    /// The branch against its base while the Branch view shows (`None`
+    /// inside: there is no base, or this is it).
+    branch: Option<Result<Option<BranchShown>, SharedString>>,
     _branch_task: Option<Task<()>>,
     _refresh: Option<Task<()>>,
     /// How closely the panel is looked at, for how often it reads Git.
@@ -140,6 +167,19 @@ pub struct ChangesPanel {
     /// The next read of a panel only glanced at.
     _glance: Option<Task<()>>,
     _subscription: Subscription,
+}
+
+/// The branch's changes against its base, read and laid out for the
+/// Branch view.
+struct BranchShown {
+    base: String,
+    fork: String,
+    files: usize,
+    added: usize,
+    removed: usize,
+    diffs: crate::diff_list::Diffs,
+    /// The summary, then the diffs (see [`crate::diff_list`]).
+    list: gpui_kit::ListState,
 }
 
 /// How closely the panel is looked at. Reading the working tree is three
@@ -196,7 +236,11 @@ impl ChangesPanel {
             stashes: None,
             conflict: None,
             writer: None,
-            expanded: HashSet::new(),
+            review: review::Review::new(cx),
+            evidence: Vec::new(),
+            explanation: None,
+            explaining: false,
+            wide: None,
             undo: Vec::new(),
             refresh_again: false,
             notes: Vec::new(),
@@ -297,6 +341,8 @@ impl ChangesPanel {
                             Err(err) => State::Failed(format!("{err:#}").into()),
                         };
                         this.sync_rows();
+                        this.changes_read(cx);
+                        cx.emit(ChangesPanelEvent::ChangesRead);
                         cx.notify();
                     }
                     std::mem::take(&mut this.refresh_again)
@@ -334,6 +380,8 @@ impl ChangesPanel {
                 if let Err(err) = result {
                     window.push_notification(Notification::error(format!("{err:#}")), cx);
                 }
+                // What the user did shows in the diff at once.
+                this.review.follow = true;
                 this.refresh(cx);
             });
         })
@@ -365,22 +413,15 @@ impl ChangesPanel {
         let Some(patch) = self.file(file_ix).and_then(|file| file.hunk_patch(hunk_ix)) else {
             return;
         };
-        self.remember_discard(patch.clone());
-        self.run(window, cx, move |root| {
-            git::apply(root, &patch, ApplyMode::Discard)
-        });
+        self.discard(vec![patch], window, cx);
     }
 
     fn keep_path(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         self.run(window, cx, move |root| git::stage_path(root, &path));
     }
 
-    /// Keeps changed files `files` (a folder's, in View as Tree).
-    fn keep_files(&mut self, files: &[usize], window: &mut Window, cx: &mut Context<Self>) {
-        let paths: Vec<String> = files
-            .iter()
-            .filter_map(|ix| self.file(*ix).map(|file| file.path.clone()))
-            .collect();
+    /// Keeps changed files `paths` (a folder's, in View as Tree).
+    fn keep_files(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.run(window, cx, move |root| {
             for path in &paths {
                 git::stage_path(root, path)?;
@@ -419,38 +460,72 @@ impl ChangesPanel {
         .detach();
     }
 
-    fn discard_file(&mut self, file_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(file) = self.file(file_ix) else {
+    /// Discards the changes of files `paths`, as they are now: a menu
+    /// opened before the list changed still names the right files.
+    fn discard_files(&mut self, paths: &[String], window: &mut Window, cx: &mut Context<Self>) {
+        let patches: Vec<String> = paths
+            .iter()
+            .filter_map(|path| self.file(self.file_ix(path)?))
+            .flat_map(|file| {
+                // From the last hunk up, so earlier hunks' line numbers
+                // stay valid.
+                (0..file.hunks.len())
+                    .rev()
+                    .filter_map(|ix| file.hunk_patch(ix))
+            })
+            .collect();
+        self.discard(patches, window, cx);
+    }
+
+    /// Reverts `patches` in the working tree, in this order; what was
+    /// reverted is one step of Undo discard.
+    fn discard(&mut self, patches: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if patches.is_empty() {
+            return;
+        }
+        let root = self.root.clone();
+        let task = cx.background_spawn(async move {
+            let mut done = Vec::new();
+            for patch in patches {
+                if let Err(err) = git::apply(&root, &patch, ApplyMode::Discard) {
+                    return (done, Some(err));
+                }
+                done.push(patch);
+            }
+            (done, None)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let (done, err) = task.await;
+            _ = this.update_in(cx, |this, window, cx| {
+                // Only what was reverted: undoing a patch that was not
+                // would add its lines a second time.
+                if !done.is_empty() {
+                    this.undo.push(done);
+                    if this.undo.len() > UNDO_DEPTH {
+                        this.undo.remove(0);
+                    }
+                }
+                if let Some(err) = err {
+                    window.push_notification(Notification::error(format!("{err:#}")), cx);
+                }
+                this.review.follow = true;
+                this.refresh(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Brings back what the last discard reverted.
+    fn undo_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(patches) = self.undo.pop() else {
             return;
         };
-        // Discard from the last hunk up, so earlier hunks' line numbers stay valid.
-        let patches: Vec<String> = (0..file.hunks.len())
-            .rev()
-            .filter_map(|ix| file.hunk_patch(ix))
-            .collect();
-        for patch in patches.iter().rev() {
-            self.remember_discard(patch.clone());
-        }
         self.run(window, cx, move |root| {
             for patch in &patches {
-                git::apply(root, patch, ApplyMode::Discard)?;
+                git::apply(root, patch, ApplyMode::Restore)?;
             }
             Ok(())
         });
-    }
-
-    fn undo_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(patch) = self.undo.pop() else { return };
-        self.run(window, cx, move |root| {
-            git::apply(root, &patch, ApplyMode::Restore)
-        });
-    }
-
-    fn remember_discard(&mut self, patch: String) {
-        self.undo.push(patch);
-        if self.undo.len() > UNDO_DEPTH {
-            self.undo.remove(0);
-        }
     }
 
     // ---- Rendering -----------------------------------------------------------
@@ -462,16 +537,72 @@ impl ChangesPanel {
         self.writer = Some(writer);
     }
 
+    /// Gives the view that explains the changes in plain words: it shows
+    /// in place of the diff when asked for (*Explain*, or the switch over
+    /// the diff). With `None` the panel offers no explanations.
+    pub fn set_explanation(&mut self, view: Option<gpui_kit::AnyView>, cx: &mut Context<Self>) {
+        self.explaining &= view.is_some();
+        self.explanation = view;
+        if let Some(history) = &self.history {
+            let explains = self.explanation.is_some();
+            history.update(cx, |history, cx| history.set_explains(explains, cx));
+        }
+        self.list.remeasure_items(0..1);
+        cx.notify();
+    }
+
+    /// Shows the explanation of the changes in place of their diff.
+    pub fn show_explanation(&mut self, cx: &mut Context<Self>) {
+        if self.explanation.is_some() {
+            self.view = GitView::Changes;
+            self.branch = None;
+            self._branch_task = None;
+            self.explaining = true;
+            cx.notify();
+        }
+    }
+
+    /// Gives the view that explains commit `sha`, for History to show with
+    /// it (asked for with [`ChangesPanelEvent::CommitShown`]).
+    pub fn set_commit_explanation(
+        &mut self,
+        sha: &str,
+        view: gpui_kit::AnyView,
+        explain: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(history) = &self.history {
+            history.update(cx, |history, cx| {
+                history.set_explanation(sha, view, explain, cx)
+            });
+        }
+    }
+
     pub fn show_view(&mut self, view: GitView, window: &mut Window, cx: &mut Context<Self>) {
         self.view = view;
+        if view != GitView::Branch {
+            // A branch's diff can be large; it is read again when shown.
+            self.branch = None;
+            self._branch_task = None;
+        }
         match view {
             GitView::History if self.history.is_none() => {
                 let (repo, writer) = (self.repo.clone(), self.writer.clone());
-                self.history = Some(cx.new(|cx| {
+                let explains = self.explanation.is_some();
+                let history = cx.new(|cx| {
                     let mut history = HistoryView::new(repo, cx);
                     history.set_writer(writer);
+                    history.set_explains(explains, cx);
                     history
-                }));
+                });
+                cx.subscribe(
+                    &history,
+                    |_, _, event: &crate::history_view::CommitShown, cx| {
+                        cx.emit(ChangesPanelEvent::CommitShown(event.0.clone()))
+                    },
+                )
+                .detach();
+                self.history = Some(history);
             }
             GitView::Stashes if self.stashes.is_none() => {
                 let repo = self.repo.clone();
@@ -483,16 +614,57 @@ impl ChangesPanel {
         cx.notify();
     }
 
-    /// Reads the branch's changes against its base, off the UI thread.
+    /// Reads the branch's changes against its base, and lays out their
+    /// rows, off the UI thread.
     fn load_branch(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
-        let read = cx.background_spawn(async move { git::diff::branch_changes(&root) });
+        let read = cx.background_spawn(async move {
+            let branch = git::diff::branch_changes(&root)?;
+            anyhow::Ok(branch.map(|branch| {
+                let added = branch.files.iter().map(FileChange::added).sum();
+                let removed = branch.files.iter().map(FileChange::removed).sum();
+                let diffs = crate::diff_list::Diffs::build(&branch.files);
+                (
+                    branch.base,
+                    branch.fork,
+                    branch.files.len(),
+                    added,
+                    removed,
+                    diffs,
+                )
+            }))
+        });
         self._branch_task = Some(cx.spawn(async move |this, cx| {
             let result = read
                 .await
                 .map_err(|err| SharedString::from(format!("{err:#}")));
             _ = this.update(cx, |this, cx| {
-                this.branch = Some(result);
+                // Compared again: the place read stays where it was.
+                let was = match &this.branch {
+                    Some(Ok(Some(shown))) => Some(shown.list.logical_scroll_top()),
+                    _ => None,
+                };
+                this.branch = Some(result.map(|read| {
+                    read.map(|(base, fork, files, added, removed, diffs)| {
+                        let list = gpui_kit::ListState::new(
+                            1 + diffs.len(),
+                            gpui_kit::ListAlignment::Top,
+                            gpui_kit::px(800.),
+                        );
+                        if let Some(was) = was {
+                            list.scroll_to(was);
+                        }
+                        BranchShown {
+                            base,
+                            fork,
+                            files,
+                            added,
+                            removed,
+                            diffs,
+                            list,
+                        }
+                    })
+                }));
                 cx.notify();
             });
         }));
@@ -512,57 +684,74 @@ impl ChangesPanel {
                 )
                 .into_any_element(),
             Some(Ok(Some(branch))) => {
-                let added: usize = branch.files.iter().map(FileChange::added).sum();
-                let removed: usize = branch.files.iter().map(FileChange::removed).sum();
-                v_flex()
-                    .id("branch-changes")
+                use gpui_kit::component::scroll::ScrollableElement as _;
+                // Drawn only where it shows (see `diff_list`).
+                let entity = cx.entity().downgrade();
+                div()
+                    .relative()
                     .size_full()
-                    .overflow_y_scroll()
-                    .px_2()
-                    .pb_3()
-                    .gap_2()
                     .child(
-                        h_flex()
-                            .px_1()
-                            .pt_2()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(div().flex_1().child(format!(
-                                "{} files against {} (since {})",
-                                branch.files.len(),
-                                branch.base,
-                                branch.fork
-                            )))
-                            .child(change_counts(added, removed, cx))
-                            .child(
-                                Button::new("refresh-branch")
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::RefreshCw)
-                                    .tooltip("Compare again")
-                                    .accessibility_label("Compare again")
-                                    .on_click(cx.listener(|this, _, _, cx| this.load_branch(cx))),
-                            ),
+                        gpui_kit::list(branch.list.clone(), move |ix, _, cx| {
+                            entity
+                                .update(cx, |this, cx| this.render_branch_item(ix, cx))
+                                .unwrap_or_else(|_| div().into_any_element())
+                        })
+                        .size_full(),
                     )
-                    .when(branch.files.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .px_1()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("No commits beyond the base yet."),
-                        )
-                    })
-                    .children(
-                        branch
-                            .files
-                            .iter()
-                            .map(|file| diff_view::file_diff(file, cx)),
-                    )
+                    .vertical_scrollbar(&branch.list)
                     .into_any_element()
             }
         }
+    }
+
+    /// The Branch view's row `ix`: the summary, then the files' diffs.
+    fn render_branch_item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(Ok(Some(branch))) = &self.branch else {
+            return div().into_any_element();
+        };
+        if ix > 0 {
+            return div()
+                .px_2()
+                .when(ix == branch.diffs.len(), |this| this.pb_3())
+                .child(branch.diffs.render_item("branch", ix - 1, cx))
+                .into_any_element();
+        }
+        v_flex()
+            .px_2()
+            .pb_2()
+            .gap_2()
+            .child(
+                h_flex()
+                    .px_1()
+                    .pt_2()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(div().flex_1().child(format!(
+                        "{} files against {} (since {})",
+                        branch.files, branch.base, branch.fork
+                    )))
+                    .child(change_counts(branch.added, branch.removed, cx))
+                    .child(
+                        Button::new("refresh-branch")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::RefreshCw)
+                            .tooltip("Compare again")
+                            .accessibility_label("Compare again")
+                            .on_click(cx.listener(|this, _, _, cx| this.load_branch(cx))),
+                    ),
+            )
+            .when(branch.diffs.is_empty(), |this| {
+                this.child(
+                    div()
+                        .px_1()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No commits beyond the base yet."),
+                )
+            })
+            .into_any_element()
     }
 
     fn open_conflict(&mut self, path: String, cx: &mut Context<Self>) {
@@ -704,6 +893,10 @@ impl ChangesPanel {
                 if changes.staged_files > 0 {
                     text.push_str(&format!(" · {} kept", changes.staged_files));
                 }
+                let (viewed, _) = self.viewed_count();
+                if viewed > 0 {
+                    text.push_str(&format!(" · {viewed} viewed"));
+                }
                 text
             }
             _ => String::new(),
@@ -717,22 +910,6 @@ impl ChangesPanel {
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             .child(div().flex_1().min_w_0().truncate().child(summary))
-            .when(matches!(&self.state, State::Loaded(changes) if !changes.files.is_empty()), |this| {
-                this.child(
-                    Button::new("all-changes")
-                        .ghost()
-                        .xsmall()
-                        .icon(ph_ui::Icons::GitCompare)
-                        .when(!narrow, |this| this.label("All changes"))
-                        .accessibility_label("All changes")
-                        .tooltip(if narrow {
-                            "All changes: every changed file in one diff, in the editor"
-                        } else {
-                            "Every changed file in one diff, in the editor"
-                        })
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesPanelEvent::OpenDiff(None)))),
-                )
-            })
             .when(matches!(&self.state, State::Loaded(changes) if !changes.files.is_empty() || !changes.untracked.is_empty()), |this| {
                 this.child(
                     Button::new("review-changes")
@@ -741,13 +918,33 @@ impl ChangesPanel {
                         .icon(ph_ui::Icons::Sparkles)
                         .when(!narrow, |this| this.label("Review"))
                         .accessibility_label("Review")
-                        .tooltip(if narrow {
+                        .tooltip(ph_ui::tip(if narrow {
                             "Review: an agent reviews these changes before you push; its findings land on the lines as notes"
                         } else {
                             "An agent reviews these changes before you push; its findings land on the lines as notes"
-                        })
+                        }))
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesPanelEvent::ReviewChanges))),
                 )
+                .when(self.explanation.is_some(), |this| {
+                    this.child(
+                        Button::new("explain-changes")
+                            .ghost()
+                            .xsmall()
+                            .icon(ph_ui::Icons::MessageSquare)
+                            .when(!narrow, |this| this.label("Explain"))
+                            .accessibility_label("Explain")
+                            .tooltip(ph_ui::tip(if narrow {
+                                "Explain: an agent tells you in plain words what these changes do, how it worked before and why, before you commit"
+                            } else {
+                                "An agent tells you in plain words what these changes do, how it worked before and why, before you commit"
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.explaining = true;
+                                cx.emit(ChangesPanelEvent::ExplainChanges);
+                                cx.notify();
+                            })),
+                    )
+                })
             })
             .when(!self.undo.is_empty(), |this| {
                 this.child(
@@ -782,7 +979,15 @@ impl ChangesPanel {
                     .icon(IconName::RefreshCw)
                     .tooltip("Refresh")
                     .accessibility_label("Refresh changes")
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        // Asked for: the diff follows, also when the read
+                        // finds the list as it was.
+                        this.review.follow = true;
+                        this.refresh(cx);
+                        if this.review.stale {
+                            this.load_review(cx);
+                        }
+                    })),
             )
     }
 
@@ -792,7 +997,8 @@ impl ChangesPanel {
             TreeRow::File { ix: at, depth } if *at == ix => Some(*depth),
             _ => None,
         });
-        let collapsed = !self.expanded.contains(&file.path);
+        let viewed = self.is_viewed(&file.path);
+        let selected = self.review.selected.as_deref() == Some(file.path.as_str());
         let path = file.path.clone();
         let diff_path = file.path.clone();
         let kind = file.kind();
@@ -819,44 +1025,24 @@ impl ChangesPanel {
                     .gap_1p5()
                     .rounded(cx.theme().radius)
                     .cursor_pointer()
-                    .hover(|style| style.bg(cx.theme().list_hover))
-                    // The row opens the file's diff in the editor; the
-                    // chevron unfolds its hunks here, to keep or discard.
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(ChangesPanelEvent::OpenDiff(Some(diff_path.clone())))
-                    }))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("fold-file-{}", file.path)))
-                            .role(gpui_kit::accesskit::Role::Button)
-                            .aria_label(if collapsed {
-                                "Show the changes here"
-                            } else {
-                                "Hide the changes"
-                            })
-                            .test_support()
-                            .flex_none()
-                            .p_0p5()
-                            .rounded(cx.theme().radius)
-                            .hover(|style| style.bg(cx.theme().secondary_hover))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                if !this.expanded.remove(&path) {
-                                    this.expanded.insert(path.clone());
-                                }
-                                this.toggled_file(ix);
-                                cx.notify();
-                            }))
-                            .child(
-                                Icon::new(if collapsed {
-                                    IconName::ChevronRight
-                                } else {
-                                    IconName::ChevronDown
-                                })
-                                .xsmall()
-                                .text_color(cx.theme().muted_foreground),
-                            ),
+                    .map(|this| {
+                        if selected {
+                            this.bg(cx.theme().list_active)
+                        } else {
+                            this.hover(|style| style.bg(cx.theme().list_hover))
+                        }
+                    })
+                    // The row shows the file's changes in the diff beside
+                    // the list; the tick says they were looked at.
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.select_file(diff_path.clone(), cx)),
                     )
+                    .child(viewed_tick(
+                        SharedString::from(format!("viewed-{}", file.path)),
+                        path,
+                        viewed,
+                        cx.weak_entity(),
+                    ))
                     .child({
                         h_flex()
                             .flex_1()
@@ -890,193 +1076,9 @@ impl ChangesPanel {
                         let panel = cx.weak_entity();
                         let path = file.path.clone();
                         move |menu, _, _| {
-                            file_menu(menu, panel.clone(), ix, path.clone(), open_path.clone())
+                            file_menu(menu, panel.clone(), path.clone(), open_path.clone())
                         }
                     }),
-            )
-            .into_any_element()
-    }
-
-    fn render_hunk(
-        &self,
-        file_ix: usize,
-        hunk_ix: usize,
-        hunk: &git::Hunk,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let id = (file_ix * 10_000 + hunk_ix) as u64;
-        let group = SharedString::from(format!("change-hunk-{id}"));
-        let mono = cx.theme().mono_font_family.clone();
-        v_flex()
-            .when(hunk_ix > 0, |this| {
-                this.border_t_1().border_color(cx.theme().border)
-            })
-            .text_xs()
-            .child(
-                h_flex()
-                    .id(("change-hunk", id))
-                    .group(group.clone())
-                    .h_6()
-                    .px_2()
-                    .gap_2()
-                    .bg(cx.theme().muted.opacity(0.6))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(
-                        div()
-                            .flex_1()
-                            .truncate()
-                            .font_family(mono.clone())
-                            .child(hunk.header.clone()),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_0p5()
-                            .invisible()
-                            .group_hover(group, |style| style.visible())
-                            .child(
-                                Button::new(("discard-hunk", id))
-                                    .ghost()
-                                    .xsmall()
-                                    .label("Discard")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.discard_hunk(file_ix, hunk_ix, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new(("keep-hunk", id))
-                                    .ghost()
-                                    .xsmall()
-                                    .label("Keep")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.keep_hunk(file_ix, hunk_ix, window, cx)
-                                    })),
-                            ),
-                    ),
-            )
-            // Long lines scroll sideways, the hunk's own bar staying put.
-            // Kept by the file's path, not its place in the list: a file
-            // that moves up when another is committed keeps its own scroll.
-            .child(diff_view::scroller(
-                SharedString::from(format!(
-                    "change-hunk-lines-{}-{hunk_ix}",
-                    self.file(file_ix)
-                        .map(|file| file.path.as_str())
-                        .unwrap_or_default()
-                )),
-                self.hunk_rows(file_ix, hunk_ix, hunk, cx),
-            ))
-            .into_any_element()
-    }
-
-    /// A hunk's lines; on hover a line offers a review note (the new side's
-    /// lines), and its notes show under it.
-    fn hunk_rows(
-        &self,
-        file_ix: usize,
-        hunk_ix: usize,
-        hunk: &git::Hunk,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let Some(path) = self.file(file_ix).map(|file| file.path.clone()) else {
-            return diff_view::hunk_lines(hunk, cx);
-        };
-        let lines = diff_view::lines(hunk);
-        let digits = diff_view::number_digits(&lines);
-        let mut rows = Vec::new();
-        for (line_ix, (line, raw)) in lines
-            .iter()
-            .zip(&hunk.lines)
-            .take(diff_view::MAX_HUNK_LINES)
-            .enumerate()
-        {
-            let id = ((file_ix * 10_000 + hunk_ix) * 1_000 + line_ix) as u64;
-            let group = SharedString::from(format!("diff-line-{id}"));
-            // A line of the new file takes a review note: its button shows
-            // over the line numbers while the pointer is on the line (at the
-            // left, so it is in reach however far the line runs).
-            let row = diff_view::line_row(line, digits, cx)
-                .id(("diff-line", id))
-                .group(group.clone())
-                .relative()
-                .when_some(line.new, |this, number| {
-                    let (path, code) = (path.clone(), raw.clone());
-                    this.child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top_0()
-                            .invisible()
-                            .group_hover(group, |style| style.visible())
-                            .child(
-                                Button::new(("note-line", id))
-                                    .primary()
-                                    .xsmall()
-                                    .icon(IconName::Plus)
-                                    .tooltip("Add a review note")
-                                    .accessibility_label("Add a review note")
-                                    .on_click(cx.listener(move |_, _, window, cx| {
-                                        ask_note(path.clone(), number, code.clone(), window, cx)
-                                    })),
-                            ),
-                    )
-                });
-            rows.push(row.into_any_element());
-            if let Some(number) = line.new {
-                for (note_ix, note) in self
-                    .notes
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, note)| note.path == path && note.line == number)
-                {
-                    rows.push(self.note_row(note_ix, note, cx));
-                }
-            }
-        }
-        if hunk.lines.len() > diff_view::MAX_HUNK_LINES {
-            rows.push(diff_view::more_lines(
-                hunk.lines.len() - diff_view::MAX_HUNK_LINES,
-                cx,
-            ));
-        }
-        rows
-    }
-
-    /// A review note under its line.
-    fn note_row(&self, ix: usize, note: &crate::notes::Note, cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
-            .items_start()
-            .gap_2()
-            .mx_2()
-            .my_1()
-            .px_2()
-            .py_1p5()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
-            .text_sm()
-            .child(
-                div().pt_0p5().child(
-                    Icon::new(Icons::MessageSquare)
-                        .xsmall()
-                        .text_color(cx.theme().muted_foreground),
-                ),
-            )
-            .child(div().flex_1().min_w_0().child(note.text.clone()))
-            .child(
-                Button::new(("remove-note", ix))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Close)
-                    .tooltip("Remove the note")
-                    .accessibility_label("Remove the note")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if ix < this.notes.len() {
-                            this.notes.remove(ix);
-                        }
-                        this.list.remeasure();
-                        cx.notify();
-                    })),
             )
             .into_any_element()
     }
@@ -1086,7 +1088,7 @@ impl ChangesPanel {
     pub fn set_review_notes(&mut self, notes: Vec<crate::notes::Note>, cx: &mut Context<Self>) {
         self.notes.retain(|note| !note.from_review);
         self.notes.extend(notes);
-        self.list.remeasure();
+        self.list.remeasure_items(0..1);
         cx.notify();
     }
 
@@ -1094,30 +1096,19 @@ impl ChangesPanel {
     pub fn add_note(&mut self, note: crate::notes::Note, cx: &mut Context<Self>) {
         if !note.text.trim().is_empty() {
             self.notes.push(note);
-            self.list.remeasure();
+            self.list.remeasure_items(0..1);
             cx.notify();
         }
     }
 
     /// The changes list's rows: the top (commit box, header), each file's
-    /// row and its hunks (unless folded), and the new files. A hunk is a
-    /// row of its own so a long diff is drawn only where it shows.
+    /// row, and the new files.
     fn rows(&self) -> (Vec<Row>, Vec<TreeRow>) {
         let State::Loaded(changes) = &self.state else {
             return (Vec::new(), Vec::new());
         };
         let mut rows = vec![Row::Top];
-        let add_file = |rows: &mut Vec<Row>, ix: usize| {
-            let file = &changes.files[ix];
-            rows.push(Row::File(ix));
-            if !self.expanded.contains(&file.path) {
-                return;
-            }
-            if file.binary {
-                rows.push(Row::Binary(ix));
-            }
-            rows.extend((0..file.hunks.len()).map(|hunk| Row::Hunk(ix, hunk)));
-        };
+        let add_file = |rows: &mut Vec<Row>, ix: usize| rows.push(Row::File(ix));
         let tree = if as_tree() {
             let paths: Vec<&str> = changes
                 .files
@@ -1144,40 +1135,28 @@ impl ChangesPanel {
         (rows, tree)
     }
 
-    /// Takes the rows as they are now; the list keeps its place when they
-    /// are the same ones.
+    /// Takes the rows as they are now; the list keeps its place.
     fn sync_rows(&mut self) {
         let (rows, tree) = self.rows();
         self.tree = tree;
         if rows != self.list_rows {
+            // A reset scrolls to the top: going through the files one by
+            // one, each kept or discarded file would throw the list back.
+            let top = self.list.logical_scroll_top();
             self.list.reset(rows.len());
+            if top.item_ix < rows.len() {
+                self.list.scroll_to(top);
+            } else if let Some(last) = rows.len().checked_sub(1) {
+                self.list.scroll_to(gpui_kit::ListOffset {
+                    item_ix: last,
+                    offset_in_item: gpui_kit::px(0.),
+                });
+            }
             self.list_rows = rows;
         } else {
-            // The same rows, but a hunk can have other lines now.
+            // The same rows, but the top can be another height now.
             self.list.remeasure();
         }
-    }
-
-    /// File `ix` was folded or unfolded: its hunk rows go or come back,
-    /// the rest of the list stays where it is.
-    fn toggled_file(&mut self, ix: usize) {
-        let (rows, tree) = self.rows();
-        self.tree = tree;
-        let Some(at) = self.list_rows.iter().position(|row| *row == Row::File(ix)) else {
-            self.sync_rows();
-            return;
-        };
-        let was = self.list_rows[at + 1..]
-            .iter()
-            .take_while(|row| matches!(row, Row::Hunk(file, _) | Row::Binary(file) if *file == ix))
-            .count();
-        let now = rows[at + 1..]
-            .iter()
-            .take_while(|row| matches!(row, Row::Hunk(file, _) | Row::Binary(file) if *file == ix))
-            .count();
-        self.list.splice(at + 1..at + 1 + was, now);
-        self.list.remeasure_items(at..at + 1);
-        self.list_rows = rows;
     }
 
     fn render_list_item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -1192,6 +1171,7 @@ impl ChangesPanel {
                 .child(div().flex_none().child(self.commit_box.clone()))
                 .children(self.render_conflicts(cx))
                 .child(div().flex_none().child(self.render_header(cx)))
+                .children(self.render_evidence(cx))
                 .children(self.render_notes_bar(cx))
                 .into_any_element(),
             Row::Folder(at) => div()
@@ -1202,26 +1182,6 @@ impl ChangesPanel {
                 .px_2()
                 .child(self.render_file(file, &changes.files[file], cx))
                 .into_any_element(),
-            Row::Binary(file) => self.hunk_frame(
-                file,
-                true,
-                changes.files[file].hunks.is_empty(),
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Binary file changed.")
-                    .into_any_element(),
-                cx,
-            ),
-            Row::Hunk(file, hunk) => {
-                let hunks = &changes.files[file].hunks;
-                let first = hunk == 0 && !changes.files[file].binary;
-                let last = hunk + 1 == hunks.len();
-                let body = self.render_hunk(file, hunk, &hunks[hunk], cx);
-                self.hunk_frame(file, first, last, body, cx)
-            }
             Row::Untracked => div()
                 .px_2()
                 .pb_3()
@@ -1230,30 +1190,51 @@ impl ChangesPanel {
         }
     }
 
-    /// A piece of a file's diff in the bordered block under its row: the
-    /// block's top edge on the `first` piece, its bottom on the `last`.
-    fn hunk_frame(
-        &self,
-        _file: usize,
-        first: bool,
-        last: bool,
-        body: AnyElement,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let radius = cx.theme().radius;
-        div()
-            .px_2()
-            .child(
-                div()
-                    .ml_5()
-                    .border_x_1()
-                    .border_color(cx.theme().border)
-                    .overflow_hidden()
-                    .when(first, |this| this.mt_0p5().border_t_1().rounded_t(radius))
-                    .when(last, |this| this.mb_2().border_b_1().rounded_b(radius))
-                    .child(body),
-            )
-            .into_any_element()
+    /// What the task's chat did to check its work (tests, commands,
+    /// screenshots), over the changes it made: the reviewer sees what stands
+    /// behind them before reading a line.
+    fn render_evidence(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.evidence.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        let chips = self.evidence.iter().enumerate().map(|(ix, item)| {
+            let color = match item.ok {
+                Some(true) => theme.success,
+                Some(false) => theme.danger,
+                None => theme.muted_foreground,
+            };
+            let detail = item.detail.clone();
+            h_flex()
+                .id(("evidence", ix))
+                .flex_none()
+                .h_6()
+                .px_2()
+                .gap_1()
+                .rounded(theme.radius)
+                .bg(theme.muted)
+                .text_xs()
+                .child(Icon::new(item.kind.icon()).xsmall().text_color(color))
+                .child(item.label.clone())
+                .when_some(detail, |this, detail| {
+                    this.tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(detail.clone()))
+                            .build(window, cx)
+                    })
+                })
+        });
+        Some(
+            h_flex()
+                .id("git-evidence")
+                .flex_none()
+                .flex_wrap()
+                .mx_2()
+                .mb_1p5()
+                .gap_1()
+                .children(chips)
+                .test_support()
+                .into_any_element(),
+        )
     }
 
     /// The bar over the changes while there are notes: how many, and
@@ -1353,15 +1334,14 @@ impl ChangesPanel {
                         cx,
                     ),
                     TreeRow::File { ix, depth } => {
-                        self.untracked_row(ix, &untracked[ix], Some(depth), cx)
+                        self.untracked_row(&untracked[ix], Some(depth), cx)
                     }
                 })
                 .collect()
         } else {
             untracked
                 .iter()
-                .enumerate()
-                .map(|(ix, path)| self.untracked_row(ix, path, None, cx))
+                .map(|path| self.untracked_row(path, None, cx))
                 .collect()
         };
         v_flex()
@@ -1385,32 +1365,46 @@ impl ChangesPanel {
     /// A new file's row (indented at `depth` in View as Tree).
     fn untracked_row(
         &self,
-        ix: usize,
         path: &str,
         depth: Option<usize>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = path.to_string();
+        let viewed = self.is_viewed(path);
+        let selected = self.review.selected.as_deref() == Some(path);
         let (dir, name) = match path.rsplit_once('/') {
             Some((dir, name)) => (format!("{dir}/"), name.to_string()),
             None => (String::new(), path.to_string()),
         };
         h_flex()
-            .id(("untracked", ix))
+            // By its path: a list position would name another file once
+            // the list changes.
+            .id(SharedString::from(format!("new-file-{path}")))
+            .aria_label(path.to_string())
+            .test_support()
             .h(ph_theme::dense(1.75, cx))
             .px_1p5()
             .when_some(depth, |this, depth| this.pl(tree_indent(depth)))
             .gap_1p5()
             .rounded(cx.theme().radius)
             .cursor_pointer()
-            .hover(|style| style.bg(cx.theme().list_hover))
+            .map(|this| {
+                if selected {
+                    this.bg(cx.theme().list_active)
+                } else {
+                    this.hover(|style| style.bg(cx.theme().list_hover))
+                }
+            })
             .text_sm()
-            .on_click(cx.listener(move |_, _, _, cx| {
-                cx.emit(ChangesPanelEvent::OpenFile {
-                    path: open.clone(),
-                    line: 0,
-                });
-            }))
+            // Shown in the diff beside the list, all its lines added; its
+            // menu opens the file itself.
+            .on_click(cx.listener(move |this, _, _, cx| this.select_file(open.clone(), cx)))
+            .child(viewed_tick(
+                SharedString::from(format!("viewed-{path}")),
+                path.to_string(),
+                viewed,
+                cx.weak_entity(),
+            ))
             .child(
                 div()
                     .w_3()
@@ -1487,6 +1481,16 @@ impl ChangesPanel {
     ) -> AnyElement {
         let folded = self.folded.contains(&key);
         let new_files = counts.is_none();
+        // By path: the menu stays open while the list changes, and a
+        // position would then name another file.
+        let files: Vec<String> = if new_files {
+            Vec::new()
+        } else {
+            files
+                .iter()
+                .filter_map(|ix| self.file(*ix).map(|file| file.path.clone()))
+                .collect()
+        };
         h_flex()
             .id(id)
             .h(ph_theme::dense(1.75, cx))
@@ -1558,10 +1562,13 @@ fn change_counts(added: usize, removed: usize, cx: &gpui_kit::App) -> impl IntoE
 
 impl Render for ChangesPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The summary, two named buttons and two icons need about this
-        // much room.
-        let (narrow, probe) = ph_ui::measure::narrower_than("git-width", 400., window, cx);
-        self.narrow = narrow;
+        let (width, probe) = ph_ui::measure::width_of("git-width", window, cx);
+        let room = width.map(|width| ph_ui::measure::design_px(width, window));
+        // With the room, the diff is beside the list; else under it.
+        self.wide = room.map(|room| room >= REVIEW_BESIDE);
+        // The summary, a named button and two icons need about this much
+        // room; beside the diff the list has less than that.
+        self.narrow = self.wide == Some(true) || room.is_some_and(|room| room < 400.);
         let body: AnyElement = match self.view {
             GitView::History => self
                 .history
@@ -1576,7 +1583,7 @@ impl Render for ChangesPanel {
             GitView::Branch => self.render_branch(cx),
             GitView::Changes => match &self.conflict {
                 Some(conflict) => conflict.clone().into_any_element(),
-                None => self.render_changes(cx),
+                None => self.render_changes(window, cx),
             },
         };
         v_flex()
@@ -1589,7 +1596,7 @@ impl Render for ChangesPanel {
 }
 
 impl ChangesPanel {
-    fn render_changes(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let is_repo = !matches!(self.state, State::NotRepository | State::Loading);
         let review: AnyElement = match &self.state {
             State::Loading => div().into_any_element(),
@@ -1619,8 +1626,9 @@ impl ChangesPanel {
                     self.sync_rows();
                 }
                 let entity = cx.entity().downgrade();
+                use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
                 use gpui_kit::component::scroll::ScrollableElement as _;
-                return div()
+                let list = div()
                     .relative()
                     .size_full()
                     .child(
@@ -1633,6 +1641,43 @@ impl ChangesPanel {
                     )
                     .vertical_scrollbar(&self.list)
                     .into_any_element();
+                // Only new files, none picked: there is no diff to show.
+                // Which way to divide the pane is decided once its width is
+                // known (a frame later): a split first made too narrow
+                // would keep those shares when given the room.
+                // The explanation shows there too, also of new files alone.
+                let (Some(wide), true) = (
+                    self.wide,
+                    self.review.has_files(cx) || (self.explaining && self.explanation.is_some()),
+                ) else {
+                    return list;
+                };
+                let diff = self.render_review(cx);
+                return if wide {
+                    h_resizable("git-review-split")
+                        .with_state(&self.review.split)
+                        .child(
+                            resizable_panel()
+                                .size(ph_ui::scaled_px(340., window))
+                                .size_range(
+                                    ph_ui::scaled_px(260., window)..ph_ui::scaled_px(520., window),
+                                )
+                                .child(list),
+                        )
+                        .child(resizable_panel().child(diff))
+                        .into_any_element()
+                } else {
+                    v_resizable("git-review-stack")
+                        .with_state(&self.review.stack)
+                        .child(
+                            resizable_panel()
+                                .size(ph_ui::scaled_px(300., window))
+                                .size_range(ph_ui::scaled_px(140., window)..gpui_kit::Pixels::MAX)
+                                .child(list),
+                        )
+                        .child(resizable_panel().child(diff))
+                        .into_any_element()
+                };
             }
         };
         v_flex()
@@ -1643,6 +1688,7 @@ impl ChangesPanel {
                 this.child(div().flex_none().child(self.commit_box.clone()))
                     .children(self.render_conflicts(cx))
                     .child(div().flex_none().child(self.render_header(cx)))
+                    .children(self.render_evidence(cx))
                     .children(self.render_notes_bar(cx))
             })
             .child(div().flex_none().child(review))
@@ -1650,10 +1696,41 @@ impl ChangesPanel {
     }
 }
 
-/// Asks for a review note on `line` of `path`; OK adds it to the panel.
+/// The tick at the start of a changed file's row: its changes were looked
+/// at. (The arrow that unfolded them in the list stood here.)
+fn viewed_tick(
+    id: SharedString,
+    path: String,
+    viewed: bool,
+    panel: gpui_kit::WeakEntity<ChangesPanel>,
+) -> impl IntoElement {
+    div()
+        .flex_none()
+        // A press on the tick is not one on the row.
+        .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation()
+        })
+        .child(
+            gpui_kit::component::checkbox::Checkbox::new(id)
+                .checked(viewed)
+                .tooltip(if viewed {
+                    "Viewed. Changes made after this take the tick off."
+                } else {
+                    "Mark as viewed"
+                })
+                .on_click(move |checked: &bool, _, cx| {
+                    cx.stop_propagation();
+                    _ = panel.update(cx, |panel, cx| panel.set_viewed(&path, *checked, cx));
+                }),
+        )
+}
+
+/// Asks for a review note on `line` of `path` (a line of the file as it
+/// was, when `removed`); OK adds it to the panel.
 fn ask_note(
     path: String,
     line: u32,
+    removed: bool,
     code: String,
     window: &mut Window,
     cx: &mut Context<ChangesPanel>,
@@ -1679,6 +1756,7 @@ fn ask_note(
                     code: code.clone(),
                     text,
                     from_review: false,
+                    removed,
                 };
                 _ = panel.update(cx, |panel, cx| panel.add_note(note, cx));
                 true
@@ -1687,12 +1765,11 @@ fn ask_note(
     focus.update(cx, |input, cx| input.focus(window, cx));
 }
 
-/// The menu of changed file `ix` (`path`): see its changes, open it, keep
-/// or discard it.
+/// The menu of changed file `path`: see its changes, open it, keep or
+/// discard it.
 fn file_menu(
     menu: gpui_kit::component::menu::PopupMenu,
     panel: gpui_kit::WeakEntity<ChangesPanel>,
-    ix: usize,
     path: String,
     open_path: String,
 ) -> gpui_kit::component::menu::PopupMenu {
@@ -1700,9 +1777,7 @@ fn file_menu(
     let diff = {
         let (panel, path) = (panel.clone(), path.clone());
         move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut gpui_kit::App| {
-            _ = panel.update(cx, |_, cx| {
-                cx.emit(ChangesPanelEvent::OpenDiff(Some(path.clone())))
-            });
+            _ = panel.update(cx, |panel, cx| panel.select_file(path.clone(), cx));
         }
     };
     let open = {
@@ -1723,13 +1798,15 @@ fn file_menu(
         }
     };
     let discard = {
-        let panel = panel.clone();
+        let (panel, path) = (panel.clone(), path.clone());
         move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
-            _ = panel.update(cx, |panel, cx| panel.discard_file(ix, window, cx));
+            _ = panel.update(cx, |panel, cx| {
+                panel.discard_files(std::slice::from_ref(&path), window, cx)
+            });
         }
     };
     menu.item(
-        PopupMenuItem::new("Open Changes")
+        PopupMenuItem::new("Show Changes")
             .icon(Icons::GitCompare)
             .on_click(diff),
     )
@@ -1775,7 +1852,7 @@ fn folder_menu(
     menu: gpui_kit::component::menu::PopupMenu,
     panel: gpui_kit::WeakEntity<ChangesPanel>,
     path: String,
-    files: Vec<usize>,
+    files: Vec<String>,
     new_files: bool,
 ) -> gpui_kit::component::menu::PopupMenu {
     use gpui_kit::component::menu::PopupMenuItem;
@@ -1786,7 +1863,7 @@ fn folder_menu(
                 if new_files {
                     panel.keep_path(path.clone(), window, cx);
                 } else {
-                    panel.keep_files(&files, window, cx);
+                    panel.keep_files(files.clone(), window, cx);
                 }
             });
         }
@@ -1794,11 +1871,7 @@ fn folder_menu(
     let discard = {
         let (panel, files) = (panel.clone(), files.clone());
         move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
-            _ = panel.update(cx, |panel, cx| {
-                for ix in files.iter().rev() {
-                    panel.discard_file(*ix, window, cx);
-                }
-            });
+            _ = panel.update(cx, |panel, cx| panel.discard_files(&files, window, cx));
         }
     };
     let menu = menu.item(

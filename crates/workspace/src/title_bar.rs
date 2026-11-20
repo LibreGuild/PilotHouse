@@ -1,7 +1,12 @@
 //! Contents of the window title bar: the app's mark and the name of what is
-//! in front (a workspace with its colour, *Chats*, *GitHub*), the command
-//! palette trigger in the middle, and window-level buttons (inbox, agents,
-//! appearance, settings, the side panels). The bar is part of the window's
+//! in front (a workspace with its colour, *Bridge*, *Reviews*), the command
+//! palette trigger in the middle, the next step of the task in front, and
+//! window-level buttons (inbox, the side panels).
+//!
+//! The task in front is not named here: its title and where it stands
+//! (in colour) stood after the workspace's name for a while, which crowded
+//! the corner and drew the eye from the work. The chat's own header says
+//! both. The bar is part of the window's
 //! frame (`frame`): it has no fill of its own. What the window shows is
 //! picked in the column of icons at its left edge (`rail`).
 //!
@@ -25,7 +30,7 @@ use ph_ui::Icons;
 use ph_ui::MenuButton as _;
 
 use crate::actions::*;
-use crate::workspace::{Section, View, Workspace};
+use crate::workspace::{View, Workspace};
 
 pub(crate) fn render(
     workspace: &Workspace,
@@ -49,6 +54,7 @@ pub(crate) fn render(
                 .flex_1()
                 .flex_basis(left_bias)
                 .gap_1()
+                .min_w_0()
                 .child(app_icon(cx))
                 .children(front_name(workspace, cx)),
         )
@@ -99,6 +105,7 @@ pub(crate) fn render(
                 .flex_basis(right_bias)
                 .justify_end()
                 .gap_1()
+                .children(next_step(workspace, cx))
                 .children(update_item(cx))
                 .child(
                     div()
@@ -106,76 +113,107 @@ pub(crate) fn render(
                         .occlude()
                         .child(crate::inbox::button(&workspace.inbox, cx)),
                 )
-                .child(
-                    div()
-                        .id("agents-button")
-                        .occlude()
-                        .child(agents_button(workspace, cx)),
-                )
-                // The two side panels' switches side by side, as in VS Code,
-                // then Settings, last.
-                .child(
-                    Button::new("toggle-sidebar")
-                        .occlude()
-                        .ghost()
-                        .small()
-                        .icon(if workspace.is_sidebar_collapsed() {
-                            IconName::PanelLeftOpen
-                        } else {
-                            IconName::PanelLeftClose
-                        })
-                        .tooltip(format!(
-                            "Show or hide the list ({})",
-                            ph_ui::platform::shortcut("secondary-b")
-                        ))
-                        .accessibility_label("Show or hide the list")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(ToggleSidebar), cx)
-                        }),
-                )
-                .child(
-                    Button::new("toggle-bottom-panel")
-                        .occlude()
-                        .ghost()
-                        .small()
-                        .icon(IconName::PanelBottom)
-                        .tooltip(format!(
-                            "Show or hide the bottom panel ({})",
-                            ph_ui::platform::shortcut("secondary-j")
-                        ))
-                        .accessibility_label("Show or hide the bottom panel")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(ToggleBottomPanel), cx)
-                        }),
-                )
-                .child(
-                    Button::new("toggle-context-panel")
-                        .occlude()
-                        .ghost()
-                        .small()
-                        .icon(IconName::PanelRight)
-                        .tooltip(format!(
-                            "Show or hide the tools ({})",
-                            ph_ui::platform::shortcut("secondary-alt-b")
-                        ))
-                        .accessibility_label("Show or hide the tools")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(ToggleContextPanel), cx)
-                        }),
-                )
-                .child(
-                    Button::new("open-settings")
-                        .occlude()
-                        .ghost()
-                        .small()
-                        .icon(Icons::Settings)
-                        .tooltip("Settings")
-                        .accessibility_label("Settings")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(OpenSettings), cx)
-                        }),
-                ),
+                .children(panel_switches(workspace, cx)),
         )
+}
+
+/// The task in the chat of the workspace in front, as the Bridge has it.
+fn task_in_front(workspace: &Workspace, cx: &App) -> Option<crate::bridge::OpenChat> {
+    if workspace.view() != View::Workspaces {
+        return None;
+    }
+    let space = workspace.active_space()?.read(cx);
+    let front = space.active_session()?;
+    crate::bridge::open_chats(
+        workspace,
+        space.project().id,
+        space.sessions(),
+        Some(front),
+        cx,
+    )
+    .into_iter()
+    .find(|chat| chat.session.id == front)
+}
+
+/// Where the task in front works: its own folder, else its workspace's
+/// first.
+fn task_folder(
+    workspace: &Workspace,
+    task: &crate::bridge::OpenChat,
+    cx: &App,
+) -> Option<std::path::PathBuf> {
+    task.session
+        .cwd
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            workspace
+                .active_space()?
+                .read(cx)
+                .project()
+                .folders()
+                .into_iter()
+                .next()
+        })
+}
+
+/// What the task in front waits for next, one press away: its changes to
+/// review (while another tool is in front), or its pull request.
+fn next_step(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let task = task_in_front(workspace, cx)?;
+    let (project, on_git) = {
+        let space = workspace.active_space()?.read(cx);
+        (
+            space.project().id,
+            space.is_context_open() && space.context_tab() == crate::bridge::REVIEW_TOOL,
+        )
+    };
+    let session = task.session.id;
+    let changed = task
+        .session
+        .facts
+        .as_ref()
+        .is_some_and(|facts| facts.files > 0);
+    let waits = matches!(
+        task.column,
+        crate::bridge::Column::Review | crate::bridge::Column::NeedsYou
+    );
+    if changed && waits && !on_git {
+        return Some(
+            div()
+                .id("next-step")
+                .occlude()
+                .child(
+                    Button::new("task-review")
+                        .outline()
+                        .small()
+                        .label("Review changes")
+                        .tooltip("Read what this task changed, in the Git tool")
+                        .on_click(cx.listener(move |workspace, _, window, cx| {
+                            workspace.review_task(project, session, window, cx)
+                        })),
+                )
+                .into_any_element(),
+        );
+    }
+    let pull = task_folder(workspace, &task, cx)
+        .and_then(|folder| crate::task_facts::of(&folder, cx)?.pull.clone())?;
+    let url = pull.url.clone();
+    Some(
+        div()
+            .id("next-step")
+            .occlude()
+            .child(
+                Button::new("task-pull")
+                    .outline()
+                    .small()
+                    .icon(Icons::GitPullRequest)
+                    .label(format!("#{}", pull.number))
+                    .tooltip("Open the pull request of this branch in the browser")
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+            )
+            .into_any_element(),
+    )
 }
 
 /// More (⋯), right of the search: making things (presentations, with the
@@ -259,9 +297,10 @@ type MenuEntry = (&'static str, Icons, fn() -> Box<dyn gpui_kit::Action>);
 /// How much more room each side of the bar gets, so its middle is the
 /// window's: the width of the window's own buttons on the other side.
 fn chrome_bias(window: &Window) -> (gpui_kit::Pixels, gpui_kit::Pixels) {
-    // gpui-component's title bar: 80 px for macOS's buttons on the left, 12
-    // elsewhere; Windows and client-decorated Linux draw three 34 px
-    // buttons on the right.
+    // gpui-component's title bar: 80 px for macOS's buttons on the left;
+    // elsewhere the bar starts at the window's edge (its 12 px there are
+    // taken off, see where the bar is made). Windows and client-decorated
+    // Linux draw three 34 px buttons on the right.
     if cfg!(target_os = "macos") {
         return (px(0.), px(80.));
     }
@@ -271,67 +310,74 @@ fn chrome_bias(window: &Window) -> (gpui_kit::Pixels, gpui_kit::Pixels) {
             gpui_kit::Decorations::Client { .. }
         );
     if controls {
-        (px(102. - 12.), px(0.))
+        (px(102.), px(0.))
     } else {
-        (px(0.), px(12.))
+        (px(0.), px(0.))
     }
 }
 
-/// The Agents button: how many chats need the user (amber) or are at work,
-/// and the popup listing them all.
-fn agents_button(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    use gpui_kit::component::popover::Popover;
-    let (needs_you, working) = crate::agents_board::counts(workspace, cx);
-    let hint = if cfg!(target_os = "macos") {
-        "⌘⇧A"
-    } else {
-        "Ctrl+Shift+A"
+/// The switches for what the view in front can show or hide: a
+/// workspace's chat and its result pane, Reviews' list. The Bridge has
+/// none.
+fn panel_switches(workspace: &Workspace, cx: &App) -> Vec<AnyElement> {
+    let switch = |id: &'static str,
+                  icon: IconName,
+                  what: &'static str,
+                  keys: &'static str,
+                  action: fn() -> Box<dyn gpui_kit::Action>| {
+        let label = format!("Show or hide {what}");
+        Button::new(id)
+            .occlude()
+            .ghost()
+            .small()
+            .icon(icon)
+            .tooltip(ph_ui::tip(format!(
+                "{label} ({})",
+                ph_ui::platform::shortcut(keys)
+            )))
+            .accessibility_label(label)
+            .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
+            .into_any_element()
     };
-    let trigger = Button::new("agents")
-        .ghost()
-        .small()
-        .icon(Icons::Bot)
-        .tooltip(format!("Agents ({hint})"))
-        .accessibility_label("Agents")
-        .when(needs_you > 0, |this| {
-            this.child(
-                div()
-                    .px_1p5()
-                    .rounded_full()
-                    .bg(cx.theme().warning.opacity(0.2))
-                    .text_color(cx.theme().warning)
-                    .text_xs()
-                    .child(needs_you.to_string()),
-            )
-        })
-        .when(needs_you == 0 && working > 0, |this| {
-            this.child(ph_ui::Loader::new().xsmall().color(cx.theme().info))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(working.to_string()),
-                )
-        });
-    let this = cx.entity().downgrade();
-    Popover::new("agents-popover")
-        .offset(ph_ui::POPUP_GAP)
-        .anchor(gpui_kit::Anchor::TopRight)
-        .open(workspace.agents_open)
-        .on_open_change({
-            let this = this.clone();
-            move |open, _, cx| {
-                _ = this.update(cx, |workspace, cx| workspace.set_agents_open(*open, cx));
-            }
-        })
-        .trigger(trigger)
-        .content(move |_, window, cx| {
-            let Some(workspace) = this.upgrade() else {
-                return div().into_any_element();
-            };
-            let room = window.viewport_size().height;
-            crate::agents_board::popup(workspace.read(cx), this.clone(), room, cx)
-        })
+    match workspace.view() {
+        View::Workspaces => {
+            let folded = workspace
+                .active_space()
+                .is_some_and(|space| space.read(cx).is_chat_folded());
+            vec![
+                switch(
+                    "toggle-chat",
+                    if folded {
+                        IconName::PanelLeftOpen
+                    } else {
+                        IconName::PanelLeftClose
+                    },
+                    "the chat",
+                    "secondary-b",
+                    || Box::new(ToggleSidebar),
+                ),
+                switch(
+                    "toggle-context-panel",
+                    IconName::PanelRight,
+                    "the result pane",
+                    "secondary-alt-b",
+                    || Box::new(ToggleContextPanel),
+                ),
+            ]
+        }
+        View::GitHub => vec![switch(
+            "toggle-sidebar",
+            if workspace.is_sidebar_collapsed() {
+                IconName::PanelLeftOpen
+            } else {
+                IconName::PanelLeftClose
+            },
+            "the list",
+            "secondary-b",
+            || Box::new(ToggleSidebar),
+        )],
+        View::Bridge | View::Custom(_) => Vec::new(),
+    }
 }
 
 /// An update, only once there is one: ready to install, waiting to be
@@ -344,16 +390,16 @@ fn update_item(cx: &App) -> Option<AnyElement> {
     let item = match updates::Updater::status(cx) {
         Status::Ready { version, .. } => button("update-restart", "Restart to update".into())
             .child(dot(cx.theme().success))
-            .tooltip(format!(
+            .tooltip(ph_ui::tip(format!(
                 "{} {version} is downloaded. Restart to install it now; otherwise it installs when you quit.",
                 ph_brand::NAME
-            ))
+            )))
             .on_click(|_, _, cx| updates::restart_to_update(cx)),
         Status::Available { version } => button("update-download", format!("Update to {version}"))
             .tooltip("Download and install the new version")
             .on_click(|_, _, cx| updates::download_update(cx)),
         Status::Manual { version } => button("update-manual", format!("{version} available"))
-            .tooltip("This copy cannot update itself: get the new version from GitHub")
+            .tooltip(ph_ui::tip("This copy cannot update itself: get the new version from GitHub"))
             .on_click(|_, _, cx| cx.open_url(updates::RELEASES_URL)),
         _ => return None,
     };
@@ -361,20 +407,21 @@ fn update_item(cx: &App) -> Option<AnyElement> {
 }
 
 /// The app's mark, its icon in small. Off macOS, where there is no menu
-/// bar, it opens the app's menu.
-fn app_icon(_: &App) -> AnyElement {
-    let mark = div()
-        .mx_1()
-        .child(ph_ui::logo_mark(ph_ui::rems_from_px(20.)));
+/// bar, it opens the app's menu, and stands centred over the column of
+/// icons under the bar (as wide as that column, from the window's edge):
+/// the mark and the icons are on one line.
+fn app_icon(cx: &App) -> AnyElement {
+    let mark = ph_ui::logo_mark(ph_ui::rems_from_px(20.));
     if cfg!(target_os = "macos") {
-        return mark.into_any_element();
+        return div().mx_1().child(mark).into_any_element();
     }
-    Button::new("app-menu")
+    let column = crate::rail::width_px(crate::rail::labels(cx));
+    let button = Button::new("app-menu")
         .occlude()
         .ghost()
         .small()
         .child(mark)
-        .tooltip(ph_brand::NAME)
+        .tooltip(ph_ui::tip(ph_brand::NAME))
         .accessibility_label(format!("{} menu", ph_brand::NAME))
         .menu(gpui_kit::Anchor::TopLeft, |menu, _, _| {
             let item = |label: &'static str, action: fn() -> Box<dyn gpui_kit::Action>| {
@@ -392,34 +439,38 @@ fn app_icon(_: &App) -> AnyElement {
                 .item(item("Settings", || Box::new(OpenSettings)))
                 .separator()
                 .item(item(concat!("Quit ", ph_brand::name!()), || Box::new(Quit)))
-        })
+        });
+    h_flex()
+        .flex_none()
+        .w(ph_ui::rems_from_px(column))
+        .justify_center()
+        .child(button)
         .into_any_element()
 }
 
-/// What is in front, said beside the app's mark: the workspace's name (or
-/// *Chats*, *GitHub*, an organisation's view). The left column of icons
-/// switches between them; this only names where the user is.
+/// What is in front, said beside the app's mark: *Bridge*, *Reviews*, an
+/// organisation's view, or the workspace's name with its colour (*Chats*
+/// for the space without folders). The left column of icons switches
+/// between them; this names where the user is.
 fn front_name(workspace: &Workspace, cx: &App) -> Option<AnyElement> {
     let name: gpui_kit::SharedString = match workspace.view() {
-        View::GitHub => "GitHub".into(),
+        View::Bridge => "Bridge".into(),
+        View::GitHub => "Reviews".into(),
         View::Custom(id) => ph_custom::views()
             .into_iter()
             .find(|custom| custom.id == id)?
             .label
             .into(),
-        View::Workspaces => match workspace.section() {
-            Section::Chats => "Chats".into(),
-            Section::Workspaces => {
-                let id = workspace.active_project_id()?;
-                workspace
-                    .projects()
-                    .iter()
-                    .find(|project| project.id == id)?
-                    .name
-                    .clone()
-                    .into()
-            }
-        },
+        View::Workspaces => {
+            let id = workspace.active_project_id()?;
+            workspace
+                .projects()
+                .iter()
+                .find(|project| project.id == id)?
+                .name
+                .clone()
+                .into()
+        }
     };
     Some(
         h_flex()
@@ -428,8 +479,8 @@ fn front_name(workspace: &Workspace, cx: &App) -> Option<AnyElement> {
             .text_sm()
             .font_weight(gpui_kit::FontWeight::MEDIUM)
             .text_color(cx.theme().muted_foreground)
-            // A workspace's colour, as on its row in the list and in the
-            // frame's light: the three say the same thing.
+            // A workspace's colour, as on its badge and in the frame's
+            // light: the three say the same thing.
             .children(crate::frame::tint(workspace, cx).map(|color| {
                 div()
                     .flex_none()

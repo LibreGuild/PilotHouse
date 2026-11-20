@@ -41,6 +41,65 @@ pub fn media_href(href: &str) -> bool {
     };
     named() == Some(true)
         && std::fs::metadata(path).is_ok_and(|file| file.is_file() && file.len() <= 512 << 20)
+        && decodable(path)
+}
+
+/// Whether the picture in `path` can be drawn safely. A bitmap is decoded
+/// whole, at the size its header says, so a small file that claims to be
+/// huge would ask for more memory than there is: at most
+/// [`super::space::MOST_PIXELS`]. Any other file is taken for an SVG, which
+/// must not nest too deeply (see [`too_deep`]).
+fn decodable(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    // By what the file holds, as the drawing tells a bitmap from an SVG.
+    let Ok(reader) = image::ImageReader::new(std::io::BufReader::new(file)).with_guessed_format()
+    else {
+        return false;
+    };
+    if reader.format().is_none() {
+        // An SVG, as text: packed with gzip its nesting cannot be counted.
+        return std::fs::read(path)
+            .is_ok_and(|svg| !svg.starts_with(&[0x1f, 0x8b]) && !too_deep(&svg));
+    }
+    reader
+        .into_dimensions()
+        .is_ok_and(|(width, height)| width as u64 * height as u64 <= super::space::MOST_PIXELS)
+}
+
+/// How deep an SVG graphic may nest to be drawn: more than drawing
+/// programs write. Reading, working out and painting it each call
+/// themselves once or more for each level, on a background thread's small
+/// stack; using that up ends the app.
+const SVG_MOST_DEPTH: usize = 64;
+
+/// Whether SVG `source` nests too deeply to be drawn.
+pub(crate) fn too_deep(source: &[u8]) -> bool {
+    super::pptx::xml_depth(source) > SVG_MOST_DEPTH
+}
+
+/// What `work` gives, or `None` when it panicked (logged as `what`).
+/// Reading a file from anywhere and drawing a slide run on background
+/// tasks, where a panic ends the whole app on macOS, and both work on what
+/// files and decks say; the causes known are checked for, this is for the
+/// ones that are not.
+pub(crate) fn caught<T>(what: &str, work: impl FnOnce() -> T) -> Option<T> {
+    // Nothing such work leaves half done is used again: it reads the deck
+    // and the file, and the fonts' lock is taken again whatever happened
+    // (see `text::lay_out_at`).
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(done) => Some(done),
+        Err(panic) => {
+            let why = panic
+                .downcast_ref::<&str>()
+                .map(|why| why.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            tracing::error!("{what} panicked: {why}");
+            None
+        }
+    }
 }
 
 /// Options for SVG that is only checked or measured: it loads nothing.
@@ -56,6 +115,11 @@ pub fn inert_options() -> usvg::Options<'static> {
 
 /// `svg` drawn `width` pixels wide (its height in proportion).
 pub fn rasterize(svg: &str, width: u32) -> Result<RgbaImage> {
+    caught("drawing a slide", || draw(svg, width))
+        .unwrap_or_else(|| Err(anyhow::anyhow!("the slide could not be drawn")))
+}
+
+fn draw(svg: &str, width: u32) -> Result<RgbaImage> {
     let options = usvg::Options {
         fontdb: fonts().db.clone(),
         image_href_resolver: image_resolver(),
@@ -147,6 +211,73 @@ pub(crate) mod tests {
             apply(&mut deck, op).unwrap();
         }
         deck
+    }
+
+    #[test]
+    fn a_panic_while_drawing_is_an_error() {
+        assert_eq!(caught("a test", || 2), Some(2));
+        assert_eq!(
+            caught::<u8>("a test (this panic is meant)", || panic!("meant")),
+            None
+        );
+    }
+
+    /// A PNG of `width` × `height` by its header (its pixels are those of
+    /// a small one: nothing reads that far).
+    pub(crate) fn png_claiming(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::RgbImage::new(2, 2)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        // The header chunk: its length and name (8 bytes after the 8 of the
+        // signature), 13 bytes that start with the size, and their CRC.
+        bytes[16..20].copy_from_slice(&width.to_be_bytes());
+        bytes[20..24].copy_from_slice(&height.to_be_bytes());
+        let mut crc = !0u32;
+        for byte in &bytes[12..29] {
+            crc ^= *byte as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        bytes[29..33].copy_from_slice(&(!crc).to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_picture_too_large_to_decode_is_not_loaded() {
+        let media = std::env::temp_dir()
+            .join(format!("pilothouse-href-{}", std::process::id()))
+            .join(crate::slides::space::MEDIA);
+        std::fs::create_dir_all(&media).unwrap();
+        let file = |name: &str, bytes: &[u8]| {
+            let path = media.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        assert!(media_href(&file("fine.png", &png_claiming(4000, 3000))));
+        assert!(!media_href(&file(
+            "huge.png",
+            &png_claiming(50_000, 50_000)
+        )));
+        // An SVG by how deep it nests.
+        let svg = |depth: usize| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg'>{}{}</svg>",
+                "<g>".repeat(depth),
+                "</g>".repeat(depth)
+            )
+        };
+        assert!(media_href(&file("flat.svg", svg(10).as_bytes())));
+        assert!(!media_href(&file("deep.svg", svg(5000).as_bytes())));
+        let _ = std::fs::remove_dir_all(media.parent().unwrap());
     }
 
     #[test]

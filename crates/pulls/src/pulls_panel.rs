@@ -83,6 +83,8 @@ pub struct PullsPanel {
     open: Option<(Entity<PullView>, Subscription)>,
     /// A pull request to show once the repository is read.
     pending_open: Option<u64>,
+    /// The pull request asked for opens on its findings.
+    pending_findings: bool,
     create: Option<CreateForm>,
     writer: Option<Writer>,
     _load: Option<Task<()>>,
@@ -96,6 +98,8 @@ struct CreateForm {
     draft: bool,
     busy: Option<&'static str>,
     _task: Option<Task<()>>,
+    /// Finds the branch to merge into (Git is asked off the UI thread).
+    _base: Task<()>,
 }
 
 impl EventEmitter<PullsPanelEvent> for PullsPanel {}
@@ -124,6 +128,7 @@ impl PullsPanel {
             error: None,
             open: None,
             pending_open: None,
+            pending_findings: false,
             create: None,
             writer: None,
             _load: None,
@@ -221,10 +226,14 @@ impl PullsPanel {
         }
     }
 
-    /// Shows the Findings tab of the pull request in view.
+    /// Shows the Findings tab of the pull request in view; of the one
+    /// asked for, once the repository is read and it opens.
     pub fn show_findings(&mut self, cx: &mut Context<Self>) {
-        if let Some((view, _)) = &self.open {
-            view.update(cx, |view, cx| view.show_findings(cx));
+        match &self.open {
+            Some((view, _)) if self.pending_open.is_none() => {
+                view.update(cx, |view, cx| view.show_findings(cx))
+            }
+            _ => self.pending_findings = self.pending_open.is_some(),
         }
     }
 
@@ -245,6 +254,7 @@ impl PullsPanel {
     pub fn open_pull(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(hosting) = self.hosting().cloned() else {
             self.pending_open = Some(number);
+            self.pending_findings = false;
             return;
         };
         self.pending_open = None;
@@ -285,10 +295,8 @@ impl PullsPanel {
         let Some((local, root)) = self.local() else {
             return;
         };
-        let (branch, base_branch) = (
-            local.read(cx).branch().unwrap_or_default().to_string(),
-            default_base(root),
-        );
+        let branch = local.read(cx).branch().unwrap_or_default().to_string();
+        let root = root.clone();
         let title = cx.new(|cx| {
             let mut input = InputState::new(window, cx).placeholder("Title");
             input.set_value(branch.replace(['-', '_', '/'], " "), window, cx);
@@ -299,10 +307,21 @@ impl PullsPanel {
                 .placeholder("Description (Markdown)")
                 .rows(6)
         });
-        let base = cx.new(|cx| {
-            let mut input = InputState::new(window, cx).placeholder("Base branch");
-            input.set_value(base_branch, window, cx);
-            input
+        let base = cx.new(|cx| InputState::new(window, cx).placeholder("Base branch"));
+        // The repository's default branch takes a few runs of Git to find
+        // (slow on Windows): the form opens at once and the branch is
+        // filled in when it is known, unless one was typed meanwhile.
+        let found = cx.background_spawn(async move { default_base(&root) });
+        let fill = cx.spawn_in(window, async move |this, cx| {
+            let found = found.await;
+            _ = this.update_in(cx, |this, window, cx| {
+                if let Some(form) = &this.create
+                    && form.base.read(cx).value().is_empty()
+                {
+                    form.base
+                        .update(cx, |input, cx| input.set_value(found, window, cx));
+                }
+            });
         });
         self.create = Some(CreateForm {
             title,
@@ -311,6 +330,7 @@ impl PullsPanel {
             draft: false,
             busy: None,
             _task: None,
+            _base: fill,
         });
         cx.notify();
     }
@@ -324,6 +344,14 @@ impl PullsPanel {
             return;
         };
         let base = form.base.read(cx).value().trim().to_string();
+        // Not found yet (it is being looked up), or cleared.
+        if base.is_empty() {
+            window.push_notification(
+                Notification::warning("Say which branch it goes into first."),
+                cx,
+            );
+            return;
+        }
         form.busy = Some("Writing…");
         cx.notify();
         let collect = cx.background_spawn({
@@ -415,6 +443,13 @@ impl PullsPanel {
         let title = form.title.read(cx).value().trim().to_string();
         let body = form.body.read(cx).value().to_string();
         let base = form.base.read(cx).value().trim().to_string();
+        if base.is_empty() {
+            window.push_notification(
+                Notification::warning("Say which branch it goes into first."),
+                cx,
+            );
+            return;
+        }
         let draft = form.draft;
         let status = local.read(cx).status().cloned().unwrap_or_default();
         let Some(head) = status.branch.clone() else {
@@ -684,10 +719,10 @@ impl PullsPanel {
                             .xsmall()
                             .ghost()
                             .icon(IconName::ExternalLink)
-                            .tooltip(format!(
+                            .tooltip(ph_ui::tip(format!(
                                 "{}/{} on GitHub",
                                 hosting.repo.owner, hosting.repo.name
-                            ))
+                            )))
                             .accessibility_label("Open the repository on GitHub")
                             .on_click(move |_, _, cx| cx.open_url(&format!("{web}/pulls"))),
                     )
@@ -839,6 +874,9 @@ impl Render for PullsPanel {
             && let Some(number) = self.pending_open.take()
         {
             self.open_pull(number, window, cx);
+            if std::mem::take(&mut self.pending_findings) {
+                self.show_findings(cx);
+            }
             // Said again once this frame is drawn: what changes while the
             // panel draws is not heard by those watching it, and the GitHub
             // view puts the pull request's chat beside it when it opens.

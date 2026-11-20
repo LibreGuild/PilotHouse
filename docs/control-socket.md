@@ -5,7 +5,7 @@ The running app listens on a Unix socket in its data directory (`control.sock`).
 Protocol: one JSON object per line.
 
 ```
-→ {"id":1,"method":"board.list","params":{"project_id":3}}
+→ {"id":1,"method":"test.list","params":{"project_id":3}}
 ← {"id":1,"result":{"cards":[…]}}        or   {"id":1,"error":"…"}
 ```
 
@@ -20,11 +20,6 @@ Try it with `pilothouse ctl <method> '<json params>'`.
 | `project.resolve` | `path` | the project containing `path`, or `null` |
 | `app.open` | `paths: [..]` | opens folders as projects and files in their project or own window (what `pilothouse <path>` forwards) |
 | `test.expect` | `project_id`, `kind` (`text`, `no_text`, `url`), `value`, `device?` | waits for the check to hold; recorded as a step while a UI test records |
-| `board.list` | `project_id` | `{cards}` |
-| `board.add_cards` | `project_id`, `cards: [{title, description?, acceptance?}]` | `{cards}` |
-| `board.next_card` | `project_id`, `agent?` | claims the top To do card → `{card}` |
-| `board.update_card` | `card_id`, `title? description? acceptance? status? assignee?` | `{card}` |
-| `board.add_note` | `card_id`, `text`, `agent?` | `{ok}` |
 | `browser.open` | `project_id`, `url` | `{url, title}` after the load event |
 | `browser.snapshot` | `project_id` | `{title, url, elements, text}` |
 | `browser.click` | `project_id`, `selector` or `x`+`y` | `{url, title}` |

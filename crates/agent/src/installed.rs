@@ -38,6 +38,11 @@ pub fn install(store: Store, cx: &mut App) {
 /// Looks again: an agent may have been installed since. Observers of
 /// [`Installed`] hear when it is done.
 pub fn recheck(cx: &mut App) {
+    // Asked to look: what was found a moment ago does not count (lookups
+    // on `PATH` and an agent's set-up checks are remembered for a few
+    // seconds, for views that ask while they draw).
+    ph_env::forget_lookups();
+    crate::setup::forget();
     look(cx);
 }
 

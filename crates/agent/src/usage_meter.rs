@@ -66,9 +66,10 @@ pub fn describe(usage: &SessionUsage) -> String {
     lines.join("\n")
 }
 
-/// A small context bar with the share used, or the token count; `None`
-/// when the agent reported nothing.
-pub fn render(usage: Option<&SessionUsage>, cx: &App) -> Option<impl IntoElement> {
+/// The share of the context used (or the token count), with a small bar
+/// before it where there is room for one (`bar`); `None` when the agent
+/// reported nothing. What it stands for is said when it is pointed at.
+pub fn render(usage: Option<&SessionUsage>, bar: bool, cx: &App) -> Option<impl IntoElement> {
     let usage = usage?;
     let details = describe(usage);
     if details.is_empty() {
@@ -96,7 +97,7 @@ pub fn render(usage: Option<&SessionUsage>, cx: &App) -> Option<impl IntoElement
             .gap_1p5()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
-            .when_some(share, |this, share| {
+            .when_some(share.filter(|_| bar), |this, share| {
                 this.child(
                     div()
                         .w(ph_ui::rems_from_px(36.))
@@ -112,11 +113,20 @@ pub fn render(usage: Option<&SessionUsage>, cx: &App) -> Option<impl IntoElement
                         ),
                 )
             })
-            .child(label)
-            .when(usage.cost > 0.0, |this| {
+            // Without its bar the number carries the warning.
+            .child(
+                div()
+                    .when(!bar && share.is_some_and(|share| share > 0.7), |this| {
+                        this.text_color(fill)
+                    })
+                    .child(label),
+            )
+            // The cost is in what shows on pointing at it; here it would
+            // push the row's buttons out.
+            .when(bar && usage.cost > 0.0, |this| {
                 this.child(money(usage.cost, usage.currency.as_deref()))
             })
-            .tooltip(move |window, cx| Tooltip::new(details.clone()).build(window, cx)),
+            .tooltip(move |window, cx| Tooltip::new(ph_ui::tip(details.clone())).build(window, cx)),
     )
 }
 

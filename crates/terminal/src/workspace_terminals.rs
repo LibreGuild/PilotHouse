@@ -15,6 +15,10 @@ use crate::terminal::{Terminal, TerminalEvent};
 #[derive(Default)]
 pub struct TerminalHub {
     terminals: HashMap<i64, Entity<WorkspaceTerminals>>,
+    /// Each workspace's agent CLIs that belong to a chat: they show in the
+    /// chat, not among the Terminal tab's, and are not kept between runs
+    /// (their chat is, and resumes them).
+    agents: HashMap<i64, Entity<WorkspaceTerminals>>,
     /// Where each workspace's terminal text is kept between runs.
     state_dir: Option<PathBuf>,
 }
@@ -23,11 +27,20 @@ pub struct TerminalHub {
 const KEPT_LINES: usize = 2000;
 /// Most terminals of a workspace brought back.
 const KEPT_TERMINALS: usize = 8;
+/// The breath between two terminals restored (see [`TerminalHub::restore`]).
+const RESTORE_PAUSE: std::time::Duration = std::time::Duration::from_millis(40);
 
 /// A terminal as it was when PilotHouse quit.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Kept {
     text: String,
+    /// The folder its shell was in (where it went with `cd`, where the
+    /// system tells): the one brought back starts there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    folder: Option<PathBuf>,
+    /// The name its tab had, when it had one of its own (a run's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
 }
 
 impl Global for TerminalHub {}
@@ -52,12 +65,31 @@ impl TerminalHub {
         cx.try_global::<Self>()?.terminals.get(&id).cloned()
     }
 
-    /// Every workspace's terminals, with the workspace's id.
+    /// The terminals of workspace `id`'s agent CLIs shown in its chats
+    /// (they start in `cwd` unless told), made on first use.
+    pub fn agent_terminals(id: i64, cwd: PathBuf, cx: &mut App) -> Entity<WorkspaceTerminals> {
+        if let Some(terminals) = Self::existing_agent_terminals(id, cx) {
+            return terminals;
+        }
+        let terminals = cx.new(|_| WorkspaceTerminals::new(cwd));
+        cx.default_global::<Self>()
+            .agents
+            .insert(id, terminals.clone());
+        terminals
+    }
+
+    pub fn existing_agent_terminals(id: i64, cx: &App) -> Option<Entity<WorkspaceTerminals>> {
+        cx.try_global::<Self>()?.agents.get(&id).cloned()
+    }
+
+    /// Every workspace's terminals, with the workspace's id: the Terminal
+    /// tab's, and its chats' agent CLIs.
     pub fn all(cx: &App) -> Vec<(i64, Entity<WorkspaceTerminals>)> {
         cx.try_global::<Self>()
             .map(|hub| {
                 hub.terminals
                     .iter()
+                    .chain(&hub.agents)
                     .map(|(id, terminals)| (*id, terminals.clone()))
                     .collect()
             })
@@ -89,8 +121,13 @@ impl TerminalHub {
                 .terminals()
                 .iter()
                 .take(KEPT_TERMINALS)
-                .map(|terminal| Kept {
-                    text: terminal.read(cx).history_text(KEPT_LINES),
+                .map(|terminal| {
+                    let terminal = terminal.read(cx);
+                    Kept {
+                        text: terminal.history_text(KEPT_LINES),
+                        folder: Some(terminal.current_dir()),
+                        label: terminal.label().map(|label| label.to_string()),
+                    }
                 })
                 .filter(|kept| !kept.text.trim().is_empty())
                 .collect();
@@ -107,9 +144,9 @@ impl TerminalHub {
     /// each a new shell with the old text above it. False when there were
     /// none (or none were kept).
     fn restore(id: i64, cx: &mut App) -> bool {
-        let Some(terminals) = Self::existing(id, cx) else {
+        if Self::existing(id, cx).is_none() {
             return false;
-        };
+        }
         let Some(dir) = cx
             .try_global::<Self>()
             .and_then(|hub| hub.state_dir.clone())
@@ -124,21 +161,62 @@ impl TerminalHub {
         let Ok(kept) = serde_json::from_slice::<Vec<Kept>>(&json) else {
             return false;
         };
-        let mut restored = false;
-        for kept in kept.iter().take(KEPT_TERMINALS) {
-            let terminal = terminals.update(cx, |terminals, cx| terminals.new_terminal(cx));
-            if let Some(terminal) = terminal {
-                terminal.read(cx).show_restored(
-                    &kept.text,
-                    concat!("from the last run of ", ph_brand::name!()),
-                );
-                restored = true;
-            }
-        }
-        if restored {
-            terminals.update(cx, |terminals, cx| terminals.select(0, cx));
+        let mut kept = kept.into_iter().take(KEPT_TERMINALS);
+        let Some(first) = kept.next() else {
+            return false;
+        };
+        let restored = Self::reopen(id, &first, cx);
+        // The others after it, one at a time with the window drawn in
+        // between. Starting a shell takes a moment (a pseudo console and a
+        // process; longer on Windows), and eight in one go held the window
+        // up as it opened.
+        let rest: Vec<Kept> = kept.collect();
+        if !rest.is_empty() {
+            cx.spawn(async move |cx| {
+                for kept in rest {
+                    cx.background_executor().timer(RESTORE_PAUSE).await;
+                    if !cx.update(|cx| Self::reopen(id, &kept, cx)) {
+                        break;
+                    }
+                }
+            })
+            .detach();
         }
         restored
+    }
+
+    /// Opens one terminal workspace `id` had, a new shell with the old text
+    /// above it, behind the terminal in front. False when the workspace's
+    /// terminals are gone or no shell would start.
+    fn reopen(id: i64, kept: &Kept, cx: &mut App) -> bool {
+        let Some(terminals) = Self::existing(id, cx) else {
+            return false;
+        };
+        let (front, had) = {
+            let terminals = terminals.read(cx);
+            (terminals.active_index(), terminals.terminals().len())
+        };
+        // In the folder it was in, while that is still there.
+        let folder = kept.folder.clone().filter(|folder| folder.is_dir());
+        let Some(terminal) = terminals.update(cx, |terminals, cx| match folder {
+            Some(folder) => terminals.new_terminal_in(folder, cx),
+            None => terminals.new_terminal(cx),
+        }) else {
+            return false;
+        };
+        if let Some(label) = &kept.label {
+            terminal.update(cx, |terminal, _| terminal.set_label(label.clone()));
+        }
+        terminal.read(cx).show_restored(
+            &kept.text,
+            concat!("from the last run of ", ph_brand::name!()),
+        );
+        // The first one restored is the one in front, as it was; one opened
+        // by hand meanwhile stays there.
+        terminals.update(cx, |terminals, cx| {
+            terminals.select(if had == 0 { 0 } else { front }, cx)
+        });
+        true
     }
 
     /// Closes a removed workspace's terminals (their shells stop) and
@@ -147,6 +225,7 @@ impl TerminalHub {
         if cx.has_global::<Self>() {
             let hub = cx.global_mut::<Self>();
             hub.terminals.remove(&id);
+            hub.agents.remove(&id);
             if let Some(dir) = &hub.state_dir {
                 let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
             }
@@ -351,7 +430,17 @@ impl WorkspaceTerminals {
         shell: Option<&ph_env::Shell>,
         cx: &mut Context<Self>,
     ) -> Option<Entity<Terminal>> {
-        let shell = match Terminal::start_with(cwd, shell) {
+        self.follow(Terminal::start_with(cwd, shell), cx)
+    }
+
+    /// The terminal of a shell (or a program) that `started`, followed (its
+    /// title, its end), not yet in a tab; why it did not start is kept.
+    fn follow(
+        &mut self,
+        started: anyhow::Result<crate::terminal::StartedShell>,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Terminal>> {
+        let shell = match started {
             Ok(shell) => shell,
             Err(err) => {
                 self.error = Some(format!("Could not start a shell: {err:#}").into());
@@ -366,10 +455,15 @@ impl WorkspaceTerminals {
                 &terminal,
                 |this, terminal, event: &TerminalEvent, cx| match event {
                     // A program that failed (an `ssh` that could not connect)
-                    // keeps its tab, so what it said can be read.
+                    // keeps its tab, so what it said can be read; it says
+                    // that it ended, as a shell left with `exit` after a
+                    // failed command ends the same way.
                     TerminalEvent::Exited
                         if terminal.read(cx).exit_code().is_some_and(|code| code != 0) =>
                     {
+                        if let Some(code) = terminal.read(cx).exit_code() {
+                            terminal.read(cx).show_ended(code);
+                        }
                         cx.notify()
                     }
                     TerminalEvent::Exited => this.close(&terminal, cx),
@@ -437,6 +531,45 @@ impl WorkspaceTerminals {
         Some(terminal)
     }
 
+    /// Runs `command` as the whole point of a new terminal named `label`
+    /// in `cwd` (an agent's CLI): the user's shell starts it and ends with
+    /// it, so no prompt is left behind and the command is not shown typed.
+    /// The shell reads the user's profile as for a terminal of their own,
+    /// so `PATH` and aliases are theirs.
+    pub fn run_program(
+        &mut self,
+        label: &str,
+        command: &str,
+        cwd: PathBuf,
+        environment: &[(String, String)],
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Terminal>> {
+        // On a server (a network drive's folder) the shell is the
+        // server's, reached through ssh: the command is typed into it
+        // (what is set here would be set for `ssh`, not for the program).
+        if ph_remote::remote_of(&cwd).is_some() {
+            return self.run_in(label, command, Some(cwd), cx);
+        }
+        let (program, args) = run_with(ph_env::default_shell(), command);
+        let started =
+            Terminal::start_program_with(&program.to_string_lossy(), args, cwd, environment).map(
+                |mut started| {
+                    // Named after what it runs, not after the shell that
+                    // starts it: "zsh" says nothing of an agent's CLI (a
+                    // program that names its terminal itself still does).
+                    started.shell = label.to_string().into();
+                    started.title = label.to_string().into();
+                    started
+                },
+            );
+        let terminal = self.follow(started, cx)?;
+        terminal.update(cx, |terminal, _| terminal.set_label(label.to_string()));
+        self.terminals.push(terminal.clone());
+        self.active = self.terminals.len() - 1;
+        cx.notify();
+        Some(terminal)
+    }
+
     /// Closes `terminal` (its shell stops).
     pub fn close(&mut self, terminal: &Entity<Terminal>, cx: &mut Context<Self>) {
         let Some(ix) = self
@@ -461,12 +594,6 @@ impl WorkspaceTerminals {
         }
         self.splits.retain(|split| split.len() > 1);
     }
-
-    pub fn close_index(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if let Some(terminal) = self.terminals.get(ix).cloned() {
-            self.close(&terminal, cx);
-        }
-    }
 }
 
 /// The most terminals side by side: each needs room for its lines.
@@ -475,6 +602,23 @@ const MAX_SPLIT: usize = 4;
 /// The tab shown after closing tab `closed` (`active` was shown; `left`
 /// remain): the same terminal if another closed, else the one that took its
 /// place, else the last.
+/// `shell` (a program and what it is started with) told to run `command`
+/// and end: `-c` for a Unix shell, interactive so that what a profile sets
+/// up for interactive shells (aliases, a version manager's `PATH`) is
+/// there; `-Command` for PowerShell, `/C` for Command Prompt.
+fn run_with((program, mut args): (PathBuf, Vec<String>), command: &str) -> (PathBuf, Vec<String>) {
+    // Its name, whichever way its path is written.
+    let path = program.to_string_lossy().to_lowercase();
+    let file = path.rsplit(['/', '\\']).next().unwrap_or_default();
+    let name = file.strip_suffix(".exe").unwrap_or(file);
+    match name {
+        "cmd" => args.extend(["/C".to_string(), command.to_string()]),
+        "pwsh" | "powershell" => args.extend(["-Command".to_string(), command.to_string()]),
+        _ => args.extend(["-i".to_string(), "-c".to_string(), command.to_string()]),
+    }
+    (program, args)
+}
+
 fn active_after_close(active: usize, closed: usize, left: usize) -> usize {
     let active = if closed < active { active - 1 } else { active };
     active.min(left.saturating_sub(1))
@@ -482,7 +626,53 @@ fn active_after_close(active: usize, closed: usize, left: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::active_after_close;
+    use std::path::PathBuf;
+
+    use super::{active_after_close, run_with};
+
+    #[test]
+    fn a_kept_terminal_says_where_it_was_and_what_it_was_named() {
+        let kept = super::Kept {
+            text: "$ cargo test\n".into(),
+            folder: Some(PathBuf::from("/work/api")),
+            label: Some("dev server".into()),
+        };
+        let json = serde_json::to_string(&[&kept]).unwrap();
+        let back: Vec<super::Kept> = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back[0].folder.as_deref(),
+            Some(std::path::Path::new("/work/api"))
+        );
+        assert_eq!(back[0].label.as_deref(), Some("dev server"));
+        // What an older version kept (the text alone) is still read.
+        let old: Vec<super::Kept> = serde_json::from_str(r#"[{"text":"hi"}]"#).unwrap();
+        assert_eq!(old[0].text, "hi");
+        assert!(old[0].folder.is_none() && old[0].label.is_none());
+    }
+
+    #[test]
+    fn a_program_is_run_by_the_users_shell() {
+        let run = |program: &str, args: &[&str]| {
+            let (_, args) = run_with(
+                (
+                    PathBuf::from(program),
+                    args.iter().map(|arg| arg.to_string()).collect(),
+                ),
+                "claude --resume x",
+            );
+            args.join(" ")
+        };
+        assert_eq!(run("/bin/zsh", &["-l"]), "-l -i -c claude --resume x");
+        assert_eq!(
+            run("/usr/local/bin/fish", &["-l"]),
+            "-l -i -c claude --resume x"
+        );
+        assert_eq!(
+            run("C:\\Program Files\\PowerShell\\7\\pwsh.exe", &["-NoLogo"]),
+            "-NoLogo -Command claude --resume x"
+        );
+        assert_eq!(run("cmd.exe", &[]), "/C claude --resume x");
+    }
 
     #[test]
     fn closing_a_tab_keeps_a_sensible_one_shown() {

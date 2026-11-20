@@ -14,8 +14,59 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+/// The login shell's environment, once it answered.
 static ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
+/// Set when the first capture has ended, answered or not.
+static ASKED: OnceLock<()> = OnceLock::new();
+/// The app's own environment, while the login shell has not answered.
+static FALLBACK: OnceLock<HashMap<String, String>> = OnceLock::new();
+/// A capture asked again (see [`forget_lookups`]) is running.
+static RETRYING: AtomicBool = AtomicBool::new(false);
+
+/// What Claude Code sets for the programs it starts, to say "you run inside
+/// my session": seen when the app itself is started from a terminal in a
+/// Claude Code session, or by an agent. Passed on, they would tell every
+/// agent the app starts that it is that session's child: a `claude` in a
+/// terminal then says "Transcript saving is off — inherited
+/// CLAUDE_CODE_CHILD_SESSION marker" and keeps no record of what is said.
+const PARENT_SESSION: [&str; 11] = [
+    "AI_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PID",
+];
+
+/// Whether variable `name` says which agent session a program runs inside
+/// (see [`forget_parent_session`]). Not what a user sets for an agent
+/// (`CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_USE_BEDROCK`…).
+pub fn is_parent_session_variable(name: &str) -> bool {
+    PARENT_SESSION.contains(&name)
+}
+
+/// Forgets that the app was started from inside an agent's session: the
+/// agents it starts are the user's own sessions, nobody's children. What
+/// the user's shell profile sets is read after this, and stays.
+///
+/// Call first thing in the app, before anything reads the environment on
+/// another thread.
+pub fn forget_parent_session() {
+    for name in PARENT_SESSION {
+        if std::env::var_os(name).is_some() {
+            // SAFETY: called at the start of the app, before any thread
+            // that reads the environment is started.
+            unsafe { std::env::remove_var(name) };
+        }
+    }
+}
 
 /// Starts capturing the environment on a background thread. Optional: the
 /// first caller of [`shell_env`] would otherwise do it synchronously.
@@ -30,19 +81,48 @@ pub fn warm_up() {
 
 /// The environment for child processes (cached after the first call).
 pub fn shell_env() -> &'static HashMap<String, String> {
-    ENV.get_or_init(|| {
-        let captured = capture();
-        if captured.is_none() {
-            tracing::warn!("could not read the login shell environment; using the app's own");
+    ASKED.get_or_init(|| match capture() {
+        Some(env) => {
+            let _ = ENV.set(env);
         }
-        captured.unwrap_or_else(|| std::env::vars().collect())
-    })
+        None => {
+            tracing::warn!("could not read the login shell environment; using the app's own")
+        }
+    });
+    ENV.get().unwrap_or_else(fallback)
+}
+
+/// The app's own environment, for when the login shell did not answer. Kept
+/// apart from [`ENV`], so a later answer can still take its place.
+fn fallback() -> &'static HashMap<String, String> {
+    FALLBACK.get_or_init(|| std::env::vars().collect())
 }
 
 /// [`shell_env`] once it has been read, without waiting for it (the login
 /// shell can take seconds to start).
 pub fn shell_env_if_ready() -> Option<&'static HashMap<String, String>> {
-    ENV.get()
+    ENV.get().or_else(|| ASKED.get().map(|()| fallback()))
+}
+
+/// Asks the login shell again, in the background, when it did not answer
+/// the first time (a slow first start after login, a profile fixed since):
+/// without this the app's own short `PATH` stayed until the app was quit.
+fn ask_again() {
+    if ASKED.get().is_none() || ENV.get().is_some() || RETRYING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("shell-env".into())
+        .spawn(|| {
+            if let Some(env) = capture() {
+                let _ = ENV.set(env);
+                clear_lookups();
+            }
+            RETRYING.store(false, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        RETRYING.store(false, Ordering::SeqCst);
+    }
 }
 
 /// One variable of [`shell_env`]; the name is case-insensitive on Windows.
@@ -60,18 +140,60 @@ pub fn var(name: &str) -> Option<&'static str> {
     None
 }
 
+/// How long a search of `PATH` is remembered. Views ask "is this agent
+/// installed?" while they draw, and one search looks at a file in every
+/// `PATH` folder (times every `PATHEXT` ending on Windows, where each look
+/// is slow): asked on every frame, that held the window up. A program
+/// installed meanwhile is found once this has passed, or at once after
+/// [`forget_lookups`].
+const LOOKUP_KEPT: std::time::Duration = std::time::Duration::from_secs(5);
+
+type Lookups = HashMap<String, (std::time::Instant, Option<PathBuf>)>;
+
+static LOOKUPS: std::sync::Mutex<Option<Lookups>> = std::sync::Mutex::new(None);
+
+/// Forgets what [`which`] remembers: the next search looks again. For when
+/// the user says something was just installed (*Check again*). If the login
+/// shell's environment could not be read, it is asked for again in the
+/// background, and used once it comes.
+pub fn forget_lookups() {
+    clear_lookups();
+    ask_again();
+}
+
+fn clear_lookups() {
+    if let Ok(mut lookups) = LOOKUPS.lock() {
+        *lookups = None;
+    }
+}
+
 /// Finds `program` on the environment's `PATH`. On Windows `PATHEXT`
-/// extensions are tried too, so `which("npx")` finds `npx.cmd`.
+/// extensions are tried too, so `which("npx")` finds `npx.cmd`. A search of
+/// `PATH` is remembered for a few seconds (see [`LOOKUP_KEPT`]).
 pub fn which(program: &str) -> Option<PathBuf> {
+    // A path is looked at where it says: one or a few files, never kept.
     if program.contains('/') || program.contains(std::path::MAIN_SEPARATOR) {
         return candidates(PathBuf::from(program))
             .into_iter()
             .find(|path| is_executable(path));
     }
+    let now = std::time::Instant::now();
+    if let Ok(lookups) = LOOKUPS.lock()
+        && let Some((at, found)) = lookups.as_ref().and_then(|known| known.get(program))
+        && now.duration_since(*at) < LOOKUP_KEPT
+    {
+        return found.clone();
+    }
     let path = var("PATH")?;
-    std::env::split_paths(path)
+    let found = std::env::split_paths(path)
         .flat_map(|dir| candidates(dir.join(program)))
-        .find(|candidate| is_executable(candidate))
+        .find(|candidate| is_executable(candidate));
+    if let Ok(mut lookups) = LOOKUPS.lock() {
+        lookups
+            .get_or_insert_with(HashMap::new)
+            .insert(program.to_string(), (now, found.clone()));
+    }
+    found
 }
 
 /// `path` itself or, on Windows unless it already ends in a runnable
@@ -140,6 +262,10 @@ mod unix {
 
     /// Marker printed before `env -0`, so anything an rc file prints is skipped.
     pub(super) const MARKER: &str = "__PILOTHOUSE_ENV_BEGIN__";
+    /// Marker printed after `env -0`: the answer is complete when it comes,
+    /// even while something the profile started in the background still
+    /// holds the pipe open.
+    pub(super) const END: &str = "__PILOTHOUSE_ENV_END__";
     /// A shell that takes longer than this to start is not waited for.
     const SHELL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -151,7 +277,7 @@ mod unix {
                 "-l",
                 "-i",
                 "-c",
-                &format!("printf '{MARKER}'; /usr/bin/env -0"),
+                &format!("printf '{MARKER}'; /usr/bin/env -0; printf '{END}'"),
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -163,8 +289,32 @@ mod unix {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut output = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut stdout, &mut output);
-            let _ = sender.send(output);
+            let mut sender = Some(sender);
+            let mut chunk = [0u8; 8192];
+            loop {
+                match std::io::Read::read(&mut stdout, &mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        // After the answer the pipe is still read to its end,
+                        // so a job the profile left writing to it is not
+                        // killed by a broken pipe.
+                        if sender.is_none() {
+                            continue;
+                        }
+                        output.extend_from_slice(&chunk[..read]);
+                        if complete(&output)
+                            && let Some(sender) = sender.take()
+                        {
+                            let _ = sender.send(std::mem::take(&mut output));
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            if let Some(sender) = sender {
+                let _ = sender.send(output);
+            }
         });
         let output = match receiver.recv_timeout(SHELL_TIMEOUT) {
             Ok(output) => output,
@@ -176,13 +326,30 @@ mod unix {
                 return None;
             }
         };
-        let _ = child.wait();
+        // The shell ends once it printed the answer; reaped aside, so a slow
+        // logout script does not hold up the caller.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         parse(&String::from_utf8_lossy(&output))
     }
 
-    /// Parses `MARKER` followed by NUL-separated `KEY=value` pairs.
+    /// Whether `output` holds the whole answer: `MARKER`, then `END`.
+    pub(super) fn complete(output: &[u8]) -> bool {
+        let find = |haystack: &[u8], needle: &str| {
+            haystack
+                .windows(needle.len())
+                .position(|window| window == needle.as_bytes())
+        };
+        find(output, MARKER)
+            .is_some_and(|begin| find(&output[begin + MARKER.len()..], END).is_some())
+    }
+
+    /// Parses `MARKER` followed by NUL-separated `KEY=value` pairs, up to
+    /// `END` when it is there (a logout script may print after it).
     pub(super) fn parse(output: &str) -> Option<HashMap<String, String>> {
         let (_, vars) = output.split_once(MARKER)?;
+        let vars = vars.split_once(END).map_or(vars, |(vars, _)| vars);
         let env: HashMap<String, String> = vars
             .split('\0')
             .filter_map(|pair| pair.split_once('='))
@@ -209,6 +376,18 @@ mod unix {
             let env = parse(&output).unwrap();
             assert_eq!(env["PATH"], "/usr/bin:/bin");
             assert_eq!(env["HOME"], "/Users/me");
+        }
+
+        #[test]
+        fn the_answer_ends_at_the_end_marker() {
+            let output = format!("hi\n{MARKER}PATH=/bin\0HOME=/h\0{END}bye=now\n");
+            assert!(complete(output.as_bytes()));
+            let env = parse(&output).unwrap();
+            assert_eq!(env["HOME"], "/h");
+            assert!(!env.contains_key("bye"));
+            // Not complete until the end marker came after the answer.
+            assert!(!complete(format!("{MARKER}PATH=/bin\0").as_bytes()));
+            assert!(!complete(format!("{END}{MARKER}PATH=/bin\0").as_bytes()));
         }
 
         #[test]
@@ -271,8 +450,10 @@ pub fn default_shell() -> (PathBuf, Vec<String>) {
         let cmd = var("COMSPEC").unwrap_or("cmd.exe");
         return (PathBuf::from(cmd), Vec::new());
     }
-    let shell = var("SHELL")
-        .map(str::to_string)
+    // Never waits for the login shell: terminals start on the UI thread, and
+    // the shell asked for the environment is this same `$SHELL` anyway.
+    let shell = shell_env_if_ready()
+        .and_then(|env| env.get("SHELL").cloned())
         .or_else(|| std::env::var("SHELL").ok())
         .unwrap_or_else(|| "/bin/zsh".into());
     // A login shell, so profile files run as in the user's own terminal.
@@ -368,8 +549,19 @@ pub fn shells() -> Vec<Shell> {
             }
         }
         // Common shells a package manager installs without listing them.
+        // The terminal's menus list these as they open: until the login
+        // shell has answered, the app's own `PATH` is searched instead of
+        // waiting for it.
+        let found = |name: &str| match shell_env_if_ready() {
+            Some(_) => which(name),
+            None => std::env::var_os("PATH").and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join(name))
+                    .find(|candidate| is_executable(candidate))
+            }),
+        };
         for name in ["fish", "nu", "pwsh"] {
-            if let Some(path) = which(name) {
+            if let Some(path) = found(name) {
                 let args = if name == "fish" {
                     vec!["-l".into()]
                 } else {
@@ -387,6 +579,31 @@ pub fn shells() -> Vec<Shell> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_sessions_own_marks_are_forgotten() {
+        for mark in [
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "AI_AGENT",
+        ] {
+            assert!(is_parent_session_variable(mark), "{mark}");
+        }
+        // What a user sets for an agent is theirs to pass on.
+        for theirs in [
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "CODEX_HOME",
+            "PATH",
+        ] {
+            assert!(!is_parent_session_variable(theirs), "{theirs}");
+        }
+    }
 
     #[test]
     fn pathext_names_replace_the_bare_one() {

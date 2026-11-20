@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Result, anyhow};
 use gpui_kit::{AnyWindowHandle, App, Entity, Global, WeakEntity};
 use ph_store::paths;
 use ph_store::projects::ProjectId;
@@ -40,6 +40,18 @@ pub fn main_workspace(cx: &App) -> Option<(AnyWindowHandle, Entity<Workspace>)> 
     cx.try_global::<MainWindow>()
         .and_then(|main| Some((main.handle, main.workspace.upgrade()?)))
         .or_else(|| crate::windows::first_open(cx))
+}
+
+/// The main window's workspace, opening a window for it when no workspace
+/// window is open: on macOS the app runs on with every window closed, and
+/// what is opened from Finder, the Dock or a quick chat needs one.
+pub fn main_workspace_or_open(cx: &mut App) -> Result<(AnyWindowHandle, Entity<Workspace>)> {
+    if let Some(main) = main_workspace(cx) {
+        return Ok(main);
+    }
+    let (handle, workspace) = crate::windows::open_window(None, cx)?;
+    set_main_window(handle, &workspace, cx);
+    Ok((handle, workspace))
 }
 
 /// What a path is to PilotHouse.
@@ -119,7 +131,7 @@ pub fn open_paths(paths: &[PathBuf], cx: &mut App) -> Result<()> {
 }
 
 fn in_main_window(target: Target, cx: &mut App) -> Result<()> {
-    let (handle, workspace) = main_workspace(cx).context("the main window is not open")?;
+    let (handle, workspace) = main_workspace_or_open(cx)?;
     handle
         .update(cx, |_, window, cx| {
             window.activate_window();

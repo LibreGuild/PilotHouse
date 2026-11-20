@@ -20,26 +20,24 @@ pub struct Preferences {
     pub code_font_size: f32,
     pub terminal_font_size: f32,
     pub corners: Corners,
-    pub window: WindowStyle,
-    /// How opaque panels are when the window is translucent (0.55–1.0).
-    pub opacity: f32,
     pub editor: EditorPreferences,
     /// Which palette dark mode used before themes had names: read once,
     /// to keep an old "Dark" choice looking the same.
     pub dark_theme: DarkTheme,
     pub chat_width: ChatWidth,
-    /// Names under the tool icons on the right, not only in tooltips.
-    pub tool_labels: bool,
+    /// Names under the icons of the column at the left edge, not only in
+    /// tooltips. On unless switched off.
+    ///
+    /// It was `tool_labels`, off unless switched on. That key is no longer
+    /// read (it stays in [`Preferences::other`]), so that everyone starts
+    /// with the names after updating, also who never touched the setting
+    /// and has a saved `false` like who chose it.
+    pub rail_names: bool,
     /// One color for focus, links, selection and highlights, over the
     /// theme's own.
     pub accent: Accent,
     /// How much room rows and spacing take.
     pub density: Density,
-    /// The gradient behind the frame ([`WindowStyle::Gradient`]).
-    pub gradient: Gradient,
-    /// The image behind the frame ([`WindowStyle::Image`]): PilotHouse's
-    /// own copy, made to fit a screen.
-    pub backdrop_image: String,
     /// Which default sizes these preferences were saved with (missing in
     /// ones saved before; see [`Preferences::migrate_sizes`]).
     #[serde(default)]
@@ -86,16 +84,12 @@ impl Default for Preferences {
             code_font_size: code_size,
             terminal_font_size: code_size,
             corners: Corners::Rounded,
-            window: WindowStyle::Solid,
-            opacity: 0.86,
             editor: EditorPreferences::default(),
             dark_theme: DarkTheme::default(),
             chat_width: ChatWidth::Comfortable,
-            tool_labels: false,
+            rail_names: true,
             accent: Accent::Theme,
             density: Density::Comfortable,
-            gradient: Gradient::Dusk,
-            backdrop_image: String::new(),
             sizes_version: SIZES_VERSION,
             other: serde_json::Map::new(),
         }
@@ -257,42 +251,6 @@ impl Corners {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WindowStyle {
-    Solid,
-    /// See-through panels over a blurred desktop.
-    Translucent,
-    /// Windows 11's Mica material.
-    Mica,
-    /// A gradient behind the frame ([`Preferences::gradient`]).
-    Gradient,
-    /// An image behind the frame ([`Preferences::backdrop_image`]).
-    Image,
-}
-
-impl WindowStyle {
-    /// The styles this platform can show.
-    pub fn available() -> Vec<WindowStyle> {
-        let mut styles = vec![WindowStyle::Solid, WindowStyle::Translucent];
-        if cfg!(windows) {
-            styles.push(WindowStyle::Mica);
-        }
-        styles.extend([WindowStyle::Gradient, WindowStyle::Image]);
-        styles
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            WindowStyle::Solid => "Solid",
-            WindowStyle::Translucent => "Translucent",
-            WindowStyle::Mica => "Mica",
-            WindowStyle::Gradient => "Gradient",
-            WindowStyle::Image => "Image",
-        }
-    }
-}
-
 /// The accent: the theme's own, or one of these over it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -402,83 +360,50 @@ pub fn dense(rems: f32, cx: &App) -> gpui_kit::Rems {
     gpui_kit::rems(rems * density(cx))
 }
 
-/// A gradient behind the frame: deep on a dark theme, soft on a light one.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Gradient {
-    #[default]
-    Dusk,
-    Ocean,
-    Aurora,
-    Ember,
-    Graphite,
-}
-
-impl Gradient {
-    pub const ALL: [Gradient; 5] = [
-        Gradient::Dusk,
-        Gradient::Ocean,
-        Gradient::Aurora,
-        Gradient::Ember,
-        Gradient::Graphite,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Gradient::Dusk => "Dusk",
-            Gradient::Ocean => "Ocean",
-            Gradient::Aurora => "Aurora",
-            Gradient::Ember => "Ember",
-            Gradient::Graphite => "Graphite",
-        }
-    }
-
-    /// Its two colors, from the top left to the bottom right.
-    pub fn colors(self, dark: bool) -> (Hsla, Hsla) {
-        let (from, to) = match (self, dark) {
-            (Gradient::Dusk, true) => (0x1e1b4b, 0x701a75),
-            (Gradient::Dusk, false) => (0xe0e7ff, 0xfae8ff),
-            (Gradient::Ocean, true) => (0x0c1e3a, 0x0f4c5c),
-            (Gradient::Ocean, false) => (0xdbeafe, 0xccfbf1),
-            (Gradient::Aurora, true) => (0x064e3b, 0x4c1d95),
-            (Gradient::Aurora, false) => (0xd1fae5, 0xede9fe),
-            (Gradient::Ember, true) => (0x431407, 0x831843),
-            (Gradient::Ember, false) => (0xffedd5, 0xffe4e6),
-            (Gradient::Graphite, true) => (0x111827, 0x374151),
-            (Gradient::Graphite, false) => (0xf3f4f6, 0xd1d5db),
-        };
-        (rgb(from).into(), rgb(to).into())
-    }
-}
-
+/// How wide the chat's messages and message box get in a pane with room
+/// to spare: a column in the pane's middle, a wider one, or the whole pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatWidth {
-    Narrow,
+    /// The column chats have by default. (There was a narrower one, 640
+    /// pixels to this one's 760, until 0.9: a build that saved it reads as
+    /// this.)
+    #[serde(alias = "narrow")]
     Comfortable,
     Wide,
+    /// As wide as the pane.
+    Full,
 }
 
 impl ChatWidth {
-    pub const ALL: [ChatWidth; 3] = [ChatWidth::Narrow, ChatWidth::Comfortable, ChatWidth::Wide];
+    pub const ALL: [ChatWidth; 3] = [ChatWidth::Comfortable, ChatWidth::Wide, ChatWidth::Full];
 
     pub fn label(self) -> &'static str {
         match self {
-            ChatWidth::Narrow => "Narrow",
-            ChatWidth::Comfortable => "Comfortable",
+            ChatWidth::Comfortable => "Normal",
             ChatWidth::Wide => "Wide",
+            ChatWidth::Full => "Full",
         }
     }
 
-    /// Widest the chat's reading column gets: in rems, so a line holds as
-    /// many words at every interface size (640, 760 and 1000 pixels at the
-    /// default one).
-    pub fn max_width(self) -> gpui_kit::Rems {
-        gpui_kit::rems(match self {
-            ChatWidth::Narrow => 40.0,
-            ChatWidth::Comfortable => 47.5,
-            ChatWidth::Wide => 62.5,
-        })
+    /// Widest the chat's column gets. The two columns are in rems, so a
+    /// line holds as many words at every interface size (760 and 1000
+    /// pixels at the default one); *Full* is the pane's own width.
+    pub fn max_width(self) -> gpui_kit::DefiniteLength {
+        match self {
+            ChatWidth::Comfortable => gpui_kit::rems(47.5).into(),
+            ChatWidth::Wide => gpui_kit::rems(62.5).into(),
+            ChatWidth::Full => gpui_kit::relative(1.),
+        }
+    }
+
+    /// Widest an empty chat's welcome gets: a few cards in the pane's
+    /// middle, which the whole of a wide pane would pull apart.
+    pub fn welcome_width(self) -> gpui_kit::DefiniteLength {
+        match self {
+            ChatWidth::Full => ChatWidth::Wide.max_width(),
+            other => other.max_width(),
+        }
     }
 }
 
@@ -513,30 +438,59 @@ fn first_installed(candidates: &[&str], installed: &[String]) -> String {
         .unwrap_or_default()
 }
 
-/// Installed font families, sorted, for the settings' font pickers.
+/// Installed font families, sorted, for the settings' font pickers: as
+/// listed the first time they were asked for in this run, so opening
+/// Settings does not wait for the system (about 100 ms on a Mac with many
+/// installed) each time. A font installed meanwhile is there after a
+/// restart. (Not [`system_fonts`]: that list can be from before the app's
+/// own fonts were loaded.)
 pub fn installed_fonts(cx: &App) -> Vec<String> {
-    let mut names = cx.text_system().all_font_names();
-    names.retain(|name| !name.starts_with('.'));
-    names.sort();
-    names.dedup();
-    names
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES
+        .get_or_init(|| {
+            let mut names = cx.text_system().all_font_names();
+            names.retain(|name| !name.starts_with('.'));
+            names.sort();
+            names.dedup();
+            names
+        })
+        .clone()
 }
 
 /// The families in effect: the user's choice, else the platform default.
+///
+/// Asked for every window and on every change of a theme or a preference
+/// (each step of a size slider), so it must not list the system's fonts:
+/// that takes about 100 ms on a Mac with many installed. The default is the
+/// family the app carries, which is there once it loaded; only without it is
+/// the system asked what it has, and then once.
 pub fn effective_fonts(preferences: &Preferences, cx: &App) -> (String, String) {
-    let installed = cx.text_system().all_font_names();
     let (ui, code) = default_fonts();
+    let default = |candidates: &[&str]| {
+        if crate::fonts::registered(cx) {
+            candidates.first().copied().unwrap_or_default().to_string()
+        } else {
+            first_installed(candidates, system_fonts(cx))
+        }
+    };
     let ui_font = if preferences.ui_font.is_empty() {
-        first_installed(ui, &installed)
+        default(ui)
     } else {
         preferences.ui_font.clone()
     };
     let code_font = if preferences.code_font.is_empty() {
-        first_installed(code, &installed)
+        default(code)
     } else {
         preferences.code_font.clone()
     };
     (ui_font, code_font)
+}
+
+/// The system's font families as they were when first asked: the fallback's
+/// answer does not need to follow a font installed while the app runs.
+fn system_fonts(cx: &App) -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| cx.text_system().all_font_names())
 }
 
 pub fn preferences(cx: &App) -> Preferences {
@@ -555,19 +509,8 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
     let preferences = preferences(cx);
     let (ui_font, code_font) = effective_fonts(&preferences, cx);
     let (radius, radius_lg) = preferences.corners.radius();
-    // An image style without an image is solid.
-    let style = match preferences.window {
-        WindowStyle::Image if preferences.backdrop_image.is_empty() => WindowStyle::Solid,
-        style => style,
-    };
-    let painted = matches!(style, WindowStyle::Gradient | WindowStyle::Image);
-    let translucent = style != WindowStyle::Solid;
-    let alpha = preferences.opacity.clamp(0.55, 1.0);
-    let mut frame = None;
-    // From the theme's own colors every time: the edits below scale
-    // alphas, and on top of an earlier pass they would compound (more
-    // transparent with each change, never solid again). A pass of its own,
-    // so the edits below register as changes and reach the theme's tokens.
+    // From the theme's own colors every time, in a pass of its own, so the
+    // edits below register as changes and reach the theme's tokens.
     // The theme shown is the selected one, or the preview of one being
     // designed.
     let config = crate::themes::current(cx);
@@ -587,225 +530,177 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
         if let Some(accent) = preferences.accent.color(dark) {
             apply_accent(colors, accent, dark);
         }
-        frame = Some((colors.sidebar, dark));
-        if painted {
-            // A gradient or image shows through the frame (under a veil of
-            // the frame's color, so its text reads); the panels keep the
-            // chosen opacity over it.
-            colors.background = colors.background.opacity(alpha);
-            for color in [
-                &mut colors.sidebar,
-                &mut colors.title_bar,
-                &mut colors.status_bar,
-                &mut colors.tab_bar,
-                &mut colors.list,
-            ] {
-                *color = color.opacity(0.);
-            }
-        } else if translucent {
-            // The desktop shows through. The window paints `background`
-            // once under everything, and the panels (surfaces) paint it again
-            // on top, so each layer gets the alpha that makes a panel come
-            // out at `alpha` overall: the chrome around them (sidebar, title
-            // and status bars) is the base layer alone, the clearest part.
-            // The chrome's own fills turn transparent, so nothing stacks
-            // further and the slider's whole range shows.
-            let layer = 1. - (1. - alpha).sqrt();
-            colors.background = colors.background.opacity(layer);
-            for color in [
-                &mut colors.sidebar,
-                &mut colors.title_bar,
-                &mut colors.status_bar,
-                &mut colors.tab_bar,
-                &mut colors.list,
-            ] {
-                *color = color.opacity(0.);
-            }
-        }
     });
-    let backdrop = match (style, frame) {
-        (WindowStyle::Gradient, Some((frame, dark))) => {
-            let (from, to) = preferences.gradient.colors(dark);
-            Some(Backdrop {
-                paint: BackdropPaint::Gradient { from, to },
-                veil: frame.opacity(if dark { 0.55 } else { 0.5 }),
-            })
-        }
-        // A picture is busier than a gradient: a thicker veil keeps the
-        // frame's text readable over it.
-        (WindowStyle::Image, Some((frame, dark))) => Some(Backdrop {
-            paint: BackdropPaint::Image(
-                std::path::PathBuf::from(&preferences.backdrop_image).into(),
-            ),
-            veil: frame.opacity(if dark { 0.72 } else { 0.66 }),
-        }),
-        _ => None,
-    };
-    cx.set_global(CurrentBackdrop(backdrop));
-    if let Some((frame, _)) = frame {
-        cx.set_global(OpaqueFrame(frame));
-    }
+    // The window is opaque. (It could be see-through, Mica, or show a
+    // gradient or picture behind the frame before 0.7: five looks to keep
+    // readable in every theme, for a setting few changed. Old values of
+    // those settings are kept unread in `Preferences::other`.)
     if let Some(window) = window {
-        window.set_background_appearance(match style {
-            WindowStyle::Solid | WindowStyle::Gradient | WindowStyle::Image => {
-                WindowBackgroundAppearance::Opaque
-            }
-            WindowStyle::Translucent => WindowBackgroundAppearance::Blurred,
-            WindowStyle::Mica => WindowBackgroundAppearance::MicaBackdrop,
-        });
+        window.set_background_appearance(WindowBackgroundAppearance::Opaque);
     }
 }
 
-/// Lays the user's accent over the theme: focus, links, selection,
-/// highlights, progress; and the main buttons when the theme draws them in
-/// its accent (Modern Dark's blue Send), not when they are its own color
-/// (Modern Light's black).
+/// Lays the user's accent over the theme, wherever the theme shows *its*
+/// accent: focus, links, selection, the text cursor, progress, the controls
+/// that show a choice (switches, checkboxes, radio buttons, a tab's line),
+/// and the main buttons when the theme draws them in a color (Modern Dark's
+/// blue Send), not when they are ink (Modern Light's black).
+///
+/// The colors that say a state (`info`, `success`, `warning`, `danger`) stay
+/// the theme's own: a green accent must not make *Working* look like *Ready
+/// for review*, nor a red one make a note look like an error. What a view
+/// tints only to draw the eye uses `link` (text, icons) or `ring` (borders),
+/// which do follow.
 fn apply_accent(colors: &mut gpui_kit::component::ThemeColor, accent: Hsla, dark: bool) {
-    let on_accent = if accent.l > 0.62 {
-        gpui_kit::hsla(0., 0., 0.08, 1.)
-    } else {
-        gpui_kit::hsla(0., 0., 1., 1.)
-    };
+    // What carries text (a button, a checked box) is the accent in a shade
+    // its text reads on; what is only a line or a glow is the accent itself.
+    let fill = fill(accent);
+    let on_accent = text_on(fill);
     let shade = |by: f32| Hsla {
-        l: (accent.l + by).clamp(0., 1.),
-        ..accent
+        l: (fill.l + by).clamp(0., 1.),
+        ..fill
     };
-    // Links: lighter on a dark theme, darker on a light one, so they read.
-    let link = if dark {
-        Hsla {
-            l: accent.l.max(0.68),
-            ..accent
-        }
-    } else {
-        Hsla {
-            l: accent.l.min(0.45),
-            ..accent
-        }
-    };
-    let primary_follows = colors.primary == colors.ring;
+    // Links, and the icons and words tinted like them: lighter on a dark
+    // theme, darker on a light one, until they read on its background.
+    let link = readable(accent, dark);
+    // By how much color the theme's main button has, not by whether it is
+    // the very color of its focus ring: One Dark, One Light and Studio Dark
+    // draw the two in blues a shade apart, and kept their blue buttons and
+    // switches under every accent.
+    let buttons_follow = is_colored(colors.button_primary);
     colors.ring = accent;
-    colors.info = accent;
-    colors.info_foreground = on_accent;
+    colors.caret = link;
     colors.drag_border = accent;
     colors.drop_target = accent.opacity(0.12);
     colors.slider_bar = accent;
     colors.progress_bar = accent;
+    colors.table_active_border = accent;
     colors.selection = accent.opacity(if dark { 0.35 } else { 0.22 });
     colors.link = link;
     colors.link_hover = link.opacity(0.85);
     colors.link_active = link;
-    colors.button_info = accent;
-    colors.button_info_hover = shade(0.05);
-    colors.button_info_active = shade(-0.05);
-    colors.button_info_foreground = on_accent;
-    if primary_follows {
-        colors.primary = accent;
-        colors.primary_hover = shade(0.05);
-        colors.primary_active = shade(-0.05);
-        colors.primary_foreground = on_accent;
-        colors.sidebar_primary = accent;
-        colors.sidebar_primary_foreground = on_accent;
+    // What shows a choice is drawn in `primary`, in every theme.
+    colors.primary = fill;
+    colors.primary_hover = shade(0.05);
+    colors.primary_active = shade(-0.05);
+    colors.primary_foreground = on_accent;
+    colors.sidebar_primary = fill;
+    colors.sidebar_primary_foreground = on_accent;
+    // The main buttons have colors of their own (they fall back to
+    // `primary` only as a theme is read), so they are set here too.
+    if buttons_follow {
+        colors.button_primary = fill;
+        colors.button_primary_hover = shade(0.05);
+        colors.button_primary_active = shade(-0.05);
+        colors.button_primary_foreground = on_accent;
     }
 }
 
-/// What is painted behind the frame, under its veil.
-#[derive(Clone)]
-pub enum BackdropPaint {
-    Gradient { from: Hsla, to: Hsla },
-    Image(std::sync::Arc<std::path::Path>),
-}
-
-#[derive(Clone)]
-pub struct Backdrop {
-    pub paint: BackdropPaint,
-    /// The frame's own color, see-through: over the picture so the frame's
-    /// text reads.
-    pub veil: Hsla,
-}
-
-#[derive(Default)]
-struct CurrentBackdrop(Option<Backdrop>);
-
-impl Global for CurrentBackdrop {}
-
-/// The theme's frame color as the theme has it: opaque even when the frame
-/// lets the desktop or a picture through.
-struct OpaqueFrame(Hsla);
-
-impl Global for OpaqueFrame {}
-
-/// The frame's color, always opaque: for what sits over the window on its
-/// own (dialogs drawn like the frame).
-pub fn opaque_frame(cx: &App) -> Hsla {
-    cx.try_global::<OpaqueFrame>().map_or_else(
-        || gpui_kit::component::ActiveTheme::theme(cx).sidebar,
-        |frame| frame.0,
-    )
-}
-
-/// The largest backdrop kept: a screen's worth, so a camera photo costs a
-/// screen's memory, not its own.
-const BACKDROP_MAX: (u32, u32) = (2560, 1600);
-
-/// Makes PilotHouse's copy of an image for behind the frame, in `dir`:
-/// scaled to fit a screen, saved as JPEG; earlier copies go. Slow on a big
-/// photo: run it off the UI thread.
-pub fn prepare_backdrop_image(
-    source: &std::path::Path,
-    dir: &std::path::Path,
-) -> anyhow::Result<std::path::PathBuf> {
-    use anyhow::Context as _;
-    let image = image::ImageReader::open(source)
-        .with_context(|| format!("opening {}", source.display()))?
-        .with_guessed_format()?
-        .decode()
-        .with_context(|| {
-            format!(
-                "{} is not an image {} can read (PNG, JPEG, WebP, GIF, BMP)",
-                source.display(),
-                ph_brand::NAME
-            )
-        })?;
-    let (width, height) = BACKDROP_MAX;
-    let image = if image.width() > width || image.height() > height {
-        image.resize(width, height, image::imageops::FilterType::Triangle)
-    } else {
-        image
-    };
-    std::fs::create_dir_all(dir)?;
-    // A new name each time: the old one may still be shown (and cached).
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_millis())
-        .unwrap_or_default();
-    let target = dir.join(format!("backdrop-{stamp}.jpg"));
-    image
-        .to_rgb8()
-        .save_with_format(&target, image::ImageFormat::Jpeg)
-        .with_context(|| format!("writing {}", target.display()))?;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path != target
-                && path
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("backdrop-"))
-            {
-                let _ = std::fs::remove_file(path);
-            }
+/// How bright `color` looks (its relative luminance, 0 to 1): the eye takes
+/// green for far brighter than blue. HSL lightness does not say it: the
+/// green and the blue accents are both "half light" there.
+fn luminance(color: Hsla) -> f32 {
+    let rgb = gpui_kit::Rgba::from(color);
+    let linear = |channel: f32| {
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
         }
-    }
-    Ok(target)
+    };
+    0.2126 * linear(rgb.r) + 0.7152 * linear(rgb.g) + 0.0722 * linear(rgb.b)
 }
 
-/// The gradient or image behind the frame, if the user chose one.
-pub fn backdrop(cx: &App) -> Option<&Backdrop> {
-    cx.try_global::<CurrentBackdrop>()?.0.as_ref()
+/// How far apart two luminances are, as WCAG counts contrast (1 to 21).
+fn contrast(a: f32, b: f32) -> f32 {
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Above this luminance white text is faint on a color (under 3 to 1), and
+/// ink is clear (over 6 to 1): the bright green, teal, amber and orange.
+const BRIGHT: f32 = 0.30;
+
+/// The text color that reads on `color`: white, or ink on a bright one.
+fn text_on(color: Hsla) -> Hsla {
+    if luminance(color) > BRIGHT {
+        gpui_kit::hsla(0., 0., 0.08, 1.)
+    } else {
+        gpui_kit::hsla(0., 0., 1., 1.)
+    }
+}
+
+/// `color` as a fill its text ([`text_on`]) reads on at 4.5 to 1. A bright
+/// color has ink on it and does from the start; one that has white on it is
+/// darkened until it does (the blue, the pink and the red by a shade).
+fn fill(color: Hsla) -> Hsla {
+    let mut color = color;
+    while luminance(color) <= BRIGHT && contrast(1., luminance(color)) < 4.5 && color.l > 0.05 {
+        color.l -= 0.01;
+    }
+    color
+}
+
+/// `color` as a color for text and icons on a theme's background: lightened
+/// on a dark theme, darkened on a light one, until it stands 4.5 to 1 from a
+/// typical background of that kind (an amber that reads as a button is too
+/// pale for a word on paper).
+fn readable(color: Hsla, dark: bool) -> Hsla {
+    // Typical backgrounds: #1f1f1f and white.
+    let (background, step) = if dark { (0.014, 0.02) } else { (1., -0.02) };
+    let mut color = color;
+    while contrast(luminance(color), background) < 4.5 && color.l > 0.05 && color.l < 0.95 {
+        color.l += step;
+    }
+    color
+}
+
+/// Whether `color` is a color and not ink, paper or a tint of them: by its
+/// chroma, which is low for a near-black, a cream and a gray alike.
+fn is_colored(color: Hsla) -> bool {
+    (1. - (2. * color.l - 1.).abs()) * color.s > 0.2
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_chat_is_a_column_a_wider_one_or_the_whole_pane() {
+        // By default the column it always was.
+        assert_eq!(Preferences::default().chat_width, ChatWidth::Comfortable);
+        assert_eq!(
+            ChatWidth::ALL.map(ChatWidth::label),
+            ["Normal", "Wide", "Full"]
+        );
+        // Each is kept and read back, with what else was saved.
+        for width in ChatWidth::ALL {
+            let saved = Preferences {
+                chat_width: width,
+                ui_font_size: 15.0,
+                ..Preferences::default()
+            };
+            let read: Preferences =
+                serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+            assert_eq!((read.chat_width, read.ui_font_size), (width, 15.0));
+        }
+        // The narrower column of earlier builds reads as the column, and
+        // costs nothing else that was saved.
+        let old: Preferences =
+            serde_json::from_str(r#"{"ui_font_size":20.0,"chat_width":"narrow"}"#).unwrap();
+        assert_eq!(
+            (old.chat_width, old.ui_font_size),
+            (ChatWidth::Comfortable, 20.0)
+        );
+        // The columns are a fixed measure; the whole pane is the pane's.
+        assert_eq!(ChatWidth::Wide.max_width(), gpui_kit::rems(62.5).into());
+        assert_eq!(ChatWidth::Full.max_width(), gpui_kit::relative(1.));
+        // An empty chat's welcome keeps to a column in any of them.
+        assert_eq!(ChatWidth::Full.welcome_width(), ChatWidth::Wide.max_width());
+        assert_eq!(
+            ChatWidth::Comfortable.welcome_width(),
+            ChatWidth::Comfortable.max_width()
+        );
+    }
 
     #[test]
     fn an_unknown_auto_save_reads_as_off_and_costs_nothing_else() {
@@ -860,32 +755,84 @@ mod tests {
         assert!(!saved.migrate_sizes(), "once");
     }
 
+    fn rgb(hex: u32) -> Hsla {
+        gpui_kit::rgb(hex).into()
+    }
+
+    /// An accent reaches the controls in every theme, the main buttons
+    /// where the theme draws them in a color, and never the colors that
+    /// say a state.
     #[test]
-    fn a_backdrop_image_is_kept_at_a_screen_size() {
-        let dir = std::env::temp_dir().join(format!("ph-backdrop-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let source = dir.join("photo.png");
-        image::RgbImage::from_pixel(4000, 3000, image::Rgb([30, 60, 90]))
-            .save(&source)
-            .unwrap();
-        let backdrops = dir.join("backdrops");
-        let first = prepare_backdrop_image(&source, &backdrops).unwrap();
-        let (width, height) = image::image_dimensions(&first).unwrap();
-        assert!(
-            width <= BACKDROP_MAX.0 && height <= BACKDROP_MAX.1,
-            "{width}x{height}"
-        );
-        assert!(
-            (width as f32 / height as f32 - 4. / 3.).abs() < 0.01,
-            "the shape is kept"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let second = prepare_backdrop_image(&source, &backdrops).unwrap();
-        assert!(!first.exists() && second.exists(), "the earlier copy goes");
-        std::fs::write(dir.join("notes.txt"), "not an image").unwrap();
-        assert!(prepare_backdrop_image(&dir.join("notes.txt"), &backdrops).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
+    fn an_accent_reaches_buttons_and_controls_and_leaves_states_alone() {
+        let green = Accent::Green.color(true).unwrap();
+        // Studio Dark: a blue button a shade from its blue focus ring.
+        let mut colors = gpui_kit::component::ThemeColor::default();
+        (colors.primary, colors.button_primary, colors.ring) =
+            (rgb(0x2b6ef0), rgb(0x2b6ef0), rgb(0x3574f0));
+        let info = rgb(0x2b6ef0);
+        colors.info = info;
+        apply_accent(&mut colors, green, true);
+        assert_eq!(colors.primary, fill(green), "switches and checkboxes");
+        assert_eq!(colors.button_primary, fill(green), "the main buttons");
+        assert_eq!(colors.ring, green);
+        assert_eq!(colors.info, info, "a state keeps its color");
+
+        // Modern Light and Warm Dark: buttons in ink and in cream.
+        for ink in [0x14171c, 0xece6dc, 0x2b2622] {
+            let mut colors = gpui_kit::component::ThemeColor::default();
+            (colors.primary, colors.button_primary) = (rgb(ink), rgb(ink));
+            apply_accent(&mut colors, green, false);
+            assert_eq!(colors.button_primary, rgb(ink), "{ink:x} stays");
+            assert_eq!(colors.primary, fill(green), "its switches take the accent");
+        }
+        for color in [0x0078d4, 0xbd93f9, 0x4572ca, 0x4867ff] {
+            assert!(is_colored(rgb(color)), "{color:x}");
+        }
+    }
+
+    /// Text on an accent, and an accent as text, read: white was put on the
+    /// bright green (2.3 to 1) because HSL calls it half light.
+    #[test]
+    fn text_reads_on_every_accent_and_every_accent_reads_as_text() {
+        for dark in [true, false] {
+            for accent in Accent::ALL {
+                let Some(color) = accent.color(dark) else {
+                    continue;
+                };
+                let fill = fill(color);
+                let on = contrast(luminance(text_on(fill)), luminance(fill));
+                assert!(
+                    on >= 4.5,
+                    "{} text on it, dark {dark}: {on}",
+                    accent.label()
+                );
+                let background = if dark { 0.014 } else { 1. };
+                let text = contrast(luminance(readable(color, dark)), background);
+                assert!(
+                    text >= 4.5,
+                    "{} as text, dark {dark}: {text}",
+                    accent.label()
+                );
+            }
+        }
+        let green = Accent::Green.color(true).unwrap();
+        assert!(text_on(green).l < 0.5, "ink on the bright green");
+        let blue = Accent::Blue.color(true).unwrap();
+        assert!(text_on(blue).l > 0.5, "white on blue");
+    }
+
+    /// The names under the icons show after an update, whatever the old
+    /// setting was saved as, and can be switched off from then on.
+    #[test]
+    fn names_under_the_icons_are_on_after_an_update() {
+        let old: Preferences = serde_json::from_str(r#"{"tool_labels":false}"#).unwrap();
+        assert!(old.rail_names);
+        assert!(old.other.contains_key("tool_labels"), "the old key is kept");
+        let mut chosen = old;
+        chosen.rail_names = false;
+        let saved = serde_json::to_string(&chosen).unwrap();
+        let again: Preferences = serde_json::from_str(&saved).unwrap();
+        assert!(!again.rail_names, "switched off, it stays off");
     }
 
     #[test]
@@ -899,16 +846,6 @@ mod tests {
             1.0,
             "the default changes nothing"
         );
-        assert_eq!(Preferences::default().window, WindowStyle::Solid);
-    }
-
-    #[test]
-    fn two_layers_make_the_chosen_opacity() {
-        for alpha in [0.55_f32, 0.7, 0.85, 1.0] {
-            let layer = 1. - (1. - alpha).sqrt();
-            let panel = 1. - (1. - layer) * (1. - layer);
-            assert!((panel - alpha).abs() < 1e-5, "{alpha}: {panel}");
-        }
     }
 
     #[test]
@@ -917,6 +854,13 @@ mod tests {
             serde_json::from_str(r#"{"accent":"teal","code_font_size":15}"#).unwrap();
         assert_eq!(partial.code_font_size, 15.0);
         assert_eq!(partial.editor.tab_size, 4);
+        // Saved by a version that had window backgrounds to choose from:
+        // it loads, and what it chose is kept unread.
+        let old: Preferences = serde_json::from_str(
+            r#"{"window":"translucent","opacity":0.7,"gradient":"ocean","backdrop_image":"/tmp/a.jpg"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.other["window"], "translucent");
         assert_eq!(
             first_installed(&["Nope", "Menlo"], &["Menlo".to_string()]),
             "Menlo"

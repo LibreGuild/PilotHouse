@@ -52,7 +52,30 @@ pub fn render(
     edit: &ImageEdit,
     quality: Quality,
 ) -> RgbaImage {
+    render_within(source, original, edit, quality, None)
+}
+
+/// [`render`], with the result at most `max_side` a side when given: a
+/// resize above the original's size would otherwise make every preview as
+/// large as the saved file.
+pub(crate) fn render_within(
+    source: &RgbaImage,
+    original: (u32, u32),
+    edit: &ImageEdit,
+    quality: Quality,
+    max_side: Option<u32>,
+) -> RgbaImage {
     let scale = source.width() as f32 / original.0.max(1) as f32;
+    // What the result's own sizes (the resize, the frame) are multiplied
+    // by: the source's scale, or less to stay within `max_side`.
+    let out_scale = {
+        let (width, height) = edit.result_size(original);
+        let longest = width.max(height) as f32 * scale;
+        match max_side {
+            Some(max) if longest > max as f32 => scale * max as f32 / longest,
+            _ => scale,
+        }
+    };
     let turned = orient(source, edit.orientation);
     let crop = edit.crop_rect(original);
     let (x, y) = (
@@ -98,8 +121,8 @@ pub fn render(
 
     let (out_width, out_height) = edit.output_size(original);
     let target = (
-        ((out_width as f32 * scale).round() as u32).max(1),
-        ((out_height as f32 * scale).round() as u32).max(1),
+        ((out_width as f32 * out_scale).round() as u32).max(1),
+        ((out_height as f32 * out_scale).round() as u32).max(1),
     );
     if image.dimensions() != target {
         let filter = match quality {
@@ -121,7 +144,7 @@ pub fn render(
     }
 
     match &edit.frame {
-        Some(frame) => framed(&image, frame, scale),
+        Some(frame) => framed(&image, frame, out_scale),
         None => image,
     }
 }
@@ -311,6 +334,9 @@ fn escape(text: &str) -> String {
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
             c if c.is_control() && c != '\n' => {}
+            // Not XML characters either: one of them and the parser refuses
+            // the whole layer, so no mark would be drawn.
+            '\u{FFFE}' | '\u{FFFF}' => {}
             c => out.push(c),
         }
     }
@@ -1115,5 +1141,44 @@ mod tests {
     #[test]
     fn text_is_escaped() {
         assert_eq!(escape("<a href='x'>&"), "&lt;a href=&apos;x&apos;&gt;&amp;");
+    }
+
+    #[test]
+    fn a_character_xml_refuses_does_not_lose_the_marks() {
+        let text = MarkKind::Text {
+            x: 4.,
+            y: 4.,
+            text: "a\u{FFFF}b\u{FFFE}".into(),
+            size: 20.,
+            color: Color::BLACK,
+            background: None,
+            bold: true,
+            align: Align::Left,
+        };
+        let mark = Mark { id: 1, kind: text };
+        assert!(marks_layer(80, 40, &[&mark], |p| p, 1.).is_some());
+    }
+
+    #[test]
+    fn a_preview_of_an_enlarged_picture_stays_small() {
+        let source = picture();
+        let edit = ImageEdit {
+            resize: Some(Size {
+                width: 4000,
+                height: 2000,
+            }),
+            ..Default::default()
+        };
+        let preview = render_within(&source, (40, 20), &edit, Quality::Preview, Some(512));
+        assert_eq!(preview.dimensions(), (512, 256));
+        // A result within the limit is made as before.
+        let small = render_within(
+            &source,
+            (40, 20),
+            &ImageEdit::default(),
+            Quality::Preview,
+            Some(512),
+        );
+        assert_eq!(small.dimensions(), (40, 20));
     }
 }

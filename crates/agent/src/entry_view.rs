@@ -86,15 +86,17 @@ pub fn render_entry(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> 
         } => {
             let user = render_user(ix, text, attachments, cx);
             match checkpoint {
-                // The restore button sits beside the message, shown on hover,
-                // so it takes no room of its own.
-                Some(checkpoint) => h_flex()
+                // The restore button sits under the message, at its side of
+                // the chat (the right), shown on hover. It stood at the
+                // left edge, across the chat from the message it belongs
+                // to, where it read as part of the agent's reply.
+                Some(checkpoint) => v_flex()
                     .id(("user-message", ix))
                     .group("user-message")
                     .items_end()
-                    .gap_1()
+                    .gap_0p5()
+                    .child(div().w_full().child(user))
                     .child(restore_button(thread_entity, ix, checkpoint, text, cx))
-                    .child(div().flex_1().min_w_0().child(user))
                     .into_any_element(),
                 None => user,
             }
@@ -129,9 +131,11 @@ pub fn render_entry(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> 
         Entry::Plan(items) => render_plan(items, cx),
         Entry::Permission(request) => render_permission(request, cx),
         Entry::Notice { text, is_error } => render_notice(text, *is_error, cx),
-        Entry::SignIn { message, methods } => {
-            render_sign_in(thread_entity, ix, message, methods, cx)
-        }
+        Entry::SignIn {
+            title,
+            message,
+            methods,
+        } => render_sign_in(thread_entity, ix, title.as_deref(), message, methods, cx),
         Entry::Review { card, .. } => div().pt_2().child(card.clone()).into_any_element(),
     };
 
@@ -180,7 +184,7 @@ pub fn render_entry(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> 
                 thread.agent(),
                 elapsed,
                 step,
-                (thread.is_background(), waiting),
+                (thread.is_background(), waiting, thread.stop_is_slow()),
                 cx,
             ))
         })
@@ -207,16 +211,13 @@ fn run_line(
     let (summary, failed) = transcript::run_summary(&tools);
     let (icon, title): (AnyElement, SharedString) = match running {
         Some(tool) => (
-            ph_ui::Loader::new()
-                .xsmall()
-                .color(cx.theme().info)
-                .into_any_element(),
+            ph_ui::Loader::new().xsmall().into_any_element(),
             format!("Running {}", tool.display_title()).into(),
         ),
         None => (
             Icon::new(Icons::Layers)
                 .xsmall()
-                .text_color(cx.theme().info)
+                .text_color(cx.theme().link)
                 .into_any_element(),
             summary.into(),
         ),
@@ -271,7 +272,8 @@ fn turn_footer(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> Optio
             // The diffs are put together once, when asked for; the list
             // draws only the files in view, so thousands open at once.
             let files = transcript::turn_changes(&thread.read(cx).entries()[start..=ix]);
-            let view = gpui_kit::AppContext::new(cx, |_| TurnChanges::new(files));
+            let root = thread.read(cx).folder().to_path_buf();
+            let view = gpui_kit::AppContext::new(cx, |_| TurnChanges::new(files, &root));
             let title = title.clone();
             window.open_dialog(cx, move |dialog, window, _| {
                 dialog
@@ -333,14 +335,17 @@ fn turn_footer(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> Optio
 /// A turn's changes, file by file, in a list that draws only what shows.
 struct TurnChanges {
     files: Rc<Vec<FileDiff>>,
+    /// The workspace's folder: files in it are named from it.
+    root: Rc<std::path::Path>,
     list: gpui_kit::ListState,
 }
 
 impl TurnChanges {
-    fn new(files: Vec<FileDiff>) -> Self {
+    fn new(files: Vec<FileDiff>, root: &std::path::Path) -> Self {
         Self {
             list: gpui_kit::ListState::new(files.len(), gpui_kit::ListAlignment::Top, px(600.)),
             files: Rc::new(files),
+            root: root.into(),
         }
     }
 }
@@ -353,6 +358,7 @@ impl gpui_kit::Render for TurnChanges {
     ) -> impl IntoElement {
         use gpui_kit::component::scroll::ScrollableElement as _;
         let files = self.files.clone();
+        let root = self.root.clone();
         div()
             .id("turn-changes")
             .relative()
@@ -370,7 +376,7 @@ impl gpui_kit::Render for TurnChanges {
                                 .border_1()
                                 .border_color(cx.theme().border)
                                 .overflow_hidden()
-                                .child(render_diff(file, "turn", cx)),
+                                .child(render_diff(file, "turn", Some(&root), cx)),
                         )
                         .into_any_element()
                 })
@@ -416,18 +422,24 @@ fn working_row(
     agent: &'static crate::agents::AgentSpec,
     elapsed: std::time::Duration,
     step: Option<String>,
-    (background, waiting): (bool, bool),
+    (background, waiting, not_stopping): (bool, bool, bool),
     cx: &App,
 ) -> impl IntoElement {
     let time = short_duration(elapsed);
-    let mut text = if waiting {
+    let mut text = if not_stopping {
+        // Stop was pressed and the agent goes on: what to do is said.
+        format!(
+            "{} has not stopped · press Stop again to end its process",
+            agent.name
+        )
+    } else if waiting {
         format!("{} is waiting for your answer · {time}", agent.name)
     } else if background {
         format!("{} is carrying on by itself · {time}", agent.name)
     } else {
         format!("{} is working · {time}", agent.name)
     };
-    if let Some(step) = step.filter(|_| !waiting) {
+    if let Some(step) = step.filter(|_| !waiting && !not_stopping) {
         text.push_str(" · ");
         text.push_str(&step);
     }
@@ -436,7 +448,7 @@ fn working_row(
         .gap_2()
         .text_xs()
         .text_color(cx.theme().muted_foreground)
-        .child(ph_ui::Loader::new().xsmall().color(cx.theme().info))
+        .child(ph_ui::Loader::new().xsmall())
         .child(
             div()
                 .min_w_0()
@@ -573,6 +585,7 @@ fn as_typed(text: &str) -> String {
 fn render_sign_in(
     thread: &Entity<ChatThread>,
     ix: usize,
+    title: Option<&str>,
     message: &str,
     methods: &[crate::connection::SignInMethod],
     cx: &App,
@@ -614,7 +627,10 @@ fn render_sign_in(
                         .small()
                         .text_color(cx.theme().warning),
                 )
-                .child(format!("Sign in to {agent}")),
+                .child(match title {
+                    Some(title) => title.to_string(),
+                    None => format!("Sign in to {agent}"),
+                }),
         )
         .child(
             div()
@@ -748,10 +764,9 @@ fn tool_status_icon(tool: &ToolEntry, cx: &App) -> AnyElement {
         }
     };
     match tool.status {
-        ToolStatus::Pending | ToolStatus::Running => ph_ui::Loader::new()
-            .xsmall()
-            .color(cx.theme().info)
-            .into_any_element(),
+        ToolStatus::Pending | ToolStatus::Running => {
+            ph_ui::Loader::new().xsmall().into_any_element()
+        }
         ToolStatus::Failed => icon()
             .xsmall()
             .text_color(cx.theme().danger)
@@ -772,14 +787,16 @@ fn render_tool(thread: &Entity<ChatThread>, ix: usize, tool: &ToolEntry, cx: &Ap
         && *thread.read(cx).status() == crate::thread::ThreadStatus::Working
         && tool.is_busy();
     let icon = if busy {
-        ph_ui::Loader::new()
-            .xsmall()
-            .color(cx.theme().info)
-            .into_any_element()
+        ph_ui::Loader::new().xsmall().into_any_element()
     } else {
         tool_status_icon(tool, cx)
     };
-    let has_details = !tool.output.trim().is_empty() || !tool.diffs.is_empty() || subagent;
+    let has_details = !tool.output.trim().is_empty()
+        || !tool.diffs.is_empty()
+        || !tool.images.is_empty()
+        || subagent;
+    let root = thread.read(cx).folder().to_path_buf();
+    let thread_for_output = thread.clone();
     let thread = thread.clone();
     let note: Option<SharedString> = if !tool.diffs.is_empty() {
         let added: usize = tool.diffs.iter().map(|diff| diff.added).sum();
@@ -791,6 +808,15 @@ fn render_tool(thread: &Entity<ChatThread>, ix: usize, tool: &ToolEntry, cx: &Ap
             1 => "1 step".into(),
             steps => format!("{steps} steps").into(),
         })
+    } else if !tool.images.is_empty() {
+        // A picture came back (a screenshot): said, so it is opened.
+        Some(match tool.images.len() {
+            1 => "1 image".into(),
+            images => format!("{images} images").into(),
+        })
+    } else if let Some(code) = tool.run.exit.filter(|code| *code != 0) {
+        // A command says how it failed.
+        Some(format!("exit {code}").into())
     } else if tool.status == ToolStatus::Failed {
         Some("failed".into())
     } else {
@@ -847,17 +873,37 @@ fn render_tool(thread: &Entity<ChatThread>, ix: usize, tool: &ToolEntry, cx: &Ap
                                 .children(
                                     tool.diffs
                                         .iter()
-                                        .map(|diff| render_diff(diff, &tool.id, cx)),
+                                        .map(|diff| render_diff(diff, &tool.id, Some(&root), cx)),
                                 ),
                         )
                     })
+                    .when(!tool.images.is_empty(), |this| {
+                        // What the tool gave back to look at: small, each
+                        // opening large on a click.
+                        this.child(h_flex().flex_wrap().gap_2().children(
+                            tool.images.iter().enumerate().map(|(n, path)| {
+                                crate::attachment_view::thumbnail(
+                                    SharedString::from(format!("tool-image-{}-{n}", tool.id)),
+                                    tool.display_title(),
+                                    path.clone(),
+                                    cx,
+                                )
+                            }),
+                        ))
+                    })
                     .when(!tool.output.trim().is_empty(), |this| {
+                        // All of what was kept, in a box that scrolls. A
+                        // command's opens at its end (the thread holds where
+                        // it is scrolled to): a failed run says why there.
+                        let scroll = thread_for_output.read(cx).output_scroll(&tool.id);
                         this.child(
                             div()
+                                .id(("tool-output", ix))
                                 .px_3()
                                 .py_2()
-                                .max_h_64()
-                                .overflow_hidden()
+                                .max_h(ph_ui::rems_from_px(360.))
+                                .overflow_y_scroll()
+                                .when_some(scroll, |this, scroll| this.track_scroll(&scroll))
                                 .rounded(cx.theme().radius)
                                 .bg(cx.theme().muted.opacity(0.4))
                                 .font_family(cx.theme().mono_font_family.clone())
@@ -874,8 +920,28 @@ fn render_tool(thread: &Entity<ChatThread>, ix: usize, tool: &ToolEntry, cx: &Ap
 /// An edit an agent made, as the Git tab draws a diff: the words that
 /// changed marked, long lines scrolling sideways. `owner` is whose edit it
 /// is (a step's id): two steps that changed one file each scroll alone.
-fn render_diff(diff: &FileDiff, owner: &str, cx: &App) -> AnyElement {
+/// A changed file as a diff's header names it: from the workspace's folder
+/// when it is in it (agents name files from the disk's root), as its
+/// folder and its name. The name is what must not be cut off.
+pub(crate) fn shown_path(path: &str, root: Option<&std::path::Path>) -> (String, String) {
+    let inside = root
+        .and_then(|root| std::path::Path::new(path).strip_prefix(root).ok())
+        .map(|inside| inside.to_string_lossy().into_owned());
+    let path = inside.as_deref().unwrap_or(path);
+    match path.rfind(['/', '\\']) {
+        Some(at) => (path[..=at].to_string(), path[at + 1..].to_string()),
+        None => (String::new(), path.to_string()),
+    }
+}
+
+fn render_diff(
+    diff: &FileDiff,
+    owner: &str,
+    root: Option<&std::path::Path>,
+    cx: &App,
+) -> AnyElement {
     use ph_preview::diff as diff_view;
+    let (folder, name) = shown_path(&diff.path, root);
     let lines = diff_view::unnumbered_lines(&diff.lines);
     let mut rows: Vec<AnyElement> = lines
         .iter()
@@ -893,7 +959,19 @@ fn render_diff(diff: &FileDiff, owner: &str, cx: &App) -> AnyElement {
                 .py_1()
                 .gap_2()
                 .text_color(cx.theme().muted_foreground)
-                .child(div().flex_1().min_w_0().truncate().child(diff.path.clone()))
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        // A long folder gives way; the name stays whole.
+                        .child(div().min_w_0().truncate().child(folder))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(cx.theme().foreground)
+                                .child(name),
+                        ),
+                )
                 .child(diff_view::change_counts(diff.added, diff.removed, cx)),
         )
         .child(diff_view::scroller(
@@ -1022,6 +1100,41 @@ fn render_permission(request: &Entity<PermissionRequest>, cx: &App) -> AnyElemen
                     .bg(cx.theme().muted.opacity(0.5))
                     .text_sm()
                     .child(plan),
+            )
+        })
+        // What is being approved, whole: the edit as a diff, a command or a
+        // tool's input as text.
+        .when(!request.asked.diffs.is_empty(), |this| {
+            let owner = format!("ask-{}", handle.entity_id());
+            this.child(
+                v_flex()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .overflow_hidden()
+                    .children(
+                        request
+                            .asked
+                            .diffs
+                            .iter()
+                            .map(|diff| render_diff(diff, &owner, None, cx)),
+                    ),
+            )
+        })
+        .when_some(request.asked.input.clone(), |this, input| {
+            this.child(
+                div()
+                    .id(("asked-input", handle.entity_id()))
+                    .px_3()
+                    .py_2()
+                    .max_h(ph_ui::rems_from_px(240.))
+                    .overflow_y_scroll()
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().muted.opacity(0.5))
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_xs()
+                    .child(input),
             )
         })
         .map(|this| match request.outcome() {
@@ -1332,7 +1445,8 @@ pub fn permission_buttons(
         .into_any_element()
 }
 
-/// Under a user message, on hover: put the files back to before it.
+/// Under a user message, at its right, on hover: put the files back to
+/// before it.
 fn restore_button(
     thread: &Entity<ChatThread>,
     ix: usize,
@@ -1353,7 +1467,9 @@ fn restore_button(
                 .icon(Icons::Undo2)
                 .label("Restore files")
                 .disabled(!enabled)
-                .tooltip("Put the project's files back as they were before this message")
+                .tooltip(ph_ui::tip(
+                    "Put the project's files back as they were before this message",
+                ))
                 .on_click(move |_, window, cx| {
                     confirm_restore(
                         thread.clone(),
@@ -1459,5 +1575,44 @@ mod tests {
         assert_eq!(as_typed("one\ntwo\n\nthree"), "one\\\ntwo\n\nthree");
         assert_eq!(as_typed("    code"), "\u{a0}\u{a0}\u{a0}\u{a0}code");
         assert_eq!(as_typed("path\\"), "path\\\\");
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::shown_path;
+    use std::path::Path;
+
+    #[test]
+    fn a_changed_file_is_named_from_the_workspace() {
+        let root = Path::new("/work/notes-api");
+        let named = |path: &str| shown_path(path, Some(root));
+        // Agents name files from the disk's root.
+        assert_eq!(
+            named("/work/notes-api/src/store.js"),
+            ("src/".to_string(), "store.js".to_string())
+        );
+        assert_eq!(
+            named("/work/notes-api/README.md"),
+            (String::new(), "README.md".to_string())
+        );
+        // One named from the workspace already, or outside it, stays.
+        assert_eq!(
+            named("src/store.js"),
+            ("src/".to_string(), "store.js".to_string())
+        );
+        assert_eq!(
+            named("/etc/hosts"),
+            ("/etc/".to_string(), "hosts".to_string())
+        );
+        // A folder whose name only starts the same is not the workspace.
+        assert_eq!(
+            named("/work/notes-api-old/a.js"),
+            ("/work/notes-api-old/".to_string(), "a.js".to_string())
+        );
+        assert_eq!(
+            shown_path("C:\\work\\a.rs", None),
+            ("C:\\work\\".to_string(), "a.rs".to_string())
+        );
     }
 }
