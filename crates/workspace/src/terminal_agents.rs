@@ -55,6 +55,9 @@ pub(crate) struct TerminalAgent {
     /// The agent's own session id and its session file.
     pub session_id: Option<String>,
     pub transcript: Option<PathBuf>,
+    /// What it was started with beside the user's own environment (its
+    /// account): where its files are is read from this.
+    pub environment: Vec<(String, String)>,
     pub updated_at: i64,
     /// When PilotHouse first saw it (Unix milliseconds).
     pub since: i64,
@@ -403,6 +406,8 @@ pub(crate) fn sync(cx: &mut App) {
                         line: found.line,
                         session_id,
                         transcript: None,
+                        // Started by hand: in the user's own environment.
+                        environment: Vec::new(),
                         updated_at: now(),
                         since: now(),
                         session: None,
@@ -603,8 +608,12 @@ fn keep_last_reply(
             .background_spawn(async move {
                 let path = transcript.or_else(|| {
                     let row = job_store.session(session).ok().flatten()?;
+                    // Its files are where its account keeps them.
+                    let environment = ph_agent::profiles::Profiles::load(&job_store)
+                        .of(agent)
+                        .environment_for(&row.account);
                     let (cwd, cli) = (PathBuf::from(row.cwd?), cli?);
-                    ph_agent::cli_sessions::sessions(agent, &cwd)
+                    ph_agent::cli_sessions::sessions_in(agent, &cwd, &environment)
                         .into_iter()
                         .find(|past| past.id == cli)?
                         .path
@@ -677,9 +686,10 @@ fn find_sessions(cx: &mut App) {
             agent.project,
             agent.since,
             terminal,
+            agent.environment.clone(),
         ));
     }
-    for (pane, agent_id, project, since, terminal) in jobs {
+    for (pane, agent_id, project, since, terminal, environment) in jobs {
         let cwd = terminal.read(cx).cwd().to_path_buf();
         let (taken, store) = (taken.clone(), store.clone());
         cx.spawn(async move |cx| {
@@ -694,7 +704,7 @@ fn find_sessions(cx: &mut App) {
                         .filter(|chat| chat.kind != "terminal" && chat.agent_id == agent_id)
                         .filter_map(|chat| chat.acp_session_id)
                         .collect();
-                    ph_agent::cli_sessions::sessions(agent_id, &cwd)
+                    ph_agent::cli_sessions::sessions_in(agent_id, &cwd, &environment)
                         .into_iter()
                         // Sessions keep their file's time; slack for the clock.
                         .find(|session| {
@@ -775,12 +785,22 @@ pub(crate) struct Launch<'a> {
 /// The command that starts an agent's CLI: its program, the session to go
 /// on with, the model and mode asked for, and `more` (hooks, PilotHouse's
 /// own tools), each already written as the shell takes it.
-fn command(start: &Launch, more: &[String]) -> anyhow::Result<String> {
+fn command(
+    start: &Launch,
+    profile: &ph_agent::profiles::Profile,
+    more: &[String],
+) -> anyhow::Result<String> {
     let name = |id: &str| {
         ph_agent::agents::find(id).map_or_else(|| id.to_string(), |agent| agent.name.to_string())
     };
-    let program = ph_agent::agents::cli_of(start.agent_id)
+    let usual = ph_agent::agents::cli_of(start.agent_id)
         .ok_or_else(|| anyhow::anyhow!("{} has no CLI", name(start.agent_id)))?;
+    // The user's own command for it (Settings → Agents), as they typed it:
+    // a shell reads it, as it would in their terminal.
+    let program = match profile.command.trim() {
+        "" => usual,
+        command => command,
+    };
     // Only what could be a flag's value: these are typed into a shell.
     let plain = |value: &&str| {
         !value.is_empty()
@@ -845,6 +865,18 @@ fn command(start: &Launch, more: &[String]) -> anyhow::Result<String> {
         }
         _ => anyhow::bail!("{} cannot run in a terminal", name(start.agent_id)),
     }
+    // What the user adds to every start of it, each word kept whole.
+    words.extend(profile.arguments.iter().map(|argument| {
+        let plain = !argument.is_empty()
+            && argument
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-:/=@+,".contains(c));
+        if plain {
+            argument.clone()
+        } else {
+            quoted(Path::new(argument))
+        }
+    }));
     words.extend(more.iter().cloned());
     Ok(words.join(" "))
 }
@@ -946,27 +978,27 @@ pub(crate) fn launch(
         start.project,
         &settings_dir().join(format!("{pane}.mcp.json")),
     ));
-    let command = command(&start, &more)?;
+    // As Settings → Agents says it runs, in the account its chat is in.
+    let store = crate::AppState::store(cx).clone();
+    let chat = start
+        .chat
+        .and_then(|(chat, _)| store.session(chat).ok().flatten());
+    let profile = ph_agent::profiles::Profiles::load(&store).of(start.agent_id);
+    let environment =
+        profile.environment_for(chat.as_ref().map_or("", |chat| chat.account.as_str()));
+    let command = command(&start, &profile, &more)?;
     let label = free_label(agent.name, terminals, cx);
     let terminal = terminals
         .update(cx, |terminals, cx| {
-            terminals.run_program(&label, &command, start.cwd.clone(), cx)
+            terminals.run_program(&label, &command, start.cwd.clone(), &environment, cx)
         })
         .ok_or_else(|| anyhow::anyhow!("Could not open a terminal"))?;
     // A chat that has its name keeps it; its row is there already.
     let (session, title) = match start.chat {
-        Some((chat, named)) => {
-            let title = named
-                .then(|| {
-                    crate::AppState::store(cx)
-                        .session(chat)
-                        .ok()
-                        .flatten()
-                        .map(|session| session.title)
-                })
-                .flatten();
-            (Some(chat), title)
-        }
+        Some((id, named)) => (
+            Some(id),
+            named.then(|| chat.map(|chat| chat.title)).flatten(),
+        ),
         None => (None, None),
     };
     // Known from the start, even if it never says how it is doing in its
@@ -994,6 +1026,7 @@ pub(crate) fn launch(
             line: None,
             session_id: start.resume.map(str::to_string),
             transcript: None,
+            environment,
             updated_at: now(),
             since: now(),
             session,
@@ -1022,8 +1055,9 @@ pub(crate) fn session_file(
     }
     let (agent_id, cwd) = (agent.agent.id, terminal.read(cx).cwd().to_path_buf());
     let (session_id, since) = (agent.session_id.clone(), agent.since);
+    let environment = agent.environment.clone();
     Some(Box::new(move || {
-        let sessions = ph_agent::cli_sessions::sessions(agent_id, &cwd);
+        let sessions = ph_agent::cli_sessions::sessions_in(agent_id, &cwd, &environment);
         if let Some(session) = session_id
             .as_ref()
             .and_then(|id| sessions.iter().find(|session| &session.id == id))
@@ -1299,6 +1333,7 @@ mod tests {
     #[test]
     fn each_agents_cli_goes_on_with_its_session_its_own_way() {
         let id = "0199a213-81c0-7800-8aa1-bbab2a035a53";
+        let usual = ph_agent::profiles::Profile::default();
         for (agent, fresh, resumed) in [
             ("claude", "claude", format!("claude --resume {id}")),
             ("codex", "codex", format!("codex resume {id}")),
@@ -1306,10 +1341,39 @@ mod tests {
             ("antigravity", "agy", format!("agy --conversation {id}")),
             ("cline", "cline", format!("cline --id {id}")),
         ] {
-            assert_eq!(command(&start(agent, None), &[]).unwrap(), fresh);
-            assert_eq!(command(&start(agent, Some(id)), &[]).unwrap(), resumed);
+            assert_eq!(command(&start(agent, None), &usual, &[]).unwrap(), fresh);
+            assert_eq!(
+                command(&start(agent, Some(id)), &usual, &[]).unwrap(),
+                resumed
+            );
         }
-        assert!(command(&start("nobody", None), &[]).is_err());
+        assert!(command(&start("nobody", None), &usual, &[]).is_err());
+
+        // The user's own command for it, and what they add to every start.
+        let mut theirs = ph_agent::profiles::Profile::default();
+        theirs.command = "claude-beta".into();
+        theirs.arguments = vec![
+            "--verbose".into(),
+            "--append-system-prompt".into(),
+            "Be brief; it's late".into(),
+        ];
+        assert_eq!(
+            command(
+                &start("claude", Some(id)),
+                &theirs,
+                &["--settings 'h.json'".to_string()]
+            )
+            .unwrap(),
+            if cfg!(windows) {
+                format!(
+                    "claude-beta --resume {id} --verbose --append-system-prompt 'Be brief; it''s late' --settings 'h.json'"
+                )
+            } else {
+                format!(
+                    "claude-beta --resume {id} --verbose --append-system-prompt 'Be brief; it'\\''s late' --settings 'h.json'"
+                )
+            }
+        );
     }
 
     #[test]
@@ -1321,6 +1385,7 @@ mod tests {
                     mode,
                     ..start(agent, None)
                 },
+                &ph_agent::profiles::Profile::default(),
                 &["--settings 'hooks.json'".to_string()],
             )
             .unwrap()

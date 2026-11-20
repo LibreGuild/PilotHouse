@@ -59,6 +59,8 @@ pub struct Handover {
     /// program with: a switch must not quietly change either.
     pub model: Option<String>,
     pub mode: Option<String>,
+    /// Which of the agent's accounts the chat is in (empty: its own).
+    pub account: String,
 }
 
 /// How long an agent has to stop when asked, before Stop offers to end its
@@ -218,6 +220,9 @@ pub struct ChatThread {
     recap_due: bool,
     /// When the turn was asked to stop, while it has not.
     stop_asked: Option<Instant>,
+    /// Which of the agent's accounts the chat is in (`profiles`); empty
+    /// for the agent's own. Fixed once something was said.
+    account: String,
     entries: Vec<Entry>,
     /// The questions of `entries` still waiting for an answer, oldest
     /// first: the sidebar and title bar ask on every frame, and a long
@@ -323,6 +328,7 @@ impl ChatThread {
             accepts_images: true,
             recap_due: false,
             stop_asked: None,
+            account: String::new(),
             entries: Vec::new(),
             pending: Vec::new(),
             views: VecDeque::new(),
@@ -438,6 +444,7 @@ impl ChatThread {
             cwd: self.project.path.clone(),
             model: choice(options::OptionCategory::Model),
             mode: choice(options::OptionCategory::Mode),
+            account: self.account.clone(),
         };
         self.persist(cx);
         self.end_agent_session(cx);
@@ -732,6 +739,7 @@ impl ChatThread {
         thread.usage = thread.store.session_usage(session.id).ok().flatten();
         thread.scroller = cx.new(|cx| TranscriptScroll::new(entries.len(), cx));
         thread.entries = entries;
+        thread.account = session.account.clone();
         thread.session = Some(session);
         thread
     }
@@ -1042,6 +1050,39 @@ impl ChatThread {
         self.acp_session_id.is_some() || self.setup.is_some() || !self.entries.is_empty()
     }
 
+    /// Which of the agent's accounts the chat is in; empty for its own.
+    pub fn account(&self) -> &str {
+        &self.account
+    }
+
+    /// Whether the chat's account can still be another: nothing was said
+    /// in it. A session only warmed up is let go for it.
+    pub fn can_change_account(&self) -> bool {
+        self.status == ThreadStatus::Idle
+            && !self.background
+            && !self
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::User { .. }))
+    }
+
+    /// Puts the chat in `account` of its agent (empty: the agent's own).
+    /// Only before something is said: the agent keeps a conversation in
+    /// its account's files, and it cannot move.
+    pub fn set_account(&mut self, account: &str, cx: &mut Context<Self>) {
+        if self.account == account || !self.can_change_account() {
+            return;
+        }
+        // A session warmed up in the account it was in is not this one's.
+        self.end_agent_session(cx);
+        self.account = account.to_string();
+        if let Some(session) = &mut self.session {
+            let _ = self.store.set_session_account(session.id, account);
+            session.account = account.to_string();
+        }
+        cx.notify();
+    }
+
     /// Changes the agent. Only allowed before the agent session started.
     pub fn set_agent(&mut self, agent: &'static AgentSpec, cx: &mut Context<Self>) {
         if self.has_started() || self.agent.id == agent.id {
@@ -1220,6 +1261,10 @@ impl ChatThread {
                     if let Some(acp_id) = &self.acp_session_id {
                         let _ = self.store.set_session_acp_id(session.id, Some(acp_id));
                         session.acp_session_id = Some(acp_id.clone());
+                    }
+                    if !self.account.is_empty() {
+                        let _ = self.store.set_session_account(session.id, &self.account);
+                        session.account = self.account.clone();
                     }
                     if let Some(review_id) = self.review_id {
                         let cwd = self.project.path.to_string_lossy().to_string();

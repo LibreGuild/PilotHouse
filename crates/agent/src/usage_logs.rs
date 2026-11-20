@@ -146,19 +146,28 @@ impl Roots {
                 home.join(".config/claude/projects"),
             ],
         };
+        // The agent's other accounts (Settings → Agents) keep their
+        // sessions in folders of their own: their usage counts too.
+        use crate::profiles::Profiles;
+        claude.extend(
+            Profiles::account_folders("claude", "CLAUDE_CONFIG_DIR")
+                .into_iter()
+                .map(|folder| folder.join("projects")),
+        );
         claude.dedup();
         let codex_home = var("CODEX_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"));
+        let codex_accounts = Profiles::account_folders("codex", "CODEX_HOME");
         let gemini_home = var("GEMINI_CLI_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.clone());
         Self {
             claude,
-            codex: vec![
-                codex_home.join("sessions"),
-                codex_home.join("archived_sessions"),
-            ],
+            codex: std::iter::once(codex_home)
+                .chain(codex_accounts)
+                .flat_map(|home| [home.join("sessions"), home.join("archived_sessions")])
+                .collect(),
             gemini: vec![gemini_home.join(".gemini/tmp")],
             cline: vec![crate::cline::Paths::under(&home, &var).sessions],
         }

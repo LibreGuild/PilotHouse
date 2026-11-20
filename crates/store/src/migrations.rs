@@ -347,6 +347,12 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX explanation_files_by_path ON explanation_files(path);
     CREATE INDEX explanation_files_by_explanation ON explanation_files(explanation_id);
     "#,
+    // 19: which of an agent's accounts a session is in (Settings → Agents;
+    // empty: the agent's own). A session stays in the account it started
+    // in: the agent keeps its conversation in that account's files.
+    r#"
+    ALTER TABLE sessions ADD COLUMN account TEXT NOT NULL DEFAULT '';
+    "#,
 ];
 
 /// Backups kept of a database file, newest first; older ones are deleted.

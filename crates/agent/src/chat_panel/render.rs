@@ -240,6 +240,77 @@ impl ChatPanel {
             .child(this_chat)
     }
 
+    /// Which of the agent's accounts the session runs in, for an agent
+    /// that has more than its own (Settings → Agents). Picked before
+    /// something is said; after that it only says which, since the agent
+    /// keeps the conversation in that account's files.
+    fn render_account(&self, agent: &'static AgentSpec, cx: &Context<Self>) -> Option<AnyElement> {
+        let profile = crate::profiles::Profiles::known().of(agent.id);
+        if profile.accounts.is_empty() {
+            return None;
+        }
+        let thread = self.active.read(cx);
+        let current = thread.account().to_string();
+        let name: SharedString = match profile.account(&current) {
+            Some(account) => account.name.clone().into(),
+            None if current.is_empty() => "Default".into(),
+            // Removed in Settings since: the session is still in it.
+            None => current.clone().into(),
+        };
+        if !thread.can_change_account() {
+            return Some(
+                div()
+                    .id("session-account")
+                    .flex_none()
+                    .px_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(
+                            "A session stays in the account it started in",
+                        )
+                        .build(window, cx)
+                    })
+                    .child(name)
+                    .into_any_element(),
+            );
+        }
+        let panel = cx.weak_entity();
+        let accounts: Vec<(String, SharedString)> =
+            std::iter::once((String::new(), SharedString::from("Default")))
+                .chain(
+                    profile
+                        .accounts
+                        .iter()
+                        .map(|account| (account.id.clone(), account.name.clone().into())),
+                )
+                .collect();
+        Some(
+            Button::new("choose-account")
+                .ghost()
+                .xsmall()
+                .label(name)
+                .tooltip(format!("The {} account this session runs in", agent.name))
+                .menu(gpui_kit::Anchor::BottomLeft, move |menu, _, _| {
+                    accounts.iter().fold(menu, |menu, (id, name)| {
+                        let (panel, id) = (panel.clone(), id.clone());
+                        menu.item(
+                            PopupMenuItem::new(name.clone())
+                                .checked(id == current)
+                                .on_click(move |_, _, cx| {
+                                    _ = panel.update(cx, |this, cx| {
+                                        this.active
+                                            .update(cx, |thread, cx| thread.set_account(&id, cx));
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    })
+                })
+                .into_any_element(),
+        )
+    }
+
     /// Chat | CLI: the session's two forms (see [`Form`]), where a session
     /// has both: a workspace's chat, with an agent that has a CLI. The
     /// conversation is the same; this picks what it is typed into.
@@ -1248,12 +1319,14 @@ impl ChatPanel {
         let has_more = options
             .iter()
             .any(|option| option.category == OptionCategory::Other);
+        let account = self.render_account(agent, cx);
         let pills = h_flex()
             .gap_1()
             .min_w_0()
             .overflow_hidden()
             .child(attach_button(panel.clone()))
             .child(model_button(agent, &options, panel.clone(), cx))
+            .children(account)
             .when_some(effort, |this, effort| {
                 this.child(option_pill(&effort, panel.clone()))
             })

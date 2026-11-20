@@ -70,6 +70,42 @@ pub(crate) fn open(
             tracing::warn!("opening the file failed: {err:#}");
         }
     });
+    // An agent is installed where it can be watched: in a terminal of the
+    // workspace in front, with Settings out of the way.
+    let install: Option<ph_agent::agents_view::Install> =
+        ph_brand::enabled(ph_brand::Feature::Terminal).then(|| {
+            let workspace = workspace.clone();
+            std::rc::Rc::new(
+                move |spec: &'static ph_agent::agents::AgentSpec,
+                      window: &mut Window,
+                      cx: &mut App| {
+                    use gpui_kit::component::WindowExt as _;
+                    let space = workspace
+                        .upgrade()
+                        .and_then(|workspace| workspace.read(cx).active_space().cloned());
+                    let Some(space) = space else {
+                        window.push_notification(
+                            "Open a workspace first: the command runs in its terminal.",
+                            cx,
+                        );
+                        return;
+                    };
+                    window.close_dialog(cx);
+                    space.update(cx, |space, cx| {
+                        space.run_in_terminal(
+                            &format!("Install {}", spec.name),
+                            spec.install_command(),
+                            window,
+                            cx,
+                        )
+                    });
+                },
+            ) as ph_agent::agents_view::Install
+        });
+    let agents = {
+        let store = store.clone();
+        cx.new(|cx| ph_agent::agents_view::AgentsView::new(store, install, window, cx))
+    };
     let tools =
         cx.new(|cx| ph_agent::tools_view::ToolsView::new(store, project, open_file, window, cx));
     let storage = cx.new(crate::storage::StorageView::new);
@@ -153,7 +189,7 @@ pub(crate) fn open(
                                             Some(editor_page(&fonts)),
                                             Some(terminal_page()),
                                             Some(chat_page()),
-                                            Some(agents_page()),
+                                            Some(agents_page(agents.clone())),
                                             Some(tools_page(tools.clone())),
                                             ph_brand::enabled(ph_brand::Feature::ChromeExtension)
                                                 .then(|| chrome_page(chrome.clone())),
@@ -712,9 +748,11 @@ fn chrome_page(view: gpui_kit::Entity<ph_browser::ChromeExtensionView>) -> Setti
     )
 }
 
-/// Each agent's setup status, checked when the page renders (what was found
-/// is remembered for a few seconds; *Check again* asks anew).
-fn agents_page() -> SettingPage {
+/// Settings → Agents: how a session opens, the agents found here (each with
+/// what can be set for it) and those that are not, with how to install
+/// them. What was found is remembered for a few seconds; *Check again*
+/// asks anew.
+fn agents_page(agents: gpui_kit::Entity<ph_agent::agents_view::AgentsView>) -> SettingPage {
     SettingPage::new("Agents")
         .icon(Icon::new(Icons::Bot))
         .title_suffix(|_, _| {
@@ -732,15 +770,28 @@ fn agents_page() -> SettingPage {
             )
         })
         .group(
-            SettingGroup::new().items(ph_agent::agents::AGENTS.iter().map(|spec| {
-                SettingItem::render(move |_, _, cx| {
-                    let checks = ph_agent::setup::checks(spec);
-                    div()
-                        .w_full()
-                        .child(ph_agent::setup_view::status(spec, &checks, cx))
-                })
-                .keywords(["agent", "install", "sign in", spec.name, spec.id])
-            })),
+            SettingGroup::new().item(
+                SettingItem::render(move |_, _, _| div().w_full().py_1().child(agents.clone()))
+                    .keywords(
+                        [
+                            "agent",
+                            "install",
+                            "sign in",
+                            "cli",
+                            "chat",
+                            "account",
+                            "command",
+                            "environment",
+                            "arguments",
+                        ]
+                        .into_iter()
+                        .chain(
+                            ph_agent::agents::AGENTS
+                                .iter()
+                                .flat_map(|spec| [spec.name, spec.id]),
+                        ),
+                    ),
+            ),
         )
         .groups(web_pages_group())
 }

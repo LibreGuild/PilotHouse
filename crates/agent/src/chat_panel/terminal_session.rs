@@ -28,11 +28,16 @@ impl ChatPanel {
         let view = match (Format::of(agent.id), session.acp_session_id.clone()) {
             (Some(format), Some(id)) => {
                 let (agent_id, folder) = (agent.id, cwd.clone());
+                // Where its account keeps its files.
+                let environment = crate::profiles::Profiles::load(&self.store)
+                    .of(agent.id)
+                    .environment_for(&session.account);
                 // Found by its id among the agent's sessions in the folder.
                 let find: FindSession = Box::new(move |_| {
                     let (id, folder) = (id.clone(), folder.clone());
+                    let environment = environment.clone();
                     let job: FindJob = Box::new(move || {
-                        crate::cli_sessions::sessions(agent_id, &folder)
+                        crate::cli_sessions::sessions_in(agent_id, &folder, &environment)
                             .into_iter()
                             .find(|session| session.id == id)
                             .and_then(|session| session.path)

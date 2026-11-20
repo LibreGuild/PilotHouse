@@ -91,7 +91,16 @@ impl ChatHub {
     ) -> bool {
         let mut running: Vec<Entity<AgentConnection>> = Self::all(cx)
             .into_iter()
-            .filter_map(|(_, chats)| chats.read(cx).connections.get(id).cloned())
+            .flat_map(|(_, chats)| {
+                // Every account's process of the agent.
+                chats
+                    .read(cx)
+                    .connections
+                    .iter()
+                    .filter(|(key, _)| key.split('#').next() == Some(id))
+                    .map(|(_, connection)| connection.clone())
+                    .collect::<Vec<_>>()
+            })
             .collect();
         running.extend(also);
         running.dedup_by_key(|connection| connection.entity_id());
@@ -188,7 +197,8 @@ pub struct WorkspaceChats {
     store: Store,
     project: ThreadProject,
     /// One process per agent, started on first use (and again if it exited).
-    connections: HashMap<&'static str, Entity<AgentConnection>>,
+    /// The agents' processes, by agent and account ([`connection_key`]).
+    connections: HashMap<String, Entity<AgentConnection>>,
     /// Chats opened or started, with their watches and when last used.
     threads: HashMap<SessionId, Kept>,
     /// Counts uses, to know which kept chat was used least lately.
@@ -354,9 +364,11 @@ impl WorkspaceChats {
     pub(crate) fn connection(
         &mut self,
         spec: &'static AgentSpec,
+        account: &str,
         cx: &mut Context<Self>,
     ) -> Entity<AgentConnection> {
-        if let Some(connection) = self.connections.get(spec.id)
+        let key = connection_key(spec.id, account);
+        if let Some(connection) = self.connections.get(&key)
             && !connection.read(cx).has_exited()
         {
             return connection.clone();
@@ -377,8 +389,15 @@ impl WorkspaceChats {
         if spec.id == "cline" {
             env.extend(crate::cline::env_for(&self.store));
         }
+        // What Settings → Agents sets for the agent, and for the account
+        // the chat is in: one process serves one account.
+        env.extend(
+            crate::profiles::Profiles::load(&self.store)
+                .of(spec.id)
+                .environment_for(account),
+        );
         let connection = cx.new(|cx| AgentConnection::start_with(spec, cwd, env, cx));
-        self.connections.insert(spec.id, connection.clone());
+        self.connections.insert(key, connection.clone());
         connection
     }
 
@@ -419,7 +438,7 @@ impl WorkspaceChats {
     ) -> Option<SessionId> {
         let agent = default_agent(&self.store);
         let thread = self.draft(agent, cx);
-        let connection = self.connection(agent, cx);
+        let connection = self.connection(agent, "", cx);
         let blocks = vec![agent_client_protocol_schema::v1::ContentBlock::Text(
             agent_client_protocol_schema::v1::TextContent::new(prompt.clone()),
         )];
@@ -636,6 +655,16 @@ impl WorkspaceChats {
         self.unseen.retain(|id| *id != session);
         cx.emit(WorkspaceChatsEvent::SessionsChanged);
         Ok(())
+    }
+}
+
+/// What an agent's process is kept by: the agent, and the account it runs
+/// in when not the agent's own.
+fn connection_key(agent: &str, account: &str) -> String {
+    if account.is_empty() {
+        agent.to_string()
+    } else {
+        format!("{agent}#{account}")
     }
 }
 

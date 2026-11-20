@@ -1723,7 +1723,7 @@ impl Workspace {
             return self.new_chat_in(id, window, cx);
         }
         self.with_active_space(window, cx, |space, window, cx| {
-            space.new_session(window, cx)
+            space.new_session_asked(window, cx)
         });
     }
 

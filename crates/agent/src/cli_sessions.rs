@@ -32,6 +32,24 @@ pub struct PastSession {
     pub path: Option<PathBuf>,
 }
 
+thread_local! {
+    /// What an agent's account sets, while its sessions are listed (see
+    /// [`sessions_in`]): read before the user's own environment.
+    static ACCOUNT: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Agent `agent`'s sessions in `cwd`, newest first, as it keeps them when
+/// started with `environment` (one of its accounts: `profiles`): an agent
+/// reads where its files are from variables (`CLAUDE_CONFIG_DIR`,
+/// `CODEX_HOME`), and another account's sessions are in another folder.
+pub fn sessions_in(agent: &str, cwd: &Path, environment: &[(String, String)]) -> Vec<PastSession> {
+    ACCOUNT.with(|account| *account.borrow_mut() = environment.to_vec());
+    let sessions = sessions(agent, cwd);
+    ACCOUNT.with(|account| account.borrow_mut().clear());
+    sessions
+}
+
 /// Agent `agent`'s sessions in `cwd`, newest first.
 pub fn sessions(agent: &str, cwd: &Path) -> Vec<PastSession> {
     let mut sessions = match agent {
@@ -53,9 +71,15 @@ fn home() -> PathBuf {
 
 /// An environment variable as the user's shell sets it.
 fn shell_var(name: &str) -> Option<PathBuf> {
-    ph_env::shell_env()
-        .get(name)
-        .cloned()
+    ACCOUNT
+        .with(|account| {
+            account
+                .borrow()
+                .iter()
+                .find(|(set, _)| set == name)
+                .map(|(_, value)| value.clone())
+        })
+        .or_else(|| ph_env::shell_env().get(name).cloned())
         .or_else(|| std::env::var(name).ok())
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)

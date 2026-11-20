@@ -31,6 +31,9 @@ pub struct Session {
     /// What it said last, for a chat whose messages are kept elsewhere (a
     /// terminal's).
     pub last_line: Option<String>,
+    /// Which of its agent's accounts it is in (Settings → Agents); empty
+    /// for the agent's own.
+    pub account: String,
     /// What it did, in numbers, as of its last turn.
     pub facts: Option<SessionFacts>,
 }
@@ -83,6 +86,7 @@ impl Session {
             cwd: row.get("cwd")?,
             kind: row.get("kind")?,
             last_line: row.get("last_line")?,
+            account: row.get("account")?,
             // Facts that no longer parse are none: the next turn writes
             // them again.
             facts: row
@@ -117,8 +121,19 @@ impl Store {
             cwd: None,
             kind: "chat".into(),
             last_line: None,
+            account: String::new(),
             facts: None,
         })
+    }
+
+    /// Puts session `id` in `account` of its agent (empty: the agent's
+    /// own), before its conversation starts.
+    pub fn set_session_account(&self, id: SessionId, account: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET account = ?2 WHERE id = ?1",
+            params![id, account],
+        )?;
+        Ok(())
     }
 
     /// Marks a session as running in `cwd` (e.g. a review worktree).

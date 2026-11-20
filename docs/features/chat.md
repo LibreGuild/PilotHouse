@@ -181,6 +181,17 @@ A session in its CLI form whose program is not running (after a restart, or once
 
 What does not carry over: a turn under way; work an agent left running in its process when you switch; and for Cline the way back to the chat is a summary, not its memory (it cannot load a session), which the chat says.
 
+## Settings → Agents: how each agent is run
+
+`agents_view.rs`, `profiles.rs` (one JSON value, `agents.profiles`; what a build does not know in it is kept).
+
+- **Open agents as** *Chat* or *CLI*: how a session opens when you ask for a new one (*New chat*, ⌘N). Each agent can say otherwise (*As all agents*, *Chat*, *CLI* on its row). A chat made for something (a message to finish, a review, a schedule's run) is always a chat.
+- **Installed** lists the agents found on this computer (their CLI is on your `PATH`), each with the command it is started by and whether it is ready; **Not installed** lists the others with the command that installs each, **Copy**, and **Install**, which runs it in a terminal of the workspace in front, where you see it run and fail. *Check again* looks anew.
+- An installed agent's row opens to what can be set for it: its **Command** (its CLI, when not the usual one: a wrapper, another build), **Arguments** added when its CLI starts, and its **Environment**, set for it as a chat and as its CLI. An agent that is not ready shows what it needs first.
+- **Accounts.** A second sign-in of an agent is a set of environment variables it is started with, usually the folder it keeps its sign-in and its sessions in (`CLAUDE_CONFIG_DIR=~/.claude-work`, `CODEX_HOME=…`): what a shell alias for a second account does. It is kept as variables, not as that alias, because an alias exists only in an interactive shell and would hold for the CLI and not for a chat. With an account added, the message box shows which account a new session runs in, to pick before something is said; after that it only says which, since the agent keeps the conversation in that account's files. To sign an account in, open a session in it as its CLI and sign in there.
+  - One agent process serves one account (`WorkspaceChats::connection` keeps them by agent and account), and a session's account is stored with it (`sessions.account`).
+  - What reads the agent's own files follows the session's account (`cli_sessions::sessions_in`): going back to the chat from the CLI, a terminal session's transcript, the last reply kept with a chat. Usage counts every account's files. The limit meter in the status bar is the agent's own account's.
+
 ## Stopping
 
 **Stop** asks the agent to end its turn (ACP `session/cancel`); the agent answers when it has. An agent that does not (a tool that hangs, an agent that no longer reads) leaves the turn running: after three seconds the working line says so and Stop turns red, and pressing it again ends the agent's process (`ChatThread::force_stop`). One process serves every chat of that agent in the workspace, so the others at work lose their turn too and are told why. Each chat keeps its session and picks it up with its next message.

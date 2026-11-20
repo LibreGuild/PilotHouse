@@ -1046,14 +1046,16 @@ impl ChatPanel {
         ];
     }
 
-    /// The workspace's process for `spec`.
+    /// The workspace's process for `spec`, in the account the chat in
+    /// front is in.
     fn connection(
         &mut self,
         spec: &'static AgentSpec,
         cx: &mut Context<Self>,
     ) -> Entity<AgentConnection> {
+        let account = self.active.read(cx).account().to_string();
         self.chats
-            .update(cx, |chats, cx| chats.connection(spec, cx))
+            .update(cx, |chats, cx| chats.connection(spec, &account, cx))
     }
 
     /// Starts the agent and its session now (a resumed session is loaded,

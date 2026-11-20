@@ -92,9 +92,15 @@ fn set_mark(store: &Store, session: SessionId, mark: Option<usize>) {
     }
 }
 
-/// The session file of agent `agent_id`'s session `id` in `cwd`.
-fn session_file(agent_id: &'static str, cwd: &std::path::Path, id: &str) -> Option<PathBuf> {
-    ph_agent::cli_sessions::sessions(agent_id, cwd)
+/// The session file of agent `agent_id`'s session `id` in `cwd`, where the
+/// agent keeps its files when started with `environment` (its account).
+fn session_file(
+    agent_id: &'static str,
+    cwd: &std::path::Path,
+    id: &str,
+    environment: &[(String, String)],
+) -> Option<PathBuf> {
+    ph_agent::cli_sessions::sessions_in(agent_id, cwd, environment)
         .into_iter()
         .find(|session| session.id == id)
         .and_then(|session| session.path)
@@ -189,10 +195,13 @@ impl WorkspaceScreen {
             (Some(format), Some(resume)) => {
                 let (store, id, folder) = (store.clone(), session.id, handover.cwd.clone());
                 let agent_id = agent.id;
+                let environment = ph_agent::profiles::Profiles::load(&store)
+                    .of(agent.id)
+                    .environment_for(&handover.account);
                 cx.spawn(async move |_, cx| {
                     let mark = cx
                         .background_spawn(async move {
-                            session_file(agent_id, &folder, &resume)
+                            session_file(agent_id, &folder, &resume, &environment)
                                 .map_or(0, |file| cli_transcript::step_count(format, &file))
                         })
                         .await;
@@ -263,17 +272,26 @@ impl WorkspaceScreen {
         let running = TerminalAgents::of_session(session.id, cx).map(|running| {
             (
                 running.state,
-                running.title.is_some(),
+                // Something happened there: it works, waits, or said
+                // something (its name alone may be the chat's own).
+                running.state != ChatState::Idle || running.line.is_some(),
                 running.session_id.clone(),
                 running.transcript.clone(),
             )
         });
         let (state, asked, cli_id, file) = running.unwrap_or((ChatState::Idle, false, None, None));
-        if matches!(state, ChatState::Working | ChatState::NeedsYou) {
-            bail!(
+        match state {
+            ChatState::Working => bail!(
                 "{} is at work in its CLI. Wait for it, or stop it there, then switch to the chat.",
                 agent.name
-            );
+            ),
+            // A question, a permission, a sign-in: answering is done
+            // there, and closing it now would drop what it is in.
+            ChatState::NeedsYou => bail!(
+                "{} waits for you in its CLI. Answer it there, or leave the CLI, then switch to the chat.",
+                agent.name
+            ),
+            _ => {}
         }
         let cli_id = cli_id.or_else(|| session.acp_session_id.clone());
         // Never on a guess: something was said there, and which of the
@@ -293,6 +311,9 @@ impl WorkspaceScreen {
             .clone()
             .map(PathBuf::from)
             .unwrap_or_else(|| self.project.path.clone());
+        let environment = ph_agent::profiles::Profiles::load(&store)
+            .of(agent.id)
+            .environment_for(&session.account);
         let taken = {
             let (store, id, cli_id, agent_id) =
                 (store.clone(), session.id, cli_id.clone(), agent.id);
@@ -302,7 +323,7 @@ impl WorkspaceScreen {
                     return Ok(0);
                 };
                 let file = file
-                    .or_else(|| session_file(agent_id, &cwd, &cli_id))
+                    .or_else(|| session_file(agent_id, &cwd, &cli_id, &environment))
                     .ok_or_else(|| anyhow!("its session file was not found"))?;
                 cli_transcript::take_in(&store, id, format, &file, mark)
             })

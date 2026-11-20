@@ -226,7 +226,7 @@ impl WorkspaceScreen {
             |this, _, event: &ChatPanelEvent, window, cx| match event {
                 ChatPanelEvent::SessionsChanged => this.reload_sessions(cx),
                 ChatPanelEvent::SelectSession(Some(id)) => this.select_session(*id, cx),
-                ChatPanelEvent::SelectSession(None) => this.new_session(window, cx),
+                ChatPanelEvent::SelectSession(None) => this.new_session_asked(window, cx),
                 ChatPanelEvent::TurnEnded => {
                     this.refresh_evidence(cx);
                     // A UI test being recorded ends with the agent's turn.
@@ -1176,6 +1176,19 @@ impl WorkspaceScreen {
         self.save_layout(cx);
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
+    }
+
+    /// A new session the user asked for (*New chat*, ⌘N): it opens as
+    /// Settings → Agents says its agent's sessions do, so in the agent's
+    /// CLI where that was chosen. One made for something (a message to
+    /// finish, the chat after one was deleted) is a chat.
+    pub fn new_session_asked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_session(window, cx);
+        let agent = self.chat.read(cx).active_thread().read(cx).agent().id;
+        let opens = ph_agent::profiles::Profiles::load(AppState::store(cx)).opens_as(agent);
+        if opens == ph_agent::Form::Cli {
+            self.show_as(ph_agent::Form::Cli, window, cx);
+        }
     }
 
     /// Begins a message in the chat for the user to finish.

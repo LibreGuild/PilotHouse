@@ -96,6 +96,9 @@ pub fn init(cx: &mut App) {
     review::install(AppState::store(cx).clone(), cx);
     attention::install(cx);
     terminal_agents::install(cx);
+    // Read once at the start: what counts usage reads every account's
+    // files, and has no store at hand.
+    ph_agent::profiles::Profiles::load(AppState::store(cx));
     ph_agent::rate_limits::RateLimits::watch_codex(cx);
     // Which agents are installed (new chats start with one), then their
     // models, so the picker lists them the first time.

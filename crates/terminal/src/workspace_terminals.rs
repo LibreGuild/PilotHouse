@@ -411,7 +411,17 @@ impl WorkspaceTerminals {
         shell: Option<&ph_env::Shell>,
         cx: &mut Context<Self>,
     ) -> Option<Entity<Terminal>> {
-        let shell = match Terminal::start_with(cwd, shell) {
+        self.follow(Terminal::start_with(cwd, shell), cx)
+    }
+
+    /// The terminal of a shell (or a program) that `started`, followed (its
+    /// title, its end), not yet in a tab; why it did not start is kept.
+    fn follow(
+        &mut self,
+        started: anyhow::Result<crate::terminal::StartedShell>,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Terminal>> {
+        let shell = match started {
             Ok(shell) => shell,
             Err(err) => {
                 self.error = Some(format!("Could not start a shell: {err:#}").into());
@@ -507,22 +517,28 @@ impl WorkspaceTerminals {
         label: &str,
         command: &str,
         cwd: PathBuf,
+        environment: &[(String, String)],
         cx: &mut Context<Self>,
     ) -> Option<Entity<Terminal>> {
         // On a server (a network drive's folder) the shell is the
-        // server's, reached through ssh: the command is typed into it.
+        // server's, reached through ssh: the command is typed into it
+        // (what is set here would be set for `ssh`, not for the program).
         if ph_remote::remote_of(&cwd).is_some() {
             return self.run_in(label, command, Some(cwd), cx);
         }
         let (program, args) = run_with(ph_env::default_shell(), command);
-        let shell = ph_env::Shell {
-            name: label.to_string(),
-            program,
-            args,
-            default: false,
-        };
-        let terminal = self.new_terminal_with(cwd, Some(&shell), cx)?;
+        let started =
+            Terminal::start_program_with(&program.to_string_lossy(), args, cwd, environment).map(
+                |mut started| {
+                    started.shell = label.to_string().into();
+                    started
+                },
+            );
+        let terminal = self.follow(started, cx)?;
         terminal.update(cx, |terminal, _| terminal.set_label(label.to_string()));
+        self.terminals.push(terminal.clone());
+        self.active = self.terminals.len() - 1;
+        cx.notify();
         Some(terminal)
     }
 

@@ -16,6 +16,7 @@
 //! use the app's browser, devices and tests.
 
 pub mod agents;
+pub mod agents_view;
 pub mod approvals;
 mod attachment_view;
 pub mod attachments;
@@ -38,6 +39,7 @@ pub mod oneshot;
 pub mod options;
 mod permission;
 pub mod preload;
+pub mod profiles;
 pub mod rate_limits;
 pub mod reply;
 pub mod review_card;

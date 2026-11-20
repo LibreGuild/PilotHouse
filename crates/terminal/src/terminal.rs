@@ -43,7 +43,7 @@ pub struct StartedShell {
     statuses: smol::channel::Receiver<crate::program_status::Message>,
     title: SharedString,
     /// The shell's name, as the user picked it (`zsh`, `PowerShell 7`).
-    shell: SharedString,
+    pub(crate) shell: SharedString,
     /// Where it started.
     cwd: std::path::PathBuf,
     columns: usize,
@@ -140,6 +140,17 @@ impl Terminal {
         args: Vec<String>,
         cwd: std::path::PathBuf,
     ) -> anyhow::Result<StartedShell> {
+        Self::start_program_with(program, args, cwd, &[])
+    }
+
+    /// [`Self::start_program`], with `environment` set for the program over
+    /// the user's own (an agent's account).
+    pub fn start_program_with(
+        program: &str,
+        args: Vec<String>,
+        cwd: std::path::PathBuf,
+        environment: &[(String, String)],
+    ) -> anyhow::Result<StartedShell> {
         let shell = std::path::PathBuf::from(program);
         // Not waiting for the login shell's environment (a terminal opened
         // as the app starts would hang until it is read): the shell started
@@ -154,6 +165,7 @@ impl Terminal {
         extra_env
             .entry("CLICOLOR".into())
             .or_insert_with(|| "1".into());
+        extra_env.extend(environment.iter().cloned());
 
         let options = tty::Options {
             shell: Some(tty::Shell::new(program.to_string(), args)),
