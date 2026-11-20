@@ -6,7 +6,10 @@
 // column, the colour the whole page takes, and the sun coming up at the end.
 //
 // Each piece runs only while it is on screen, and none of them runs for a
-// reader who asked their system for less motion. A piece that changes how
+// reader who asked their system for less motion. A drawing that plays by
+// itself stops where it is when it leaves the screen and carries on from
+// there when it is back (see `playing`): starting over each time made the
+// page blink whenever a reader scrolled a little away and back. A piece that changes how
 // something is laid out says so with a class on that thing (`pin`,
 // `afloat`, `demo-on`, `pinned`, `staged`, `live`), so a style never
 // counts on a script that did not run.
@@ -33,6 +36,32 @@ function watch(el, on, margin = "0px") {
     },
     { rootMargin: margin },
   ).observe(el);
+}
+
+/** For a drawing that plays by itself: `wait(ms)` waits that long, and then
+ * for as long as `el` is off the screen, so a script written as a row of
+ * waits stops where it is and carries on when its drawing is back. `start`
+ * is called the first time it shows. */
+function playing(el, start) {
+  let visible = false;
+  let started = false;
+  let resume = null;
+  watch(el, (now) => {
+    visible = now;
+    if (!now) return;
+    resume?.();
+    resume = null;
+    if (!started) {
+      started = true;
+      // After whoever called has `wait` in hand (a browser without the
+      // observer says "on screen" before this function returns).
+      setTimeout(start, 0);
+    }
+  });
+  return async (ms) => {
+    await sleep(ms);
+    while (!visible) await new Promise((resolve) => (resume = resolve));
+  };
 }
 
 // What follows the scroll, done once a frame however often the event fires.
@@ -348,13 +377,22 @@ if ($("#sea-day")) {
     const roomy = matchMedia("(min-width: 1001px) and (min-height: 560px)");
     let pinned = false;
 
+    let was = "";
+    let settle = 0;
     const scroll = () => {
       if (!pinned) return;
       const span = hero.offsetHeight - scene.clientHeight;
-      const p = ease(clamp((scrollY - hero.offsetTop) / span, 0, 1));
-      scene.style.setProperty("--p", p.toFixed(4));
+      const p = ease(clamp((scrollY - hero.offsetTop) / span, 0, 1)).toFixed(4);
+      // Nothing to do for the rest of the page's scroll.
+      if (p === was) return;
+      was = p;
+      scene.style.setProperty("--p", p);
       // Out of the tab order once they can no longer be seen.
       text.classList.toggle("gone", p > 0.45);
+      // The window follows the scroll at once (see `.moving` in the styles).
+      scene.classList.add("moving");
+      clearTimeout(settle);
+      settle = setTimeout(() => scene.classList.remove("moving"), 180);
     };
 
     const layout = () => {
@@ -379,6 +417,7 @@ if ($("#sea-day")) {
       scene.style.setProperty("--y1", `${y1.toFixed(1)}px`);
       scene.style.setProperty("--s1", end.toFixed(4));
       scene.style.setProperty("--s0", (end * 0.88).toFixed(4));
+      was = "";
       scroll();
     };
 
@@ -424,9 +463,6 @@ if ($("#sea-day")) {
     const [chatIdle, paneIdle] = $$("[data-idle]", win);
     const phases = $$(".phases li");
     const REQUEST = "Show the tide chart when there is no network.";
-    // Each start gets a number; a run stops when it sees a newer one (the
-    // window left the screen, or came back).
-    let run = 0;
 
     /** Lights the phase the task is in, and ticks the ones before it. */
     const phase = (name) => {
@@ -472,23 +508,22 @@ if ($("#sea-day")) {
       pointer.style.transform = `translate(${win.offsetWidth * 0.5}px, ${win.offsetHeight * 0.86}px)`;
     };
 
-    const play = async (mine) => {
-      const stale = () => mine !== run;
+    // The task, over and over. Every `pause` also waits while the window is
+    // off the screen, so the task stops where it is and carries on from
+    // there: it does not start over each time the window comes back.
+    const play = async () => {
       const show = (name) => part(name).classList.add("show");
-      while (!stale()) {
+      for (;;) {
         reset();
-        await sleep(700);
-        if (stale()) return;
+        await pause(700);
         // The request is typed and sent.
         phase("ask");
         for (let length = 1; length <= REQUEST.length; length++) {
           typed.textContent = REQUEST.slice(0, length);
-          await sleep(22);
-          if (stale()) return;
+          await pause(22);
         }
         pointAt(hook("send"));
-        await sleep(800);
-        if (stale()) return;
+        await pause(800);
         await press(hook("send"));
         typed.textContent = "";
         chatIdle.classList.add("off");
@@ -496,68 +531,54 @@ if ($("#sea-day")) {
         tabDot.className = "dot blue";
         phase("work");
         // The agent works: its steps on the left, what it changed on the right.
-        for (const [name, wait] of [["s1", 650], ["s2", 750], ["f1", 150], ["diff", 450], ["s3", 750], ["f2", 150]]) {
-          await sleep(wait);
-          if (stale()) return;
+        for (const [name, after] of [["s1", 650], ["s2", 750], ["f1", 150], ["diff", 450], ["s3", 750], ["f2", 150]]) {
+          await pause(after);
           if (name === "f1") paneIdle.classList.add("off");
           show(name);
         }
         // It asks; the answer is a click.
-        await sleep(750);
-        if (stale()) return;
+        await pause(750);
         show("ask");
         show("count");
         tabDot.className = "dot amber";
         phase("allow");
-        await sleep(850);
-        if (stale()) return;
+        await pause(850);
         pointAt(hook("allow"));
-        await sleep(950);
-        if (stale()) return;
+        await pause(950);
         await press(hook("allow"));
         ask.classList.add("gone");
         part("count").classList.remove("show");
         tabDot.className = "dot blue";
-        await sleep(850);
-        if (stale()) return;
+        await pause(850);
         show("tests");
         tabDot.className = "dot green";
         phase("review");
         // The review: on a phone the Git pane takes the chat's place; then
         // each file is ticked as read, and the change committed.
-        await sleep(750);
-        if (stale()) return;
+        await pause(750);
         win.dataset.view = "result";
         for (const tick of ["t1", "t2"]) {
-          await sleep(450);
-          if (stale()) return;
+          await pause(450);
           pointAt(hook(tick), 0.5, 0.5);
-          await sleep(750);
-          if (stale()) return;
+          await pause(750);
           hook(tick).classList.add("on");
         }
-        await sleep(400);
-        if (stale()) return;
+        await pause(400);
         show("commit");
         phase("ship");
-        await sleep(400);
-        if (stale()) return;
+        await pause(400);
         pointAt(hook("commit"));
-        await sleep(950);
-        if (stale()) return;
+        await pause(950);
         await press(hook("commit"));
         show("toast");
         phase("all");
-        await sleep(3600);
+        await pause(3600);
       }
     };
 
     win.classList.add("demo-on");
     reset();
-    watch(win, (visible) => {
-      run += 1;
-      if (visible) void play(run);
-    });
+    const pause = playing(win, () => void play());
   }
 }
 
@@ -620,39 +641,28 @@ if ($("#sea-day")) {
     };
     win.classList.add("live");
     show("story");
-    let run = 0;
-    let visible = false;
-    // The change as a diff for a moment, then told: long enough to read.
-    const play = async () => {
-      const mine = ++run;
-      while (mine === run && visible) {
-        show("diff");
-        await sleep(2600);
-        if (mine !== run) return;
-        show("story");
-        await sleep(7400);
-      }
-    };
-    // The reader flips it: it stays as they left it for a while.
+    // The reader flips it: it stays as they left it until this time.
+    let held = 0;
     win.addEventListener("click", (event) => {
       const tab = event.target.closest(".s");
       if (!tab) return;
-      const mine = ++run;
+      held = performance.now() + 12000;
       show(tab.dataset.to);
-      setTimeout(() => {
-        if (mine === run && visible && !reduce) play();
-      }, 12000);
     });
     if (!reduce) {
-      watch(win, (now) => {
-        visible = now;
-        if (now) {
-          play();
-        } else {
-          run += 1;
+      // Told, long enough to read; then the change as a diff for a moment.
+      // Off the screen it waits as it is, and carries on when it is back.
+      const play = async () => {
+        for (;;) {
+          await wait(7400);
+          if (performance.now() < held) continue;
+          show("diff");
+          await wait(2600);
+          if (performance.now() < held) continue;
           show("story");
         }
-      });
+      };
+      const wait = playing(win, () => void play());
     }
   }
 }
@@ -702,31 +712,23 @@ if ($("#sea-day")) {
       ["c", "working"],
       ["b", "done"],
     ];
-    let run = 0;
-    let visible = false;
-    /** Plays the afternoon over and over, after `pause` ms, until a newer
-     * run starts. A card a reader already moved is left where it is. */
-    const play = async (mine, pause = 0) => {
-      await sleep(pause);
-      while (mine === run) {
+    // When a reader moved a card, the board waits until this time.
+    let held = 0;
+    /** Plays the afternoon over and over. Off the screen it waits where it
+     * is. A card a reader already moved is left where it is. */
+    const play = async () => {
+      for (;;) {
         for (const [id, state] of script) {
-          await sleep(1900);
-          if (mine !== run) return;
+          await wait(1900);
+          while (performance.now() < held) await wait(300);
           if (cards[id].dataset.state !== state) move(id, state);
         }
-        await sleep(2800);
-        if (mine !== run) return;
+        await wait(2800);
         for (const [id, state] of start) if (cards[id].dataset.state !== state) move(id, state);
       }
     };
     count();
-    if (!reduce) {
-      watch(board, (now) => {
-        visible = now;
-        run += 1;
-        if (visible) void play(run);
-      });
-    }
+    const wait = reduce ? sleep : playing(board, () => void play());
 
     // A reader can answer too: Allow or Deny sends the agent back to work,
     // Review changes finishes the task. The board waits a moment, then
@@ -736,9 +738,8 @@ if ($("#sea-day")) {
       const card = event.target.closest(".wbtn")?.closest(".card");
       const next = { needs: "working", ready: "done" }[card?.dataset.state];
       if (!next) return;
-      run += 1;
+      held = performance.now() + 2600;
       move(card.dataset.id, next);
-      if (visible && !reduce) void play(run, 2600);
     });
   }
 }
@@ -799,6 +800,9 @@ if ($("#sea-day")) {
   const end = $("#download");
   const daybreak = $(".daybreak");
   if (nav) {
+    // The link last marked: the mark is written when it moves, not on
+    // every frame of a scroll.
+    let marked = -2;
     followers.push(() => {
       const most = root.scrollHeight - innerHeight;
       read?.style.setProperty("--read", most > 0 ? (scrollY / most).toFixed(4) : "0");
@@ -810,10 +814,13 @@ if ($("#sea-day")) {
         if (section && section.getBoundingClientRect().top <= line) current = index;
       });
       if (end && end.getBoundingClientRect().top <= line) current = -1;
-      links.forEach((link, index) => {
-        if (index === current) link.setAttribute("aria-current", "location");
-        else link.removeAttribute("aria-current");
-      });
+      if (current !== marked) {
+        marked = current;
+        links.forEach((link, index) => {
+          if (index === current) link.setAttribute("aria-current", "location");
+          else link.removeAttribute("aria-current");
+        });
+      }
       if (!daybreak) return;
       const box = daybreak.getBoundingClientRect();
       // The header turns light once the sunrise is under it.

@@ -16,7 +16,7 @@
   --line: rgba(255, 255, 255, 0.11);
   --line-2: rgba(255, 255, 255, 0.2);
   --fill: rgba(255, 255, 255, 0.11);
-  --glass: rgba(18, 19, 21, 0.72);
+  --glass: rgba(17, 18, 20, 0.94);
   --panel: rgba(255, 255, 255, 0.04);
   --accent: #4fd6c7;
   --accent-2: #a5f3c4;
@@ -102,12 +102,13 @@ p { margin: 0; }
   position: sticky; top: 0; z-index: 10;
   display: flex; align-items: center; gap: 24px;
   height: var(--nav); padding: 0 var(--pad);
-  background: rgba(8, 9, 10, 0.6);
-  backdrop-filter: blur(14px) saturate(1.4);
+  /* Nearly solid: with nothing blurring what passes under it, a heading
+     would show through a clearer bar. */
+  background: rgba(8, 9, 10, 0.97);
   border-bottom: 1px solid var(--line);
   transition: background 0.4s, border-color 0.4s;
 }
-.nav.day { background: rgba(246, 241, 231, 0.82); }
+.nav.day { background: rgba(246, 241, 231, 0.97); }
 /* How far down the page the reader is. */
 .read { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; transform: scaleX(var(--read, 0)); transform-origin: left; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
 .brand { display: inline-flex; align-items: center; gap: 9px; color: var(--ink); text-decoration: none; font: 650 1.06rem/1 var(--sans); }
@@ -147,10 +148,13 @@ main > section { position: relative; padding: clamp(72px, 13vh, 124px) var(--pad
 }
 .sky { position: absolute; inset: 0; width: 100%; height: 100%; }
 .aurora { position: absolute; inset: 0; pointer-events: none; }
-.aurora i { position: absolute; border-radius: 50%; filter: blur(80px); animation: drift 20s ease-in-out infinite alternate; }
-.aurora i:nth-child(1) { left: 2%; top: -24%; width: 48vw; height: 54vh; background: var(--accent); opacity: 0.2; }
-.aurora i:nth-child(2) { right: -6%; top: -8%; width: 42vw; height: 48vh; background: var(--accent-2); opacity: 0.09; animation-duration: 26s; animation-delay: -8s; }
-.aurora i:nth-child(3) { left: 32%; top: 36%; width: 38vw; height: 34vh; background: var(--accent); opacity: 0.08; animation-duration: 32s; animation-delay: -14s; }
+/* Soft lights. Each is a gradient that fades to nothing, not a shape with a
+   blur filter over it: a large blur is worked out again for every frame the
+   light moves, and that is what makes a browser drop frames here. */
+.aurora i { position: absolute; border-radius: 50%; background: radial-gradient(closest-side, var(--light), color-mix(in srgb, var(--light) 45%, transparent) 45%, transparent); animation: drift 20s ease-in-out infinite alternate; }
+.aurora i:nth-child(1) { --light: var(--accent); left: -8%; top: -42%; width: 68vw; height: 86vh; opacity: 0.2; }
+.aurora i:nth-child(2) { --light: var(--accent-2); right: -16%; top: -24%; width: 60vw; height: 78vh; opacity: 0.09; animation-duration: 26s; animation-delay: -8s; }
+.aurora i:nth-child(3) { --light: var(--accent); left: 24%; top: 24%; width: 54vw; height: 56vh; opacity: 0.08; animation-duration: 32s; animation-delay: -14s; }
 @keyframes drift { to { transform: translate(7vw, 5vh) scale(1.18); } }
 
 .hero-text { position: relative; z-index: 1; width: 100%; max-width: 1340px; text-align: center; display: grid; gap: clamp(12px, 2.5vh, 24px); justify-items: center; }
@@ -160,7 +164,7 @@ main > section { position: relative; padding: clamp(72px, 13vh, 124px) var(--pad
 .actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
 
 .hero-stage { position: relative; z-index: 1; width: 100%; max-width: 1000px; perspective: 1500px; }
-.halo { position: absolute; inset: 2% 4% 8%; border-radius: 40%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); filter: blur(72px); opacity: 0.3; }
+.halo { position: absolute; inset: -14% -8% -8%; background: radial-gradient(52% 58% at 32% 50%, var(--accent), transparent 72%), radial-gradient(52% 58% at 68% 50%, var(--accent-2), transparent 72%); opacity: 0.3; }
 .hero-stage .win { background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.012) 30%), rgba(15, 16, 18, 0.9); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.09), 0 50px 90px -40px rgba(0, 0, 0, 0.95), 0 0 80px -30px var(--accent); }
 .tilt { position: relative; transform-origin: 50% 0; }
 
@@ -200,6 +204,10 @@ main > section { position: relative; padding: clamp(72px, 13vh, 124px) var(--pad
 .hero.pin .hero-text.gone { visibility: hidden; }
 .hero.pin .hero-stage { position: absolute; left: 50%; top: 0; width: calc(100% - 48px); translate: -50% 0; transform: translateY(calc(var(--y0, 300px) + (var(--y1, 100px) - var(--y0, 300px)) * var(--p, 0))); }
 .hero.pin .tilt { transform: rotateX(calc((1 - var(--p, 0)) * 20deg + var(--rx, 0deg))) rotateY(var(--ry, 0deg)) scale(calc(var(--s0, 0.88) + (var(--s1, 1) - var(--s0, 0.88)) * var(--p, 0))); transition: transform 0.2s ease-out; }
+/* The ease is for the lean toward the pointer. While the page scrolls the
+   window follows the scroll itself: an ease would start over on every
+   frame and leave it trailing behind. */
+.hero.pin .scene.moving .tilt { transition: none; }
 .hero.pin .halo { opacity: calc(0.2 + var(--p, 0) * 0.14); }
 .hero.pin .phases { position: absolute; left: 0; right: 0; bottom: calc(100% + 14px); margin: 0; opacity: calc(var(--p, 0) * 3 - 1.6); }
 .hero.pin .sea { position: absolute; left: 0; bottom: 0; margin: 0; height: clamp(130px, 26vh, 250px); transform: translateY(calc(var(--p, 0) * 31%)); }
@@ -239,14 +247,14 @@ main > section { position: relative; padding: clamp(72px, 13vh, 124px) var(--pad
 .moves.pinned .move:last-child { min-height: 62vh; }
 .moves.pinned .move-fig { display: none; }
 .moves.pinned .moves-stage { display: block; position: sticky; top: 16vh; height: 68vh; }
-.stage-glow { position: absolute; inset: 14% 10%; border-radius: 50%; background: linear-gradient(120deg, var(--accent), var(--accent-2)); filter: blur(90px); opacity: 0.15; }
+.stage-glow { position: absolute; inset: -4% -8%; background: radial-gradient(50% 50% at 36% 46%, var(--accent), transparent 70%), radial-gradient(50% 50% at 64% 54%, var(--accent-2), transparent 70%); opacity: 0.15; }
 .stage-frames { position: absolute; inset: 0; perspective: 1400px; }
 /* The step leaving goes at once, the one arriving a moment after: two
    half-seen drawings on top of each other read as a smudge. */
 .frame { position: absolute; inset: 0; display: grid; place-items: center; opacity: 0; transform: translateY(40px) rotateX(-10deg) scale(0.94); transition: opacity 0.2s ease, transform 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); pointer-events: none; }
 .frame.on { opacity: 1; transform: none; transition: opacity 0.4s ease 0.16s, transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) 0.1s; }
 .frame.gone { transform: translateY(-40px) rotateX(10deg) scale(0.94); }
-.frame > .pane { width: min(100%, 480px); transform: scale(1.34); background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 36%), #141517; backdrop-filter: none; }
+.frame > .pane { width: min(100%, 480px); transform: scale(1.34); background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 36%), #141517; }
 .stage-dots { position: absolute; right: -6px; top: 50%; translate: 0 -50%; list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
 .stage-dots li { width: 6px; height: 6px; border-radius: 999px; background: var(--line-2); transition: height 0.4s, background 0.4s; }
 .stage-dots li.on { height: 26px; background: var(--accent); }
@@ -256,7 +264,7 @@ main > section { position: relative; padding: clamp(72px, 13vh, 124px) var(--pad
    ===================================================================== */
 .explain-sec { background: linear-gradient(#0c0d0e, #0a0b0c 55%, #0c0d0e); }
 .explain-sec > .wf { position: relative; max-width: 940px; margin: 0 auto; }
-.explain-sec > .wf::before { content: ""; position: absolute; inset: 14% 10% -6%; border-radius: 50%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); filter: blur(90px); opacity: 0.1; }
+.explain-sec > .wf::before { content: ""; position: absolute; inset: -6% -10% -26%; background: radial-gradient(50% 52% at 34% 52%, var(--accent), transparent 70%), radial-gradient(50% 52% at 66% 52%, var(--accent-2), transparent 70%); opacity: 0.1; }
 .told { position: relative; }
 .told-body { display: grid; grid-template-columns: 28% minmax(0, 1fr); min-height: 336px; }
 .told-body > .files { border-bottom: none; border-right: 1px solid var(--line); padding: 12px 10px; }
@@ -319,7 +327,7 @@ main > section { position: relative; padding: clamp(72px, 13vh, 124px) var(--pad
    ===================================================================== */
 .bridge-sec { background: linear-gradient(#0c0d0e, #0d0e10); }
 .bridge-sec .wf { position: relative; max-width: 1080px; margin: 0 auto; }
-.bridge-sec .wf::before { content: ""; position: absolute; inset: 10% 8% -4%; border-radius: 50%; background: linear-gradient(90deg, var(--amber), var(--blue), var(--green)); filter: blur(90px); opacity: 0.11; }
+.bridge-sec .wf::before { content: ""; position: absolute; inset: -10% -8% -24%; background: radial-gradient(40% 50% at 22% 52%, var(--amber), transparent 70%), radial-gradient(40% 50% at 50% 52%, var(--blue), transparent 70%), radial-gradient(40% 50% at 78% 52%, var(--green), transparent 70%); opacity: 0.11; }
 .board { position: relative; }
 .bridge { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; padding: 16px; min-height: 330px; align-items: start; }
 .col { display: grid; gap: 9px; align-content: start; padding: 10px; border-radius: 12px; background: var(--panel); min-height: 290px; }
@@ -490,9 +498,9 @@ main > section { position: relative; padding: clamp(72px, 13vh, 124px) var(--pad
 .dawn { padding-bottom: 0; background: linear-gradient(180deg, #0e0f11 0%, #121314 20%, #241a18 40%, #5c3327 58%, #b8674a 74%, #eba17c 89%, #f3c4a0 100%); overflow: hidden; }
 .dawn .wf { position: relative; z-index: 1; }
 .map { display: grid; grid-template-columns: minmax(0, 1fr) 130px minmax(0, 1fr); align-items: center; max-width: 900px; margin: 0 auto; font-size: 13.5px; }
-.machine { display: grid; gap: 12px; padding: 18px; border-radius: 22px; border: 1.5px dashed var(--line-2); background: rgba(10, 11, 12, 0.5); backdrop-filter: blur(6px); }
+.machine { display: grid; gap: 12px; padding: 18px; border-radius: 22px; border: 1.5px dashed var(--line-2); background: rgba(10, 11, 12, 0.8); }
 .machine small { font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; }
-.node { display: flex; align-items: center; gap: 9px; height: 46px; padding: 0 14px; border-radius: 12px; border: 1px solid var(--line-2); background: rgba(10, 11, 12, 0.6); backdrop-filter: blur(6px); white-space: nowrap; }
+.node { display: flex; align-items: center; gap: 9px; height: 46px; padding: 0 14px; border-radius: 12px; border: 1px solid var(--line-2); background: rgba(10, 11, 12, 0.86); white-space: nowrap; }
 .node img { border-radius: 5px; }
 .node .ico { font-size: 16px; color: var(--muted); }
 .node.main { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft), 0 0 40px -6px var(--accent); font-weight: 650; }
@@ -553,7 +561,7 @@ main > section { position: relative; padding: clamp(72px, 13vh, 124px) var(--pad
 .wf small { font-size: 10.5px; color: var(--muted); }
 .wf b { font-weight: 600; }
 .wf p { margin: 0; }
-.win, .pane { border: 1px solid var(--line-2); border-radius: 16px; background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.012) 36%), var(--glass); backdrop-filter: blur(18px); box-shadow: var(--shadow); }
+.win, .pane { border: 1px solid var(--line-2); border-radius: 16px; background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.012) 36%), var(--glass); box-shadow: var(--shadow); }
 .win { overflow: hidden; }
 .pane { padding: 16px; display: grid; gap: 12px; }
 .win-bar { display: flex; align-items: center; gap: 6px; padding: 10px 13px; background: rgba(255, 255, 255, 0.04); border-bottom: 1px solid var(--line); }

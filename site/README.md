@@ -38,7 +38,9 @@ A screenshot goes stale each time the app's look changes, in every theme. A draw
 - **Make it yours** repaints the page in the accent picked, the way the app's accent setting does.
 - **The sun comes up** behind a second sea at the end of the privacy section, as it is scrolled into view.
 
-Each of these runs only while it is on screen. For a reader who asked their system for reduced motion nothing moves, and without JavaScript the page is the same drawings standing still: check both when you change one. So that the page never ends up half-way, a style that depends on the script is written against a class the script itself puts on the thing it runs (`pin`, `afloat`, `demo-on`, `pinned`, `staged`, `live`), never against "scripts are on".
+Each of these runs only while it is on screen. A drawing that plays by itself (the hero's window, Explain, the Bridge) stops where it is when it leaves the screen and carries on from there when it is back (`playing` in `main.js`): starting over on every return made the page blink for a reader who scrolled a little away and back. For a reader who asked their system for reduced motion nothing moves, and without JavaScript the page is the same drawings standing still: check both when you change one. So that the page never ends up half-way, a style that depends on the script is written against a class the script itself puts on the thing it runs (`pin`, `afloat`, `demo-on`, `pinned`, `staged`, `live`, `moving`), never against "scripts are on".
+
+**What it costs to draw.** The page scrolls over a sky that is drawn again every frame, so what sits on it has to be cheap to put on screen. Two things are kept out for that reason: `filter: blur()` on anything large (a glow is a `radial-gradient` that fades to nothing, which looks the same and costs nothing per frame), and `backdrop-filter` (the glass is a dense fill with a sheen, not a blur of what is behind; behind a window that turns in 3D, a browser redoes that blur every frame, and flickers when it falls behind). What follows the scroll is written once a frame and only when it changed.
 
 ## Look
 
