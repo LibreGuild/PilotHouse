@@ -331,6 +331,20 @@ impl WorkspaceScreen {
         cx.spawn_in(window, async move |this, cx| {
             let taken = taken.await;
             _ = this.update_in(cx, |this, window, cx| {
+                // The CLI worked or answered, and its session file holds
+                // nothing new: it kept no record (its transcript saving
+                // was off). Said, since the chat then looks as it did and
+                // the agent will not know what was said there either.
+                if matches!(taken, Ok(0)) && asked {
+                    let _ = cli_transcript::note(
+                        &store,
+                        session.id,
+                        &format!(
+                            "{} kept no record of what was said in its CLI, so it is not in this chat, and {} will not remember it.",
+                            agent.name, agent.name
+                        ),
+                    );
+                }
                 if let Err(err) = &taken {
                     tracing::warn!("reading a session's CLI part into its chat: {err:#}");
                     // Said in the chat, where it will be missed.

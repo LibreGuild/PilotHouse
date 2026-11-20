@@ -52,6 +52,9 @@ fn main() {
 }
 
 fn run_app(open: Vec<std::path::PathBuf>, quick_chat: bool) -> Result<()> {
+    // Started from a terminal inside an agent's session (or by an agent):
+    // the agents this app starts are not that session's children.
+    ph_env::forget_parent_session();
     logs::write_to_file();
     // Agents and terminals need the login shell's PATH; read it while the UI starts.
     ph_env::warm_up();

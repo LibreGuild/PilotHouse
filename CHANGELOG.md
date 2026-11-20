@@ -6,6 +6,7 @@ Each release also has **Merge notes** for organisations that build their own cop
 
 ## Unreleased
 
+- **Fixed: agents kept no record when the app was started from inside a Claude Code session.** Claude Code marks the programs it starts as its session's children, and the app handed that mark on: a `claude` in one of its terminals said "Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker", so what was said in a session's CLI was in no file, and missing from the chat on the way back. The app forgets those marks as it starts, and a chat says so if a CLI kept no record.
 - **Chat: `/` lists all of an agent's commands.** The menu showed the first eight and could not be scrolled, so the rest were reached only by typing their names. It still shows eight at a time, and moves with the arrow keys through all of them.
 - **Chat: what "Always allow" left behind can be seen and taken back.** An approval answered *Always* leaves a rule with the agent, which then never asks again, and nothing showed it. A Claude Code chat's ⋯ menu has **Always allowed here…**: the rules for the folder, each with a button that takes it back.
 - **Chat: a picture a tool gives back is shown.** A screenshot tool's call said one line of text and its picture was dropped. The picture now shows with the call, small, and opens large on a click.

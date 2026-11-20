@@ -17,6 +17,49 @@ use std::sync::OnceLock;
 
 static ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
 
+/// What Claude Code sets for the programs it starts, to say "you run inside
+/// my session": seen when the app itself is started from a terminal in a
+/// Claude Code session, or by an agent. Passed on, they would tell every
+/// agent the app starts that it is that session's child: a `claude` in a
+/// terminal then says "Transcript saving is off — inherited
+/// CLAUDE_CODE_CHILD_SESSION marker" and keeps no record of what is said.
+const PARENT_SESSION: [&str; 11] = [
+    "AI_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PID",
+];
+
+/// Whether variable `name` says which agent session a program runs inside
+/// (see [`forget_parent_session`]). Not what a user sets for an agent
+/// (`CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_USE_BEDROCK`…).
+pub fn is_parent_session_variable(name: &str) -> bool {
+    PARENT_SESSION.contains(&name)
+}
+
+/// Forgets that the app was started from inside an agent's session: the
+/// agents it starts are the user's own sessions, nobody's children. What
+/// the user's shell profile sets is read after this, and stays.
+///
+/// Call first thing in the app, before anything reads the environment on
+/// another thread.
+pub fn forget_parent_session() {
+    for name in PARENT_SESSION {
+        if std::env::var_os(name).is_some() {
+            // SAFETY: called at the start of the app, before any thread
+            // that reads the environment is started.
+            unsafe { std::env::remove_var(name) };
+        }
+    }
+}
+
 /// Starts capturing the environment on a background thread. Optional: the
 /// first caller of [`shell_env`] would otherwise do it synchronously.
 pub fn warm_up() {
@@ -422,6 +465,31 @@ pub fn shells() -> Vec<Shell> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_sessions_own_marks_are_forgotten() {
+        for mark in [
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "AI_AGENT",
+        ] {
+            assert!(is_parent_session_variable(mark), "{mark}");
+        }
+        // What a user sets for an agent is theirs to pass on.
+        for theirs in [
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "CODEX_HOME",
+            "PATH",
+        ] {
+            assert!(!is_parent_session_variable(theirs), "{theirs}");
+        }
+    }
 
     #[test]
     fn pathext_names_replace_the_bare_one() {

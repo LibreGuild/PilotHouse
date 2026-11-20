@@ -185,6 +185,8 @@ The CLI is the terminal's own program: the user's shell starts it (`-l -i -c`, s
 
 A session in its CLI form whose program is not running (after a restart, or once you left the CLI) shows what its session file says, read only, with **Continue**: nothing starts by itself. A chat nothing was sent in has no conversation yet: its CLI starts a session of its own, named by the first thing asked there. *Past chats → Started outside this app* lists an agent's own sessions in the folder to go on with here (a chat that takes the session back; for Cline, which cannot, its CLI).
 
+**Nobody's child.** Claude Code tells the programs it starts that they run inside its session (`CLAUDE_CODE_CHILD_SESSION` and others), and a `claude` that sees that keeps no record of what is said ("Transcript saving is off"). So an app started from a terminal in a Claude Code session would hand that on to every agent it starts, and a session's CLI part would be in no file to take back. The app forgets those marks as it starts (`ph_env::forget_parent_session`); what your shell profile sets for an agent stays. Should a CLI keep no record all the same, the chat says so when you come back, instead of looking as if nothing was said.
+
 What does not carry over: a turn under way; work an agent left running in its process when you switch; and for Cline the way back to the chat is a summary, not its memory (it cannot load a session), which the chat says.
 
 ## Settings → Agents: how each agent is run
