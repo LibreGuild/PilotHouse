@@ -29,14 +29,15 @@ A screenshot goes stale each time the app's look changes, in every theme. A draw
 
 `main.js` adds the motion; the comment at the top of each of its parts says what it does.
 
-- **The sea** under the hero is drawn on a canvas, and the agents float on its first wave.
-- **The hero's window** plays a task on a loop: the request is typed, the agent works, asks, gets a yes, the tests pass, the files are ticked as read, the change is committed. The steps and their timing are the `play` function; the parts it shows carry `data-d`, the things it points at `data-demo`.
+- **The hero is one scene**: a sky of stars, the words, the window, and a sea in front with the agents afloat on it as small boats. On a wide screen the scene stays in place for a stretch of scrolling (`.hero.pin`): the words leave, and the window comes up out of the sea and flat to the reader. One number, `--p`, goes from 0 to 1 over that stretch and the styles follow it.
+- **The window plays a task** on a loop: the request is typed, the agent works, asks, gets a yes, the tests pass, the files are ticked as read, the change is committed. The steps and their timing are the `play` function; the parts it shows carry `data-d`, the things it points at `data-demo`, and the row of phases above the window says where the task is.
 - **A task in four moves** keeps one window in place on a wide screen while the four steps scroll by, and shows each step's drawing in it. On a narrow one each step has its drawing under it.
-- **The Bridge's cards** go from column to column (the `script` list).
-- **The tiles'** small drawings loop while they are on screen (CSS keyframes).
+- **The Bridge's cards** go from column to column (the `script` list), and a reader can answer one: Allow, Deny and Review changes move its card.
+- **The tiles'** small drawings loop while they are on screen (CSS keyframes), and a light follows the pointer across the grid.
 - **Make it yours** repaints the page in the accent picked, the way the app's accent setting does.
+- **The sun comes up** behind a second sea at the end of the privacy section, as it is scrolled into view.
 
-Each of these runs only while it is on screen. For a reader who asked their system for reduced motion nothing moves, and without JavaScript the page is the same drawings standing still: check both when you change one.
+Each of these runs only while it is on screen. For a reader who asked their system for reduced motion nothing moves, and without JavaScript the page is the same drawings standing still: check both when you change one. So that the page never ends up half-way, a style that depends on the script is written against a class the script itself puts on the thing it runs (`pin`, `afloat`, `demo-on`, `pinned`, `staged`, `live`), never against "scripts are on".
 
 ## Look
 
@@ -48,6 +49,6 @@ A night watch that ends at dawn: the page starts dark, the sky lightens through 
 python3 -m http.server -d site 8000
 ```
 
-Then open <http://localhost:8000>.
+Then open <http://localhost:8000>. A browser may keep the stylesheet and the script from the last time: after changing one, reload with the cache off (⌘⇧R, or Ctrl+Shift+R). On the published site this cannot happen: the page links them as `?v=dev`, and the *Site* workflow replaces `dev` with the commit on each publish.
 
 **First publish:** in the repository's settings, under *Pages*, set the source to *GitHub Actions*. The next push to `main` that touches `site/` (or running the *Site* workflow by hand) publishes it.

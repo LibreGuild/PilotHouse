@@ -33,6 +33,7 @@
   --serif: ui-serif, "New York", "Iowan Old Style", Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  --nav: 62px;
   --wide: 1160px;
   --pad: max(24px, calc((100vw - var(--wide)) / 2));
   color-scheme: dark;
@@ -100,73 +101,114 @@ p { margin: 0; }
 .nav {
   position: sticky; top: 0; z-index: 10;
   display: flex; align-items: center; gap: 24px;
-  padding: 12px var(--pad);
-  background: rgba(7, 11, 22, 0.62);
+  height: var(--nav); padding: 0 var(--pad);
+  background: rgba(7, 11, 22, 0.55);
   backdrop-filter: blur(14px) saturate(1.4);
   border-bottom: 1px solid var(--line);
+  transition: background 0.4s, border-color 0.4s;
 }
-.nav.day { background: rgba(246, 241, 231, 0.78); }
-.nav { transition: background 0.4s; }
+.nav.day { background: rgba(246, 241, 231, 0.82); }
+/* How far down the page the reader is. */
+.read { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; transform: scaleX(var(--read, 0)); transform-origin: left; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
 .brand { display: inline-flex; align-items: center; gap: 9px; color: var(--ink); text-decoration: none; font: 650 1.06rem/1 var(--sans); }
 .brand img { border-radius: 7px; }
 .nav nav { display: flex; gap: 24px; margin-left: auto; }
-.nav nav a { color: var(--muted); text-decoration: none; font-size: 0.95rem; transition: color 0.2s; }
-.nav nav a:hover { color: var(--ink); }
+.nav nav a { position: relative; color: var(--muted); text-decoration: none; font-size: 0.95rem; transition: color 0.2s; }
+.nav nav a:hover, .nav nav a[aria-current] { color: var(--ink); }
+.nav nav a::after { content: ""; position: absolute; left: 0; right: 0; bottom: -8px; height: 2px; border-radius: 2px; background: var(--accent); transform: scaleX(0); transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.nav nav a[aria-current]::after { transform: none; }
 .nav-end { display: flex; align-items: center; gap: 10px; }
 
+/* A little grain over everything, so the long dark gradients do not band. */
+body::after {
+  content: ""; position: fixed; inset: 0; z-index: 9; pointer-events: none; opacity: 0.055;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.6 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
+
 /* ---- Sections ---- */
-main > section { position: relative; padding: 120px var(--pad); }
-.section-head { max-width: 760px; margin-bottom: 64px; display: grid; gap: 16px; }
+main > section { position: relative; padding: clamp(72px, 13vh, 124px) var(--pad); }
+.section-head { max-width: 760px; margin-bottom: clamp(36px, 7vh, 64px); display: grid; gap: 16px; }
 .section-head.center { margin-inline: auto; text-align: center; justify-items: center; }
 .section-head > p:last-child:not(.eyebrow) { color: var(--muted); font-size: 1.2rem; }
 
-/* Headings come in a word at a time (only where scripts run). */
-.js [data-reveal] .w { display: inline-block; opacity: 0; transform: translateY(0.45em); transition: opacity 0.6s ease, transform 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); transition-delay: calc(var(--i) * 70ms); }
-.js [data-reveal].in .w { opacity: 1; transform: none; }
+/* Headings come in a word at a time (the script makes the words). */
+[data-reveal] .w { display: inline-block; opacity: 0; transform: translateY(0.45em); transition: opacity 0.6s ease, transform 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); transition-delay: calc(var(--i) * 70ms); }
+[data-reveal].in .w { opacity: 1; transform: none; }
 
 /* =====================================================================
-   Hero
+   Hero: one scene. The sky, the words, the window, and the sea in front.
    ===================================================================== */
-.hero {
-  padding-top: 84px; padding-bottom: 0;
-  display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; gap: 56px;
-  background:
-    radial-gradient(1100px 520px at 50% -8%, color-mix(in srgb, var(--accent) 34%, transparent), transparent 62%),
-    radial-gradient(700px 400px at 85% 30%, rgba(110, 168, 255, 0.12), transparent 60%);
-  overflow: hidden;
+.hero { padding: 0; margin-top: calc(var(--nav) * -1); background: var(--night); }
+.scene {
+  position: relative; overflow: hidden;
+  display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; gap: clamp(26px, 5vh, 48px);
+  padding: calc(var(--nav) + clamp(30px, 8vh, 88px)) var(--pad) 0;
+  background: radial-gradient(120% 70% at 50% 108%, #1b2056 0%, #0e1332 38%, var(--night) 74%);
 }
-.stars {
-  position: absolute; inset: 0; pointer-events: none; opacity: 0.7;
-  background-image:
-    radial-gradient(1px 1px at 22px 38px, #fff, transparent),
-    radial-gradient(1px 1px at 148px 96px, #fff, transparent),
-    radial-gradient(1.4px 1.4px at 262px 18px, #cdd6ff, transparent),
-    radial-gradient(1px 1px at 318px 164px, #fff, transparent),
-    radial-gradient(1px 1px at 86px 208px, #cdd6ff, transparent),
-    radial-gradient(1.2px 1.2px at 204px 248px, #fff, transparent);
-  background-size: 360px 280px;
-  -webkit-mask-image: linear-gradient(#000 0%, transparent 62%);
-  mask-image: linear-gradient(#000 0%, transparent 62%);
-  animation: twinkle 7s ease-in-out infinite alternate;
-}
-@keyframes twinkle { to { opacity: 0.35; } }
-.hero-text { position: relative; max-width: 920px; text-align: center; display: grid; gap: 24px; justify-items: center; }
-.actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
-.hero-stage { position: relative; width: 100%; max-width: 1060px; perspective: 1800px; }
-.halo { position: absolute; inset: 8% 6% -6%; border-radius: 50%; background: linear-gradient(90deg, var(--accent), var(--blue), var(--accent-2)); filter: blur(80px); opacity: 0.32; }
-.tilt { position: relative; transform: rotateX(var(--rx, 6deg)) rotateY(var(--ry, 0deg)); transform-origin: 50% 20%; transition: transform 0.25s ease-out; }
+.sky { position: absolute; inset: 0; width: 100%; height: 100%; }
+.aurora { position: absolute; inset: 0; pointer-events: none; }
+.aurora i { position: absolute; border-radius: 50%; filter: blur(80px); animation: drift 20s ease-in-out infinite alternate; }
+.aurora i:nth-child(1) { left: 2%; top: -24%; width: 48vw; height: 54vh; background: var(--accent); opacity: 0.3; }
+.aurora i:nth-child(2) { right: -6%; top: -8%; width: 42vw; height: 48vh; background: #3f6bff; opacity: 0.22; animation-duration: 26s; animation-delay: -8s; }
+.aurora i:nth-child(3) { left: 32%; top: 36%; width: 38vw; height: 34vh; background: var(--accent-2); opacity: 0.12; animation-duration: 32s; animation-delay: -14s; }
+@keyframes drift { to { transform: translate(7vw, 5vh) scale(1.18); } }
 
-/* The agents, afloat on the swell. */
-.sea { position: relative; width: 100vw; height: 230px; margin-top: -70px; display: flex; justify-content: space-around; align-items: flex-start; padding-top: 60px; }
+.hero-text { position: relative; z-index: 1; width: 100%; max-width: 1340px; text-align: center; display: grid; gap: clamp(12px, 2.5vh, 24px); justify-items: center; }
+.hero h1 { font-size: clamp(2.5rem, min(6.2vw, 8.6vh), 5.2rem); }
+.hero h1 .grad { white-space: nowrap; }
+.hero .lead { max-width: 760px; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+
+.hero-stage { position: relative; z-index: 1; width: 100%; max-width: 1000px; perspective: 1500px; }
+.halo { position: absolute; inset: 2% 4% 8%; border-radius: 40%; background: linear-gradient(90deg, var(--accent), var(--blue) 50%, var(--accent-2)); filter: blur(72px); opacity: 0.4; }
+.hero-stage .win { background: rgba(15, 21, 44, 0.9); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05), 0 50px 90px -40px rgba(0, 0, 0, 0.95), 0 0 70px -24px var(--accent); }
+.tilt { position: relative; transform-origin: 50% 0; }
+
+/* Where the task is: lit by the script as the window plays. */
+.phases { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 10px; font: 600 12.5px/1 var(--sans); color: var(--muted); }
+.phases li { display: inline-flex; align-items: center; gap: 8px; padding: 7px 12px 7px 10px; border-radius: 999px; border: 1px solid var(--line); background: rgba(10, 15, 32, 0.6); transition: color 0.3s, border-color 0.3s, background 0.3s, box-shadow 0.3s; }
+.phases li::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--line-2); transition: background 0.3s; }
+.phases li.done { color: var(--ink); }
+.phases li.done::before { background: var(--green); }
+.phases li.on { color: var(--accent-ink); border-color: transparent; background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 6px 22px -8px var(--accent); }
+.phases li.on::before { background: var(--accent-ink); }
+
+/* The sea, and the agents afloat: a sail, and a hull with the name on it. */
+.sea { position: relative; z-index: 2; width: 100vw; height: clamp(170px, 28vh, 250px); margin-top: -12px; display: flex; justify-content: space-around; align-items: flex-start; }
 .sea canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-.boat { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: 999px; border: 1px solid var(--line-2); background: rgba(14, 20, 38, 0.8); backdrop-filter: blur(6px); font: 600 0.9rem/1 var(--sans); white-space: nowrap; box-shadow: 0 10px 24px -12px rgba(0, 0, 0, 0.8); }
-.js .boat { position: absolute; left: 0; top: 0; will-change: transform; }
-.boat .c-a { background: #e8906a; } .boat .c-b { background: #8fb4ff; } .boat .c-c { background: #7cd3ff; } .boat .c-d { background: #b79bff; } .boat .c-e { background: #7fe0b0; }
+.boat { position: relative; z-index: 1; display: grid; justify-items: center; font: 600 0.82rem/1 var(--sans); white-space: nowrap; transform-origin: 50% 100%; filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.5)); }
+.sail { width: 30px; height: 34px; margin-bottom: -1px; }
+.sail .mast { fill: none; stroke: var(--line-2); stroke-width: 1.4; stroke-linecap: round; }
+.sail .main { fill: var(--c); opacity: 0.92; }
+.sail .jib { fill: var(--c); opacity: 0.5; }
+.hull { display: inline-flex; align-items: center; gap: 7px; padding: 6px 14px 7px; border: 1px solid var(--line-2); border-radius: 6px 6px 16px 16px; background: #0d1330; }
+.lamp { width: 7px; height: 7px; border-radius: 50%; background: var(--c); box-shadow: 0 0 10px 1px var(--c); animation: lamp 2.6s ease-in-out infinite; }
+.boat:nth-of-type(odd) .lamp { animation-delay: -1.2s; }
+@keyframes lamp { 50% { opacity: 0.45; } }
+/* Without the script there are no waves: still water, the agents moored on it. */
+.sea:not(.afloat) { align-items: flex-start; background: linear-gradient(transparent 60px, #171d4a 60px, #0c1130 55%, var(--night)); }
+/* Once the script floats them, each rides a wave. */
+.sea.afloat .boat { position: absolute; left: 0; top: 0; will-change: transform; }
+
+/* Pinned (a wide screen, where the script runs): the scene stays in place
+   for a stretch of scrolling. --p goes from 0 to 1 over it: the words
+   leave, the window comes up out of the sea and flat to the reader, and
+   the sea sinks. */
+.hero.pin { height: calc(100svh + 70vh); }
+.hero.pin .scene { position: sticky; top: 0; height: 100svh; display: block; padding: 0; }
+.hero.pin .hero-text { position: absolute; left: 50%; top: calc(var(--nav) + clamp(14px, 5.5vh, 64px)); width: calc(100% - 48px); translate: -50% 0; transform: translateY(calc(var(--p, 0) * -26vh)); opacity: calc(1 - var(--p, 0) * 2.4); }
+.hero.pin .hero-text.gone { visibility: hidden; }
+.hero.pin .hero-stage { position: absolute; left: 50%; top: 0; width: calc(100% - 48px); translate: -50% 0; transform: translateY(calc(var(--y0, 300px) + (var(--y1, 100px) - var(--y0, 300px)) * var(--p, 0))); }
+.hero.pin .tilt { transform: rotateX(calc((1 - var(--p, 0)) * 20deg + var(--rx, 0deg))) rotateY(var(--ry, 0deg)) scale(calc(var(--s0, 0.88) + (var(--s1, 1) - var(--s0, 0.88)) * var(--p, 0))); transition: transform 0.2s ease-out; }
+.hero.pin .halo { opacity: calc(0.26 + var(--p, 0) * 0.2); }
+.hero.pin .phases { position: absolute; left: 0; right: 0; bottom: calc(100% + 14px); margin: 0; opacity: calc(var(--p, 0) * 3 - 1.6); }
+.hero.pin .sea { position: absolute; left: 0; bottom: 0; margin: 0; height: clamp(130px, 26vh, 250px); transform: translateY(calc(var(--p, 0) * 31%)); }
+@media (max-height: 640px) { .hero.pin .fine { display: none; } }
 
 /* =====================================================================
    Three things it holds to
    ===================================================================== */
-.creed { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding-block: 110px; background: linear-gradient(var(--night), #0a1022); }
+.creed { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding-block: clamp(56px, 11vh, 110px); background: linear-gradient(var(--night), #0a1022); }
 .creed article { display: grid; gap: 14px; align-content: start; padding: 8px 40px; border-left: 1px solid var(--line); }
 .creed article:first-child { border-left: none; padding-left: 0; }
 .creed .ico { font-size: 30px; color: var(--accent); }
@@ -193,14 +235,18 @@ main > section { position: relative; padding: 120px var(--pad); }
 .moves.pinned .moves-grid { grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.28fr); gap: 64px; }
 .moves.pinned .move { grid-template-columns: minmax(0, 1fr); min-height: 72vh; align-content: center; opacity: 0.22; transition: opacity 0.5s; }
 .moves.pinned .move.on { opacity: 1; }
+.moves.pinned { padding-bottom: 24px; }
+.moves.pinned .move:last-child { min-height: 62vh; }
 .moves.pinned .move-fig { display: none; }
 .moves.pinned .moves-stage { display: block; position: sticky; top: 16vh; height: 68vh; }
 .stage-glow { position: absolute; inset: 14% 10%; border-radius: 50%; background: linear-gradient(120deg, var(--accent), var(--blue)); filter: blur(90px); opacity: 0.22; }
 .stage-frames { position: absolute; inset: 0; perspective: 1400px; }
-.frame { position: absolute; inset: 0; display: grid; place-items: center; opacity: 0; transform: translateY(40px) rotateX(-10deg) scale(0.94); transition: opacity 0.55s ease, transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1); pointer-events: none; }
-.frame.on { opacity: 1; transform: none; }
+/* The step leaving goes at once, the one arriving a moment after: two
+   half-seen drawings on top of each other read as a smudge. */
+.frame { position: absolute; inset: 0; display: grid; place-items: center; opacity: 0; transform: translateY(40px) rotateX(-10deg) scale(0.94); transition: opacity 0.2s ease, transform 0.6s cubic-bezier(0.2, 0.8, 0.2, 1); pointer-events: none; }
+.frame.on { opacity: 1; transform: none; transition: opacity 0.4s ease 0.16s, transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) 0.1s; }
 .frame.gone { transform: translateY(-40px) rotateX(10deg) scale(0.94); }
-.frame > .pane { width: min(100%, 480px); transform: scale(1.34); }
+.frame > .pane { width: min(100%, 480px); transform: scale(1.34); background: #121938; backdrop-filter: none; }
 .stage-dots { position: absolute; right: -6px; top: 50%; translate: 0 -50%; list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
 .stage-dots li { width: 6px; height: 6px; border-radius: 999px; background: var(--line-2); transition: height 0.4s, background 0.4s; }
 .stage-dots li.on { height: 26px; background: var(--accent); }
@@ -216,23 +262,29 @@ main > section { position: relative; padding: 120px var(--pad); }
 .col { display: grid; gap: 9px; align-content: start; padding: 10px; border-radius: 12px; background: var(--panel); min-height: 290px; }
 .col-head { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 12.5px; padding: 2px 2px 4px; }
 .col-head small { margin-left: auto; font-weight: 400; }
+.board.live .when .wbtn { cursor: pointer; transition: filter 0.15s, transform 0.15s; }
+.board.live .when .wbtn:hover { filter: brightness(1.25); transform: translateY(-1px); }
 
 /* =====================================================================
    Features: tiles with small drawings that move
    ===================================================================== */
 .bento-sec { background: linear-gradient(#0b1128, #0c1130); }
 .bento { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
-.tile { position: relative; display: grid; gap: 8px; align-content: start; padding: 18px 18px 22px; border-radius: 22px; border: 1px solid var(--line); background: linear-gradient(160deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.015)); transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), border-color 0.3s, box-shadow 0.3s; }
+.tile { position: relative; display: grid; grid-template-rows: 1fr auto auto; gap: 8px; padding: 18px 18px 22px; border-radius: 22px; border: 1px solid var(--line); background: linear-gradient(160deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.015)); transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), border-color 0.3s, box-shadow 0.3s; }
 .tile:hover { transform: translateY(-4px); border-color: color-mix(in srgb, var(--accent) 60%, transparent); box-shadow: 0 24px 50px -30px var(--accent); }
 .tile.wide { grid-column: span 2; }
+/* A light that follows the pointer across the grid (the script sets where). */
+.tile::before { content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; background: radial-gradient(260px circle at var(--mx, 50%) var(--my, 50%), var(--accent), transparent 70%); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; opacity: 0; transition: opacity 0.35s; pointer-events: none; }
+.tile::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: radial-gradient(340px circle at var(--mx, 50%) var(--my, 50%), color-mix(in srgb, var(--accent) 13%, transparent), transparent 70%); opacity: 0; transition: opacity 0.35s; pointer-events: none; }
+.bento.lit .tile::before, .bento.lit .tile::after { opacity: 1; }
 .tile.full { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 24px 40px; padding: 30px 34px; }
 .tile.full .cap { display: grid; gap: 8px; }
 .tile h3 { font-size: 1.18rem; margin-top: 8px; }
 .tile.full h3 { font: 600 clamp(1.6rem, 2.8vw, 2.2rem)/1.1 var(--serif); margin: 0; }
 .tile p { color: var(--muted); font-size: 0.98rem; }
-.art { position: relative; height: 168px; border-radius: 14px; background: rgba(4, 8, 20, 0.5); border: 1px solid var(--line); overflow: hidden; display: grid; place-items: center; padding: 14px; font: 11px/1.3 var(--sans); }
-/* A tile's drawing moves only while it is on screen. */
-.js .tile:not(.play) .art * { animation-play-state: paused !important; }
+.art { position: relative; min-height: 168px; border-radius: 14px; background: rgba(4, 8, 20, 0.5); border: 1px solid var(--line); overflow: hidden; display: grid; place-items: center; padding: 14px; font: 11px/1.3 var(--sans); }
+/* A tile's drawing moves only while it is on screen (the script says when). */
+.bento.staged .tile:not(.play) .art * { animation-play-state: paused !important; }
 .cur { position: absolute; width: 16px; height: 16px; fill: #fff; stroke: #0a0f20; stroke-width: 1.5; filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.6)); }
 .cur.agent { fill: var(--accent); }
 
@@ -372,7 +424,7 @@ main > section { position: relative; padding: 120px var(--pad); }
 /* =====================================================================
    Dawn: nothing leaves your computer
    ===================================================================== */
-.dawn { padding-bottom: 54vh; background: linear-gradient(180deg, #0c1130 0%, #151845 30%, #2f2260 50%, #6d407a 68%, #d98a73 84%, #f4dcbc 95%, #f6f1e7 100%); overflow: hidden; }
+.dawn { padding-bottom: 0; background: linear-gradient(180deg, #0c1130 0%, #151845 24%, #2f2260 44%, #6d407a 62%, #c97a78 78%, #f0b392 92%, #f3c4a0 100%); overflow: hidden; }
 .dawn .wf { position: relative; z-index: 1; }
 .map { display: grid; grid-template-columns: minmax(0, 1fr) 130px minmax(0, 1fr); align-items: center; max-width: 900px; margin: 0 auto; font-size: 13.5px; }
 .machine { display: grid; gap: 12px; padding: 18px; border-radius: 22px; border: 1.5px dashed var(--line-2); background: rgba(8, 12, 30, 0.45); backdrop-filter: blur(6px); }
@@ -392,17 +444,17 @@ main > section { position: relative; padding: 120px var(--pad); }
 @keyframes packet { 0% { transform: translateX(0); opacity: 0; } 12%, 86% { opacity: 1; } 100% { transform: translateX(112px); opacity: 0; } }
 .node.none { border-style: dashed; color: var(--muted); background: transparent; }
 .node.none b { margin-left: auto; padding-left: 10px; color: var(--red); font-size: 12px; font-weight: 600; }
-.plain-line { position: relative; z-index: 1; max-width: 860px; margin: 110px auto 0; text-align: center; font: 600 clamp(1.5rem, 3vw, 2.3rem)/1.25 var(--serif); letter-spacing: -0.015em; text-wrap: balance; }
-.sun { position: absolute; left: 50%; bottom: -330px; width: 760px; height: 760px; margin-left: -380px; border-radius: 50%; background: radial-gradient(circle, #fff8e4 0%, #ffd9a0 30%, rgba(255, 190, 130, 0.5) 52%, transparent 68%); pointer-events: none; }
-@supports (animation-timeline: view()) {
-  .sun { animation: sunrise linear both; animation-timeline: view(); animation-range: entry 55% exit 0%; }
-  @keyframes sunrise { from { transform: translateY(300px); opacity: 0.3; } to { transform: none; opacity: 1; } }
-}
+.plain-line { position: relative; z-index: 1; max-width: 860px; margin: clamp(56px, 11vh, 110px) auto 0; text-align: center; font: 600 clamp(1.5rem, 3vw, 2.3rem)/1.25 var(--serif); letter-spacing: -0.015em; text-wrap: balance; }
+/* Daybreak: the sun comes up behind the water (the script raises it as
+   the page is scrolled), and the water runs out into the daylight below. */
+.daybreak { position: relative; height: clamp(300px, 58vh, 520px); margin: clamp(40px, 8vh, 90px) calc(var(--pad) * -1) 0; }
+.daybreak canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.daybreak .sun { position: absolute; left: 50%; top: 52%; width: min(560px, 92vw); aspect-ratio: 1; border-radius: 50%; translate: -50% -50%; transform: translateY(calc((1 - var(--rise, 1)) * 46%)); background: radial-gradient(circle, #fffdf2 0 17%, #ffe9b8 24%, rgba(255, 205, 140, 0.55) 40%, rgba(255, 180, 130, 0.18) 56%, transparent 70%); }
 
 /* =====================================================================
    Day: download
    ===================================================================== */
-.download { background: #f6f1e7; text-align: center; display: grid; gap: 22px; justify-items: center; padding-top: 40px; padding-bottom: 130px; }
+.download { background: #f6f1e7; text-align: center; display: grid; gap: 22px; justify-items: center; padding-top: 48px; padding-bottom: clamp(80px, 14vh, 130px); }
 .download h2 { font-size: clamp(2.8rem, 7vw, 5.2rem); }
 .beacon { position: relative; width: 84px; height: 84px; margin-bottom: 18px; }
 .beacon img { position: relative; border-radius: 20px; box-shadow: 0 24px 50px -20px rgba(60, 30, 140, 0.7); }
@@ -479,7 +531,17 @@ em.add { color: var(--green); } em.del { color: var(--red); }
 .tabs { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); overflow: hidden; }
 .tab { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 7px; color: var(--muted); white-space: nowrap; }
 .tab.on { background: var(--fill); color: var(--ink); font-weight: 600; }
-.thread { flex: 1; display: grid; gap: 9px; align-content: start; padding: 12px 10px; }
+.thread { position: relative; flex: 1; display: grid; gap: 9px; align-content: start; padding: 12px 10px; }
+/* Before the task starts the window is not empty: the chat asks, the pane
+   says there is nothing yet. Only where the script plays the task. */
+.idle { display: none; }
+.demo-on .idle { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 9px; color: var(--muted); text-align: center; transition: opacity 0.35s; }
+.demo-on .result > .idle { top: 36px; }
+.demo-on .idle .ico { font-size: 22px; color: var(--accent); }
+.demo-on .idle b { color: var(--ink); font-size: 13px; }
+.demo-on .idle span { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; padding-inline: 12px; }
+.demo-on .idle i { font-style: normal; padding: 4px 9px; border-radius: 999px; border: 1px solid var(--line-2); font-size: 11px; }
+.demo-on .idle.off { opacity: 0; }
 .me { justify-self: end; max-width: 88%; padding: 7px 10px; border-radius: 10px 10px 2px 10px; background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
 .steps { display: grid; gap: 5px; }
 .steps span { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--muted); }
@@ -567,7 +629,7 @@ em.add { color: var(--green); } em.del { color: var(--red); }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
-  .js [data-reveal] .w { opacity: 1; transform: none; }
+  [data-reveal] .w { opacity: 1; transform: none; }
   .tilt { transform: none; }
   .mini-findings .tick .ico, .mini-screens .ok { opacity: 1; transform: none; }
   .mini-findings .tick.a, .mini-findings .tick.b { background: var(--accent); border-color: var(--accent); }
@@ -600,7 +662,10 @@ em.add { color: var(--green); } em.del { color: var(--red); }
   .review { grid-template-columns: minmax(0, 1fr); }
   .review .files { border-right: none; border-bottom: 1px solid var(--line); }
   .sea { height: 170px; }
-  .boat { font-size: 0.78rem; padding: 6px 10px; }
+  .boat { font-size: 0.74rem; }
+  .hull { padding: 5px 10px 6px; }
   .boat:nth-of-type(2n) { display: none; }
+  .phases { font-size: 11px; gap: 5px; }
+  .phases li { padding: 6px 9px 6px 8px; }
   .nav .quiet { display: none; }
 }

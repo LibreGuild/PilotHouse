@@ -10,7 +10,7 @@
   <meta property="og:type" content="website">
   <meta name="theme-color" content="#070b16">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=dev">
 </head>
 <body>
   <!-- The line icons the drawings use. -->
@@ -51,83 +51,100 @@
       <a class="button quiet" href="https://github.com/LibreGuild/PilotHouse">GitHub</a>
       <a class="button primary small" href="#download">Download</a>
     </div>
+    <i class="read" aria-hidden="true"></i>
   </header>
 
   <main id="main">
 
-    <!-- ===== Hero: the window plays a task by itself, over a night sea ===== -->
+    <!-- ===== Hero: a night sea, the agents afloat, and the window playing a task ===== -->
     <section class="hero" id="top">
-      <div class="stars" aria-hidden="true"></div>
-      <div class="hero-text">
-        <h1>One window for<br><span class="grad">your coding agents.</span></h1>
-        <p class="lead">See what each one is doing. Review what it changed. Decide what ships.</p>
-        <div class="actions">
-          <a class="button primary" id="download-main" href="#download"><svg class="ico" aria-hidden="true"><use href="#i-down"/></svg><span>Download PilotHouse</span></a>
-          <a class="button" href="#how">Watch a task go by</a>
-        </div>
-        <p class="fine">Free and open source · macOS, Windows, Linux · No account</p>
-      </div>
+      <!-- On a wide screen the script pins this scene: scrolling brings the
+           window up out of the sea and flat to the reader. -->
+      <div class="scene">
+        <canvas class="sky" id="sky" aria-hidden="true"></canvas>
+        <div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
 
-      <figure class="wf hero-stage" role="img" aria-label="A drawing of PilotHouse's window playing a task by itself. A request is typed; the agent reads and edits two files; it asks whether it may run the tests and gets a yes; the tests pass; the changed files show in the Git pane with their diff; the change is committed and a pull request opened.">
-        <div class="halo" aria-hidden="true"></div>
-        <div class="win tilt" id="demo" aria-hidden="true">
-          <div class="win-bar"><i></i><i></i><i></i><span class="win-title">tidewatch</span><span class="win-search"><svg class="ico"><use href="#i-search"/></svg>Search or run a command</span></div>
-          <div class="app">
-            <div class="rail">
-              <span class="r"><svg class="ico"><use href="#i-wheel"/></svg>Bridge<b class="count" data-d="count">1</b></span>
-              <span class="r"><svg class="ico"><use href="#i-pr"/></svg>Reviews</span>
-              <span class="r"><svg class="ico"><use href="#i-chats"/></svg>Chats</span>
-              <hr>
-              <span class="r on"><b class="badge b1">T</b>tidewatch</span>
-              <span class="r"><b class="badge b2">R</b>receipts</span>
-            </div>
-            <div class="chat">
-              <div class="tabs"><span class="tab on"><i class="dot" data-demo="tabdot"></i>Offline tide chart</span><span class="tab"><i class="dot blue"></i>Units in the table</span></div>
-              <div class="thread">
-                <div class="me" data-d="msg">Show the tide chart when there is no network.</div>
-                <div class="steps">
-                  <span data-d="s1"><svg class="ico ok"><use href="#i-check"/></svg>Read <code>src/chart.rs</code></span>
-                  <span data-d="s2"><svg class="ico ok"><use href="#i-check"/></svg>Edited <code>src/chart.rs</code> <em class="add">+38</em> <em class="del">−5</em></span>
-                  <span data-d="s3"><svg class="ico ok"><use href="#i-check"/></svg>Edited <code>src/cache.rs</code> <em class="add">+4</em> <em class="del">−2</em></span>
-                </div>
-                <div class="ask" data-d="ask" data-demo="ask">
-                  <p><b>May I run the tests?</b><code>cargo test -p tidewatch</code></p>
-                  <div><span class="wbtn pri" data-demo="allow">Allow</span><span class="wbtn">Always</span><span class="wbtn">Deny</span></div>
-                </div>
-                <div class="steps"><span class="passed" data-d="tests"><svg class="ico ok"><use href="#i-check"/></svg><b>14 tests passed</b></span></div>
-              </div>
-              <div class="composer"><span class="typed" data-demo="typed"></span><i class="caret"></i><i class="send" data-demo="send"><svg class="ico"><use href="#i-up"/></svg></i></div>
-            </div>
-            <div class="result">
-              <div class="names"><span class="on">Git</span><span>Preview</span><span>Terminal</span><span>Files</span></div>
-              <div class="files">
-                <span class="f" data-d="f1"><i class="tick" data-demo="t1"><svg class="ico"><use href="#i-check"/></svg></i><code>src/chart.rs</code><em class="add">+38</em><em class="del">−5</em></span>
-                <span class="f" data-d="f2"><i class="tick" data-demo="t2"><svg class="ico"><use href="#i-check"/></svg></i><code>src/cache.rs</code><em class="add">+4</em><em class="del">−2</em></span>
-              </div>
-              <div class="diff" data-d="diff">
-                <span class="l"><b>12</b><i class="bar w60"></i></span>
-                <span class="l del"><b>13</b><i class="bar w70"></i></span>
-                <span class="l add"><b>13</b><i class="bar w80"></i></span>
-                <span class="l add"><b>14</b><i class="bar w50"></i></span>
-                <span class="l add"><b>15</b><i class="bar w70"></i></span>
-                <span class="l"><b>16</b><i class="bar w40"></i></span>
-              </div>
-              <div class="commit-row" data-d="commit"><span class="wbtn pri" data-demo="commit">Commit and open a pull request</span></div>
-              <div class="toast" data-d="toast"><svg class="ico ok"><use href="#i-check"/></svg>Pull request #12 opened</div>
-            </div>
+        <div class="hero-text">
+          <h1>One window for <span class="grad">your coding agents.</span></h1>
+          <p class="lead">See what each one is doing. Review what it changed. Decide what ships.</p>
+          <div class="actions">
+            <a class="button primary" id="download-main" href="#download"><svg class="ico" aria-hidden="true"><use href="#i-down"/></svg><span>Download PilotHouse</span></a>
+            <a class="button" id="watch" href="#stage">Watch a task go by</a>
           </div>
-          <svg class="pointer" data-demo="pointer"><use href="#i-cursor"/></svg>
+          <p class="fine">Free and open source · macOS, Windows, Linux · No account</p>
         </div>
-      </figure>
 
-      <!-- The agents, afloat. -->
-      <div class="sea" aria-hidden="true">
-        <canvas id="sea"></canvas>
-        <span class="boat" data-x="0.1"><i class="dot c-a"></i>Claude Code</span>
-        <span class="boat" data-x="0.3"><i class="dot c-b"></i>Codex</span>
-        <span class="boat" data-x="0.5"><i class="dot c-c"></i>Gemini CLI</span>
-        <span class="boat" data-x="0.7"><i class="dot c-d"></i>Antigravity</span>
-        <span class="boat" data-x="0.9"><i class="dot c-e"></i>Cline</span>
+        <figure class="wf hero-stage" id="stage" role="img" aria-label="A drawing of PilotHouse's window playing a task by itself. A request is typed; the agent reads and edits two files; it asks whether it may run the tests and gets a yes; the tests pass; the changed files show in the Git pane with their diff; the change is committed and a pull request opened.">
+          <!-- Where the task is: the script lights these as the window plays. -->
+          <ol class="phases" aria-hidden="true">
+            <li data-phase="ask">You ask</li>
+            <li data-phase="work">It works</li>
+            <li data-phase="allow">It asks first</li>
+            <li data-phase="review">You review</li>
+            <li data-phase="ship">You ship</li>
+          </ol>
+          <div class="halo" aria-hidden="true"></div>
+          <div class="win tilt" id="demo" aria-hidden="true">
+            <div class="win-bar"><i></i><i></i><i></i><span class="win-title">tidewatch</span><span class="win-search"><svg class="ico"><use href="#i-search"/></svg>Search or run a command</span></div>
+            <div class="app">
+              <div class="rail">
+                <span class="r"><svg class="ico"><use href="#i-wheel"/></svg>Bridge<b class="count" data-d="count">1</b></span>
+                <span class="r"><svg class="ico"><use href="#i-pr"/></svg>Reviews</span>
+                <span class="r"><svg class="ico"><use href="#i-chats"/></svg>Chats</span>
+                <hr>
+                <span class="r on"><b class="badge b1">T</b>tidewatch</span>
+                <span class="r"><b class="badge b2">R</b>receipts</span>
+              </div>
+              <div class="chat">
+                <div class="tabs"><span class="tab on"><i class="dot" data-demo="tabdot"></i>Offline tide chart</span><span class="tab"><i class="dot blue"></i>Units in the table</span></div>
+                <div class="thread">
+                  <div class="idle" data-idle><svg class="ico"><use href="#i-wheel"/></svg><b>What should we work on?</b><span><i>Fix a bug</i><i>Review a pull request</i><i>Write tests</i></span></div>
+                  <div class="me" data-d="msg">Show the tide chart when there is no network.</div>
+                  <div class="steps">
+                    <span data-d="s1"><svg class="ico ok"><use href="#i-check"/></svg>Read <code>src/chart.rs</code></span>
+                    <span data-d="s2"><svg class="ico ok"><use href="#i-check"/></svg>Edited <code>src/chart.rs</code> <em class="add">+38</em> <em class="del">−5</em></span>
+                    <span data-d="s3"><svg class="ico ok"><use href="#i-check"/></svg>Edited <code>src/cache.rs</code> <em class="add">+4</em> <em class="del">−2</em></span>
+                  </div>
+                  <div class="ask" data-d="ask" data-demo="ask">
+                    <p><b>May I run the tests?</b><code>cargo test -p tidewatch</code></p>
+                    <div><span class="wbtn pri" data-demo="allow">Allow</span><span class="wbtn">Always</span><span class="wbtn">Deny</span></div>
+                  </div>
+                  <div class="steps"><span class="passed" data-d="tests"><svg class="ico ok"><use href="#i-check"/></svg><b>14 tests passed</b></span></div>
+                </div>
+                <div class="composer"><span class="typed" data-demo="typed"></span><i class="caret"></i><i class="send" data-demo="send"><svg class="ico"><use href="#i-up"/></svg></i></div>
+              </div>
+              <div class="result">
+                <div class="names"><span class="on">Git</span><span>Preview</span><span>Terminal</span><span>Files</span></div>
+                <div class="idle" data-idle><svg class="ico"><use href="#i-branch"/></svg><b>No changes yet</b></div>
+                <div class="files">
+                  <span class="f" data-d="f1"><i class="tick" data-demo="t1"><svg class="ico"><use href="#i-check"/></svg></i><code>src/chart.rs</code><em class="add">+38</em><em class="del">−5</em></span>
+                  <span class="f" data-d="f2"><i class="tick" data-demo="t2"><svg class="ico"><use href="#i-check"/></svg></i><code>src/cache.rs</code><em class="add">+4</em><em class="del">−2</em></span>
+                </div>
+                <div class="diff" data-d="diff">
+                  <span class="l"><b>12</b><i class="bar w60"></i></span>
+                  <span class="l del"><b>13</b><i class="bar w70"></i></span>
+                  <span class="l add"><b>13</b><i class="bar w80"></i></span>
+                  <span class="l add"><b>14</b><i class="bar w50"></i></span>
+                  <span class="l add"><b>15</b><i class="bar w70"></i></span>
+                  <span class="l"><b>16</b><i class="bar w40"></i></span>
+                </div>
+                <div class="commit-row" data-d="commit"><span class="wbtn pri" data-demo="commit">Commit and open a pull request</span></div>
+                <div class="toast" data-d="toast"><svg class="ico ok"><use href="#i-check"/></svg>Pull request #12 opened</div>
+              </div>
+            </div>
+            <svg class="pointer" data-demo="pointer"><use href="#i-cursor"/></svg>
+          </div>
+        </figure>
+
+        <!-- The agents, afloat. -->
+        <div class="sea" aria-hidden="true">
+          <canvas id="sea"></canvas>
+          <span class="boat" data-x="0.07" style="--c: #f0976f"><svg class="sail" viewBox="0 0 30 34"><path class="mast" d="M14.5 1v32"/><path class="main" d="M17 3.5 28 29H17z"/><path class="jib" d="M12 10 3.5 29H12z"/></svg><span class="hull"><i class="lamp"></i>Claude Code</span></span>
+          <span class="boat" data-x="0.27" style="--c: #8fb4ff"><svg class="sail" viewBox="0 0 30 34"><path class="mast" d="M14.5 1v32"/><path class="main" d="M17 3.5 28 29H17z"/><path class="jib" d="M12 10 3.5 29H12z"/></svg><span class="hull"><i class="lamp"></i>Codex</span></span>
+          <span class="boat" data-x="0.5" style="--c: #7cd3ff"><svg class="sail" viewBox="0 0 30 34"><path class="mast" d="M14.5 1v32"/><path class="main" d="M17 3.5 28 29H17z"/><path class="jib" d="M12 10 3.5 29H12z"/></svg><span class="hull"><i class="lamp"></i>Gemini CLI</span></span>
+          <span class="boat" data-x="0.73" style="--c: #c3a6ff"><svg class="sail" viewBox="0 0 30 34"><path class="mast" d="M14.5 1v32"/><path class="main" d="M17 3.5 28 29H17z"/><path class="jib" d="M12 10 3.5 29H12z"/></svg><span class="hull"><i class="lamp"></i>Antigravity</span></span>
+          <span class="boat" data-x="0.93" style="--c: #7fe0b0"><svg class="sail" viewBox="0 0 30 34"><path class="mast" d="M14.5 1v32"/><path class="main" d="M17 3.5 28 29H17z"/><path class="jib" d="M12 10 3.5 29H12z"/></svg><span class="hull"><i class="lamp"></i>Cline</span></span>
+        </div>
       </div>
       <p class="sr-only">Works with Claude Code, Codex, Gemini CLI, Antigravity and Cline.</p>
     </section>
@@ -243,7 +260,7 @@
       <header class="section-head center">
         <p class="eyebrow">The Bridge</p>
         <h2 data-reveal>Every task, sorted by what it needs from you.</h2>
-        <p>Answer an agent right on its card.</p>
+        <p>Answer an agent right on its card. Try it.</p>
       </header>
       <figure class="wf" role="img" aria-label="The Bridge: four columns named Needs you, Working, Ready for review and Done. Cards for tasks move from one column to the next as agents work, ask, finish and are reviewed.">
         <div class="win board" id="board" aria-hidden="true">
@@ -431,7 +448,7 @@
         </div>
       </figure>
       <p class="plain-line">PilotHouse has no AI of its own. It works with the agents you already use.</p>
-      <div class="sun" aria-hidden="true"></div>
+      <div class="daybreak" aria-hidden="true"><i class="sun"></i><canvas id="sea-day"></canvas></div>
     </section>
 
     <!-- ===== Day: download ===== -->
@@ -489,6 +506,6 @@
     <p>Apache 2.0 · Made by LibreGuild</p>
   </footer>
 
-  <script src="main.js" defer></script>
+  <script src="main.js?v=dev" defer></script>
 </body>
 </html>
