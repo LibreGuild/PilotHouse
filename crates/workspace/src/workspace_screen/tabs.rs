@@ -4,10 +4,12 @@
 //! is doing shows without leaving for the Bridge.
 //!
 //! They are the workspace's cards of the Bridge, in a row: a chat marked
-//! done there leaves the row, and marking one done here puts it under
-//! *Done* there. They stand in the chat panel's own header, where a chat's
-//! title would be (the panel asks for them when it draws): one row says
-//! which chats there are, which is in front and what can be done with it.
+//! done leaves the row. A tab's cross closes the tab and nothing else: the
+//! chat stays as it is, in *Past chats* (where it is marked done, renamed
+//! or deleted) and on the Bridge, and has its tab again when it is opened
+//! again or needs the user. They stand in the chat panel's own header,
+//! where a chat's title would be (the panel asks for them when it draws):
+//! one row says which chats there are and which is in front.
 
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::menu::ContextMenuExt as _;
@@ -31,8 +33,15 @@ pub(super) fn render(
         let this = this.read(cx);
         let shell = this.shell.upgrade()?;
         let front = this.active_session;
-        let open =
+        let mut open =
             crate::bridge::open_chats(shell.read(cx), this.project.id, &this.sessions, front, cx);
+        // A closed tab stays closed, except the chat in front and one that
+        // waits for the user (that must not be missed).
+        open.retain(|chat| {
+            !this.tab_closed(chat.session.id)
+                || Some(chat.session.id) == front
+                || chat.summary.state == ChatState::NeedsYou
+        });
         // The tab of the chat in front is scrolled into view when the chat
         // changes, not on every draw: the row stays where it was dragged.
         if this.tabs_front.replace(front) != front
@@ -104,31 +113,33 @@ fn chat_tab(
         chat.summary.agent.name
     ));
     let group = SharedString::from(format!("chat-tab-{id}"));
-    // Put away from here: under Done on the Bridge, and out of the row.
-    let done = (!busy && !chat.settled).then(|| {
-        let shell = shell.clone();
+    // The tab closes; its chat does not change (it is marked done from
+    // Past chats, or from its card on the Bridge).
+    let close = {
+        let screen = screen.clone();
         div()
             .flex_none()
             .invisible()
             .group_hover(group.clone(), |style| style.visible())
             .child(
-                Button::new(("chat-tab-done", id as u64))
+                Button::new(("chat-tab-close", id as u64))
                     .ghost()
                     .xsmall()
-                    .icon(Icons::Check)
-                    .tooltip("Mark as done")
-                    .accessibility_label("Mark as done")
-                    .on_click(move |_, _, cx| {
+                    .icon(IconName::Close)
+                    .tooltip("Close the tab. The chat stays in Past chats")
+                    .accessibility_label("Close tab")
+                    .on_click(move |_, window, cx| {
                         cx.stop_propagation();
-                        _ = shell.update(cx, |shell, cx| shell.settle_all(&[(project, id)], cx));
+                        _ = screen.update(cx, |this, cx| this.close_tab(id, window, cx));
                     }),
             )
-    });
+    };
     let menu = {
         let (shell, session) = (shell.clone(), chat.session.clone());
-        let marks = (chat.pinned, chat.settled);
+        let settled = chat.settled;
         move |menu, _: &mut Window, _: &mut Context<gpui_kit::component::menu::PopupMenu>| {
-            crate::bridge::chat_menu_items(menu, &shell, project, &session, marks, busy)
+            // Pinning orders the Bridge's cards; a row of tabs has no top.
+            crate::bridge::chat_menu_items(menu, &shell, project, &session, (None, settled), busy)
         }
     };
     let show = screen.clone();
@@ -156,7 +167,7 @@ fn chat_tab(
         })
         .aria_label(tip.clone())
         .tooltip(move |window, cx| {
-            gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tip.clone())).build(window, cx)
         })
         .on_click(move |_, window, cx| {
             _ = show.update(cx, |this, cx| {
@@ -166,12 +177,7 @@ fn chat_tab(
         })
         .child(state_mark(state, cx))
         .child(div().min_w_0().truncate().child(title))
-        // A tab with nothing to press is as wide on the right as one with:
-        // the titles line up.
-        .child(match done {
-            Some(done) => done.into_any_element(),
-            None => div().flex_none().w_1().into_any_element(),
-        })
+        .child(close)
         .test_support()
         .context_menu(menu)
         .into_any_element()

@@ -368,10 +368,10 @@ impl ExplanationView {
                                 .ghost()
                                 .icon(Icons::FilePlus)
                                 .label("Add to commit")
-                                .tooltip(
+                                .tooltip(ph_ui::tip(
                                     "Share it with the team: writes it as a file under \
                                      .pilothouse/explanations, to commit with your changes",
-                                )
+                                ))
                                 .disabled(busy)
                                 .on_click(cx.listener(|this, _, _, cx| this.add_to_commit(cx))),
                         )
@@ -382,10 +382,10 @@ impl ExplanationView {
                                 .xsmall()
                                 .ghost()
                                 .label("Take out")
-                                .tooltip(
+                                .tooltip(ph_ui::tip(
                                     "Remove its file from the repository again. It stays on \
                                      this computer.",
-                                )
+                                ))
                                 .disabled(busy)
                                 .on_click(cx.listener(|this, _, _, cx| this.take_out(cx))),
                         )
@@ -396,7 +396,9 @@ impl ExplanationView {
                             .ghost()
                             .icon(IconName::Copy)
                             .label("Copy")
-                            .tooltip("Copy all of it as Markdown (a part: select it and copy)")
+                            .tooltip(ph_ui::tip(
+                                "Copy all of it as Markdown (a part: select it and copy)",
+                            ))
                             .on_click(move |_, window, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(markdown.clone()));
                                 window.push_notification(

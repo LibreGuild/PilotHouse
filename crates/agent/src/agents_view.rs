@@ -406,7 +406,7 @@ impl AgentsView {
                         .ghost()
                         .xsmall()
                         .icon(IconName::Close)
-                        .tooltip("Remove the account here (its sign-in and sessions stay where the agent keeps them)")
+                        .tooltip(ph_ui::tip("Remove the account here (its sign-in and sessions stay where the agent keeps them)"))
                         .accessibility_label(format!("Remove the account {}", account.name))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.profiles.update(id, |profile| {

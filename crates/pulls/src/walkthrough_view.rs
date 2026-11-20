@@ -269,7 +269,9 @@ impl Render for WalkthroughView {
                             .ghost()
                             .icon(IconName::Copy)
                             .label("Copy")
-                            .tooltip("Copy all of it as Markdown (a part: select it and copy)")
+                            .tooltip(ph_ui::tip(
+                                "Copy all of it as Markdown (a part: select it and copy)",
+                            ))
                             .on_click(move |_, window, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(markdown.clone()));
                                 window.push_notification(

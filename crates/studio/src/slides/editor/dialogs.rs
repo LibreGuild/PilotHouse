@@ -364,7 +364,7 @@ impl SlidesEditor {
                         .hover(move |style| style.bg(hover))
                         .cursor_pointer()
                         .tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(title.clone())
+                            gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(title.clone()))
                                 .build(window, cx)
                         })
                         .child(img(picture).size_full().object_fit(ObjectFit::Contain))

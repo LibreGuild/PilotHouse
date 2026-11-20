@@ -108,7 +108,8 @@ impl Item {
                 !labels || self.hint.is_some() || self.about.is_some(),
                 |this| {
                     this.tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                        gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tip.clone()))
+                            .build(window, cx)
                     })
                 },
             )
@@ -316,7 +317,9 @@ pub(crate) fn render_places(
                         .ghost()
                         .small()
                         .icon(IconName::Plus)
-                        .tooltip("Open a folder as a workspace, or make one without folders")
+                        .tooltip(ph_ui::tip(
+                            "Open a folder as a workspace, or make one without folders",
+                        ))
                         .accessibility_label("Add a workspace")
                         .menu(gpui_kit::Anchor::TopLeft, |menu, _, _| {
                             menu.item(
@@ -408,7 +411,7 @@ fn workspace_badge(
         .items_center()
         .cursor_pointer()
         .tooltip(move |window, cx| {
-            gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tip.clone())).build(window, cx)
         })
         .on_click(move |_, window, cx| {
             _ = open.update(cx, |workspace, cx| workspace.open_project(id, window, cx));

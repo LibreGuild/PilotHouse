@@ -753,7 +753,9 @@ fn hunk_bar(file: usize, hunk: usize, panel: WeakEntity<ChangesPanel>, cx: &App)
                 .xsmall()
                 .icon(IconName::Check)
                 .label("Keep these lines")
-                .tooltip("Stage this part: it is ready to commit and leaves the changes")
+                .tooltip(ph_ui::tip(
+                    "Stage this part: it is ready to commit and leaves the changes",
+                ))
                 .on_click(decide(true)),
         )
         .child(
@@ -762,7 +764,9 @@ fn hunk_bar(file: usize, hunk: usize, panel: WeakEntity<ChangesPanel>, cx: &App)
                 .xsmall()
                 .icon(IconName::Undo2)
                 .label("Discard these lines")
-                .tooltip("Take this part back out of the file (Undo discard brings it back)")
+                .tooltip(ph_ui::tip(
+                    "Take this part back out of the file (Undo discard brings it back)",
+                ))
                 .on_click(decide(false)),
         )
         .into_any_element()
@@ -834,7 +838,9 @@ fn file_actions(
                     .ghost()
                     .xsmall()
                     .label("Undo")
-                    .tooltip("Discard this file's changes (Undo discard brings them back)")
+                    .tooltip(ph_ui::tip(
+                        "Discard this file's changes (Undo discard brings them back)",
+                    ))
                     .on_click(undo),
             )
         })
@@ -844,7 +850,9 @@ fn file_actions(
                     .ghost()
                     .xsmall()
                     .label("Keep")
-                    .tooltip("Stage this file: it is ready to commit and leaves the changes")
+                    .tooltip(ph_ui::tip(
+                        "Stage this file: it is ready to commit and leaves the changes",
+                    ))
                     .on_click(keep),
             )
         })

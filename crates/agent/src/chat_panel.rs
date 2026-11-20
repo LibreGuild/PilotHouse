@@ -52,6 +52,7 @@ use crate::{setup, setup_view};
 
 mod dropped;
 mod fit;
+mod history;
 mod mentions;
 mod picker;
 mod render;
@@ -96,7 +97,11 @@ pub enum ChatPanelEvent {
     /// Something was sent to the session in front while it is in its CLI
     /// form: this text is to be typed into the CLI, for the user to send.
     TypeInCli(String),
+    /// Asked of a chat from its row in Past chats (see `history`).
+    ChatAction(Box<Session>, ChatAction),
 }
+
+pub use history::{ChatAction, ChatMarks};
 
 /// The two forms of a session with an agent: the chat, or the agent's own
 /// program in a terminal. It is one conversation either way (the agent's
@@ -270,6 +275,13 @@ pub struct ChatPanel {
     /// The CLI of the session shown, where sessions have their other form
     /// here (a workspace's chat).
     cli_view: Option<CliView>,
+    /// Past chats (see `history`): its pop-up is open; the whole list
+    /// shows where the chat is; the chats either lists, read when it
+    /// opens; and who says which are marked done.
+    history_open: bool,
+    all_chats: bool,
+    history: Vec<Session>,
+    chat_marks: Option<ChatMarks>,
     /// The shared Chrome tabs are being read (`@tabs`): the message waits
     /// for them, so it does not go without them.
     reading_tabs: bool,
@@ -376,6 +388,10 @@ impl ChatPanel {
             narrow: false,
             width: None,
             cli_view: None,
+            history_open: false,
+            all_chats: false,
+            history: Vec::new(),
+            chat_marks: None,
             reading_tabs: false,
             tabs_attached: false,
             subagents_open: false,
@@ -412,6 +428,8 @@ impl ChatPanel {
 
     /// Shows `session`, or a fresh draft for `None`.
     pub fn set_session(&mut self, session: Option<Session>, cx: &mut Context<Self>) {
+        // A chat was picked (from the list, a tab, anywhere): it shows.
+        self.all_chats = false;
         self.terminal_session = None;
         if let Some(session) = session
             .as_ref()

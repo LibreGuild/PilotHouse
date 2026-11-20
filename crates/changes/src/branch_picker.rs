@@ -508,7 +508,7 @@ impl BranchPicker {
                                 "Pull",
                                 status.behind,
                             )
-                            .tooltip(pull_tip)
+                            .tooltip(ph_ui::tip(pull_tip))
                             .on_click(cx.listener(|this, _, _, cx| this.sync(Sync::Pull, cx))),
                         )
                     })
@@ -523,7 +523,7 @@ impl BranchPicker {
                             if published { "Push" } else { "Publish" },
                             if published { status.ahead } else { 0 },
                         )
-                        .tooltip(push_tip)
+                        .tooltip(ph_ui::tip(push_tip))
                         .on_click(cx.listener(|this, _, _, cx| this.sync(Sync::Push, cx))),
                     ),
             )

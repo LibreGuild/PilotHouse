@@ -1316,7 +1316,7 @@ impl RichEditor {
                 .ghost()
                 .xsmall()
                 .icon(IconName::Plus)
-                .tooltip(tip)
+                .tooltip(ph_ui::tip(tip))
                 .accessibility_label(tip)
                 .on_click(cx.listener(move |this, _, _, cx| this.table_op(id, op, cx)))
         };
@@ -1382,7 +1382,7 @@ impl RichEditor {
                 .ghost()
                 .xsmall()
                 .label(label)
-                .tooltip(tip)
+                .tooltip(ph_ui::tip(tip))
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.wrap(open, close, window, cx)),
                 )
@@ -1392,7 +1392,7 @@ impl RichEditor {
                 .ghost()
                 .xsmall()
                 .label(label)
-                .tooltip(make.label())
+                .tooltip(ph_ui::tip(make.label()))
                 .on_click(cx.listener(move |this, _, window, cx| this.make(make, window, cx)))
         };
         let separator = || div().w_px().h_4().mx_1().bg(border);

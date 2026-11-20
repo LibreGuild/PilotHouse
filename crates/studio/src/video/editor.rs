@@ -1701,7 +1701,7 @@ impl VideoEditor {
                     .small()
                     .icon(Icons::Undo2)
                     .disabled(!can_undo)
-                    .tooltip(format!("Undo ({undo_key})"))
+                    .tooltip(ph_ui::tip(format!("Undo ({undo_key})")))
                     .on_click(
                         cx.listener(|this, _, _, cx| this.doc.update(cx, |doc, cx| doc.undo(cx))),
                     ),
@@ -1750,11 +1750,11 @@ impl VideoEditor {
                             .small()
                             .icon(*icon)
                             .selected(current == tool)
-                            .tooltip(if key.is_empty() {
+                            .tooltip(ph_ui::tip(if key.is_empty() {
                                 name.to_string()
                             } else {
                                 format!("{name} ({key})")
-                            })
+                            }))
                             .accessibility_label(*name)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.set_tool(tool, cx);

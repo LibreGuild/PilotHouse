@@ -2574,12 +2574,12 @@ impl FileView {
                         .xsmall()
                         .label(view.label())
                         .selected(current)
-                        .tooltip(match view {
+                        .tooltip(ph_ui::tip(match view {
                             View::Source => "The file's text",
                             View::Preview => "The file rendered",
                             View::Split => "The text and the rendering side by side",
                             View::Rich => "Edit the document as formatted text",
-                        })
+                        }))
                         .on_click(
                             cx.listener(move |this, _, window, cx| this.set_view(view, window, cx)),
                         )
@@ -2644,11 +2644,11 @@ impl FileView {
                     .xsmall()
                     .icon(Icons::SlidersHorizontal)
                     .label("Edit")
-                    .tooltip(if self.kind == Kind::Video {
+                    .tooltip(ph_ui::tip(if self.kind == Kind::Video {
                         "Cut, speed up, mark up, crop or compress it in Studio, by hand or with an agent"
                     } else {
                         "Crop, mark up, resize or compress it in Studio, by hand or with an agent"
-                    })
+                    }))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(FileViewEvent::EditMedia(path.clone()))
                     }))
@@ -2663,7 +2663,9 @@ impl FileView {
                     .xsmall()
                     .icon(Icons::SlidersHorizontal)
                     .label("Edit")
-                    .tooltip("Open the deck in Studio Slides, to edit it by hand or with an agent")
+                    .tooltip(ph_ui::tip(
+                        "Open the deck in Studio Slides, to edit it by hand or with an agent",
+                    ))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(FileViewEvent::EditMedia(path.clone()))
                     }))
@@ -2751,7 +2753,7 @@ impl FileView {
                     .when_some(tip, |this, tip| {
                         use gpui_kit::StatefulInteractiveElement as _;
                         this.tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                            gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tip.clone()))
                                 .build(window, cx)
                         })
                     })

@@ -2,7 +2,8 @@
 //! room the pane has.
 //!
 //! The row under the message holds the agent and model, the account, the
-//! effort, the mode, what the chat has used, its menu and Send. In a narrow
+//! effort, the mode, the menu for the rest, what the chat has used and
+//! Send. In a narrow
 //! pane that is more than fits, and a row that is cut off hides whole
 //! buttons ("Auto rev…", then nothing). So as the pane narrows the buttons
 //! give up their words one at a time and stay as icons, each still opening
@@ -88,7 +89,7 @@ fn needed(row: &Row, fit: Fit) -> f32 {
         None => 0.,
     };
     width += pill(&row.effort, fit.effort) + pill(&row.mode, fit.mode);
-    // What the chat used, its menu, Send (and Stop).
+    // The menu after the choices; what the chat used, Send (and Stop).
     if row.usage {
         width += if fit.usage_bar { 72. } else { 34. } + GAP;
     }

@@ -474,7 +474,7 @@ impl Render for HistoryView {
                                 .ghost()
                                 .icon(ph_ui::Icons::Sparkles)
                                 .label(if self.writing { "Writing…" } else { "Write changelog" })
-                                .tooltip("An agent writes release notes from the commits since the last tag")
+                                .tooltip(ph_ui::tip("An agent writes release notes from the commits since the last tag"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     if !this.writing {
                                         this.write_changelog(window, cx)

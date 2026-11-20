@@ -532,7 +532,7 @@ impl WorkspaceScreen {
                                     .flex_none()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(crate::sidebar::age(session.updated_at)),
+                                    .child(ph_ui::time::age(session.updated_at)),
                             )
                             .on_click(move |_, window, cx| {
                                 window.close_dialog(cx);

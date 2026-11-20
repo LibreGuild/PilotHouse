@@ -245,7 +245,7 @@ fn agent_entry(spec: &AgentSpec, checks: &[Check], divided: bool, cx: &App) -> A
                         .xsmall()
                         .ghost()
                         .icon(IconName::ExternalLink)
-                        .tooltip(format!("{}'s page", spec.name))
+                        .tooltip(ph_ui::tip(format!("{}'s page", spec.name)))
                         .accessibility_label(SharedString::from(format!(
                             "Open {}'s page",
                             spec.name

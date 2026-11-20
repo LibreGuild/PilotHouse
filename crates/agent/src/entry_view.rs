@@ -131,9 +131,11 @@ pub fn render_entry(thread_entity: &Entity<ChatThread>, ix: usize, cx: &App) -> 
         Entry::Plan(items) => render_plan(items, cx),
         Entry::Permission(request) => render_permission(request, cx),
         Entry::Notice { text, is_error } => render_notice(text, *is_error, cx),
-        Entry::SignIn { message, methods } => {
-            render_sign_in(thread_entity, ix, message, methods, cx)
-        }
+        Entry::SignIn {
+            title,
+            message,
+            methods,
+        } => render_sign_in(thread_entity, ix, title.as_deref(), message, methods, cx),
         Entry::Review { card, .. } => div().pt_2().child(card.clone()).into_any_element(),
     };
 
@@ -583,6 +585,7 @@ fn as_typed(text: &str) -> String {
 fn render_sign_in(
     thread: &Entity<ChatThread>,
     ix: usize,
+    title: Option<&str>,
     message: &str,
     methods: &[crate::connection::SignInMethod],
     cx: &App,
@@ -624,7 +627,10 @@ fn render_sign_in(
                         .small()
                         .text_color(cx.theme().warning),
                 )
-                .child(format!("Sign in to {agent}")),
+                .child(match title {
+                    Some(title) => title.to_string(),
+                    None => format!("Sign in to {agent}"),
+                }),
         )
         .child(
             div()
@@ -1461,7 +1467,9 @@ fn restore_button(
                 .icon(Icons::Undo2)
                 .label("Restore files")
                 .disabled(!enabled)
-                .tooltip("Put the project's files back as they were before this message")
+                .tooltip(ph_ui::tip(
+                    "Put the project's files back as they were before this message",
+                ))
                 .on_click(move |_, window, cx| {
                     confirm_restore(
                         thread.clone(),

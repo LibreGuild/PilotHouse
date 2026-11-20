@@ -69,6 +69,7 @@ Three levels, no fourth:
 - **Destructive** (`danger`) only for irreversible actions, and they ask first.
 - Icons are at least as large as the text beside them: 14 to 16 px (`small()`, or `size_4()`) with row text, 12 to 14 px (`xsmall()`, `small()`) with captions, 18 px in the columns of icons; they inherit the text's colour.
 - Tooltips name icon-only controls. Never repeat a visible label; never put information only in a tooltip.
+- **A tooltip grows downwards, not sideways.** Its text is at most 52 characters a line (`ph_ui::tip`): broken at spaces, and inside a word longer than a line (a path, a URL) after a separator. Pass every tooltip whose text is made up as the app runs (a title, a path, a command, a state) through `ph_ui::tip(…)`, and any fixed one longer than a line; a short fixed label needs nothing.
 - **A row of Settings** is a name, one sentence under it, and its control at the right. A control wider than a dropdown (several buttons, a sentence) goes under the text (`.layout(Axis::Vertical)`), or it runs off the page. A group's description shows only under a title. A page that is one view (`view_page` in `settings_dialog.rs`) lists the words Search finds it by. A form that fills a page keeps its way back and its Save over its fields, not under them.
 
 ## 6. One way to each place

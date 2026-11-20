@@ -322,7 +322,10 @@ impl gpui_kit::RenderOnce for ShortcutRecorder {
                             .ghost()
                             .small()
                             .label("Reset")
-                            .tooltip(format!("Back to {}", shortcut_label(default_shortcut())))
+                            .tooltip(ph_ui::tip(format!(
+                                "Back to {}",
+                                shortcut_label(default_shortcut())
+                            )))
                             .on_click(|_, _, cx| {
                                 let _ =
                                     AppState::store(cx).set_setting(SHORTCUT_KEY, &None::<String>);
@@ -839,7 +842,7 @@ impl Render for QuickChatWindow {
                         .small()
                         .icon(Icons::ExternalLink)
                         .accessibility_label(format!("Open in {}", ph_brand::NAME))
-                        .tooltip(format!("Open in {}", ph_brand::NAME))
+                        .tooltip(ph_ui::tip(format!("Open in {}", ph_brand::NAME)))
                         .on_click(cx.listener(|this, _, window, cx| this.open_in_app(window, cx))),
                 ),
         );

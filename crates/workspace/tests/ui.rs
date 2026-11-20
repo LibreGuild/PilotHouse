@@ -773,29 +773,37 @@ fn open_chats_are_tabs_over_the_chat(cx: &mut TestAppContext) {
     click_id(window, ("chat-tab", second as u64), cx);
     assert_eq!(front(cx), Some(second), "a tab shows its chat");
 
-    // The first is marked done from its tab, which shows what to press
-    // while the pointer is on it.
+    // A tab's cross (shown while the pointer is on the tab) closes the
+    // tab and nothing else: the chat is not marked done, and is still there.
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
+        assert!(
+            window.try_find(("chat-tab-done", first as u64)).is_none(),
+            "a tab has no tick"
+        );
         gpui_kit::test::TestWindowExt::hover(window, ("chat-tab", first as u64), cx);
     })
     .unwrap();
     cx.run_until_parked();
-    click_id(window, ("chat-tab-done", first as u64), cx);
+    click_id(window, ("chat-tab-close", first as u64), cx);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         let done: Vec<i64> = AppState::store(cx).setting("workspace.sidebar_settled");
-        assert_eq!(done, vec![first], "kept as done");
+        assert!(done.is_empty(), "closing a tab marks nothing done");
+        assert!(
+            AppState::store(cx).session(first).unwrap().is_some(),
+            "the chat is kept"
+        );
         assert!(
             window.try_find(("chat-tab", first as u64)).is_none(),
-            "it left the row"
+            "its tab left the row"
         );
         assert!(window.try_find(("chat-tab", second as u64)).is_some());
     })
     .unwrap();
     assert_eq!(front(cx), Some(second), "the chat in front stays");
 
-    // On the Bridge it is under Done, its card without the button.
+    // On the Bridge it is where it was: not under Done.
     press(window, "secondary-shift-e", cx);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
@@ -807,10 +815,273 @@ fn open_chats_are_tabs_over_the_chat(cx: &mut TestAppContext) {
         assert!(
             window
                 .try_find(gpui_kit::SharedString::from(format!("bridge-done-{first}")))
-                .is_none()
+                .is_some(),
+            "still to be marked done"
         );
     })
     .unwrap();
+}
+
+/// Closing the tab in front shows the one beside it; a closed tab is back
+/// when its chat is opened again, and stays closed when the app starts
+/// again.
+#[gpui_kit::test]
+fn a_closed_tab_gives_way_and_comes_back(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let (alpha, _beta) = two_workspaces("close-tabs", window, &workspace, cx);
+    let [first, second, third] = cx.update(|cx| {
+        let store = AppState::store(cx);
+        ["Sort the arrivals", "Name the berths", "Paint the buoys"]
+            .map(|title| store.create_session(alpha, title, "claude").unwrap().id)
+    });
+    workspace.update(cx, |workspace, cx| {
+        workspace.unload_idle(std::time::Duration::ZERO, cx)
+    });
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_chat(alpha, second, window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let front = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let space = workspace.read(cx).active_space().unwrap().clone();
+            space.read(cx).active_session()
+        })
+    };
+    let hover_and_close = |session: i64, cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            gpui_kit::test::TestWindowExt::hover(window, ("chat-tab", session as u64), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        click_id(window, ("chat-tab-close", session as u64), cx);
+    };
+    assert_eq!(front(cx), Some(second));
+    hover_and_close(second, cx);
+    let beside = front(cx);
+    assert!(
+        beside == Some(first) || beside == Some(third),
+        "the tab beside it is in front: {beside:?}"
+    );
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find(("chat-tab", second as u64)).is_none());
+        let saved = AppState::store(cx).project_ui_state(alpha).unwrap();
+        assert_eq!(saved.closed_tabs, vec![second], "kept for the next start");
+    })
+    .unwrap();
+
+    // Past chats still lists it, and opening it there gives it its tab.
+    click(window, "chat-history", cx);
+    click_id(window, ("history-row", second as u64), cx);
+    assert_eq!(front(cx), Some(second));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find(("chat-tab", second as u64)).is_some());
+        let saved = AppState::store(cx).project_ui_state(alpha).unwrap();
+        assert!(saved.closed_tabs.is_empty());
+    })
+    .unwrap();
+
+    // With every tab closed, a new chat is in front.
+    for session in [first, second, third] {
+        hover_and_close(session, cx);
+    }
+    assert_eq!(front(cx), None, "nothing is left to show but a new chat");
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        for session in [first, second, third] {
+            assert!(window.try_find(("chat-tab", session as u64)).is_none());
+        }
+        assert!(
+            window.try_find("send-message").is_some(),
+            "with its message box"
+        );
+    })
+    .unwrap();
+}
+
+/// Past chats is one list, the last used first, whatever a chat's state:
+/// the pop-up has the last ten and the way to all of them, which show
+/// where the chat was (no message box) until one is picked. A row marks
+/// its chat done, renames it and deletes it.
+#[gpui_kit::test]
+fn past_chats_are_one_list_with_what_can_be_done(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let (alpha, _beta) = two_workspaces("history", window, &workspace, cx);
+    let sessions: Vec<i64> = cx.update(|cx| {
+        let store = AppState::store(cx);
+        (1..=12)
+            .map(|n| {
+                let agent = if n % 2 == 0 { "codex" } else { "claude" };
+                store
+                    .create_session(alpha, &format!("Chat number {n}"), agent)
+                    .unwrap()
+                    .id
+            })
+            .collect()
+    });
+    // The store lists them the last used first: that order is the list's.
+    let listed: Vec<i64> = cx.update(|cx| {
+        AppState::store(cx)
+            .sessions(alpha)
+            .unwrap()
+            .iter()
+            .map(|session| session.id)
+            .collect()
+    });
+    assert_eq!(listed.len(), 12);
+    let (newest, oldest) = (listed[0], listed[11]);
+    workspace.update(cx, |workspace, cx| {
+        workspace.unload_idle(std::time::Duration::ZERO, cx)
+    });
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_chat(alpha, newest, window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let front = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let space = workspace.read(cx).active_space().unwrap().clone();
+            space.read(cx).active_session()
+        })
+    };
+    let hover_row = |session: i64, cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            gpui_kit::test::TestWindowExt::hover(window, ("history-row", session as u64), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+
+    // The pop-up: the ten last used, in that order, and no more.
+    click(window, "chat-history", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let mut last = f32::MIN;
+        for session in &listed[..10] {
+            let row = window.find(("history-row", *session as u64));
+            let top: f32 = row.bounds().origin.y.into();
+            assert!(top > last, "the last used first, one under the other");
+            last = top;
+        }
+        for session in &listed[10..] {
+            assert!(
+                window.try_find(("history-row", *session as u64)).is_none(),
+                "the pop-up stops at ten"
+            );
+        }
+        assert!(window.try_find("history-show-all").is_some());
+    })
+    .unwrap();
+
+    // Marked done from its row: kept, and the row stays in the list.
+    let marked = listed[2];
+    hover_row(marked, cx);
+    click_id(
+        window,
+        gpui_kit::SharedString::from(format!("history-done-{marked}")),
+        cx,
+    );
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let done: Vec<i64> = AppState::store(cx).setting("workspace.sidebar_settled");
+        assert_eq!(done, vec![marked]);
+        assert!(
+            window.try_find(("history-row", marked as u64)).is_some(),
+            "a chat marked done is not moved out of the list"
+        );
+    })
+    .unwrap();
+
+    // All of them, where the chat was.
+    click(window, "history-show-all", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("all-chats").is_some());
+        assert!(
+            window.try_find("send-message").is_none(),
+            "the list takes the chat's place, message box and all"
+        );
+        assert!(
+            window.try_find(("history-row", oldest as u64)).is_some(),
+            "every chat is listed"
+        );
+    })
+    .unwrap();
+
+    // Renamed from its row.
+    let renamed = listed[5];
+    hover_row(renamed, cx);
+    click_id(
+        window,
+        gpui_kit::SharedString::from(format!("history-rename-{renamed}")),
+        cx,
+    );
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("dialog-ok").is_some(),
+            "it asks for the name"
+        );
+        window.press("secondary-a", cx);
+        window.input("Moor the tender", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    click(window, "dialog-ok", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            AppState::store(cx).session(renamed).unwrap().unwrap().title,
+            "Moor the tender"
+        );
+        assert!(
+            window.try_find("all-chats").is_some(),
+            "the list is still up"
+        );
+        assert!(window.try_find_by_label("Moor the tender").is_some());
+    })
+    .unwrap();
+
+    // Deleted from its row, after it asked.
+    let deleted = listed[7];
+    hover_row(deleted, cx);
+    click_id(
+        window,
+        gpui_kit::SharedString::from(format!("history-delete-{deleted}")),
+        cx,
+    );
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("dialog-ok").is_some(), "it asks first");
+        assert!(AppState::store(cx).session(deleted).unwrap().is_some());
+    })
+    .unwrap();
+    click(window, "dialog-ok", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(AppState::store(cx).session(deleted).unwrap().is_none());
+        assert!(window.try_find(("history-row", deleted as u64)).is_none());
+    })
+    .unwrap();
+
+    // A chat picked from the list shows as a past chat does.
+    click_id(window, ("history-row", oldest as u64), cx);
+    assert_eq!(front(cx), Some(oldest));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("all-chats").is_none());
+        assert!(window.try_find("send-message").is_some());
+    })
+    .unwrap();
+    let _ = sessions;
 }
 
 /// A session has two forms, the chat and its agent's CLI. One stored in its

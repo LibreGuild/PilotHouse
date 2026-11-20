@@ -94,6 +94,10 @@ pub struct ProjectUiState {
     pub chat_share: Option<f32>,
     /// What Preview showed last: `browser` or `devices`.
     pub preview: Option<String>,
+    /// The chats whose tab over the chat was closed: they are in *Past
+    /// chats* still, and get their tab back when they are opened again.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub closed_tabs: Vec<i64>,
 }
 
 impl Project {

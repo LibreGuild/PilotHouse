@@ -284,11 +284,11 @@ impl Render for ToolsView {
                             "Use for every agent"
                         })
                         .disabled(taken)
-                        .tooltip(concat!(
+                        .tooltip(ph_ui::tip(concat!(
                             "Copies it, with its environment, into ",
                             ph_brand::name!(),
                             "'s list"
-                        ))
+                        )))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.add(server.clone(), window, cx);
                         })),

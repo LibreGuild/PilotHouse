@@ -265,7 +265,7 @@ impl Render for ReviewCard {
                                     .small()
                                     .outline()
                                     .label("Show on the lines")
-                                    .tooltip("The open findings as notes on the changes in the Git tab, to fix with the agent")
+                                    .tooltip(ph_ui::tip("The open findings as notes on the changes in the Git tab, to fix with the agent"))
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.emit(ReviewCardEvent::OpenFindings { review_id })
                                     })),
@@ -296,7 +296,7 @@ impl Render for ReviewCard {
                                 .small()
                                 .ghost()
                                 .label("Check the fixes")
-                                .tooltip("After the author pushes: check each open finding and what changed")
+                                .tooltip(ph_ui::tip("After the author pushes: check each open finding and what changed"))
                                 .on_click(cx.listener(move |_, _, _, cx| {
                                     cx.emit(ReviewCardEvent::ReviewAgain { review_id })
                                 })),

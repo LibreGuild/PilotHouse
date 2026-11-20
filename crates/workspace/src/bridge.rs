@@ -438,7 +438,6 @@ fn stored_summary(stored: &Session) -> ChatSummary {
 pub(crate) struct OpenChat {
     pub session: Session,
     pub summary: ChatSummary,
-    pub pinned: bool,
     pub settled: bool,
     /// Where it stands on the Bridge.
     pub column: Column,
@@ -481,7 +480,6 @@ pub(crate) fn open_chats(
             (column != Column::Done || front == Some(stored.id)).then(|| OpenChat {
                 session: stored.clone(),
                 summary,
-                pinned: workspace.is_pinned(stored.id),
                 settled,
                 column,
             })
@@ -1139,7 +1137,7 @@ fn card_view(
                     div()
                         .flex_none()
                         .group_hover(group.clone(), |style| style.invisible())
-                        .child(crate::sidebar::age(card.updated_at)),
+                        .child(ph_ui::time::age(card.updated_at)),
                 ),
         )
         .child(
@@ -1316,7 +1314,8 @@ fn facts_row(card: &Card, key: &str, cx: &App) -> Option<AnyElement> {
                 .cursor_pointer()
                 .hover(|style| style.text_color(theme.foreground))
                 .tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tip.clone()))
+                        .build(window, cx)
                 })
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
@@ -1525,18 +1524,20 @@ fn chat_menu(
         .icon(IconName::Ellipsis)
         .accessibility_label("Task menu")
         .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+            let marks = (Some(marks.0), marks.1);
             chat_menu_items(menu, &workspace, project, &session, marks, busy)
         })
 }
 
 /// What can be done with a chat (pinned and marked done as `marks` say):
-/// the menu of its card, and of its tab over a workspace's chat.
+/// the menu of its card, and of its tab over a workspace's chat. A tab
+/// has no pinning (`None`): that orders the Bridge's cards.
 pub(crate) fn chat_menu_items(
     menu: PopupMenu,
     workspace: &WeakEntity<Workspace>,
     project: ProjectId,
     session: &Session,
-    (pinned, settled): (bool, bool),
+    (pinned, settled): (Option<bool>, bool),
     busy: bool,
 ) -> PopupMenu {
     let id = session.id;
@@ -1547,14 +1548,17 @@ pub(crate) fn chat_menu_items(
         workspace.clone(),
     );
     let (rename_session, delete_session) = (session.clone(), session.clone());
+    let menu = match pinned {
+        Some(pinned) => menu.item(
+            PopupMenuItem::new(if pinned { "Unpin" } else { "Pin to the top" })
+                .icon(Icon::new(if pinned { Icons::PinOff } else { Icons::Pin }))
+                .on_click(move |_, _, cx| {
+                    _ = pin.update(cx, |workspace, cx| workspace.toggle_pin(id, cx));
+                }),
+        ),
+        None => menu,
+    };
     menu.item(
-        PopupMenuItem::new(if pinned { "Unpin" } else { "Pin to the top" })
-            .icon(Icon::new(if pinned { Icons::PinOff } else { Icons::Pin }))
-            .on_click(move |_, _, cx| {
-                _ = pin.update(cx, |workspace, cx| workspace.toggle_pin(id, cx));
-            }),
-    )
-    .item(
         PopupMenuItem::new(if settled { "Not done" } else { "Mark as done" })
             .icon(Icon::new(if settled { Icons::Undo2 } else { Icons::Check }))
             .on_click(move |_, _, cx| {

@@ -207,8 +207,10 @@ impl Render for LoneFile {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(format!("in {folder}"))
                                 .tooltip(move |window, cx| {
-                                    gpui_kit::component::tooltip::Tooltip::new(full.clone())
-                                        .build(window, cx)
+                                    gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(
+                                        full.clone(),
+                                    ))
+                                    .build(window, cx)
                                 }),
                         )
                         .child(div().flex_1().min_w_2())
@@ -221,11 +223,11 @@ impl Render for LoneFile {
                                 .xsmall()
                                 .icon(ph_ui::Icons::FolderOpen)
                                 .label("Open folder")
-                                .tooltip(concat!(
+                                .tooltip(ph_ui::tip(concat!(
                                     "Adds this file's folder to ",
                                     ph_brand::name!(),
                                     ", with Git, chat and the rest"
-                                ))
+                                )))
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.open_folder(window, cx)),
                                 ),

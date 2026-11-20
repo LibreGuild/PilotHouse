@@ -243,7 +243,9 @@ impl ChromeExtensionView {
                             .small()
                             .ghost()
                             .label("Make a test")
-                            .tooltip("A chat drafts a Playwright test of it, for you to send")
+                            .tooltip(ph_ui::tip(
+                                "A chat drafts a Playwright test of it, for you to send",
+                            ))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.use_workflow(&test, WorkflowUse::Test, window, cx)
                             })),
@@ -254,7 +256,9 @@ impl ChromeExtensionView {
                                 .small()
                                 .ghost()
                                 .label("Schedule")
-                                .tooltip("A schedule runs it with an agent and reports what it saw")
+                                .tooltip(ph_ui::tip(
+                                    "A schedule runs it with an agent and reports what it saw",
+                                ))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.use_workflow(&schedule, WorkflowUse::Schedule, window, cx)
                                 })),

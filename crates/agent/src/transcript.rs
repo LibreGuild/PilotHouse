@@ -68,7 +68,10 @@ pub enum Entry {
         is_error: bool,
     },
     /// The agent needs a login; offers the ways it can sign in itself.
+    /// `title` says what is the matter when that is known to be something
+    /// other than "not signed in".
     SignIn {
+        title: Option<String>,
         message: String,
         methods: Vec<SignInMethod>,
     },

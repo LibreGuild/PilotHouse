@@ -454,7 +454,10 @@ impl RunsPanel {
                         .ghost()
                         .xsmall()
                         .icon(Icons::SquareStop)
-                        .tooltip(format!("Stop {} (pid {})", port.process, port.pid))
+                        .tooltip(ph_ui::tip(format!(
+                            "Stop {} (pid {})",
+                            port.process, port.pid
+                        )))
                         .accessibility_label("Stop the process")
                         .on_click(cx.listener(move |this, _, _, cx| this.stop_port(&stop, cx))),
                 )

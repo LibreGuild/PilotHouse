@@ -137,7 +137,10 @@ impl ChatPanel {
                         } else {
                             "Start again"
                         })
-                        .tooltip(format!("Go on with this session in {}'s CLI", agent.name))
+                        .tooltip(ph_ui::tip(format!(
+                            "Go on with this session in {}'s CLI",
+                            agent.name
+                        )))
                         .on_click(
                             cx.listener(|_, _, _, cx| cx.emit(ChatPanelEvent::ShowAs(Form::Cli))),
                         ),

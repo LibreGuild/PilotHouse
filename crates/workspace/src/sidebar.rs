@@ -93,26 +93,3 @@ pub(crate) fn drag_width(width: Pixels, cx: &mut App) {
     })
     .detach();
 }
-
-/// How long ago `millis` was, as lists say it: *now*, *5m*, *3h*, *Tue*,
-/// *Mar 4*.
-pub(crate) fn age(millis: i64) -> String {
-    let Ok(at) = jiff::Timestamp::from_millisecond(millis) else {
-        return String::new();
-    };
-    let now = jiff::Timestamp::now();
-    let minutes = (now.as_second() - at.as_second()) / 60;
-    match minutes {
-        ..1 => "now".into(),
-        1..60 => format!("{minutes}m"),
-        60..1440 => format!("{}h", minutes / 60),
-        1440..10080 => at
-            .to_zoned(jiff::tz::TimeZone::system())
-            .strftime("%a")
-            .to_string(),
-        _ => at
-            .to_zoned(jiff::tz::TimeZone::system())
-            .strftime("%b %-d")
-            .to_string(),
-    }
-}

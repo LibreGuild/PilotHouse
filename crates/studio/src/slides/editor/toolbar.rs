@@ -271,15 +271,15 @@ impl SlidesEditor {
             if shown {
                 button.label(label)
             } else {
-                button.tooltip(label)
+                button.tooltip(ph_ui::tip(label))
             }
         };
         let tool = |id: &'static str, icon: Icons, label: &'static str, tooltip: &'static str| {
             let button = Button::new(id).ghost().small().icon(icon);
             if compact {
-                button.tooltip(format!("{label}: {tooltip}"))
+                button.tooltip(ph_ui::tip(format!("{label}: {tooltip}")))
             } else {
-                button.label(label).tooltip(tooltip)
+                button.label(label).tooltip(ph_ui::tip(tooltip))
             }
         };
         let new_slide = {

@@ -1209,7 +1209,7 @@ impl SlidesEditor {
                     .small()
                     .icon(Icons::Undo2)
                     .disabled(!can_undo)
-                    .tooltip(format!("Undo ({undo_key})"))
+                    .tooltip(ph_ui::tip(format!("Undo ({undo_key})")))
                     .on_click(cx.listener(|this, _, window, cx| this.undo(&Undo, window, cx))),
             )
             .child(
@@ -1230,11 +1230,11 @@ impl SlidesEditor {
                     .icon(Icons::Play)
                     .label("Present")
                     .dropdown_caret(true)
-                    .tooltip(if cfg!(target_os = "macos") {
+                    .tooltip(ph_ui::tip(if cfg!(target_os = "macos") {
                         "Present (⌘↩ from this slide; ⇧⌘↩ from the start)"
                     } else {
                         "Present (Ctrl+Enter from this slide; F5 from the start)"
-                    })
+                    }))
                     .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
                         let (here, start, rehearse) =
                             (editor.clone(), editor.clone(), editor.clone());

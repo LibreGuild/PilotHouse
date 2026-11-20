@@ -616,7 +616,7 @@ impl DevicesPanel {
                 .ghost()
                 .small()
                 .icon(icon)
-                .tooltip(label)
+                .tooltip(ph_ui::tip(label))
                 .accessibility_label(label)
         };
         let panel = cx.entity().downgrade();
@@ -1127,7 +1127,7 @@ impl DevicesPanel {
                                         )
                                     })
                                     .tooltip({
-                                        let line = node.describe();
+                                        let line = ph_ui::tip(node.describe());
                                         move |window, cx| {
                                             gpui_kit::component::tooltip::Tooltip::new(line.clone())
                                                 .build(window, cx)

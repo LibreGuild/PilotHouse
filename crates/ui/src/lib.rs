@@ -24,6 +24,7 @@ pub mod rich_copy;
 mod scale;
 mod surface;
 pub mod time;
+mod tip;
 mod truncated;
 mod workspace_colors;
 
@@ -42,6 +43,7 @@ pub use menu::{MenuButton, POPUP_GAP, SpacedMenu};
 pub use pill_tabs::{PillTab, PillTabs};
 pub use scale::{rems_from_px, scaled_px};
 pub use surface::Surface;
+pub use tip::tip;
 pub use truncated::truncated_label;
 pub use workspace_colors::{WORKSPACE_COLORS, workspace_color};
 

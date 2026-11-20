@@ -2376,9 +2376,34 @@ impl ChatThread {
         cx: &mut Context<Self>,
     ) {
         if needs_login(error) && !methods.is_empty() {
+            // Gemini asks for a login where it does not read the key the
+            // user saved: said as what it is.
+            let untrusted = self.agent.id == "gemini"
+                && dirs::home_dir().is_some_and(|home| {
+                    let environment = crate::profiles::Profiles::known()
+                        .of(self.agent.id)
+                        .environment_for(&self.account);
+                    let var = |name: &str| {
+                        environment
+                            .iter()
+                            .find(|(known, _)| known == name)
+                            .map(|(_, value)| value.clone())
+                            .or_else(|| ph_env::var(name).map(str::to_string))
+                    };
+                    crate::gemini_trust::keeps_saved_key_from(&self.project.path, &home, &var)
+                });
+            let (title, message) = if untrusted {
+                (
+                    Some(format!("{} does not trust this folder", self.agent.name)),
+                    crate::gemini_trust::explanation(&self.project.path),
+                )
+            } else {
+                (None, error.to_string())
+            };
             self.push(
                 Entry::SignIn {
-                    message: error.to_string(),
+                    title,
+                    message,
                     methods: methods.to_vec(),
                 },
                 cx,

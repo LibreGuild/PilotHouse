@@ -622,7 +622,7 @@ impl Render for VideoPlayer {
                             .ghost()
                             .xsmall()
                             .icon(icon)
-                            .tooltip(tip)
+                            .tooltip(ph_ui::tip(tip))
                             .accessibility_label(tip)
                             .on_click(
                                 cx.listener(|this, _, window, cx| {

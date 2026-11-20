@@ -141,7 +141,7 @@ impl RenderOnce for PillTabs {
                     .when(!folded, |this| this.child(tab.label))
                     .when(folded, |this| {
                         this.tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(name.clone())
+                            gpui_kit::component::tooltip::Tooltip::new(crate::tip(name.clone()))
                                 .build(window, cx)
                         })
                     })

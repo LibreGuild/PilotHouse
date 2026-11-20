@@ -321,7 +321,7 @@ impl BrowserPanel {
                 .ghost()
                 .small()
                 .icon(icon)
-                .tooltip(label)
+                .tooltip(ph_ui::tip(label))
                 .accessibility_label(label)
         };
         h_flex()

@@ -275,7 +275,11 @@ impl VideoEditor {
         let frame = doc.frame_at(self.position).map(|(ix, _)| ix + 1);
         let playing = self.playing();
         let button = |id: &'static str, icon: Icons, tip: &'static str| {
-            Button::new(id).ghost().small().icon(icon).tooltip(tip)
+            Button::new(id)
+                .ghost()
+                .small()
+                .icon(icon)
+                .tooltip(ph_ui::tip(tip))
         };
         let (a, b) = self.marks_ab;
         let between = a.zip(b).map(|(a, b)| (b - a).abs());

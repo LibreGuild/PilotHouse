@@ -85,7 +85,8 @@ impl GithubView {
                 cx,
             )
             .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tooltip.clone()))
+                    .build(window, cx)
             })
             .on_click(
                 cx.listener(move |this, _, window, cx| this.show_repo(id.clone(), window, cx)),

@@ -331,7 +331,10 @@ fn panel_switches(workspace: &Workspace, cx: &App) -> Vec<AnyElement> {
             .ghost()
             .small()
             .icon(icon)
-            .tooltip(format!("{label} ({})", ph_ui::platform::shortcut(keys)))
+            .tooltip(ph_ui::tip(format!(
+                "{label} ({})",
+                ph_ui::platform::shortcut(keys)
+            )))
             .accessibility_label(label)
             .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
             .into_any_element()
@@ -387,16 +390,16 @@ fn update_item(cx: &App) -> Option<AnyElement> {
     let item = match updates::Updater::status(cx) {
         Status::Ready { version, .. } => button("update-restart", "Restart to update".into())
             .child(dot(cx.theme().success))
-            .tooltip(format!(
+            .tooltip(ph_ui::tip(format!(
                 "{} {version} is downloaded. Restart to install it now; otherwise it installs when you quit.",
                 ph_brand::NAME
-            ))
+            )))
             .on_click(|_, _, cx| updates::restart_to_update(cx)),
         Status::Available { version } => button("update-download", format!("Update to {version}"))
             .tooltip("Download and install the new version")
             .on_click(|_, _, cx| updates::download_update(cx)),
         Status::Manual { version } => button("update-manual", format!("{version} available"))
-            .tooltip("This copy cannot update itself: get the new version from GitHub")
+            .tooltip(ph_ui::tip("This copy cannot update itself: get the new version from GitHub"))
             .on_click(|_, _, cx| cx.open_url(updates::RELEASES_URL)),
         _ => return None,
     };
@@ -418,7 +421,7 @@ fn app_icon(cx: &App) -> AnyElement {
         .ghost()
         .small()
         .child(mark)
-        .tooltip(ph_brand::NAME)
+        .tooltip(ph_ui::tip(ph_brand::NAME))
         .accessibility_label(format!("{} menu", ph_brand::NAME))
         .menu(gpui_kit::Anchor::TopLeft, |menu, _, _| {
             let item = |label: &'static str, action: fn() -> Box<dyn gpui_kit::Action>| {

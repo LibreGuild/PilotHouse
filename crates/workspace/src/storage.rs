@@ -219,7 +219,7 @@ impl StorageView {
                     .ghost()
                     .xsmall()
                     .icon(Icons::FolderOpen)
-                    .tooltip(ph_ui::platform::reveal_label())
+                    .tooltip(ph_ui::tip(ph_ui::platform::reveal_label()))
                     .accessibility_label("Show the folder")
                     .on_click({
                         let path = item.path.clone();

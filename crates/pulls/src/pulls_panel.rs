@@ -719,10 +719,10 @@ impl PullsPanel {
                             .xsmall()
                             .ghost()
                             .icon(IconName::ExternalLink)
-                            .tooltip(format!(
+                            .tooltip(ph_ui::tip(format!(
                                 "{}/{} on GitHub",
                                 hosting.repo.owner, hosting.repo.name
-                            ))
+                            )))
                             .accessibility_label("Open the repository on GitHub")
                             .on_click(move |_, _, cx| cx.open_url(&format!("{web}/pulls"))),
                     )

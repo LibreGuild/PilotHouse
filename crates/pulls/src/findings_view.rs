@@ -492,7 +492,7 @@ impl FindingsView {
                         .primary()
                         .icon(IconName::ArrowUp)
                         .label(if posted { "Update on GitHub" } else { "Post to GitHub" })
-                        .tooltip("Open findings on their lines, and one summary comment the author can tick")
+                        .tooltip(ph_ui::tip("Open findings on their lines, and one summary comment the author can tick"))
                         .disabled(busy)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.publish(PostMode::Inline, window, cx)
@@ -516,7 +516,7 @@ impl FindingsView {
                     .ghost()
                     .icon(IconName::RefreshCw)
                     .label(if local { "Read replies" } else { "Refresh" })
-                    .tooltip("Read ticks in the summary comment and replies on the findings")
+                    .tooltip(ph_ui::tip("Read ticks in the summary comment and replies on the findings"))
                     .disabled(busy || (local && !posted))
                     .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx))),
             )
@@ -526,7 +526,7 @@ impl FindingsView {
                         .small()
                         .outline()
                         .label("Check the fixes")
-                        .tooltip("A new round on the latest commit: each open finding, and what changed")
+                        .tooltip(ph_ui::tip("A new round on the latest commit: each open finding, and what changed"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.agent(|pull| AgentRequest::Review { pull, kind: "followup" }, cx)
                         })),
@@ -536,7 +536,7 @@ impl FindingsView {
                         .small()
                         .ghost()
                         .label("Second opinion")
-                        .tooltip("Another agent reviews it; findings both make are marked")
+                        .tooltip(ph_ui::tip("Another agent reviews it; findings both make are marked"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.agent(|pull| AgentRequest::Review { pull, kind: "second" }, cx)
                         })),
@@ -564,7 +564,7 @@ impl FindingsView {
                         .ghost()
                         .icon(Icons::GitBranch)
                         .label(format!("Fix {open} in a task"))
-                        .tooltip("A task on the pull request's branch, its chat given the open findings")
+                        .tooltip(ph_ui::tip("A task on the pull request's branch, its chat given the open findings"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let findings = open_findings.clone();
                             this.agent(move |pull| AgentRequest::Fix { pull, findings }, cx)
@@ -1077,7 +1077,7 @@ impl FindingsView {
                         .ghost()
                         .icon(Icons::Sparkles)
                         .label("Is the author right?")
-                        .tooltip("An agent reads the code again and drafts a reply for you to post")
+                        .tooltip(ph_ui::tip("An agent reads the code again and drafts a reply for you to post"))
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(FindingsEvent::Agent(AgentRequest::Claim { finding_id }))
                         })),
@@ -1116,7 +1116,7 @@ impl FindingsView {
                         .xsmall()
                         .ghost()
                         .label("Open issue")
-                        .tooltip("Track it in an issue (labelled pilothouse) with its place and the fix")
+                        .tooltip(ph_ui::tip("Track it in an issue (labelled pilothouse) with its place and the fix"))
                         .disabled(busy)
                         .on_click(cx.listener({
                             let label = label.clone();
@@ -1135,7 +1135,7 @@ impl FindingsView {
                         .xsmall()
                         .ghost()
                         .label("Remember why")
-                        .tooltip("Later reviews of this repository are told, so they don't raise it again")
+                        .tooltip(ph_ui::tip("Later reviews of this repository are told, so they don't raise it again"))
                         .on_click(cx.listener({
                             let label = label.clone();
                             move |this, _, window, cx| {
@@ -1189,7 +1189,7 @@ impl FindingsView {
                                 .xsmall()
                                 .outline()
                                 .label("Propose to the repository")
-                                .tooltip("Opens a pull request adding it to .pilothouse/review.md, for everyone's reviews")
+                                .tooltip(ph_ui::tip("Opens a pull request adding it to .pilothouse/review.md, for everyone's reviews"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     let rule = this.input.read(cx).value().trim().to_string();
                                     if rule.is_empty() {

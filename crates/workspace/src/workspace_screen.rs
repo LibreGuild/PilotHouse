@@ -116,6 +116,8 @@ pub struct WorkspaceScreen {
     /// were last scrolled to show.
     tabs_scroll: gpui_kit::ScrollHandle,
     tabs_front: std::cell::Cell<Option<SessionId>>,
+    /// The chats whose tab was closed (see `tabs`).
+    closed_tabs: std::collections::HashSet<SessionId>,
     /// Shared with the sidebar, which lists them on each draw.
     sessions: std::rc::Rc<[Session]>,
     active_session: Option<SessionId>,
@@ -210,6 +212,14 @@ impl WorkspaceScreen {
                     window.window_handle(),
                 ));
             }
+            // Past chats says which are marked done, as the Bridge has it.
+            let marks = screen.clone();
+            chat.set_chat_marks(std::rc::Rc::new(move |id, cx| {
+                marks
+                    .upgrade()
+                    .and_then(|screen| screen.read(cx).shell.upgrade())
+                    .is_some_and(|shell| shell.read(cx).is_settled(id))
+            }));
             // Its header shows the workspace's open chats as tabs.
             chat.set_header_tabs(
                 std::rc::Rc::new(move |window, cx| tabs::render(&screen, window, cx)),
@@ -239,6 +249,9 @@ impl WorkspaceScreen {
                 ChatPanelEvent::WantPulls => this.feed_pulls(window, cx),
                 ChatPanelEvent::ShowAs(form) => this.show_as(*form, window, cx),
                 ChatPanelEvent::TypeInCli(text) => this.type_in_cli(text, window, cx),
+                ChatPanelEvent::ChatAction(session, action) => {
+                    this.chat_action(session, *action, window, cx)
+                }
                 ChatPanelEvent::PickOutsideSession(agent) => {
                     let cwd = this.project.path.clone();
                     this.pick_agent_session(agent, cwd, window, cx)
@@ -339,6 +352,7 @@ impl WorkspaceScreen {
         }
         // Its chats are on the Bridge, so the chat always offers its own.
         chat.update(cx, |chat, cx| chat.set_history_menu(true, cx));
+        let closed_tabs = saved.closed_tabs.iter().copied().collect();
         let mut space = Self {
             cli_views,
             _cli_watch: None,
@@ -356,6 +370,7 @@ impl WorkspaceScreen {
             shell,
             tabs_scroll: gpui_kit::ScrollHandle::new(),
             tabs_front: std::cell::Cell::new(None),
+            closed_tabs,
             sessions: sessions.into(),
             active_session,
             chat,
@@ -1154,12 +1169,54 @@ impl WorkspaceScreen {
         };
         let session = Some(session);
         self.active_session = Some(id);
+        // Opened again: it has its tab again.
+        self.closed_tabs.remove(&id);
         self.chat
             .update(cx, |chat, cx| chat.set_session(session, cx));
         self.refresh_evidence(cx);
         self.save_layout(cx);
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
+    }
+
+    /// Closes chat `id`'s tab over the chat: the chat stays as it is (in
+    /// *Past chats*, on the Bridge), only its tab goes, until the chat is
+    /// opened again or needs the user. The one in front gives way to the
+    /// tab beside it, or to a new chat.
+    pub(crate) fn close_tab(&mut self, id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
+        let beside = self.shell.upgrade().and_then(|shell| {
+            let open = crate::bridge::open_chats(
+                shell.read(cx),
+                self.project.id,
+                &self.sessions,
+                self.active_session,
+                cx,
+            );
+            let shown: Vec<SessionId> = open
+                .iter()
+                .map(|chat| chat.session.id)
+                .filter(|open| *open == id || !self.closed_tabs.contains(open))
+                .collect();
+            let at = shown.iter().position(|open| *open == id)?;
+            shown
+                .get(at + 1)
+                .or_else(|| at.checked_sub(1).and_then(|at| shown.get(at)))
+                .copied()
+        });
+        self.closed_tabs.insert(id);
+        if self.active_session == Some(id) {
+            match beside {
+                Some(beside) => self.select_session(beside, cx),
+                None => self.new_session(window, cx),
+            }
+        }
+        self.save_layout(cx);
+        cx.notify();
+    }
+
+    /// Whether chat `id`'s tab was closed.
+    pub(crate) fn tab_closed(&self, id: SessionId) -> bool {
+        self.closed_tabs.contains(&id)
     }
 
     /// Clears the chat so the next message starts a new session (with the
@@ -1307,8 +1364,33 @@ impl WorkspaceScreen {
             self.active_session = active;
             self.save_layout(cx);
         }
+        // A list of chats that shows is read again.
+        self.chat.update(cx, |chat, cx| chat.sessions_changed(cx));
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
+    }
+
+    /// What was asked of chat `session` from its row in Past chats: the
+    /// same as from its card on the Bridge.
+    fn chat_action(
+        &mut self,
+        session: &ph_store::sessions::Session,
+        action: ph_agent::ChatAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(shell) = self.shell.upgrade() else {
+            return;
+        };
+        let (project, session) = (self.project.id, session.clone());
+        // After this update: the shell reads this screen while it acts.
+        cx.defer_in(window, move |_, window, cx| {
+            shell.update(cx, |shell, cx| match action {
+                ph_agent::ChatAction::ToggleDone => shell.toggle_settled(project, session.id, cx),
+                ph_agent::ChatAction::Rename => shell.rename_chat(project, &session, window, cx),
+                ph_agent::ChatAction::Delete => shell.delete_chat(project, &session, window, cx),
+            });
+        });
     }
 
     fn save_layout(&mut self, cx: &mut Context<Self>) {
@@ -1333,6 +1415,11 @@ impl WorkspaceScreen {
             tree_open: Some(self.layout.tree_open),
             preview: Some(self.layout.preview.key().to_string()),
             chat_share: self.layout.chat_share,
+            closed_tabs: {
+                let mut closed: Vec<SessionId> = self.closed_tabs.iter().copied().collect();
+                closed.sort_unstable();
+                closed
+            },
         };
         if let Err(err) = AppState::store(cx).save_project_ui_state(self.project.id, &self.saved) {
             tracing::warn!(

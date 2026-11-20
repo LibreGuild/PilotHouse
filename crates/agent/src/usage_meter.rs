@@ -126,7 +126,7 @@ pub fn render(usage: Option<&SessionUsage>, bar: bool, cx: &App) -> Option<impl 
             .when(bar && usage.cost > 0.0, |this| {
                 this.child(money(usage.cost, usage.currency.as_deref()))
             })
-            .tooltip(move |window, cx| Tooltip::new(details.clone()).build(window, cx)),
+            .tooltip(move |window, cx| Tooltip::new(ph_ui::tip(details.clone())).build(window, cx)),
     )
 }
 

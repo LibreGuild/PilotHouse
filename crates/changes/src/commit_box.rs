@@ -302,7 +302,7 @@ impl Render for CommitBox {
                                 "Commit"
                             })
                             .when(commit_all, |this| {
-                                this.tooltip("Nothing is kept yet: keeps every change, new files too, and commits them")
+                                this.tooltip(ph_ui::tip("Nothing is kept yet: keeps every change, new files too, and commits them"))
                             })
                             .disabled(!can_commit)
                             .on_click(cx.listener(|this, _, window, cx| this.commit(window, cx))),

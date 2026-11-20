@@ -55,7 +55,7 @@ pub fn truncated_label(
                 line.width > *width + px(0.5)
             });
             if cut {
-                Tooltip::new(full.clone()).build(window, cx)
+                Tooltip::new(crate::tip(full.clone())).build(window, cx)
             } else {
                 cx.new(|_| EmptyView).into()
             }

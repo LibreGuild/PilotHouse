@@ -259,7 +259,7 @@ impl WorkspaceScreen {
                 } else {
                     IconName::PanelLeftOpen
                 })
-                .tooltip(label)
+                .tooltip(ph_ui::tip(label))
                 .accessibility_label(label)
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_tree(cx)))
                 .into_any_element()
@@ -351,7 +351,7 @@ impl WorkspaceScreen {
                                 .ghost()
                                 .small()
                                 .icon(Icons::MessagesSquare)
-                                .tooltip(label.clone())
+                                .tooltip(ph_ui::tip(label.clone()))
                                 .accessibility_label(label)
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.show_chat(window, cx)),

@@ -484,7 +484,7 @@ impl Render for RunsView {
                                 .xsmall()
                                 .ghost()
                                 .label("Remove copy")
-                                .tooltip("Its changes are in the project; free the space its copy takes")
+                                .tooltip(ph_ui::tip("Its changes are in the project; free the space its copy takes"))
                                 .on_click(cx.listener(move |this, _, _, cx| this.remove_copy(remove_lane.clone(), cx))),
                         )
                     })
@@ -495,7 +495,7 @@ impl Render for RunsView {
                                 .primary()
                                 .label(if busy { "Applying…" } else { "Keep" })
                                 .disabled(busy)
-                                .tooltip("Apply this agent's changes to the project (a checkpoint is taken first)")
+                                .tooltip(ph_ui::tip("Apply this agent's changes to the project (a checkpoint is taken first)"))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.apply(apply_lane.clone(), base.clone(), window, cx)
                                 })),

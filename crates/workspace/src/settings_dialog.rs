@@ -248,7 +248,8 @@ fn accent_swatches(cx: &App) -> impl IntoElement + use<> {
                 })
                 .p(px(2.))
                 .tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(accent.label()).build(window, cx)
+                    gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(accent.label()))
+                        .build(window, cx)
                 })
                 .on_click(move |_, _, cx| AppState::update_preferences(cx, |p| p.accent = accent));
             match accent.color(dark) {

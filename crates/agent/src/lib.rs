@@ -32,6 +32,7 @@ mod entry_view;
 pub mod evidence;
 pub mod explanations;
 pub mod form;
+mod gemini_trust;
 pub mod installed;
 pub mod instructions;
 pub mod mcp_config;
@@ -61,8 +62,8 @@ pub mod view_mode;
 
 pub use attachments::{Attachment, LiveSources, PullBrief};
 pub use chat_panel::{
-    ChatContext, ChatPanel, ChatPanelEvent, CliView, Form, HeaderTabs, Instructions, Prepare,
-    Starter,
+    ChatAction, ChatContext, ChatMarks, ChatPanel, ChatPanelEvent, CliView, Form, HeaderTabs,
+    Instructions, Prepare, Starter,
 };
 pub use chats::{
     ChatHub, ChatState, ChatSummary, ChatsActivity, Preparing, WorkspaceChats, WorkspaceChatsEvent,

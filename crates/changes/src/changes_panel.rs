@@ -812,11 +812,11 @@ impl ChangesPanel {
                         .icon(ph_ui::Icons::Sparkles)
                         .when(!narrow, |this| this.label("Review"))
                         .accessibility_label("Review")
-                        .tooltip(if narrow {
+                        .tooltip(ph_ui::tip(if narrow {
                             "Review: an agent reviews these changes before you push; its findings land on the lines as notes"
                         } else {
                             "An agent reviews these changes before you push; its findings land on the lines as notes"
-                        })
+                        }))
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesPanelEvent::ReviewChanges))),
                 )
                 .when(self.explanation.is_some(), |this| {
@@ -827,11 +827,11 @@ impl ChangesPanel {
                             .icon(ph_ui::Icons::MessageSquare)
                             .when(!narrow, |this| this.label("Explain"))
                             .accessibility_label("Explain")
-                            .tooltip(if narrow {
+                            .tooltip(ph_ui::tip(if narrow {
                                 "Explain: an agent tells you in plain words what these changes do, how it worked before and why, before you commit"
                             } else {
                                 "An agent tells you in plain words what these changes do, how it worked before and why, before you commit"
-                            })
+                            }))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.explaining = true;
                                 cx.emit(ChangesPanelEvent::ExplainChanges);
@@ -1102,7 +1102,8 @@ impl ChangesPanel {
                 .child(item.label.clone())
                 .when_some(detail, |this, detail| {
                     this.tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(detail.clone()).build(window, cx)
+                        gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(detail.clone()))
+                            .build(window, cx)
                     })
                 })
         });

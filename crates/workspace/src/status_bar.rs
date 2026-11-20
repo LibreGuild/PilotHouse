@@ -94,8 +94,10 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                         .min_w_0()
                         .when(!full_paths.is_empty(), |this| {
                             this.tooltip(move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(full_paths.clone())
-                                    .build(window, cx)
+                                gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(
+                                    full_paths.clone(),
+                                ))
+                                .build(window, cx)
                             })
                         })
                         .when_some(path, |this, path| {
@@ -173,11 +175,11 @@ fn agent_updates_item(cx: &mut Context<Workspace>) -> Option<AnyElement> {
                             .small()
                             .outline()
                             .label("Update")
-                            .tooltip(
+                            .tooltip(ph_ui::tip(
                                 crate::agent_updates::update_command(agent.id)
                                     .map(|command| format!("Runs `{command}` in a terminal"))
                                     .unwrap_or_default(),
-                            )
+                            ))
                             .on_click(move |_, window, cx| {
                                 _ = workspace.update(cx, |workspace, cx| {
                                     workspace.update_agent_cli(agent, window, cx)
@@ -314,7 +316,8 @@ fn limits(cx: &Context<Workspace>) -> Vec<AnyElement> {
                     )
                 }))
                 .tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tip.clone()))
+                        .build(window, cx)
                 })
                 .into_any_element()
         })
@@ -373,7 +376,8 @@ fn ci_item(ci: Option<&crate::signals::Ci>, cx: &Context<Workspace>) -> Option<A
                     .on_click(move |_, _, cx| cx.open_url(&url))
             })
             .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tip.clone()))
+                    .build(window, cx)
             })
             .into_any_element(),
     )
@@ -390,7 +394,9 @@ fn merged_item(cx: &Context<Workspace>) -> AnyElement {
                 .text_color(cx.theme().success),
         )
         .label("Merged · Finish task")
-        .tooltip("The task's branch is in its base: remove its worktree and workspace")
+        .tooltip(ph_ui::tip(
+            "The task's branch is in its base: remove its worktree and workspace",
+        ))
         .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::actions::FinishTask), cx))
         .into_any_element()
 }
@@ -506,7 +512,7 @@ fn drive_item(
             .icon(Icon::new(Icons::HardDrive).xsmall())
             .label(label)
             .text_color(color)
-            .tooltip(tip)
+            .tooltip(ph_ui::tip(tip))
             .on_click(|_, window, cx| {
                 window.dispatch_action(Box::new(crate::actions::ShowNetworkDrives), cx)
             })

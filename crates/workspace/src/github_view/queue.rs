@@ -553,11 +553,11 @@ impl GithubView {
                             .xsmall()
                             .ghost()
                             .label(if self.review_first { "Review first" } else { "Newest first" })
-                            .tooltip(if self.review_first {
+                            .tooltip(ph_ui::tip(if self.review_first {
                                 "Sorted for review: pushed since your review, CI not failing, risky, small. Click for newest first."
                             } else {
                                 "Sorted by date. Click to sort for review."
-                            })
+                            }))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let on = !this.review_first;
                                 this.set_review_first(on, cx)

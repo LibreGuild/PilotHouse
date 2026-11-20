@@ -729,10 +729,12 @@ impl GithubView {
                     Notification::info("Run with several agents from a workspace."),
                     cx,
                 ),
-                // Terminal agents' chats belong to workspaces, not here.
+                // Terminal agents' chats belong to workspaces, not here; and
+                // this panel gives Past chats no row actions.
                 ChatPanelEvent::ShowAs(_)
                 | ChatPanelEvent::PickOutsideSession(_)
-                | ChatPanelEvent::TypeInCli(_) => {}
+                | ChatPanelEvent::TypeInCli(_)
+                | ChatPanelEvent::ChatAction(..) => {}
             },
         );
         self.chats.insert(id.clone(), (chat.clone(), subscription));

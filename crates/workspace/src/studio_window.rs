@@ -737,7 +737,9 @@ impl Render for StudioWindow {
                 .icon(Icons::MessageSquare)
                 .label("Agent")
                 .selected(self.chat_shown)
-                .tooltip("Show or hide the chat: describe an edit and an agent makes it")
+                .tooltip(ph_ui::tip(
+                    "Show or hide the chat: describe an edit and an agent makes it",
+                ))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_chat(cx)))
         });
         // Mid-slide the chat keeps its full width and is cut by its pane,

@@ -811,7 +811,9 @@ impl UsageView {
             })
             .aria_label(format!("{name}: {numbers}"))
             .when_some(tip, |this, tip| {
-                this.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                this.tooltip(move |window, cx| {
+                    Tooltip::new(ph_ui::tip(tip.clone())).build(window, cx)
+                })
             })
             .child(
                 h_flex()
@@ -1053,7 +1055,7 @@ impl UsageView {
                                 .xsmall()
                                 .label("Plan and limits")
                                 .icon(Icons::ExternalLink)
-                                .tooltip(url)
+                                .tooltip(ph_ui::tip(url))
                                 .on_click(move |_, _, cx| cx.open_url(url)),
                         )
                     }),
@@ -1391,7 +1393,7 @@ fn info(id: &'static str, text: impl Into<SharedString>, cx: &App) -> impl IntoE
                 .xsmall()
                 .text_color(cx.theme().muted_foreground),
         )
-        .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+        .tooltip(move |window, cx| Tooltip::new(ph_ui::tip(text.clone())).build(window, cx))
 }
 
 #[cfg(test)]

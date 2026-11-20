@@ -923,7 +923,9 @@ impl Render for TranscriptView {
                     .xsmall()
                     .icon(Icons::MessageSquare)
                     .label("Continue in a chat")
-                    .tooltip("A new chat that starts from this session, with any agent")
+                    .tooltip(ph_ui::tip(
+                        "A new chat that starts from this session, with any agent",
+                    ))
                     .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
                         crate::agents::AGENTS.iter().fold(menu, |menu, agent| {
                             let view = view.clone();

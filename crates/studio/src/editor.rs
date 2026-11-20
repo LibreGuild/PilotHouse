@@ -1155,7 +1155,7 @@ impl ImageEditor {
                     .small()
                     .icon(Icons::Undo2)
                     .disabled(!can_undo)
-                    .tooltip(format!("Undo ({undo_key})"))
+                    .tooltip(ph_ui::tip(format!("Undo ({undo_key})")))
                     .on_click(cx.listener(|this, _, window, cx| this.undo(&Undo, window, cx))),
             )
             .child(
@@ -1202,7 +1202,9 @@ impl ImageEditor {
                     .icon(Icons::Download)
                     .label("Export")
                     .disabled(!ready)
-                    .tooltip(format!("Save the result as a new file ({export_key})"))
+                    .tooltip(ph_ui::tip(format!(
+                        "Save the result as a new file ({export_key})"
+                    )))
                     .on_click(cx.listener(|this, _, window, cx| this.open_export(window, cx))),
             )
             .into_any_element()
@@ -1236,11 +1238,11 @@ impl ImageEditor {
                             .small()
                             .icon(*icon)
                             .selected(current == tool)
-                            .tooltip(if key.is_empty() {
+                            .tooltip(ph_ui::tip(if key.is_empty() {
                                 name.to_string()
                             } else {
                                 format!("{name} ({key})")
-                            })
+                            }))
                             .accessibility_label(*name)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.set_tool(tool, cx);

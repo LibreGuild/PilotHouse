@@ -600,9 +600,9 @@ impl PullView {
                             .primary()
                             .icon(Icons::Sparkles)
                             .label("Review with agent")
-                            .tooltip(
+                            .tooltip(ph_ui::tip(
                                 "Opens a review chat in the GitHub view, on its own copy of the PR",
-                            )
+                            ))
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 cx.emit(PullViewEvent::Agent(crate::AgentRequest::Review {
                                     pull: Box::new(review_pull.clone()),
@@ -619,7 +619,7 @@ impl PullView {
                                 .icon(IconName::Eye)
                                 .label("Watching")
                                 .selected(true)
-                                .tooltip("You are told when the author pushes or answers a finding. Click to stop.")
+                                .tooltip(ph_ui::tip("You are told when the author pushes or answers a finding. Click to stop."))
                                 .on_click(cx.listener(|this, _, _, cx| this.toggle_watch(cx))),
                         )
                     })
@@ -1122,7 +1122,7 @@ impl PullView {
                             .ghost()
                             .icon(Icons::Sparkles)
                             .label(if asking { "Cancel" } else { "Ask about lines" })
-                            .tooltip("Ask an agent about some lines of this file: type `start-end: question`")
+                            .tooltip(ph_ui::tip("Ask an agent about some lines of this file: type `start-end: question`"))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.asking = if this.asking == Some(ix) { None } else { Some(ix) };
                                 if this.asking.is_some() {

@@ -780,7 +780,7 @@ impl ImageEditor {
                 .ghost()
                 .small()
                 .icon(icon)
-                .tooltip(tip)
+                .tooltip(ph_ui::tip(tip))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.doc.update(cx, |doc, cx| {
                         doc.settle();
@@ -959,7 +959,7 @@ impl ImageEditor {
             Switch::new("studio-frame")
                 .checked(frame.is_some())
                 .label("Frame")
-                .tooltip("Space, a background, round corners and a shadow: for screenshots in docs and slides")
+                .tooltip(ph_ui::tip("Space, a background, round corners and a shadow: for screenshots in docs and slides"))
                 .on_click(cx.listener(|this, checked: &bool, _, cx| {
                     let checked = *checked;
                     this.doc.update(cx, |doc, cx| {
@@ -1010,7 +1010,8 @@ impl ImageEditor {
                         })
                         .cursor_pointer()
                         .tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(*name).build(window, cx)
+                            gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(*name))
+                                .build(window, cx)
                         })
                         .child(fill.size_full().rounded(px(4.)))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1091,7 +1092,7 @@ pub(crate) fn align_buttons(current: Align, pick: PickAlign) -> AnyElement {
                 .xsmall()
                 .icon(icon)
                 .selected(align == current)
-                .tooltip(name)
+                .tooltip(ph_ui::tip(name))
                 .accessibility_label(name)
                 .on_click(move |_, window, cx| pick(&align, window, cx))
         }))

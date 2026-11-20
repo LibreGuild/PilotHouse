@@ -345,7 +345,7 @@ impl Render for LiveTools {
                 .small()
                 .icon(icon)
                 .selected(mode == target)
-                .tooltip(tooltip)
+                .tooltip(ph_ui::tip(tooltip))
                 .accessibility_label(tooltip)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_mode(target, cx)))
         };
@@ -499,10 +499,10 @@ impl Render for LiveTools {
                     .small()
                     .icon(Icons::Camera)
                     .disabled(!has_frame || self.busy)
-                    .tooltip(format!(
+                    .tooltip(ph_ui::tip(format!(
                         "Send a screenshot to chat ({})",
                         ph_ui::platform::shortcut("secondary-shift-s")
-                    ))
+                    )))
                     .accessibility_label("Send a screenshot to chat")
                     .on_click(cx.listener(|this, _, _, cx| this.capture(cx))),
             )

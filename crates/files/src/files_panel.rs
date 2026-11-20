@@ -1023,7 +1023,7 @@ impl FilesPanel {
                 .ghost()
                 .xsmall()
                 .icon(icon)
-                .tooltip(tip)
+                .tooltip(ph_ui::tip(tip))
                 .accessibility_label(tip)
         };
         h_flex()

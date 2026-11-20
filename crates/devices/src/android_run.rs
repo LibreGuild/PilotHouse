@@ -654,7 +654,9 @@ impl Render for AndroidRun {
                             .icon(Icons::Package)
                             .label("Build APK")
                             .disabled(busy)
-                            .tooltip("Build the APK of this module and variant; no device needed")
+                            .tooltip(ph_ui::tip(
+                                "Build the APK of this module and variant; no device needed",
+                            ))
                             .on_click(cx.listener(|run, _, _, cx| run.build_apk(cx))),
                     )
                     .when_some(built_apk, |this, apk| {

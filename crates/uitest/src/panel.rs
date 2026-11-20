@@ -558,7 +558,7 @@ impl TestsPanel {
                         .small()
                         .ghost()
                         .label(label)
-                        .tooltip("Later runs compare each step's screen with this run's")
+                        .tooltip(ph_ui::tip("Later runs compare each step's screen with this run's"))
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, _, cx| this.accept_look(&look_path, cx))),
                 )
@@ -582,7 +582,7 @@ impl TestsPanel {
                         .ghost()
                         .label("Repair with agent")
                         .disabled(busy)
-                        .tooltip("The agent redoes the scenario from the broken step; you keep or discard what it records")
+                        .tooltip(ph_ui::tip("The agent redoes the scenario from the broken step; you keep or discard what it records"))
                         .on_click(cx.listener(move |this, _, _, cx| this.repair(repair_path.clone(), cx))),
                 )
             })
