@@ -41,7 +41,7 @@ pub struct StartedShell {
     events: smol::channel::Receiver<Event>,
     /// Program status reports (OSC 7501) found in the output.
     statuses: smol::channel::Receiver<crate::program_status::Message>,
-    title: SharedString,
+    pub(crate) title: SharedString,
     /// The shell's name, as the user picked it (`zsh`, `PowerShell 7`).
     pub(crate) shell: SharedString,
     /// Where it started.

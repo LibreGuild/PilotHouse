@@ -51,6 +51,7 @@ use crate::transcript_scroll::TranscriptList;
 use crate::{setup, setup_view};
 
 mod dropped;
+mod fit;
 mod mentions;
 mod picker;
 mod render;
@@ -259,6 +260,10 @@ pub struct ChatPanel {
     _busy_tick: Option<Task<()>>,
     /// The pane is narrow: the empty chat's starters stack in one column.
     narrow: bool,
+    /// The pane's width when it was last drawn (pixels at the default
+    /// interface size): the message box's buttons keep their words while
+    /// there is room for them (`fit`).
+    width: Option<f32>,
     /// Whoever shows this panel can run an agent's CLI in a terminal (a
     /// workspace's screen; not the quick chat or a Studio window), so the
     /// offer to do so is worth making.
@@ -369,6 +374,7 @@ impl ChatPanel {
             busy_since: None,
             _busy_tick: None,
             narrow: false,
+            width: None,
             cli_view: None,
             reading_tabs: false,
             tabs_attached: false,

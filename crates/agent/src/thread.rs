@@ -407,7 +407,16 @@ impl ChatThread {
     /// go on with one conversation, and what the program needs to go on is
     /// returned. Refused, with why, while the chat works or waits for an
     /// answer: a turn under way cannot be moved.
-    pub fn hand_over(&mut self, cx: &mut Context<Self>) -> Result<Handover, SharedString> {
+    ///
+    /// The task with it resolves once the agent's side has let go: the
+    /// program is started on the conversation only then. (An agent keeps a
+    /// hold on a conversation it has open; Antigravity and Codex say
+    /// "already open in another process" to a CLI started too soon, and
+    /// Codex then takes no input.)
+    pub fn hand_over(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<(Handover, Task<()>), SharedString> {
         let name = self.agent.name;
         if self.status != ThreadStatus::Idle || self.background {
             return Err(format!(
@@ -420,6 +429,19 @@ impl ChatThread {
         }
         if !self.queued.is_empty() {
             return Err("Messages are still waiting to be sent in this chat.".into());
+        }
+        // One process serves every chat of this agent here. While another
+        // of them works it cannot be ended, and an agent that cannot close
+        // one session by itself would keep its hold on this conversation.
+        let me = cx.entity_id();
+        if let Some(connection) = &self.connection {
+            let connection = connection.read(cx);
+            if connection.busy(Some(me), cx) && connection.closes_sessions() == Some(false) {
+                return Err(format!(
+                    "{name} cannot let go of this conversation while another of its chats here is at work. Wait for that chat, then switch."
+                )
+                .into());
+            }
         }
         // The agent keeps a session once something was said in it. One
         // only warmed up has nothing to go on with (and no file of its
@@ -454,11 +476,40 @@ impl ChatThread {
             account: self.account.clone(),
         };
         self.persist(cx);
-        self.end_agent_session(cx);
+        let released = self.release_conversation(cx);
         self.reads_this_turn = false;
         self.app_tools_this_turn = false;
         cx.notify();
-        Ok(handover)
+        Ok((handover, released))
+    }
+
+    /// Makes the agent's side let go of the chat's conversation, for
+    /// another program to go on with it; resolves when it has.
+    ///
+    /// Where no other chat of the agent's process is at work, the process
+    /// is ended: the one sure way that nothing of it holds the
+    /// conversation (its other chats, at rest, load their sessions again
+    /// with their next message). Where one is, only this session is
+    /// closed, and that is waited for.
+    fn release_conversation(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        let Some(connection) = self.connection.take() else {
+            return Task::ready(());
+        };
+        let (known, setup) = (self.acp_session_id.take(), self.setup.take());
+        let me = cx.entity_id();
+        if !connection.read(cx).busy(Some(me), cx) {
+            let message = SharedString::from(format!("{} restarted.", self.agent.name));
+            connection.update(cx, |connection, cx| connection.end(Some(me), message, cx));
+            return Task::ready(());
+        }
+        let session = async move {
+            match (known, setup) {
+                (Some(id), _) => Some(id),
+                (None, Some(setup)) => setup.await.ok(),
+                (None, None) => None,
+            }
+        };
+        connection.read(cx).closed_session(session, cx)
     }
 
     /// Whether this chat is a new one nothing happened in yet (no message,
@@ -3439,16 +3490,30 @@ done"#,
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A chat's conversation goes on in its agent's own program: the chat
-    /// lets go of the session first, and only at rest.
+    /// Waits for `released` (what [`ChatThread::hand_over`] gives back).
+    fn wait_released(cx: &mut TestAppContext, released: Task<()>) {
+        let done = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = done.clone();
+        cx.spawn(async move |_| {
+            released.await;
+            flag.set(true);
+        })
+        .detach();
+        wait_until(cx, "the agent's side to let go", |_| done.get());
+    }
+
+    /// A chat's conversation goes on in its agent's own program: the
+    /// agent's side lets go first, and only at rest. With no other chat of
+    /// the agent at work its process ends, the one sure way that nothing
+    /// holds the conversation.
     #[gpui_kit::test]
     fn a_chat_hands_its_conversation_to_the_agents_cli(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let dir = temp_dir("handover");
-        // It answers a prompt at once, and can close sessions.
+        // It answers a prompt at once.
         let spec = fake_agent_that(
             &dir,
-            r#"{\"sessionCapabilities\":{\"close\":{}}}"#,
+            "{}",
             r#"session/prompt) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}" ;;"#,
         );
         let store = Store::open_in_memory().unwrap();
@@ -3465,18 +3530,21 @@ done"#,
         wait_until(cx, "the session to start", |cx| {
             thread.read_with(cx, |thread, _| thread.acp_session_id.is_some())
         });
-        let empty = thread
+        let (empty, released) = thread
             .update(cx, |thread, cx| thread.hand_over(cx))
             .unwrap();
+        wait_released(cx, released);
         assert!(empty.resume.is_none() && empty.session.is_none());
         thread.read_with(cx, |thread, _| {
             assert!(thread.acp_session_id.is_none() && thread.connection.is_none())
         });
-        wait_until(cx, "the warmed session to be closed", |_| {
-            methods(&dir).iter().any(|m| m == "session/close")
-        });
+        assert!(
+            connection.read_with(cx, |connection, _| connection.has_exited()),
+            "nothing of the agent holds a conversation any more"
+        );
 
         // Something said: the session it was said in is what goes on.
+        let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
         thread.update(cx, |thread, cx| {
             thread.send(
                 "go".into(),
@@ -3495,40 +3563,94 @@ done"#,
                 thread.status == ThreadStatus::Idle && thread.acp_session_id.is_some()
             })
         });
-        let closes = |dir: &Path| {
-            methods(dir)
-                .iter()
-                .filter(|m| *m == "session/close")
-                .count()
-        };
-        let before = closes(&dir);
-        let handover = thread
+        let session_id = thread.read_with(cx, |thread, _| thread.acp_session_id.clone().unwrap());
+        let (handover, released) = thread
             .update(cx, |thread, cx| thread.hand_over(cx))
             .unwrap();
-        assert_eq!(handover.resume.as_deref(), Some("fake-2"));
+        // Already let go as this returns: the process is gone.
+        assert!(connection.read_with(cx, |connection, _| connection.has_exited()));
+        wait_released(cx, released);
+        assert_eq!(handover.resume, Some(session_id.clone()));
         assert_eq!(handover.agent.id, "fake");
         assert_eq!(handover.cwd, dir);
         let stored = handover
             .session
             .expect("a chat something was said in is stored");
         assert_eq!(
-            store
-                .session(stored.id)
-                .unwrap()
-                .unwrap()
-                .acp_session_id
-                .as_deref(),
-            Some("fake-2")
+            store.session(stored.id).unwrap().unwrap().acp_session_id,
+            Some(session_id)
         );
-        // Never two programs on one conversation: the chat's session ends.
-        wait_until(cx, "the chat's session to be closed", |_| {
-            closes(&dir) > before
-        });
         thread.read_with(cx, |thread, _| {
             assert!(thread.acp_session_id.is_none() && thread.connection.is_none())
         });
-        drop(connection);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With another chat of the agent at work, its process cannot be ended
+    /// under that chat: only this session is closed, and waited for; an
+    /// agent that cannot close one session keeps the chat where it is.
+    #[gpui_kit::test]
+    fn a_handover_does_not_end_the_agent_under_another_chat(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        for (name, can_close) in [("handover-busy", true), ("handover-held", false)] {
+            let dir = temp_dir(name);
+            let capabilities = if can_close {
+                r#"{\"sessionCapabilities\":{\"close\":{}}}"#
+            } else {
+                "{}"
+            };
+            // A prompt is never answered: the other chat stays at work.
+            let spec = fake_agent_that(&dir, capabilities, "session/prompt) ;;");
+            let store = Store::open_in_memory().unwrap();
+            let place = store.add_project(&dir).unwrap();
+            let here = ThreadProject {
+                id: place.id,
+                ..project(&dir)
+            };
+            let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+            let thread = cx.new(|cx| ChatThread::draft(store.clone(), here.clone(), spec, cx));
+            let other = cx.new(|cx| ChatThread::draft(store.clone(), here, spec, cx));
+            thread.update(cx, |thread, cx| thread.warm_up(connection.clone(), cx));
+            wait_until(cx, "the session to start", |cx| {
+                thread.read_with(cx, |thread, _| thread.acp_session_id.is_some())
+            });
+            other.update(cx, |other, cx| {
+                other.send(
+                    "work".into(),
+                    Vec::new(),
+                    "work".into(),
+                    say("work"),
+                    connection.clone(),
+                    cx,
+                )
+            });
+            wait_until(cx, "the other chat's prompt to reach the agent", |_| {
+                methods(&dir).iter().any(|m| m == "session/prompt")
+            });
+            let handed = thread.update(cx, |thread, cx| thread.hand_over(cx));
+            if can_close {
+                let (_, released) = handed.unwrap();
+                wait_released(cx, released);
+                assert!(
+                    methods(&dir).iter().any(|m| m == "session/close"),
+                    "this chat's session was closed: {:?}",
+                    methods(&dir)
+                );
+            } else {
+                let refused = handed.unwrap_err();
+                assert!(refused.contains("cannot let go"), "{refused}");
+                thread.read_with(cx, |thread, _| {
+                    assert!(thread.acp_session_id.is_some(), "the chat stays as it was")
+                });
+            }
+            // Either way the other chat's agent goes on.
+            assert!(!connection.read_with(cx, |connection, _| connection.has_exited()));
+            other.read_with(cx, |other, _| {
+                assert_eq!(other.status, ThreadStatus::Working)
+            });
+            drop((thread, other, connection));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[gpui_kit::test]

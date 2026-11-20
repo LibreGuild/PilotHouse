@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
-use gpui_kit::{AnyWindowHandle, EntityId, Focusable as _, Subscription, WeakEntity};
+use gpui_kit::{AnyWindowHandle, EntityId, Focusable as _, Subscription, Task, WeakEntity};
 use ph_agent::cli_transcript::{self, Record};
 use ph_agent::{ChatState, CliView, Form};
 use ph_store::Store;
@@ -136,7 +136,7 @@ impl WorkspaceScreen {
         }
         let shown = self.chat.read(cx).form();
         let done = match (shown, form) {
-            (Form::Chat, Form::Cli) => self.chat_to_cli(cx),
+            (Form::Chat, Form::Cli) => self.chat_to_cli(window, cx),
             (Form::Cli, Form::Cli) => self.continue_cli(window, cx),
             (Form::Cli, Form::Chat) => self.cli_to_chat(window, cx),
             (Form::Chat, Form::Chat) => Ok(()),
@@ -148,11 +148,12 @@ impl WorkspaceScreen {
         cx.notify();
     }
 
-    /// The chat in front goes on in its agent's CLI.
-    fn chat_to_cli(&mut self, cx: &mut Context<Self>) -> Result<()> {
+    /// The chat in front goes on in its agent's CLI: once the agent's side
+    /// has let go of the conversation, and not before.
+    fn chat_to_cli(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<()> {
         let store = AppState::store(cx).clone();
         let thread = self.chat.read(cx).active_thread().clone();
-        let handover = thread
+        let (handover, released) = thread
             .update(cx, |thread, cx| thread.hand_over(cx))
             .map_err(|why| anyhow!("{why}"))?;
         let agent = handover.agent;
@@ -174,55 +175,70 @@ impl WorkspaceScreen {
         if let Some(resume) = &handover.resume {
             store.set_session_acp_id(session.id, Some(resume))?;
         }
-        // The mark: what the agent's file holds now was said in the chat
+        // The mark: what the agent's record holds now was said in the chat
         // (and is in its transcript); what comes after, in the CLI. Read
-        // off the UI thread; the CLI adds nothing until it is typed into.
-        match handover.resume.clone() {
+        // off the UI thread, before the CLI is there to add to it.
+        let mark = match handover.resume.clone() {
             Some(resume) => {
-                let (store, id, folder) = (store.clone(), session.id, handover.cwd.clone());
+                let folder = handover.cwd.clone();
                 let agent_id = agent.id;
                 let environment = ph_agent::profiles::Profiles::load(&store)
                     .of(agent.id)
                     .environment_for(&handover.account);
-                cx.spawn(async move |_, cx| {
-                    let mark = cx
-                        .background_spawn(async move {
-                            Record {
-                                agent: agent_id,
-                                id: &resume,
-                                cwd: &folder,
-                                environment: &environment,
-                                file: None,
-                            }
-                            .step_count()
-                            // A record that cannot be read: all that can
-                            // be read of it later is taken as new.
-                            .unwrap_or(0)
-                        })
-                        .await;
-                    set_mark(&store, id, Some(mark));
+                cx.background_spawn(async move {
+                    Record {
+                        agent: agent_id,
+                        id: &resume,
+                        cwd: &folder,
+                        environment: &environment,
+                        file: None,
+                    }
+                    .step_count()
+                    // A record that cannot be read: all that can be read
+                    // of it later is taken as new.
+                    .unwrap_or(0)
                 })
-                .detach();
             }
             // A session of its own starts: all of its record is new.
-            None => set_mark(&store, session.id, Some(0)),
-        }
+            None => Task::ready(0),
+        };
         // Read from the store again when it comes back, with what the CLI
         // added.
         let chats = self.chat.read(cx).chats().clone();
         chats.update(cx, |chats, cx| chats.forget(session.id, cx));
-        let started = self.start_cli(
-            &session,
-            handover.cwd,
-            handover.resume,
-            named,
-            (handover.model, handover.mode),
-            cx,
-        );
-        // Shown as it now is either way: one that did not start says so
-        // and offers to go on.
-        self.show_session_again(session.id, cx);
-        started
+        // Nothing is sent in the chat meanwhile: that would take the
+        // conversation up again under the CLI about to start.
+        self.chat.update(cx, |chat, cx| {
+            chat.set_busy(Some(format!("Opening {}'s CLI…", agent.name)), cx)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let mark = mark.await;
+            // Never two programs on one conversation: the CLI starts once
+            // the agent's side said it let go (its process ended, or its
+            // session closed).
+            released.await;
+            _ = this.update_in(cx, |this, window, cx| {
+                set_mark(&store, session.id, Some(mark));
+                this.chat.update(cx, |chat, cx| chat.set_busy(None, cx));
+                let started = this.start_cli(
+                    &session,
+                    handover.cwd,
+                    handover.resume,
+                    named,
+                    (handover.model, handover.mode),
+                    cx,
+                );
+                // Shown as it now is either way: one that did not start
+                // says so and offers to go on.
+                this.show_session_again(session.id, cx);
+                if let Err(why) = started {
+                    use gpui_kit::component::WindowExt as _;
+                    window.push_notification(format!("{why:#}"), cx);
+                }
+            });
+        })
+        .detach();
+        Ok(())
     }
 
     /// A session in its CLI form whose program is not running goes on:

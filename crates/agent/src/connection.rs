@@ -219,6 +219,51 @@ impl AgentConnection {
         .detach();
     }
 
+    /// Whether the agent can end one session and go on with its others
+    /// (`session/close`); `None` while it has not started far enough to
+    /// say.
+    pub(crate) fn closes_sessions(&self) -> Option<bool> {
+        self.ready
+            .clone()
+            .now_or_never()
+            .and_then(Result::ok)
+            .map(|ready| ready.close_session)
+    }
+
+    /// [`Self::close_session`], waited for: resolves once the agent said
+    /// the session is closed (or will not: it cannot, it went away, or it
+    /// took longer than a program should to let go of a conversation).
+    /// What is started on the conversation next waits for this.
+    pub(crate) fn closed_session(
+        &self,
+        session: impl Future<Output = Option<String>> + Send + 'static,
+        cx: &App,
+    ) -> Task<()> {
+        let ready = self.ready.clone();
+        let timeout = cx
+            .background_executor()
+            .timer(std::time::Duration::from_secs(5));
+        cx.background_spawn(async move {
+            let close = async {
+                let (Some(session_id), Ok(ready)) = (session.await, ready.await) else {
+                    return;
+                };
+                if !ready.close_session {
+                    return;
+                }
+                if let Err(err) = ready
+                    .process
+                    .request("session/close", json!({ "sessionId": session_id }))
+                    .await
+                {
+                    tracing::debug!("closing agent session {session_id}: {err:#}");
+                }
+            };
+            futures::pin_mut!(close);
+            futures::future::select(close, timeout).await;
+        })
+    }
+
     /// Runs an agent-handled sign-in (it may open the browser).
     pub fn sign_in(
         &self,

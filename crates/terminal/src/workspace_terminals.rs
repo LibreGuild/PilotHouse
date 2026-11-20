@@ -549,7 +549,11 @@ impl WorkspaceTerminals {
         let started =
             Terminal::start_program_with(&program.to_string_lossy(), args, cwd, environment).map(
                 |mut started| {
+                    // Named after what it runs, not after the shell that
+                    // starts it: "zsh" says nothing of an agent's CLI (a
+                    // program that names its terminal itself still does).
                     started.shell = label.to_string().into();
+                    started.title = label.to_string().into();
                     started
                 },
             );

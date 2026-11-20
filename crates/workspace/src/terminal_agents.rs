@@ -50,6 +50,11 @@ pub(crate) struct TerminalAgent {
     pub state: ChatState,
     /// The first thing asked, as its name.
     pub title: Option<String>,
+    /// Whether what the program calls itself (its status' title, the
+    /// title it gives its terminal) is its name: so for an agent started
+    /// by hand in a terminal. One started as a chat's CLI is not named by
+    /// its terminal: a chat named "zsh" says nothing.
+    pub named_by_program: bool,
     /// What it is doing, asks, or said last.
     pub line: Option<String>,
     /// The agent's own session id and its session file.
@@ -389,7 +394,11 @@ pub(crate) fn sync(cx: &mut App) {
                     if found.line.is_some() || found.source == Source::ProgramStatus {
                         agent.line = found.line;
                     }
-                    if found.title.is_some() {
+                    // What the program calls itself names an agent
+                    // started by hand. A session started from a chat is
+                    // named as chats are: it keeps the chat's name, or
+                    // takes the first thing asked (its hooks, its file).
+                    if found.title.is_some() && agent.named_by_program {
                         agent.title = found.title;
                     }
                 }
@@ -403,6 +412,7 @@ pub(crate) fn sync(cx: &mut App) {
                         agent: found.agent,
                         state: found.state,
                         title: found.title,
+                        named_by_program: true,
                         line: found.line,
                         session_id,
                         transcript: None,
@@ -1023,6 +1033,7 @@ pub(crate) fn launch(
             agent,
             state: ChatState::Idle,
             title: title.clone(),
+            named_by_program: false,
             line: None,
             session_id: start.resume.map(str::to_string),
             transcript: None,
