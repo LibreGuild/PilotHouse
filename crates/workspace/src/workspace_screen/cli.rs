@@ -27,7 +27,7 @@ use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
 use gpui_kit::{AnyWindowHandle, EntityId, Focusable as _, Subscription, WeakEntity};
-use ph_agent::cli_transcript::{self, Format};
+use ph_agent::cli_transcript::{self, Record};
 use ph_agent::{ChatState, CliView, Form};
 use ph_store::Store;
 use ph_store::projects::ProjectId;
@@ -90,20 +90,6 @@ fn set_mark(store: &Store, session: SessionId, mark: Option<usize>) {
     if let Err(err) = store.set_setting(MARKS, &marks) {
         tracing::warn!("keeping a session's mark: {err:#}");
     }
-}
-
-/// The session file of agent `agent_id`'s session `id` in `cwd`, where the
-/// agent keeps its files when started with `environment` (its account).
-fn session_file(
-    agent_id: &'static str,
-    cwd: &std::path::Path,
-    id: &str,
-    environment: &[(String, String)],
-) -> Option<PathBuf> {
-    ph_agent::cli_sessions::sessions_in(agent_id, cwd, environment)
-        .into_iter()
-        .find(|session| session.id == id)
-        .and_then(|session| session.path)
 }
 
 impl WorkspaceScreen {
@@ -191,8 +177,8 @@ impl WorkspaceScreen {
         // The mark: what the agent's file holds now was said in the chat
         // (and is in its transcript); what comes after, in the CLI. Read
         // off the UI thread; the CLI adds nothing until it is typed into.
-        match (Format::of(agent.id), handover.resume.clone()) {
-            (Some(format), Some(resume)) => {
+        match handover.resume.clone() {
+            Some(resume) => {
                 let (store, id, folder) = (store.clone(), session.id, handover.cwd.clone());
                 let agent_id = agent.id;
                 let environment = ph_agent::profiles::Profiles::load(&store)
@@ -201,16 +187,25 @@ impl WorkspaceScreen {
                 cx.spawn(async move |_, cx| {
                     let mark = cx
                         .background_spawn(async move {
-                            session_file(agent_id, &folder, &resume, &environment)
-                                .map_or(0, |file| cli_transcript::step_count(format, &file))
+                            Record {
+                                agent: agent_id,
+                                id: &resume,
+                                cwd: &folder,
+                                environment: &environment,
+                                file: None,
+                            }
+                            .step_count()
+                            // A record that cannot be read: all that can
+                            // be read of it later is taken as new.
+                            .unwrap_or(0)
                         })
                         .await;
                     set_mark(&store, id, Some(mark));
                 })
                 .detach();
             }
-            // A session of its own starts: all of its file is new.
-            _ => set_mark(&store, session.id, Some(0)),
+            // A session of its own starts: all of its record is new.
+            None => set_mark(&store, session.id, Some(0)),
         }
         // Read from the store again when it comes back, with what the CLI
         // added.
@@ -318,44 +313,46 @@ impl WorkspaceScreen {
             let (store, id, cli_id, agent_id) =
                 (store.clone(), session.id, cli_id.clone(), agent.id);
             cx.background_spawn(async move {
-                // Nothing was said there, or nothing of it can be read.
-                let (Some(cli_id), Some(format)) = (cli_id, Format::of(agent_id)) else {
-                    return Ok(0);
+                // Nothing was said there: there is nothing to take in.
+                let Some(cli_id) = cli_id else {
+                    return Ok(Some(0));
                 };
-                let file = file
-                    .or_else(|| session_file(agent_id, &cwd, &cli_id, &environment))
-                    .ok_or_else(|| anyhow!("its session file was not found"))?;
-                cli_transcript::take_in(&store, id, format, &file, mark)
+                Record {
+                    agent: agent_id,
+                    id: &cli_id,
+                    cwd: &cwd,
+                    environment: &environment,
+                    file,
+                }
+                .take_in(&store, id, mark)
             })
         };
         cx.spawn_in(window, async move |this, cx| {
             let taken = taken.await;
             _ = this.update_in(cx, |this, window, cx| {
-                // The CLI worked or answered, and its session file holds
-                // nothing new: it kept no record (its transcript saving
-                // was off). Said, since the chat then looks as it did and
-                // the agent will not know what was said there either.
-                if matches!(taken, Ok(0)) && asked {
-                    let _ = cli_transcript::note(
-                        &store,
-                        session.id,
-                        &format!(
-                            "{} kept no record of what was said in its CLI, so it is not in this chat, and {} will not remember it.",
-                            agent.name, agent.name
-                        ),
-                    );
-                }
-                if let Err(err) = &taken {
-                    tracing::warn!("reading a session's CLI part into its chat: {err:#}");
-                    // Said in the chat, where it will be missed.
-                    let _ = cli_transcript::note(
-                        &store,
-                        session.id,
-                        &format!(
-                            "What was said in {}'s CLI could not be read into this chat. {} still knows it.",
-                            agent.name, agent.name
-                        ),
-                    );
+                // Something was said in the CLI and is not in the chat
+                // now: said, with what is known of why, since the chat
+                // would otherwise look as if nothing had been.
+                let name = agent.name;
+                let missing = match &taken {
+                    // Its record was read and holds nothing new.
+                    Ok(Some(0)) if asked => Some(format!(
+                        "{name}'s own record of this session holds nothing new, so what was said in its CLI is not in this chat. If {name} kept no record of it (its transcript saving was off), it will not remember it either."
+                    )),
+                    // Its record cannot be read here: the agent has it.
+                    Ok(None) if asked => Some(format!(
+                        "What was said in {name}'s CLI cannot be shown in this chat: {name}'s own record of it could not be read. {name} still knows it."
+                    )),
+                    Err(err) => {
+                        tracing::warn!("reading a session's CLI part into its chat: {err:#}");
+                        Some(format!(
+                            "What was said in {name}'s CLI could not be read into this chat. {name} still knows it."
+                        ))
+                    }
+                    _ => None,
+                };
+                if let Some(missing) = missing {
+                    let _ = cli_transcript::note(&store, session.id, &missing);
                 }
                 set_mark(&store, session.id, None);
                 let _ = store.set_session_place(session.id, "chat", session.cwd.as_deref());

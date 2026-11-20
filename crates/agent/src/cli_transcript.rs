@@ -725,6 +725,62 @@ pub fn step_count(format: Format, path: &std::path::Path) -> usize {
     steps_of(format, path).len()
 }
 
+/// Where an agent's own record of one of its sessions is looked for.
+pub struct Record<'a> {
+    pub agent: &'a str,
+    /// The agent's own id of the session.
+    pub id: &'a str,
+    /// The folder the session works in.
+    pub cwd: &'a std::path::Path,
+    /// What the agent is started with beside the user's own environment
+    /// (its account): where its files are is read from this.
+    pub environment: &'a [(String, String)],
+    /// Its session file, when the agent said where it is (its hooks).
+    pub file: Option<std::path::PathBuf>,
+}
+
+impl Record<'_> {
+    /// What the record says, as steps; `None` when the agent keeps none
+    /// this can read, or this session's is not found.
+    fn steps(&self) -> Option<Vec<Step>> {
+        // One database a conversation, not a file of lines.
+        if self.agent == "antigravity" {
+            return crate::antigravity_store::steps(self.id, self.environment);
+        }
+        let format = Format::of(self.agent)?;
+        let file = self.file.clone().or_else(|| {
+            crate::cli_sessions::sessions_in(self.agent, self.cwd, self.environment)
+                .into_iter()
+                .find(|session| session.id == self.id)
+                .and_then(|session| session.path)
+        })?;
+        file.is_file().then(|| steps_of(format, &file))
+    }
+
+    /// How many steps the record holds now; `None` when it cannot be
+    /// read. A chat whose conversation goes on in the agent's CLI keeps
+    /// this as its mark: what the record holds after it was said there.
+    pub fn step_count(&self) -> Option<usize> {
+        self.steps().map(|steps| steps.len())
+    }
+
+    /// Adds to chat `session`'s transcript what the record says after its
+    /// first `from` steps (see [`take_in`]). `Ok(None)` when the record
+    /// cannot be read: nothing is added, and nothing is known of what was
+    /// said.
+    pub fn take_in(
+        &self,
+        store: &ph_store::Store,
+        session: ph_store::sessions::SessionId,
+        from: usize,
+    ) -> anyhow::Result<Option<usize>> {
+        match self.steps() {
+            Some(steps) => take_in_steps(store, session, steps, from).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
 /// Adds to chat `session`'s transcript what the agent's session file says
 /// after its first `from` steps: the part of a conversation that went on
 /// in the agent's CLI, taken in when it comes back to the chat. Returns
@@ -742,11 +798,19 @@ pub fn take_in(
     path: &std::path::Path,
     from: usize,
 ) -> anyhow::Result<usize> {
+    take_in_steps(store, session, steps_of(format, path), from)
+}
+
+fn take_in_steps(
+    store: &ph_store::Store,
+    session: ph_store::sessions::SessionId,
+    steps: Vec<Step>,
+    from: usize,
+) -> anyhow::Result<usize> {
     use crate::transcript::StoredEntry;
-    let steps = steps_of(format, path);
     anyhow::ensure!(
         steps.len() >= from,
-        "the session file holds {} steps, fewer than the {from} the chat knew",
+        "the agent's record holds {} steps, fewer than the {from} the chat knew",
         steps.len()
     );
     let stored: Vec<(&str, String)> = steps

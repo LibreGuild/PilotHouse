@@ -17,6 +17,7 @@
 
 pub mod agents;
 pub mod agents_view;
+mod antigravity_store;
 pub mod approvals;
 mod attachment_view;
 pub mod attachments;
