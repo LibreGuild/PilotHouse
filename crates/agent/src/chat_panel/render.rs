@@ -375,6 +375,7 @@ impl ChatPanel {
         use crate::view_mode::ViewMode;
         let thread = self.active.read(cx);
         let current_mode = ViewMode::current(cx);
+        let current_width = ph_theme::preferences::preferences(cx).chat_width;
         let agent = thread.agent();
         // Only a chat that has started and is at rest can be made shorter
         // or handed on.
@@ -477,9 +478,44 @@ impl ChatPanel {
                     )
                 };
                 // Every chat's: how much of an agent's work the transcript
-                // shows.
+                // shows, and how wide it gets in a pane with room to spare.
                 let store = store.clone();
-                menu.separator().label("View").submenu_with_icon(
+                let menu = menu.separator().label("View").submenu_with_icon(
+                    Some(Icon::new(Icons::MoveHorizontal)),
+                    format!("Width: {}", current_width.label()),
+                    window,
+                    cx,
+                    move |menu, _, _| {
+                        ph_theme::ChatWidth::ALL
+                            .into_iter()
+                            .fold(menu, |menu, width| {
+                                menu.item(
+                                    PopupMenuItem::new(width.label())
+                                        .checked(width == current_width)
+                                        .on_click(move |_, window, cx| {
+                                            // Saved with the other preferences,
+                                            // which the workspace owns; this
+                                            // crate cannot name its actions.
+                                            let action = match width {
+                                                ph_theme::ChatWidth::Comfortable => {
+                                                    "workspace::ChatWidthNormal"
+                                                }
+                                                ph_theme::ChatWidth::Wide => {
+                                                    "workspace::ChatWidthWide"
+                                                }
+                                                ph_theme::ChatWidth::Full => {
+                                                    "workspace::ChatWidthFull"
+                                                }
+                                            };
+                                            if let Ok(action) = cx.build_action(action, None) {
+                                                window.dispatch_action(action, cx);
+                                            }
+                                        }),
+                                )
+                            })
+                    },
+                );
+                menu.submenu_with_icon(
                     Some(Icon::new(Icons::Eye)),
                     format!("Show: {}", current_mode.name()),
                     window,
@@ -894,7 +930,7 @@ impl ChatPanel {
                             .max_w(
                                 ph_theme::preferences::preferences(cx)
                                     .chat_width
-                                    .max_width(),
+                                    .welcome_width(),
                             )
                             .grid()
                             // Side by side with room for two, else one under the

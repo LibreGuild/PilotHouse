@@ -166,6 +166,7 @@ icon_assets!(
         ZoomOut,
         Scan,
         Maximize2,
+        MoveHorizontal,
     ]
 );
 

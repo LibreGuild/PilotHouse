@@ -876,7 +876,9 @@ fn chat_page() -> SettingPage {
                         |p, v| p.chat_width = v,
                     ),
                 )
-                .description("How wide messages get in a large window.")
+                .description(
+                    "How wide messages get in a pane with room to spare: a column, a wider one, or the whole pane. Also under ⋯ in the chat.",
+                )
                 .keywords(["chat", "width", "column"]),
             ),
         );

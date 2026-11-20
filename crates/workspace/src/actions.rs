@@ -114,6 +114,11 @@ actions!(
         ZoomOut,
         /// The default sizes again (⌘0, Ctrl+0).
         ResetZoom,
+        /// How wide the chat's messages get (the chat's ⋯ menu, and
+        /// Settings → Chat): the column, a wider one, the whole pane.
+        ChatWidthNormal,
+        ChatWidthWide,
+        ChatWidthFull,
     ]
 );
 
@@ -209,4 +214,14 @@ pub(crate) fn bind_keys(cx: &mut App) {
     cx.on_action(|_: &ZoomIn, cx| AppState::update_preferences(cx, |p| p.zoom(1)));
     cx.on_action(|_: &ZoomOut, cx| AppState::update_preferences(cx, |p| p.zoom(-1)));
     cx.on_action(|_: &ResetZoom, cx| AppState::update_preferences(cx, |p| p.reset_zoom()));
+    for width in ph_theme::ChatWidth::ALL {
+        let set = move |cx: &mut App| AppState::update_preferences(cx, |p| p.chat_width = width);
+        match width {
+            ph_theme::ChatWidth::Comfortable => {
+                cx.on_action(move |_: &ChatWidthNormal, cx| set(cx))
+            }
+            ph_theme::ChatWidth::Wide => cx.on_action(move |_: &ChatWidthWide, cx| set(cx)),
+            ph_theme::ChatWidth::Full => cx.on_action(move |_: &ChatWidthFull, cx| set(cx)),
+        };
+    }
 }

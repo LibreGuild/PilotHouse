@@ -360,34 +360,50 @@ pub fn dense(rems: f32, cx: &App) -> gpui_kit::Rems {
     gpui_kit::rems(rems * density(cx))
 }
 
+/// How wide the chat's messages and message box get in a pane with room
+/// to spare: a column in the pane's middle, a wider one, or the whole pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatWidth {
-    Narrow,
+    /// The column chats have by default. (There was a narrower one, 640
+    /// pixels to this one's 760, until 0.9: a build that saved it reads as
+    /// this.)
+    #[serde(alias = "narrow")]
     Comfortable,
     Wide,
+    /// As wide as the pane.
+    Full,
 }
 
 impl ChatWidth {
-    pub const ALL: [ChatWidth; 3] = [ChatWidth::Narrow, ChatWidth::Comfortable, ChatWidth::Wide];
+    pub const ALL: [ChatWidth; 3] = [ChatWidth::Comfortable, ChatWidth::Wide, ChatWidth::Full];
 
     pub fn label(self) -> &'static str {
         match self {
-            ChatWidth::Narrow => "Narrow",
-            ChatWidth::Comfortable => "Comfortable",
+            ChatWidth::Comfortable => "Normal",
             ChatWidth::Wide => "Wide",
+            ChatWidth::Full => "Full",
         }
     }
 
-    /// Widest the chat's reading column gets: in rems, so a line holds as
-    /// many words at every interface size (640, 760 and 1000 pixels at the
-    /// default one).
-    pub fn max_width(self) -> gpui_kit::Rems {
-        gpui_kit::rems(match self {
-            ChatWidth::Narrow => 40.0,
-            ChatWidth::Comfortable => 47.5,
-            ChatWidth::Wide => 62.5,
-        })
+    /// Widest the chat's column gets. The two columns are in rems, so a
+    /// line holds as many words at every interface size (760 and 1000
+    /// pixels at the default one); *Full* is the pane's own width.
+    pub fn max_width(self) -> gpui_kit::DefiniteLength {
+        match self {
+            ChatWidth::Comfortable => gpui_kit::rems(47.5).into(),
+            ChatWidth::Wide => gpui_kit::rems(62.5).into(),
+            ChatWidth::Full => gpui_kit::relative(1.),
+        }
+    }
+
+    /// Widest an empty chat's welcome gets: a few cards in the pane's
+    /// middle, which the whole of a wide pane would pull apart.
+    pub fn welcome_width(self) -> gpui_kit::DefiniteLength {
+        match self {
+            ChatWidth::Full => ChatWidth::Wide.max_width(),
+            other => other.max_width(),
+        }
     }
 }
 
@@ -618,6 +634,44 @@ fn is_colored(color: Hsla) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_chat_is_a_column_a_wider_one_or_the_whole_pane() {
+        // By default the column it always was.
+        assert_eq!(Preferences::default().chat_width, ChatWidth::Comfortable);
+        assert_eq!(
+            ChatWidth::ALL.map(ChatWidth::label),
+            ["Normal", "Wide", "Full"]
+        );
+        // Each is kept and read back, with what else was saved.
+        for width in ChatWidth::ALL {
+            let saved = Preferences {
+                chat_width: width,
+                ui_font_size: 15.0,
+                ..Preferences::default()
+            };
+            let read: Preferences =
+                serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+            assert_eq!((read.chat_width, read.ui_font_size), (width, 15.0));
+        }
+        // The narrower column of earlier builds reads as the column, and
+        // costs nothing else that was saved.
+        let old: Preferences =
+            serde_json::from_str(r#"{"ui_font_size":20.0,"chat_width":"narrow"}"#).unwrap();
+        assert_eq!(
+            (old.chat_width, old.ui_font_size),
+            (ChatWidth::Comfortable, 20.0)
+        );
+        // The columns are a fixed measure; the whole pane is the pane's.
+        assert_eq!(ChatWidth::Wide.max_width(), gpui_kit::rems(62.5).into());
+        assert_eq!(ChatWidth::Full.max_width(), gpui_kit::relative(1.));
+        // An empty chat's welcome keeps to a column in any of them.
+        assert_eq!(ChatWidth::Full.welcome_width(), ChatWidth::Wide.max_width());
+        assert_eq!(
+            ChatWidth::Comfortable.welcome_width(),
+            ChatWidth::Comfortable.max_width()
+        );
+    }
 
     #[test]
     fn an_unknown_auto_save_reads_as_off_and_costs_nothing_else() {

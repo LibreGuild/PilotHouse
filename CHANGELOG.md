@@ -6,6 +6,7 @@ Each release also has **Merge notes** for organisations that build their own cop
 
 ## Unreleased
 
+- **The chat can take the whole pane.** *Width* under **⋯ → View** in the chat (and *Reading width* in Settings → Chat) is *Normal* (the column in the pane's middle, as before), *Wide* or *Full* (as wide as the pane). The *Narrow* column is gone; a setting that had it reads as *Normal*.
 - **Tooltips no longer run across the window.** A tooltip with a path or a long sentence in it was one line as wide as its text. Every tooltip is now at most 52 characters a line and grows downwards; a path or another long word is broken after a `/` or `-` where one is near.
 - **A chat's tab has a cross, which closes the tab and nothing else.** The tick that marked the chat done from its tab is gone. A closed tab's chat is still in *Past chats* and on the Bridge, and has its tab again when it is opened again or needs you. *Pin to the top* is gone from a tab's menu (it orders the Bridge's cards and did nothing for a tab).
 - **Past chats is one list, the last used first.** The clock over the chat lists the ten last used chats with each one's agent mark. A row pointed at marks its chat done, renames it or deletes it. *Show all chats* puts the whole list where the chat is, until you pick one.
