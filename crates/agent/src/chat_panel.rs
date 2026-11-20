@@ -1301,8 +1301,16 @@ impl ChatPanel {
         cx.notify();
     }
 
+    /// Stop: asks the agent to; pressed again once that has not worked,
+    /// ends its process.
     fn cancel(&mut self, cx: &mut Context<Self>) {
-        self.active.update(cx, |thread, cx| thread.cancel(cx));
+        self.active.update(cx, |thread, cx| {
+            if thread.stop_is_slow() {
+                thread.force_stop(cx)
+            } else {
+                thread.cancel(cx)
+            }
+        });
     }
 
     /// Puts a queued message back in the composer to change it.

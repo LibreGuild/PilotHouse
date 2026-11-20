@@ -1173,14 +1173,20 @@ impl ChatPanel {
             });
 
         let has_text = !self.composer.read(cx).value().trim().is_empty();
+        // An agent that does not stop when asked: Stop then ends it.
+        let slow = self.active.read(cx).stop_is_slow();
         let stop = busy.then(|| {
             Button::new("stop-agent")
                 .small()
-                .outline()
                 .rounded_full()
                 .icon(IconName::Square)
-                .tooltip("Stop")
-                .accessibility_label("Stop")
+                .map(|this| if slow { this.danger() } else { this.outline() })
+                .tooltip(if slow {
+                    "Not stopping. Press to end the agent's process"
+                } else {
+                    "Stop"
+                })
+                .accessibility_label(if slow { "Force stop" } else { "Stop" })
                 .on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))
         });
         // While the agent works, a message is queued: it goes when the turn ends.

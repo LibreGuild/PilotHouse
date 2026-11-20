@@ -166,6 +166,7 @@ mod tests {
             diffs: Vec::new(),
             children: Vec::new(),
             agent_text: String::new(),
+            run: Default::default(),
             expanded: false,
             started: None,
             touched: None,

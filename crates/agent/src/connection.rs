@@ -160,6 +160,20 @@ impl AgentConnection {
         if self.busy(asking, cx) {
             return false;
         }
+        self.end(asking, format!("{} restarted.", self.spec.name).into(), cx);
+        true
+    }
+
+    /// Ends the agent's process, whatever its chats are doing: those other
+    /// than `asking` are told `message`, and a turn of theirs ends with it.
+    /// For a restart nothing is at work; a chat whose turn does not stop
+    /// when asked ends the process under the others too.
+    pub fn end(
+        &mut self,
+        asking: Option<gpui_kit::EntityId>,
+        message: SharedString,
+        cx: &mut Context<Self>,
+    ) {
         let threads: Vec<_> = self
             .threads
             .values()
@@ -169,14 +183,12 @@ impl AgentConnection {
         if let Some(process) = self.process.take() {
             process.stop();
         }
-        let message = SharedString::from(format!("{} restarted.", self.spec.name));
         self.exited = Some(message.clone());
         // Its output closing later finds no chat to tell.
         self.threads.clear();
         for thread in threads {
             thread.update(cx, |thread, cx| thread.agent_exited(message.clone(), cx));
         }
-        true
     }
 
     /// Ends the agent session `session` (once known: it may still be being
@@ -380,6 +392,13 @@ async fn initialize(
                 // Questions with forms are answered in the chat.
                 .elicitation(
                     ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
+                )
+                // What a command prints comes as it is printed, with the
+                // command's exit code at its end (see `CommandRun`).
+                .meta(
+                    json!({ "terminal_output_delta": true })
+                        .as_object()
+                        .cloned(),
                 ),
         )
         .client_info(Implementation::new("pilothouse", env!("CARGO_PKG_VERSION")));

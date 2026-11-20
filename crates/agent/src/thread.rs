@@ -43,6 +43,9 @@ const HISTORY_PREAMBLE_CHARS: usize = 8_000;
 /// background command or subagent) counts as done after this long without
 /// an update and with no tool call running…
 const BACKGROUND_QUIET: Duration = Duration::from_secs(8);
+/// How long an agent has to stop when asked, before Stop offers to end its
+/// process instead. Longer than a second press by mistake.
+const STOP_GRACE: Duration = Duration::from_secs(3);
 /// …or after this long without any update at all.
 const BACKGROUND_SILENT: Duration = Duration::from_secs(90);
 
@@ -195,6 +198,8 @@ pub struct ChatThread {
     /// The agent session was started anew for a chat that had one before
     /// (the agent cannot resume it): the next message carries a recap.
     recap_due: bool,
+    /// When the turn was asked to stop, while it has not.
+    stop_asked: Option<Instant>,
     entries: Vec<Entry>,
     /// The questions of `entries` still waiting for an answer, oldest
     /// first: the sidebar and title bar ask on every frame, and a long
@@ -203,6 +208,9 @@ pub struct ChatThread {
     /// Replies whose drawn view is kept, most recently drawn last (see
     /// [`KEPT_VIEWS`]).
     views: VecDeque<usize>,
+    /// Where each open command's output is scrolled to, by the call's id.
+    /// A command opens at its end: that is where a failure says why.
+    output_scrolls: HashMap<String, gpui_kit::ScrollHandle>,
     /// `entries[..saved]` are in the store.
     saved: usize,
     /// What the chat did, in numbers, as the store has it.
@@ -296,9 +304,11 @@ impl ChatThread {
             importing: false,
             accepts_images: true,
             recap_due: false,
+            stop_asked: None,
             entries: Vec::new(),
             pending: Vec::new(),
             views: VecDeque::new(),
+            output_scrolls: HashMap::new(),
             saved: 0,
             facts_saved: None,
             status: ThreadStatus::Idle,
@@ -1347,6 +1357,65 @@ impl ChatThread {
         })
         .detach();
         self.cancel_pending_permissions(cx);
+        // Stopping is a request the agent answers. One that does not (a
+        // tool that hangs, an agent that no longer reads) is seen as slow,
+        // and Stop then ends its process.
+        if self.status != ThreadStatus::Idle && self.stop_asked.is_none() {
+            self.stop_asked = Some(Instant::now());
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(STOP_GRACE).await;
+                _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+    }
+
+    /// Whether the turn was asked to stop a while ago and still goes on.
+    pub fn stop_is_slow(&self) -> bool {
+        self.status != ThreadStatus::Idle
+            && self
+                .stop_asked
+                .is_some_and(|asked| asked.elapsed() >= STOP_GRACE)
+    }
+
+    /// Ends the agent's process: for a turn that does not stop when asked.
+    /// The process serves every chat of this agent in the workspace, so
+    /// those at work lose their turn too, and are told why. Each chat picks
+    /// its conversation up again with its next message.
+    pub fn force_stop(&mut self, cx: &mut Context<Self>) {
+        let me = cx.entity_id();
+        let name = self.agent.name;
+        if let Some(connection) = self.connection.take() {
+            connection.update(cx, |connection, cx| {
+                connection.end(
+                    Some(me),
+                    format!("{name} was stopped from another chat. Send a message to go on.")
+                        .into(),
+                    cx,
+                )
+            });
+        }
+        // The prompt's answer will not come: nothing waits for it.
+        self._turn = None;
+        self.acp_session_id = None;
+        self.setup = None;
+        self.reads_this_turn = false;
+        self.app_tools_this_turn = false;
+        if self.background {
+            self.end_background(false, cx);
+        } else if self.status != ThreadStatus::Idle {
+            self.finish_turn(Ok(StopReason::Cancelled), cx);
+        }
+        self.push(
+            Entry::Notice {
+                text: format!(
+                    "{name} did not stop when asked, so its process was ended. Your next message starts it again."
+                ),
+                is_error: false,
+            },
+            cx,
+        );
+        self.persist(cx);
     }
 
     /// Runs an agent-handled sign-in, then asks the user to retry.
@@ -1699,27 +1768,46 @@ impl ChatThread {
             .iter()
             .map(PermissionChoice::from_option)
             .collect();
+        // The call as the transcript knows it, with what the question adds.
+        let mut tool = self
+            .tool_index(&request.tool_call.tool_call_id.0)
+            .and_then(|ix| match &self.entries[ix] {
+                Entry::Tool(tool) => Some(tool.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(ToolEntry::placeholder);
+        tool.apply(&request.tool_call);
         // Approving a plan: the plan goes in the card, to read before
         // answering.
-        let plan = (request.tool_call.fields.kind
-            == Some(agent_client_protocol_schema::v1::ToolKind::SwitchMode))
-        .then(|| {
-            let mut tool = self
-                .tool_index(&request.tool_call.tool_call_id.0)
-                .and_then(|ix| match &self.entries[ix] {
-                    Entry::Tool(tool) => Some(tool.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(ToolEntry::placeholder);
-            tool.apply(&request.tool_call);
-            tool.output
-        })
-        .filter(|plan| !plan.trim().is_empty())
-        .map(|plan| cx.new(|cx| crate::reply::Reply::new(&plan, cx)));
+        let is_plan = request.tool_call.fields.kind
+            == Some(agent_client_protocol_schema::v1::ToolKind::SwitchMode);
+        let plan = is_plan
+            .then(|| tool.output.clone())
+            .filter(|plan| !plan.trim().is_empty())
+            .map(|plan| cx.new(|cx| crate::reply::Reply::new(&plan, cx)));
+        // Anything else: the command, the edit or the tool's input, whole.
+        let asked = if is_plan {
+            crate::permission::Asked::default()
+        } else {
+            // The card names files from the workspace's folder, as the
+            // transcript does.
+            let root = self.project.path.clone();
+            for diff in &mut tool.diffs {
+                let (folder, name) = crate::entry_view::shown_path(&diff.path, Some(&root));
+                diff.path = format!("{folder}{name}");
+            }
+            crate::permission::Asked::of(
+                &title,
+                tool.kind,
+                request.tool_call.fields.raw_input.as_ref(),
+                tool.diffs,
+            )
+        };
         let permission = cx.new(|_| {
             let mut permission =
                 PermissionRequest::new(source.into(), title.into(), choices, respond);
             permission.plan = plan;
+            permission.asked = asked;
             permission
         });
         self.add_request(permission, cx);
@@ -1817,13 +1905,30 @@ impl ChatThread {
         self.setup = None;
         self.connection = None;
         if self.status != ThreadStatus::Idle {
+            // The prompt's own failure ("the agent process exited") would
+            // end the turn a second time, saying less.
+            self._turn = None;
             self.finish_turn(Err(message), cx);
         }
     }
 
+    /// Where the output of the open command `id` is scrolled to.
+    pub fn output_scroll(&self, id: &str) -> Option<gpui_kit::ScrollHandle> {
+        self.output_scrolls.get(id).cloned()
+    }
+
     pub fn toggle_expanded(&mut self, ix: usize, cx: &mut Context<Self>) {
         match self.entries.get_mut(ix) {
-            Some(Entry::Tool(tool)) => tool.expanded = !tool.expanded,
+            Some(Entry::Tool(tool)) => {
+                tool.expanded = !tool.expanded;
+                if tool.expanded && tool.kind == crate::transcript::ToolKindLabel::Execute {
+                    let scroll = gpui_kit::ScrollHandle::new();
+                    scroll.scroll_to_bottom();
+                    self.output_scrolls.insert(tool.id.clone(), scroll);
+                } else {
+                    self.output_scrolls.remove(&tool.id);
+                }
+            }
             Some(Entry::Thought { expanded, .. }) => *expanded = !*expanded,
             _ => return,
         }
@@ -1947,6 +2052,25 @@ impl ChatThread {
                 // The chat had a session the agent did not take back: it
                 // starts over in this one.
                 this.recap_due = resume_id.is_some() && !resumed;
+                if this.recap_due {
+                    // Said, not done quietly: the agent no longer knows
+                    // what it knew, only what the summary tells it.
+                    let why = if can_load {
+                        "could not open its own record of this chat"
+                    } else {
+                        "cannot pick a chat up where it left off"
+                    };
+                    this.push(
+                        Entry::Notice {
+                            text: format!(
+                                "{} {why}, so it starts fresh here. It is given a summary of what was said, not all it knew.",
+                                agent.name
+                            ),
+                            is_error: false,
+                        },
+                        cx,
+                    );
+                }
                 this.accepts_images = ready.images && !agent.quirks.text_prompts;
                 if !offered.is_empty() {
                     options::cache(&this.store, agent.id, &offered);
@@ -2056,6 +2180,7 @@ impl ChatThread {
         self.background = false;
         self.status = ThreadStatus::Idle;
         self.turn_started = None;
+        self.stop_asked = None;
         self.changed_last(cx);
         self.persist(cx);
         cx.emit(ThreadEvent::TurnEnded);
@@ -2090,6 +2215,7 @@ impl ChatThread {
         }
         self.status = ThreadStatus::Idle;
         self.turn_started = None;
+        self.stop_asked = None;
         // The working row goes and the turn's summary comes.
         self.changed_last(cx);
         self.reads_this_turn = false;
@@ -2646,12 +2772,19 @@ mod session_tests {
     /// A fake agent in `dir` that logs the methods it gets to
     /// `dir/methods.log`, and offers `session/close` when `can_close`.
     fn fake_agent(dir: &Path, can_close: bool) -> &'static AgentSpec {
-        let log = dir.join("methods.log");
         let capabilities = if can_close {
             r#"{\"sessionCapabilities\":{\"close\":{}}}"#
         } else {
             "{}"
         };
+        fake_agent_that(dir, capabilities, "")
+    }
+
+    /// A fake agent with these `capabilities` (JSON, quotes escaped for the
+    /// shell) that treats some methods its own way: `cases` are lines of
+    /// the script's `case "$method"`, tried before answering `{}`.
+    fn fake_agent_that(dir: &Path, capabilities: &str, cases: &str) -> &'static AgentSpec {
+        let log = dir.join("methods.log");
         let script = format!(
             r#"n=0
 while IFS= read -r line; do
@@ -2661,6 +2794,7 @@ while IFS= read -r line; do
   case "$method" in
     initialize) echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"protocolVersion\":1,\"agentCapabilities\":{capabilities}}}}}" ;;
     session/new) n=$((n+1)); echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"sessionId\":\"fake-$n\"}}}}" ;;
+    {cases}
     *) [ -n "$id" ] && echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{}}}}" ;;
   esac
 done"#,
@@ -2842,6 +2976,155 @@ done"#,
             );
         });
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn say(text: &str) -> Vec<ContentBlock> {
+        vec![ContentBlock::Text(TextContent::new(text.to_string()))]
+    }
+
+    fn last_notice(thread: &ChatThread) -> Option<(String, bool)> {
+        thread.entries.iter().rev().find_map(|entry| match entry {
+            Entry::Notice { text, is_error } => Some((text.clone(), *is_error)),
+            _ => None,
+        })
+    }
+
+    #[gpui_kit::test]
+    fn an_agent_that_does_not_stop_when_asked_is_ended(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = temp_dir("stubborn");
+        // It takes a prompt and never answers, and does not hear "stop".
+        let spec = fake_agent_that(&dir, "{}", "session/prompt|session/cancel) ;;");
+        let store = Store::open_in_memory().unwrap();
+        let place = store.add_project(&dir).unwrap();
+        let here = ThreadProject {
+            id: place.id,
+            ..project(&dir)
+        };
+        let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+        let thread = cx.new(|cx| ChatThread::draft(store.clone(), here.clone(), spec, cx));
+        let other = cx.new(|cx| ChatThread::draft(store, here, spec, cx));
+        for (chat, text) in [(&thread, "go"), (&other, "you too")] {
+            chat.update(cx, |chat, cx| {
+                chat.send(
+                    text.into(),
+                    Vec::new(),
+                    text.into(),
+                    say(text),
+                    connection.clone(),
+                    cx,
+                )
+            });
+        }
+        wait_until(cx, "both prompts to reach the agent", |_| {
+            methods(&dir)
+                .iter()
+                .filter(|m| *m == "session/prompt")
+                .count()
+                == 2
+        });
+        // Asked to stop: the agent gets the request, and time to answer it.
+        thread.update(cx, |thread, cx| thread.cancel(cx));
+        wait_until(cx, "the request to stop to reach the agent", |_| {
+            methods(&dir).iter().any(|m| m == "session/cancel")
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.status, ThreadStatus::Working);
+            assert!(
+                !thread.stop_is_slow(),
+                "a second press by mistake ends nothing"
+            );
+        });
+        // It did not stop: Stop now ends its process.
+        thread.update(cx, |thread, _| {
+            thread.stop_asked = Some(Instant::now() - STOP_GRACE);
+        });
+        assert!(thread.read_with(cx, |thread, _| thread.stop_is_slow()));
+        thread.update(cx, |thread, cx| thread.force_stop(cx));
+        cx.run_until_parked();
+        assert!(connection.read_with(cx, |connection, _| connection.has_exited()));
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.status, ThreadStatus::Idle);
+            assert!(!thread.stop_is_slow());
+            assert!(thread.connection.is_none() && thread.acp_session_id.is_none());
+            let (text, is_error) = last_notice(thread).unwrap();
+            assert!(text.contains("its process was ended"), "{text}");
+            assert!(!is_error);
+            // It keeps the session to pick up again.
+            assert!(
+                thread
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.acp_session_id.is_some())
+            );
+        });
+        // The agent's other chat at work lost its turn, and is told why.
+        other.read_with(cx, |other, _| {
+            assert_eq!(other.status, ThreadStatus::Idle);
+            let (text, is_error) = last_notice(other).unwrap();
+            assert!(text.contains("stopped from another chat"), "{text}");
+            assert!(is_error);
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
+    fn a_chat_whose_agent_lost_it_says_it_starts_fresh(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        for (name, capabilities, cases, why) in [
+            (
+                // It can load sessions, and does not know this one.
+                "lost",
+                r#"{\"loadSession\":true}"#,
+                r#"session/load) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32002,\"message\":\"no such session\"}}" ;;"#,
+                "could not open its own record of this chat",
+            ),
+            // It cannot load sessions at all.
+            (
+                "no-load",
+                "{}",
+                "",
+                "cannot pick a chat up where it left off",
+            ),
+        ] {
+            let dir = temp_dir(name);
+            let spec = fake_agent_that(&dir, capabilities, cases);
+            let store = Store::open_in_memory().unwrap();
+            let place = store.add_project(&dir).unwrap();
+            let session = store.create_session(place.id, "Tides", "claude").unwrap();
+            store
+                .set_session_acp_id(session.id, Some("from-before"))
+                .unwrap();
+            let session = store.session(session.id).unwrap().unwrap();
+            let here = ThreadProject {
+                id: place.id,
+                ..project(&dir)
+            };
+            let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+            let thread = cx.new(|cx| {
+                let mut thread = ChatThread::open(store.clone(), here, session, cx);
+                thread.agent = spec;
+                thread
+            });
+            thread.update(cx, |thread, cx| thread.warm_up(connection.clone(), cx));
+            wait_until(cx, "a session to start", |cx| {
+                thread.read_with(cx, |thread, _| thread.acp_session_id.is_some())
+            });
+            thread.read_with(cx, |thread, _| {
+                assert_eq!(thread.acp_session_id.as_deref(), Some("fake-1"));
+                assert!(thread.recap_due, "the next message tells it what was said");
+                let (text, is_error) = last_notice(thread).unwrap();
+                assert!(text.contains(why), "{name}: {text}");
+                assert!(text.contains("starts fresh here") && !is_error);
+            });
+            assert_eq!(
+                methods(&dir).iter().any(|m| m == "session/load"),
+                name == "lost",
+                "{:?}",
+                methods(&dir)
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[gpui_kit::test]

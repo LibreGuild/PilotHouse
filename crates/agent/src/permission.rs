@@ -38,8 +38,112 @@ pub struct PermissionRequest {
     form: Option<Form>,
     /// The plan to approve, when the agent asks to leave plan mode.
     pub plan: Option<gpui_kit::Entity<crate::reply::Reply>>,
+    /// What is being approved, whole, to read before answering.
+    pub asked: Asked,
     outcome: Option<SharedString>,
     responder: Option<Responder>,
+}
+
+/// What an approval is about, beyond its title: a title is one line, and
+/// "Run a script" or "Edit tide.py" is not enough to say yes to.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Asked {
+    /// A command in full, or what a tool is called with, a line per field.
+    pub input: Option<SharedString>,
+    /// The edits the action would make.
+    pub diffs: Vec<crate::transcript::FileDiff>,
+}
+
+/// The most of an input that a card shows.
+const INPUT_CHARS: usize = 4_000;
+/// The most of one field of it.
+const FIELD_CHARS: usize = 600;
+
+impl Asked {
+    /// What the card of an action shows under `title`: `diffs` as they are,
+    /// and from the action's `input` what the title does not already say.
+    pub fn of(
+        title: &str,
+        kind: crate::transcript::ToolKindLabel,
+        input: Option<&serde_json::Value>,
+        diffs: Vec<crate::transcript::FileDiff>,
+    ) -> Self {
+        use crate::transcript::ToolKindLabel as Kind;
+        let text = match kind {
+            Kind::Execute => input.and_then(command_of),
+            // Their title names the file or the search, and an edit shows
+            // as its diff.
+            Kind::Read | Kind::Search | Kind::Think => None,
+            Kind::Edit | Kind::Delete | Kind::Move if !diffs.is_empty() => None,
+            _ => input.and_then(fields_of),
+        };
+        let input = text
+            .map(|text| text.trim().to_string())
+            // Nothing twice: a short command is its own title.
+            .filter(|text| !text.is_empty() && !title.contains(text.as_str()))
+            .map(|text| clip(&text, INPUT_CHARS).into());
+        Self { input, diffs }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.input.is_none() && self.diffs.is_empty()
+    }
+}
+
+/// The command an agent asks to run, from its tool's input: a string, the
+/// script a shell is started with (`["bash", "-lc", "…"]`), or the words
+/// of a command.
+fn command_of(input: &serde_json::Value) -> Option<String> {
+    use serde_json::Value;
+    let words = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_string))
+            .collect()
+    };
+    ["command", "cmd", "script", "commands"]
+        .iter()
+        .find_map(|key| match input.get(*key)? {
+            Value::String(command) => Some(command.clone()),
+            // Several commands, one a line.
+            Value::Array(items) if *key == "commands" => Some(words(items).join("\n")),
+            Value::Array(items) => {
+                let words = words(items);
+                match words.as_slice() {
+                    [_shell, flag, script] if flag.starts_with('-') && flag.ends_with('c') => {
+                        Some(script.clone())
+                    }
+                    _ => Some(words.join(" ")),
+                }
+            }
+            _ => None,
+        })
+}
+
+/// A tool's input as `name: value` lines, strings as they are.
+fn fields_of(input: &serde_json::Value) -> Option<String> {
+    let fields = input.as_object()?;
+    let lines: Vec<String> = fields
+        .iter()
+        .filter_map(|(name, value)| {
+            let value = match value {
+                serde_json::Value::Null => return None,
+                serde_json::Value::String(text) if text.is_empty() => return None,
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            Some(format!("{name}: {}", clip(&value, FIELD_CHARS)))
+        })
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// The first `chars` characters of `text`, with a mark when there is more.
+fn clip(text: &str, chars: usize) -> String {
+    match text.char_indices().nth(chars) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_string(),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +185,7 @@ impl PermissionRequest {
             options,
             form: None,
             plan: None,
+            asked: Asked::default(),
             outcome: None,
             responder: Some(Box::new(move |reply, cx| match reply {
                 Reply::Chose(option) => responder(Some(option), cx),
@@ -101,6 +206,7 @@ impl PermissionRequest {
             options: Vec::new(),
             form: Some(form),
             plan: None,
+            asked: Asked::default(),
             outcome: None,
             responder: Some(Box::new(responder)),
         }
@@ -233,5 +339,113 @@ impl ApprovalInbox {
             inbox_for_events.update(cx, |_, cx| cx.notify());
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcript::{FileDiff, ToolKindLabel};
+    use serde_json::json;
+
+    fn input(asked: &Asked) -> Option<&str> {
+        asked.input.as_deref()
+    }
+
+    #[test]
+    fn a_card_shows_the_whole_command() {
+        // A short command is its own title: nothing twice.
+        let asked = Asked::of(
+            "Run `cargo test`",
+            ToolKindLabel::Execute,
+            Some(&json!({ "command": "cargo test", "description": "Run the tests" })),
+            Vec::new(),
+        );
+        assert!(asked.is_empty());
+        // A script is more than its title's first line.
+        let script = "set -e\ncd server\nrm -rf build\nmake release";
+        let asked = Asked::of(
+            "Run set -e",
+            ToolKindLabel::Execute,
+            Some(&json!({ "command": script })),
+            Vec::new(),
+        );
+        assert_eq!(input(&asked), Some(script));
+        // Codex names the shell and its script; Antigravity lists commands.
+        let asked = Asked::of(
+            "Run a command",
+            ToolKindLabel::Execute,
+            Some(&json!({ "command": ["/bin/zsh", "-lc", "git push --force"] })),
+            Vec::new(),
+        );
+        assert_eq!(input(&asked), Some("git push --force"));
+        let asked = Asked::of(
+            "Run a command",
+            ToolKindLabel::Execute,
+            Some(&json!({ "command": ["git", "status"] })),
+            Vec::new(),
+        );
+        assert_eq!(input(&asked), Some("git status"));
+        let asked = Asked::of(
+            "Run commands",
+            ToolKindLabel::Execute,
+            Some(&json!({ "commands": ["npm ci", "npm test"] })),
+            Vec::new(),
+        );
+        assert_eq!(input(&asked), Some("npm ci\nnpm test"));
+        // A command with no input known says nothing more.
+        assert!(Asked::of("Run it", ToolKindLabel::Execute, None, Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn a_card_shows_an_edit_as_its_diff_and_a_tool_as_its_input() {
+        let diff = FileDiff::new("tide.py", "a\n", "b\n");
+        let asked = Asked::of(
+            "Edit tide.py",
+            ToolKindLabel::Edit,
+            Some(&json!({ "file_path": "tide.py", "old_string": "a", "new_string": "b" })),
+            vec![diff.clone()],
+        );
+        assert_eq!(asked.diffs, vec![diff]);
+        assert_eq!(asked.input, None, "the diff says it");
+        // An edit the agent sent no diff for still says what it is.
+        let asked = Asked::of(
+            "Edit a file",
+            ToolKindLabel::Edit,
+            Some(&json!({ "file_path": "tide.py", "new_string": "b" })),
+            Vec::new(),
+        );
+        assert_eq!(input(&asked), Some("file_path: tide.py\nnew_string: b"));
+        // Another program's tool: what it is called with.
+        let asked = Asked::of(
+            "create_issue",
+            ToolKindLabel::Other,
+            Some(
+                &json!({ "title": "Tides are off", "labels": ["bug"], "body": "", "draft": null }),
+            ),
+            Vec::new(),
+        );
+        assert_eq!(
+            input(&asked),
+            Some("title: Tides are off\nlabels: [\"bug\"]")
+        );
+        // Reading is said by its title; a long value is cut.
+        assert!(
+            Asked::of(
+                "Read tide.py",
+                ToolKindLabel::Read,
+                Some(&json!({ "path": "tide.py" })),
+                Vec::new()
+            )
+            .is_empty()
+        );
+        let asked = Asked::of(
+            "Fetch",
+            ToolKindLabel::Fetch,
+            Some(&json!({ "url": "é".repeat(5_000) })),
+            Vec::new(),
+        );
+        let shown = input(&asked).unwrap();
+        assert!(shown.chars().count() < 700 && shown.ends_with('…'));
     }
 }
