@@ -1,11 +1,9 @@
-//! A chat that was an agent CLI in a terminal (kind `terminal`), its
-//! terminal closed: the agent's own session file shown read only, and ways
-//! to go on: in a terminal again (the CLI resumes its session), or in a new
-//! chat that starts from a recap of it.
+//! A session in its CLI form (kind `terminal`): the agent's own program,
+//! shown in the chat's place while it runs. When it does not (the app was
+//! restarted, the program ended), the agent's session file shows read only
+//! with a way to go on in the CLI; the header's switch goes on in the chat.
 
 use std::path::PathBuf;
-
-use gpui_kit::component::menu::PopupMenuItem;
 
 use super::*;
 use crate::cli_transcript::{FindJob, FindSession, Format, TranscriptView};
@@ -14,8 +12,6 @@ use crate::cli_transcript::{FindJob, FindSession, Format, TranscriptView};
 pub(super) struct TerminalSession {
     pub session: Session,
     pub agent: &'static AgentSpec,
-    /// Where the agent worked.
-    pub cwd: PathBuf,
     /// Its session file as a chat, for agents whose files PilotHouse reads.
     pub view: Option<Entity<TranscriptView>>,
 }
@@ -59,47 +55,30 @@ impl ChatPanel {
         self.terminal_session = Some(TerminalSession {
             session,
             agent,
-            cwd,
             view,
         });
     }
 
-    /// The closed terminal session: its title, its transcript, and what can
-    /// be done next.
-    pub(super) fn render_terminal_session(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// A session in its CLI form: the agent's program when it runs here,
+    /// else what its session file says (read only), with a way to go on.
+    pub(super) fn render_cli(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(shown) = &self.terminal_session else {
             return div().into_any_element();
         };
+        let header = self.render_header(window, cx).into_any_element();
+        let running = self
+            .cli_view
+            .as_ref()
+            .and_then(|view| view(shown.session.id, window, cx));
+        if let Some(view) = running {
+            return v_flex()
+                .size_full()
+                .child(header)
+                .child(div().flex_1().min_h_0().child(view))
+                .into_any_element();
+        }
         let agent = shown.agent;
         let theme = cx.theme();
-        let header = h_flex()
-            .flex_none()
-            .h(ph_ui::rems_from_px(40.))
-            .px_3()
-            .gap_2()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(agent.mark(ph_ui::rems_from_px(16.)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .font_weight(gpui_kit::FontWeight::MEDIUM)
-                    .child(shown.session.title.clone()),
-            )
-            .child(
-                h_flex()
-                    // Kept whole: the title beside it gives way.
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(Icon::new(Icons::Terminal).xsmall())
-                    .child("Terminal session · read only"),
-            );
         let body = match &shown.view {
             Some(view) => div()
                 .flex_1()
@@ -115,7 +94,7 @@ impl ChatPanel {
                 .text_sm()
                 .text_color(theme.muted_foreground)
                 .child(format!(
-                    "{} ran in a terminal; its conversation is in {}'s own files.",
+                    "{} ran in its CLI; its conversation is in {}'s own files.",
                     agent.name, agent.name
                 ))
                 .when(shown.session.acp_session_id.is_none(), |this| {
@@ -126,106 +105,44 @@ impl ChatPanel {
                 })
                 .into_any_element(),
         };
+        // Nothing starts by itself: the CLI comes back when asked for.
+        let go_on = self.cli_view.is_some().then(|| {
+            h_flex()
+                .flex_none()
+                .px_3()
+                .py_2()
+                .gap_3()
+                .border_t_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("{}'s CLI is not running.", agent.name)),
+                )
+                .child(
+                    Button::new("cli-continue")
+                        .primary()
+                        .small()
+                        .icon(Icons::Terminal)
+                        .label(if shown.session.acp_session_id.is_some() {
+                            "Continue"
+                        } else {
+                            "Start again"
+                        })
+                        .tooltip(format!("Go on with this session in {}'s CLI", agent.name))
+                        .on_click(
+                            cx.listener(|_, _, _, cx| cx.emit(ChatPanelEvent::ShowAs(Form::Cli))),
+                        ),
+                )
+        });
         v_flex()
             .size_full()
             .child(header)
             .child(body)
-            .child(self.render_terminal_actions(shown, cx))
-            .into_any_element()
-    }
-
-    /// Go on in a terminal (the CLI resumes the session, or starts anew
-    /// when it is not known), or in a new chat.
-    fn render_terminal_actions(
-        &self,
-        shown: &TerminalSession,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let agent = shown.agent;
-        let session = shown.session.acp_session_id.clone();
-        let panel = cx.weak_entity();
-        // Only where this build has terminals.
-        let terminals = ph_brand::enabled(ph_brand::Feature::Terminal);
-        let resume = terminals.then(|| {
-            let (panel, session, cwd) = (panel.clone(), session.clone(), shown.cwd.clone());
-            Button::new("terminal-session-resume")
-                .primary()
-                .small()
-                .icon(Icons::Terminal)
-                .label(if session.is_some() {
-                    "Continue in terminal"
-                } else {
-                    "Start again in a terminal"
-                })
-                .tooltip(format!("{} in a terminal of this workspace", agent.name))
-                .on_click(move |_, _, cx| {
-                    _ = panel.update(cx, |_, cx| {
-                        cx.emit(ChatPanelEvent::ResumeInTerminal {
-                            agent: agent.id,
-                            session: session.clone(),
-                            cwd: cwd.clone(),
-                        })
-                    });
-                })
-        });
-        // From a recap of what the transcript shows, with any agent.
-        let in_chat = shown.view.clone().map(|view| {
-            let panel = panel.clone();
-            Button::new("terminal-session-chat")
-                .small()
-                .icon(Icons::MessageSquare)
-                .label("Continue in a new chat")
-                .tooltip("A new chat that starts from this session, with any agent")
-                .menu(gpui_kit::Anchor::BottomLeft, move |menu, _, _| {
-                    AGENTS.iter().fold(menu, |menu, agent| {
-                        let (panel, view) = (panel.clone(), view.clone());
-                        menu.item(PopupMenuItem::new(agent.name).on_click(move |_, _, cx| {
-                            let Some((recap, title)) = view.read(cx).recap(cx) else {
-                                return;
-                            };
-                            _ = panel.update(cx, |_, cx| {
-                                cx.emit(ChatPanelEvent::ContinueInChat {
-                                    agent,
-                                    recap,
-                                    title,
-                                })
-                            });
-                        }))
-                    })
-                })
-        });
-        // No transcript to recap: the agent takes its session back itself,
-        // where it can.
-        let load = (shown.view.is_none() && !agent.quirks.no_session_load)
-            .then_some(session)
-            .flatten()
-            .map(|session| {
-                let title = shown.session.title.clone();
-                Button::new("terminal-session-load")
-                    .small()
-                    .icon(Icons::MessageSquare)
-                    .label("Continue in a new chat")
-                    .tooltip(format!("{} takes the session back in a chat", agent.name))
-                    .on_click(move |_, _, cx| {
-                        _ = panel.update(cx, |_, cx| {
-                            cx.emit(ChatPanelEvent::ResumeInChat {
-                                agent: agent.id,
-                                session: session.clone(),
-                                title: title.clone(),
-                            })
-                        });
-                    })
-            });
-        h_flex()
-            .flex_none()
-            .px_3()
-            .py_2()
-            .gap_2()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .children(resume)
-            .children(in_chat)
-            .children(load)
+            .children(go_on)
             .into_any_element()
     }
 }

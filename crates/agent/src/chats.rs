@@ -272,6 +272,14 @@ impl WorkspaceChats {
         thread
     }
 
+    /// Lets go of the loaded chat of `session`: its conversation went on
+    /// in its agent's CLI and its transcript was added to in the store, so
+    /// it is read from there when it is next shown.
+    pub fn forget(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        self.threads.remove(&session);
+        cx.notify();
+    }
+
     /// Keeps `thread` (now stored as `session`) loaded, so it keeps working
     /// off screen.
     pub(crate) fn keep(

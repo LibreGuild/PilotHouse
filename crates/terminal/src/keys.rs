@@ -20,6 +20,13 @@ pub fn to_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
         }
     };
     let named: Option<Vec<u8>> = match keystroke.key.as_str() {
+        // A new line without sending, in a program that takes several
+        // lines (agent CLIs do): a line feed, which is what Ctrl+J types.
+        // Claude Code, Codex and Gemini CLI read it as "new line"; to a
+        // shell it is Enter, as before.
+        "enter" if modifiers.shift => Some(b"\n".to_vec()),
+        // Meta+Enter, their other way to say it.
+        "enter" if modifiers.alt => Some(b"\x1b\r".to_vec()),
         "enter" => Some(b"\r".to_vec()),
         "backspace" if modifiers.alt => Some(vec![0x1b, 0x7f]),
         "backspace" => Some(vec![0x7f]),
@@ -86,6 +93,9 @@ mod tests {
     fn control_and_named_keys() {
         assert_eq!(bytes("ctrl-c"), Some(vec![3]));
         assert_eq!(bytes("enter"), Some(b"\r".to_vec()));
+        // A new line in an agent's prompt, not "send".
+        assert_eq!(bytes("shift-enter"), Some(b"\n".to_vec()));
+        assert_eq!(bytes("alt-enter"), Some(b"\x1b\r".to_vec()));
         assert_eq!(bytes("backspace"), Some(vec![0x7f]));
         assert_eq!(bytes("up"), Some(b"\x1b[A".to_vec()));
         assert_eq!(

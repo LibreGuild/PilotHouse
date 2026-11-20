@@ -983,6 +983,12 @@ impl Workspace {
         let deleted = self
             .chats_of(project, cx)
             .and_then(|chats| chats.update(cx, |chats, cx| chats.delete(id, cx)));
+        // Its agent's CLI, if it shows as one, goes with it.
+        if deleted.is_ok()
+            && let Some(space) = self.spaces.get(&project).cloned()
+        {
+            space.update(cx, |space, cx| space.close_cli(id, cx));
+        }
         if let Err(err) = deleted {
             window.push_notification(
                 Notification::error(format!("Could not delete the chat: {err:#}")),

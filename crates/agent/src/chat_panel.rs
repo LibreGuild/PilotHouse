@@ -86,26 +86,27 @@ pub enum ChatPanelEvent {
     WantPulls,
     /// A starter of the panel's [`ChatContext`] was picked (its id).
     Starter(String),
-    /// Go on with an agent CLI's session in a terminal of the workspace
-    /// (`session` resumed; a new one when not known).
-    ResumeInTerminal {
-        agent: &'static str,
-        session: Option<String>,
-        cwd: std::path::PathBuf,
-    },
-    /// Go on in a new chat with `agent`, from `recap` of a terminal session.
-    ContinueInChat {
-        agent: &'static AgentSpec,
-        recap: String,
-        title: String,
-    },
-    /// Go on in a new chat that takes agent `agent`'s own `session` back.
-    ResumeInChat {
-        agent: &'static str,
-        session: String,
-        title: String,
-    },
+    /// Show the session in front in its other form (see [`Form`]): a chat
+    /// goes on in its agent's CLI, a CLI session in the chat.
+    ShowAs(Form),
+    /// Pick one of an agent's own sessions in this folder that did not
+    /// start here (the agent's id), to go on with it.
+    PickOutsideSession(&'static str),
 }
+
+/// The two forms of a session with an agent: the chat, or the agent's own
+/// program in a terminal. It is one conversation either way (the agent's
+/// session, which both go on with), shown in the same place; only what is
+/// typed into changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Form {
+    Chat,
+    Cli,
+}
+
+/// The agent's program of the session a panel shows, as a view, while it
+/// runs. Whoever shows the panel has the terminals.
+pub type CliView = Rc<dyn Fn(SessionId, &mut Window, &mut App) -> Option<gpui_kit::AnyView>>;
 
 /// What a chat panel is for when it is not a workspace's plain chat: the
 /// GitHub view's chat about one pull request.
@@ -258,7 +259,9 @@ pub struct ChatPanel {
     /// Whoever shows this panel can run an agent's CLI in a terminal (a
     /// workspace's screen; not the quick chat or a Studio window), so the
     /// offer to do so is worth making.
-    runs_terminals: bool,
+    /// The CLI of the session shown, where sessions have their other form
+    /// here (a workspace's chat).
+    cli_view: Option<CliView>,
     /// The shared Chrome tabs are being read (`@tabs`): the message waits
     /// for them, so it does not go without them.
     reading_tabs: bool,
@@ -363,7 +366,7 @@ impl ChatPanel {
             busy_since: None,
             _busy_tick: None,
             narrow: false,
-            runs_terminals: false,
+            cli_view: None,
             reading_tabs: false,
             tabs_attached: false,
             subagents_open: false,
@@ -511,9 +514,35 @@ impl ChatPanel {
         }
     }
 
-    /// Says that [`ChatPanelEvent::ResumeInTerminal`] is acted on here.
-    pub fn set_runs_terminals(&mut self, on: bool) {
-        self.runs_terminals = on;
+    /// Gives sessions their other form here: `view` is the agent's program
+    /// of a session, while it runs, and [`ChatPanelEvent::ShowAs`] is acted
+    /// on by whoever shows the panel.
+    pub fn set_cli_view(&mut self, view: CliView) {
+        self.cli_view = Some(view);
+    }
+
+    /// The form the session in front is in.
+    pub fn form(&self) -> Form {
+        if self.terminal_session.is_some() {
+            Form::Cli
+        } else {
+            Form::Chat
+        }
+    }
+
+    /// The session in front as it is stored, once it is (a chat nothing
+    /// was sent in is not yet).
+    pub fn shown_session(&self, cx: &App) -> Option<Session> {
+        match &self.terminal_session {
+            Some(shown) => Some(shown.session.clone()),
+            None => self.active.read(cx).session().cloned(),
+        }
+    }
+
+    /// The chat in front (behind a session shown as its CLI, the chat
+    /// shown before it).
+    pub fn active_thread(&self) -> &Entity<ChatThread> {
+        &self.active
     }
 
     /// Makes this panel the chat about something (`None`: a plain chat).

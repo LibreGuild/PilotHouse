@@ -36,11 +36,6 @@ use crate::workspace_terminals::WorkspaceTerminals;
 pub enum TerminalPanelEvent {
     /// Ask the agent about `text` from the terminal named `terminal`.
     Ask { terminal: String, text: String },
-    /// Start a coding agent's CLI (by agent id) in a new terminal in `cwd`,
-    /// with PilotHouse following what it does.
-    StartAgent { agent: &'static str, cwd: PathBuf },
-    /// Pick one of the agent's past sessions in `cwd` to resume.
-    ResumeAgent { agent: &'static str, cwd: PathBuf },
     /// Open a link ⌘-clicked in a terminal's output; `cwd` is where its
     /// shell started (a relative path is looked for there first).
     Open {
@@ -385,9 +380,7 @@ impl TerminalPanel {
             .menu(gpui_kit::Anchor::TopRight, move |menu, window, cx| {
                 // Looked up as it opens: a shell installed meanwhile shows.
                 let shells = ph_env::shells();
-                let agent_panel = panel.clone();
-                let agent_cwd = cwd.clone();
-                let menu = shells
+                shells
                     .into_iter()
                     .fold(menu.label("New terminal"), |menu, shell| {
                         let label = if shell.default {
@@ -432,46 +425,7 @@ impl TerminalPanel {
                                 })
                         });
                         menu.item(PopupMenuItem::submenu(label, submenu))
-                    });
-                // Agents whose CLI PilotHouse follows in a terminal.
-                const AGENTS: [(&str, &str); 5] = [
-                    ("claude", "Claude Code"),
-                    ("codex", "Codex"),
-                    ("gemini", "Gemini CLI"),
-                    ("antigravity", "Antigravity"),
-                    ("cline", "Cline"),
-                ];
-                let menu = AGENTS.iter().fold(
-                    menu.separator().label("Agent in a terminal"),
-                    |menu, (agent, name)| {
-                        let (panel, cwd) = (agent_panel.clone(), agent_cwd.clone());
-                        menu.item(PopupMenuItem::new(*name).on_click(move |_, _, cx| {
-                            _ = panel.update(cx, |_, cx| {
-                                cx.emit(TerminalPanelEvent::StartAgent {
-                                    agent,
-                                    cwd: cwd.clone(),
-                                })
-                            });
-                        }))
-                    },
-                );
-                let resume = {
-                    let (panel, cwd) = (agent_panel.clone(), agent_cwd.clone());
-                    PopupMenu::build(window, cx, move |menu, _, _| {
-                        AGENTS.iter().fold(menu, |menu, (agent, name)| {
-                            let (panel, cwd) = (panel.clone(), cwd.clone());
-                            menu.item(PopupMenuItem::new(*name).on_click(move |_, _, cx| {
-                                _ = panel.update(cx, |_, cx| {
-                                    cx.emit(TerminalPanelEvent::ResumeAgent {
-                                        agent,
-                                        cwd: cwd.clone(),
-                                    })
-                                });
-                            }))
-                        })
                     })
-                };
-                menu.item(PopupMenuItem::submenu("Resume a session", resume))
             })
             .into_any_element()
     }

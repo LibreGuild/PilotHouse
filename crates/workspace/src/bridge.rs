@@ -410,6 +410,20 @@ fn in_terminal(stored: &Session, cx: &App) -> bool {
         && crate::terminal_agents::TerminalAgents::of_session(stored.id, cx).is_some()
 }
 
+/// A session shown as its agent's CLI in the chat's place: what the CLI
+/// says of itself, under the session's own name.
+fn cli_summary(stored: &Session, cx: &App) -> Option<ChatSummary> {
+    let running = crate::terminal_agents::TerminalAgents::of_session(stored.id, cx)?;
+    let terminal = running.terminal.upgrade()?;
+    crate::workspace_screen::cli::chat_of(running.project, &terminal, cx)?;
+    Some(ChatSummary {
+        state: running.state,
+        title: stored.title.clone().into(),
+        agent: running.agent,
+        line: running.line.clone(),
+    })
+}
+
 /// A chat not loaded in this run, as it was stored: nothing is going on.
 fn stored_summary(stored: &Session) -> ChatSummary {
     ChatSummary {
@@ -445,11 +459,17 @@ pub(crate) fn open_chats(
     let chats = ph_agent::ChatHub::existing(project, cx);
     let mut open: Vec<OpenChat> = sessions
         .iter()
-        .filter(|stored| !in_terminal(stored, cx))
+        // An agent CLI in a terminal of the Terminal tab is that
+        // terminal's; one in the chat's place is the session's other form
+        // and keeps its tab.
+        .filter(|stored| !in_terminal(stored, cx) || cli_summary(stored, cx).is_some())
         .filter_map(|stored| {
-            let summary = chats
-                .as_ref()
-                .and_then(|chats| chats.read(cx).summary(stored.id, cx))
+            let summary = cli_summary(stored, cx)
+                .or_else(|| {
+                    chats
+                        .as_ref()
+                        .and_then(|chats| chats.read(cx).summary(stored.id, cx))
+                })
                 .unwrap_or_else(|| stored_summary(stored));
             let settled = workspace.is_settled(stored.id);
             let column = Column::place(

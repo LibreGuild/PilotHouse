@@ -268,6 +268,23 @@ static INSTALLED: std::sync::RwLock<Option<Vec<&'static str>>> = std::sync::RwLo
 /// PilotHouse quits; a chat with one offers its terminal instead.
 static NO_CHAT_MODE: std::sync::RwLock<Vec<&'static str>> = std::sync::RwLock::new(Vec::new());
 
+/// Whether agent `id` has a program of its own to run in a terminal, with
+/// the command that starts it: a session's other form (`chat_panel::Form`).
+pub fn cli_of(id: &str) -> Option<&'static str> {
+    match id {
+        "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        "gemini" => Some("gemini"),
+        "antigravity" => Some("agy"),
+        "cline" => Some("cline"),
+        _ => None,
+    }
+}
+
+pub fn has_cli(id: &str) -> bool {
+    cli_of(id).is_some()
+}
+
 /// Whether agent `id`'s CLI here cannot run in a chat (it can in a
 /// terminal).
 pub fn chat_unsupported(id: &str) -> bool {

@@ -53,6 +53,9 @@ pub struct TerminalView {
     cell: Cell<(f32, f32)>,
     /// A mouse drag is selecting text.
     selecting: bool,
+    /// The left button is held on a program that asked for the mouse: the
+    /// cell (column, row, from 1) it was last told.
+    reporting: Option<(usize, usize)>,
     /// The drag went past the top (-1) or bottom (1) edge: the history
     /// scrolls while it stays there, and the selection follows.
     edge: i32,
@@ -88,6 +91,7 @@ impl TerminalView {
             last_bounds: Rc::default(),
             cell: Cell::new((0., 0.)),
             selecting: false,
+            reporting: None,
             edge: 0,
             _autoscroll: None,
             composing: String::new(),
@@ -325,6 +329,19 @@ impl TerminalView {
                 return;
             }
         }
+        // A program that asked for the mouse gets the click (vim, htop, a
+        // full-screen agent). Shift keeps it for selecting text, as in
+        // other terminals.
+        let mode = *self.terminal.read(cx).term().lock().mode();
+        if mode.intersects(TermMode::MOUSE_MODE) && !event.modifiers.shift {
+            let cell = self.screen_cell(point, cx);
+            self.terminal
+                .read(cx)
+                .write(mouse_report(0, true, cell.0, cell.1, mode));
+            self.reporting = Some(cell);
+            cx.notify();
+            return;
+        }
         let kind = match event.click_count {
             2 => SelectionType::Semantic,
             3.. => SelectionType::Lines,
@@ -332,6 +349,34 @@ impl TerminalView {
         };
         self.terminal.read(cx).term().lock().selection = Some(Selection::new(kind, point, side));
         self.selecting = true;
+        cx.notify();
+    }
+
+    /// `point` as a program is told it: column and row on the screen, from 1.
+    fn screen_cell(&self, point: Point, cx: &App) -> (usize, usize) {
+        let offset = self.terminal.read(cx).term().lock().grid().display_offset() as i32;
+        (
+            point.column.0 + 1,
+            (point.line.0 + offset).max(0) as usize + 1,
+        )
+    }
+
+    /// The left button came up: a program that had the press gets the
+    /// release, else a drag that selected ends.
+    fn mouse_up(&mut self, position: gpui_kit::Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(last) = self.reporting.take() else {
+            self.end_drag(cx);
+            return;
+        };
+        let cell = self
+            .cell_at(position, cx)
+            .map_or(last, |(point, _)| self.screen_cell(point, cx));
+        let terminal = self.terminal.read(cx);
+        let mode = *terminal.term().lock().mode();
+        // Still wanted: the program may have let go of the mouse meanwhile.
+        if mode.intersects(TermMode::MOUSE_MODE) {
+            terminal.write(mouse_report(0, false, cell.0, cell.1, mode));
+        }
         cx.notify();
     }
 
@@ -345,6 +390,27 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Held on a program that follows drags: told each new cell.
+        if let Some(last) = self.reporting {
+            if pressed != Some(MouseButton::Left) {
+                self.mouse_up(position, cx);
+                return;
+            }
+            let Some(cell) = self
+                .cell_at(position, cx)
+                .map(|(point, _)| self.screen_cell(point, cx))
+            else {
+                return;
+            };
+            let terminal = self.terminal.read(cx);
+            let mode = *terminal.term().lock().mode();
+            if cell != last && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
+                // 32 marks a move; the button held is the left one (0).
+                terminal.write(mouse_report(32, true, cell.0, cell.1, mode));
+                self.reporting = Some(cell);
+            }
+            return;
+        }
         if !self.selecting {
             return;
         }
@@ -505,10 +571,47 @@ impl TerminalView {
         }
     }
 
-    fn paste(&mut self, _: &TerminalPaste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.terminal.read(cx).paste(&text);
+    /// Pastes the clipboard: its text, files copied in a file manager as
+    /// their paths, or an image (a screenshot) as the path of a file it is
+    /// saved to. A terminal takes only text, and an agent CLI attaches an
+    /// image whose path it is given.
+    fn paste(&mut self, _: &TerminalPaste, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::ClipboardEntry;
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        // Before text: the clipboard holds copied files' names as text too.
+        if let Some(paths) = item.entries().iter().find_map(|entry| match entry {
+            ClipboardEntry::ExternalPaths(paths) => Some(paths.paths().to_vec()),
+            _ => None,
+        }) {
+            self.terminal.read(cx).paste(&typed_paths(&paths));
+            return;
         }
+        if let Some(text) = item.text().filter(|text| !text.is_empty()) {
+            self.terminal.read(cx).paste(&text);
+            return;
+        }
+        let Some((format, bytes)) = item.entries().iter().find_map(|entry| match entry {
+            ClipboardEntry::Image(image) => Some((image.format, image.bytes.clone())),
+            _ => None,
+        }) else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let saved = cx
+                .background_executor()
+                .spawn(async move { save_pasted_image(format, &bytes) })
+                .await;
+            // An image that could not be saved pastes nothing, as an
+            // empty clipboard does.
+            if let Ok(path) = saved {
+                _ = this.update(cx, |this, cx| {
+                    this.terminal.read(cx).paste(&typed_paths(&[path]));
+                });
+            }
+        })
+        .detach();
     }
 
     /// The wheel: to a program that asked for the mouse (Codex, Claude Code,
@@ -740,7 +843,7 @@ impl Render for TerminalView {
         // Report our bounds after layout; resize on the next frame if needed.
         let entity = cx.weak_entity();
         let last_bounds = self.last_bounds.clone();
-        let selecting = self.selecting;
+        let selecting = self.selecting || self.reporting.is_some();
         let measure = canvas(
             move |bounds, _, cx| {
                 if last_bounds.get() != Some(bounds) {
@@ -781,7 +884,8 @@ impl Render for TerminalView {
                                 if phase == gpui_kit::DispatchPhase::Bubble
                                     && event.button == MouseButton::Left
                                 {
-                                    _ = released.update(cx, |this, cx| this.end_drag(cx));
+                                    _ = released
+                                        .update(cx, |this, cx| this.mouse_up(event.position, cx));
                                 }
                             },
                         );
@@ -813,8 +917,15 @@ impl Render for TerminalView {
             // drag selects, so a release over the terminal always ends it.
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| this.end_drag(cx)),
+                cx.listener(|this, event: &gpui_kit::MouseUpEvent, _, cx| {
+                    this.mouse_up(event.position, cx)
+                }),
             )
+            // Files dropped on a terminal are typed as their paths, as other
+            // terminals do: an agent CLI attaches an image named so.
+            .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, _, cx| {
+                this.terminal.read(cx).paste(&typed_paths(paths.paths()));
+            }))
             // A right click puts the keyboard here, so the menu's actions
             // reach this terminal.
             .on_mouse_down(
@@ -1036,12 +1147,70 @@ mod input_tests {
 /// (`ESC [ < b ; x ; y M`) or the old form (`ESC [ M` and three bytes,
 /// for cells up to 223).
 fn wheel_report(button: u8, column: usize, row: usize, mode: TermMode) -> Vec<u8> {
+    mouse_report(button, true, column, row, mode)
+}
+
+/// A button going down (`pressed`) or up at a cell, as a program that
+/// asked for the mouse is told. The old form has no "which button came
+/// up": it says 3.
+fn mouse_report(button: u8, pressed: bool, column: usize, row: usize, mode: TermMode) -> Vec<u8> {
     if mode.contains(TermMode::SGR_MOUSE) {
-        format!("\x1b[<{button};{column};{row}M").into_bytes()
+        let end = if pressed { 'M' } else { 'm' };
+        format!("\x1b[<{button};{column};{row}{end}").into_bytes()
     } else {
         let at = |n: usize| (n.min(223) + 32) as u8;
+        let button = if pressed { button } else { 3 };
         vec![0x1b, b'[', b'M', button + 32, at(column), at(row)]
     }
+}
+
+/// Paths as they are typed at a prompt: each quoted where it must be, with
+/// a space after the last, so the next thing typed is not part of it.
+fn typed_paths(paths: &[std::path::PathBuf]) -> String {
+    let mut typed = String::new();
+    for path in paths {
+        let path = path.to_string_lossy();
+        let plain = path
+            .chars()
+            .all(|c| c.is_alphanumeric() || "/\\._-+:@%~".contains(c));
+        if plain {
+            typed.push_str(&path);
+        } else if cfg!(windows) {
+            typed.push_str(&format!("\"{path}\""));
+        } else {
+            typed.push_str(&format!("'{}'", path.replace('\'', "'\\''")));
+        }
+        typed.push(' ');
+    }
+    typed
+}
+
+/// Saves an image pasted into a terminal to a file of its own in the
+/// system's temporary folder, and returns where.
+fn save_pasted_image(
+    format: gpui_kit::ImageFormat,
+    bytes: &[u8],
+) -> std::io::Result<std::path::PathBuf> {
+    use gpui_kit::ImageFormat;
+    let extension = match format {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::Gif => "gif",
+        ImageFormat::Webp => "webp",
+        ImageFormat::Svg => "svg",
+        ImageFormat::Bmp => "bmp",
+        ImageFormat::Tiff => "tiff",
+        _ => "img",
+    };
+    let dir = std::env::temp_dir().join("pilothouse-pasted");
+    std::fs::create_dir_all(&dir)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|time| time.as_millis())
+        .unwrap_or_default();
+    let path = dir.join(format!("pasted-{stamp}.{extension}"));
+    std::fs::write(&path, bytes)?;
+    Ok(path)
 }
 
 /// Drops the history and the screen above the cursor's line, which moves
@@ -1093,6 +1262,50 @@ mod clear_tests {
 #[cfg(test)]
 mod wheel_tests {
     use super::*;
+
+    #[test]
+    fn clicks_are_told_to_a_program_that_asked() {
+        // The newer form says which button came up; the old one says "a
+        // button" (3).
+        assert_eq!(
+            mouse_report(0, true, 10, 5, TermMode::SGR_MOUSE),
+            b"\x1b[<0;10;5M"
+        );
+        assert_eq!(
+            mouse_report(0, false, 10, 5, TermMode::SGR_MOUSE),
+            b"\x1b[<0;10;5m"
+        );
+        assert_eq!(
+            mouse_report(32, true, 11, 5, TermMode::SGR_MOUSE),
+            b"\x1b[<32;11;5M"
+        );
+        assert_eq!(
+            mouse_report(0, true, 1, 2, TermMode::empty()),
+            vec![0x1b, b'[', b'M', 32, 33, 34]
+        );
+        assert_eq!(
+            mouse_report(0, false, 1, 2, TermMode::empty()),
+            vec![0x1b, b'[', b'M', 35, 33, 34]
+        );
+    }
+
+    #[test]
+    fn dropped_files_are_typed_as_their_paths() {
+        use std::path::PathBuf;
+        assert_eq!(
+            typed_paths(&[PathBuf::from("/tmp/shot.png")]),
+            "/tmp/shot.png "
+        );
+        if cfg!(not(windows)) {
+            assert_eq!(
+                typed_paths(&[
+                    PathBuf::from("/Users/me/My Shots/it's.png"),
+                    PathBuf::from("b.txt")
+                ]),
+                "'/Users/me/My Shots/it'\\''s.png' b.txt "
+            );
+        }
+    }
 
     #[test]
     fn wheel_reports() {

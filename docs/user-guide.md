@@ -25,7 +25,7 @@ A workspace keeps its chats, shells and test runs going while you look at anothe
 
 **Quick chat:** ⌥Space (Alt+Shift+Space on Windows and Linux) opens a small chat window over every app, from anywhere, while PilotHouse runs; press it again to hide it. Its chats are under *Chats*. Set the shortcut in Settings → Chat, or give `pilothouse quick-chat` a shortcut in your system's keyboard settings ([quick-chat.md](features/quick-chat.md)).
 
-**Agents in a terminal:** start one from the terminal's **+** (or resume one of its sessions there). Once you ask it something it is listed with the chats; after its terminal closes it stays, with its last answer, and opens read only, to go on in a terminal or in a new chat.
+**Chat or CLI:** a session with an agent has two forms, and the switch in the chat's header (**Chat | CLI**) goes from one to the other: the chat, or the agent's own program, in the same place. It is one conversation either way, so you can start in the chat, go on in the CLI and come back; what was said in the CLI is in the chat's transcript when you do. The switch waits while the agent works. *Past chats → Started outside this app* goes on with a session you began elsewhere (another terminal, another editor).
 
 ## Reviews
 

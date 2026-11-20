@@ -49,6 +49,7 @@ use crate::app_state::AppState;
 use crate::context_panel::ContextTab;
 use crate::detect::{Stack, detect};
 
+pub(crate) mod cli;
 pub(crate) mod explain;
 mod layout;
 mod panels;
@@ -170,6 +171,10 @@ pub struct WorkspaceScreen {
     signals: crate::signals::Signals,
     _signals: gpui_kit::Task<()>,
     _subscriptions: Vec<Subscription>,
+    /// The views of the agent CLIs the chat shows (see `cli`).
+    cli_views: cli::CliViews,
+    /// Watches the workspace's agent terminals, once one was started.
+    _cli_watch: Option<Subscription>,
     /// Each shown agent transcript's "Continue in a chat", by terminal.
     pub(crate) transcript_subscriptions: HashMap<gpui_kit::EntityId, Subscription>,
 }
@@ -193,9 +198,18 @@ impl WorkspaceScreen {
 
         let store = store.clone();
         let screen = cx.weak_entity();
+        let cli_views = cli::CliViews::default();
         let chat = cx.new(|cx| {
             let mut chat = ChatPanel::new(store.clone(), project.clone(), window, cx);
-            chat.set_runs_terminals(true);
+            // Its sessions have their other form here: the agent's CLI.
+            if ph_brand::enabled(ph_brand::Feature::Terminal) {
+                chat.set_cli_view(Self::cli_view(
+                    project.id,
+                    screen.clone(),
+                    cli_views.clone(),
+                    window.window_handle(),
+                ));
+            }
             // Its header shows the workspace's open chats as tabs.
             chat.set_header_tabs(
                 std::rc::Rc::new(move |window, cx| tabs::render(&screen, window, cx)),
@@ -223,53 +237,10 @@ impl WorkspaceScreen {
                     }
                 }
                 ChatPanelEvent::WantPulls => this.feed_pulls(window, cx),
-                // A closed terminal's chat goes on.
-                ChatPanelEvent::ResumeInTerminal {
-                    agent,
-                    session,
-                    cwd,
-                } => {
-                    if !ph_brand::enabled(ph_brand::Feature::Terminal) {
-                        return;
-                    }
-                    // Already going on in a terminal: that one.
-                    let open = session.as_deref().and_then(|session| {
-                        crate::terminal_agents::TerminalAgents::of_cli_session(agent, session, cx)
-                            .and_then(|running| running.terminal.upgrade())
-                    });
-                    match open {
-                        Some(terminal) => this.show_terminal(&terminal, window, cx),
-                        None => this.start_terminal_agent(
-                            agent,
-                            cwd.clone(),
-                            session.clone(),
-                            window,
-                            cx,
-                        ),
-                    }
-                }
-                ChatPanelEvent::ContinueInChat {
-                    agent,
-                    recap,
-                    title,
-                } => {
-                    let from = format!("{} in a terminal", agent.name);
-                    this.chat.update(cx, |chat, cx| {
-                        chat.continue_with(agent, recap.clone(), title.clone(), &from, window, cx)
-                    });
-                }
-                ChatPanelEvent::ResumeInChat {
-                    agent,
-                    session,
-                    title,
-                } => {
-                    let past = ph_agent::cli_sessions::PastSession {
-                        id: session.clone(),
-                        title: title.clone(),
-                        updated_at: 0,
-                        path: None,
-                    };
-                    this.resume_in_chat(agent, &past, window, cx);
+                ChatPanelEvent::ShowAs(form) => this.show_as(*form, window, cx),
+                ChatPanelEvent::PickOutsideSession(agent) => {
+                    let cwd = this.project.path.clone();
+                    this.pick_agent_session(agent, cwd, window, cx)
                 }
                 // A workspace's chat has no starters of its own.
                 ChatPanelEvent::Starter(_) => {}
@@ -368,6 +339,8 @@ impl WorkspaceScreen {
         // Its chats are on the Bridge, so the chat always offers its own.
         chat.update(cx, |chat, cx| chat.set_history_menu(true, cx));
         let mut space = Self {
+            cli_views,
+            _cli_watch: None,
             layout,
             shown: HashSet::new(),
             _save_split: None,

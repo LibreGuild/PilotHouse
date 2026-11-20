@@ -164,6 +164,23 @@ The project is the agent's working directory, or `--project PATH`.
 
 Transcripts are stored per session, with the agent's ACP session id. After a restart, agents that support `session/load` (Claude Code does) resume their own session. For the others, PilotHouse starts a new session and sends a short recap of the earlier conversation with the first new message. The same happens when an agent that can resume does not find the session any more. Either way the chat says so ("… starts fresh here. It is given a summary of what was said, not all it knew"): the agent then knows less than the transcript shows, and that is not left to be found out.
 
+## Chat or CLI: one session, two forms
+
+A session with an agent is one conversation, the agent's own session, and it has two forms: the chat, and the agent's own program (its CLI) in a terminal. **Chat | CLI** in the chat's header goes from one to the other, in the same place: the CLI shows where the transcript and the message box were. Nothing but what you type into changes. The switch is in a workspace's chat, for the agents that have a CLI (all five), where the build has terminals.
+
+What keeps that true (`workspace_screen/cli.rs`, `ChatThread::hand_over`, `terminal_agents::launch`):
+
+- **One program at a time.** A chat hands its conversation over at rest: while the agent works, waits for an answer or has messages queued, the switch says so and changes nothing. The chat then ends its agent session (`session/close`) before the CLI starts. Coming back, the CLI's terminal is closed before the chat loads the session again; a CLI at work is not closed (wait for it, or stop it there).
+- **Never on a guess.** The CLI goes on with the session the chat had, by its id (`claude --resume`, `codex resume`, `gemini --resume`, `agy --conversation`, `cline --id`). Coming back uses the id the CLI is on: Claude Code says it through its hooks, the others' is the one they resumed or is found in their files. While something was said there and the id is not known yet, the switch waits and says so.
+- **Nothing said is lost.** As a chat goes to the CLI it keeps how many steps the agent's session file holds (a mark, in the setting `chat.cli_marks`). Coming back, what the file holds after the mark was said in the CLI and is added to the chat's transcript (`cli_transcript::take_in`). These entries read plainer than a chat's own (a tool is its name, without its output or diff): the file says less than the agent tells a chat. If the file cannot be read, the chat says so; the agent still knows what was said.
+- **The session keeps its model and mode.** The CLI starts with the chat's model (`--model`) and, for Claude Code, its permission mode (`--permission-mode`), and with PilotHouse's own tools (the browser, devices, tests: `--mcp-config` for Claude Code, `-c mcp_servers.pilothouse…` for Codex, for this run only). Codex's mode and the other CLIs' tools are their own settings.
+
+The CLI is the terminal's own program: the user's shell starts it (`-l -i -c`, so `PATH` and aliases are theirs) and ends with it, so leaving the CLI leaves no prompt behind. Its terminal belongs to the chat: it is not among the Terminal tab's, and the session keeps its tab over the chat and its card on the Bridge, with the state the CLI reports ([terminal.md](terminal.md#agents-in-a-terminal)).
+
+A session in its CLI form whose program is not running (after a restart, or once you left the CLI) shows what its session file says, read only, with **Continue**: nothing starts by itself. A chat nothing was sent in has no conversation yet: its CLI starts a session of its own, named by the first thing asked there. *Past chats → Started outside this app* lists an agent's own sessions in the folder to go on with here (a chat that takes the session back; for Cline, which cannot, its CLI).
+
+What does not carry over: a turn under way; work an agent left running in its process when you switch; and for Cline the way back to the chat is a summary, not its memory (it cannot load a session), which the chat says.
+
 ## Stopping
 
 **Stop** asks the agent to end its turn (ACP `session/cancel`); the agent answers when it has. An agent that does not (a tool that hangs, an agent that no longer reads) leaves the turn running: after three seconds the working line says so and Stop turns red, and pressing it again ends the agent's process (`ChatThread::force_stop`). One process serves every chat of that agent in the workspace, so the others at work lose their turn too and are told why. Each chat keeps its session and picks it up with its next message.

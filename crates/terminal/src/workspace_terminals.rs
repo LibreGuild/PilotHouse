@@ -15,6 +15,10 @@ use crate::terminal::{Terminal, TerminalEvent};
 #[derive(Default)]
 pub struct TerminalHub {
     terminals: HashMap<i64, Entity<WorkspaceTerminals>>,
+    /// Each workspace's agent CLIs that belong to a chat: they show in the
+    /// chat, not among the Terminal tab's, and are not kept between runs
+    /// (their chat is, and resumes them).
+    agents: HashMap<i64, Entity<WorkspaceTerminals>>,
     /// Where each workspace's terminal text is kept between runs.
     state_dir: Option<PathBuf>,
 }
@@ -54,12 +58,31 @@ impl TerminalHub {
         cx.try_global::<Self>()?.terminals.get(&id).cloned()
     }
 
-    /// Every workspace's terminals, with the workspace's id.
+    /// The terminals of workspace `id`'s agent CLIs shown in its chats
+    /// (they start in `cwd` unless told), made on first use.
+    pub fn agent_terminals(id: i64, cwd: PathBuf, cx: &mut App) -> Entity<WorkspaceTerminals> {
+        if let Some(terminals) = Self::existing_agent_terminals(id, cx) {
+            return terminals;
+        }
+        let terminals = cx.new(|_| WorkspaceTerminals::new(cwd));
+        cx.default_global::<Self>()
+            .agents
+            .insert(id, terminals.clone());
+        terminals
+    }
+
+    pub fn existing_agent_terminals(id: i64, cx: &App) -> Option<Entity<WorkspaceTerminals>> {
+        cx.try_global::<Self>()?.agents.get(&id).cloned()
+    }
+
+    /// Every workspace's terminals, with the workspace's id: the Terminal
+    /// tab's, and its chats' agent CLIs.
     pub fn all(cx: &App) -> Vec<(i64, Entity<WorkspaceTerminals>)> {
         cx.try_global::<Self>()
             .map(|hub| {
                 hub.terminals
                     .iter()
+                    .chain(&hub.agents)
                     .map(|(id, terminals)| (*id, terminals.clone()))
                     .collect()
             })
@@ -183,6 +206,7 @@ impl TerminalHub {
         if cx.has_global::<Self>() {
             let hub = cx.global_mut::<Self>();
             hub.terminals.remove(&id);
+            hub.agents.remove(&id);
             if let Some(dir) = &hub.state_dir {
                 let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
             }
@@ -473,6 +497,35 @@ impl WorkspaceTerminals {
         Some(terminal)
     }
 
+    /// Runs `command` as the whole point of a new terminal named `label`
+    /// in `cwd` (an agent's CLI): the user's shell starts it and ends with
+    /// it, so no prompt is left behind and the command is not shown typed.
+    /// The shell reads the user's profile as for a terminal of their own,
+    /// so `PATH` and aliases are theirs.
+    pub fn run_program(
+        &mut self,
+        label: &str,
+        command: &str,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<Terminal>> {
+        // On a server (a network drive's folder) the shell is the
+        // server's, reached through ssh: the command is typed into it.
+        if ph_remote::remote_of(&cwd).is_some() {
+            return self.run_in(label, command, Some(cwd), cx);
+        }
+        let (program, args) = run_with(ph_env::default_shell(), command);
+        let shell = ph_env::Shell {
+            name: label.to_string(),
+            program,
+            args,
+            default: false,
+        };
+        let terminal = self.new_terminal_with(cwd, Some(&shell), cx)?;
+        terminal.update(cx, |terminal, _| terminal.set_label(label.to_string()));
+        Some(terminal)
+    }
+
     /// Closes `terminal` (its shell stops).
     pub fn close(&mut self, terminal: &Entity<Terminal>, cx: &mut Context<Self>) {
         let Some(ix) = self
@@ -505,6 +558,23 @@ const MAX_SPLIT: usize = 4;
 /// The tab shown after closing tab `closed` (`active` was shown; `left`
 /// remain): the same terminal if another closed, else the one that took its
 /// place, else the last.
+/// `shell` (a program and what it is started with) told to run `command`
+/// and end: `-c` for a Unix shell, interactive so that what a profile sets
+/// up for interactive shells (aliases, a version manager's `PATH`) is
+/// there; `-Command` for PowerShell, `/C` for Command Prompt.
+fn run_with((program, mut args): (PathBuf, Vec<String>), command: &str) -> (PathBuf, Vec<String>) {
+    // Its name, whichever way its path is written.
+    let path = program.to_string_lossy().to_lowercase();
+    let file = path.rsplit(['/', '\\']).next().unwrap_or_default();
+    let name = file.strip_suffix(".exe").unwrap_or(file);
+    match name {
+        "cmd" => args.extend(["/C".to_string(), command.to_string()]),
+        "pwsh" | "powershell" => args.extend(["-Command".to_string(), command.to_string()]),
+        _ => args.extend(["-i".to_string(), "-c".to_string(), command.to_string()]),
+    }
+    (program, args)
+}
+
 fn active_after_close(active: usize, closed: usize, left: usize) -> usize {
     let active = if closed < active { active - 1 } else { active };
     active.min(left.saturating_sub(1))
@@ -512,7 +582,33 @@ fn active_after_close(active: usize, closed: usize, left: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::active_after_close;
+    use std::path::PathBuf;
+
+    use super::{active_after_close, run_with};
+
+    #[test]
+    fn a_program_is_run_by_the_users_shell() {
+        let run = |program: &str, args: &[&str]| {
+            let (_, args) = run_with(
+                (
+                    PathBuf::from(program),
+                    args.iter().map(|arg| arg.to_string()).collect(),
+                ),
+                "claude --resume x",
+            );
+            args.join(" ")
+        };
+        assert_eq!(run("/bin/zsh", &["-l"]), "-l -i -c claude --resume x");
+        assert_eq!(
+            run("/usr/local/bin/fish", &["-l"]),
+            "-l -i -c claude --resume x"
+        );
+        assert_eq!(
+            run("C:\\Program Files\\PowerShell\\7\\pwsh.exe", &["-NoLogo"]),
+            "-NoLogo -Command claude --resume x"
+        );
+        assert_eq!(run("cmd.exe", &[]), "/C claude --resume x");
+    }
 
     #[test]
     fn closing_a_tab_keeps_a_sensible_one_shown() {

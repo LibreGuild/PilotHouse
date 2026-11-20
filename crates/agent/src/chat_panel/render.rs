@@ -96,20 +96,38 @@ impl ChatPanel {
         let wide = tabbed
             && width.is_some_and(|width| ph_ui::measure::design_px(width, window) >= ONE_ROW);
         let side_of = self.side_of().cloned();
+        // The session in front: a chat, or one in its CLI form (the chat
+        // behind it is then not what the header is about).
+        let cli = self
+            .terminal_session
+            .as_ref()
+            .map(|shown| (shown.agent, SharedString::from(shown.session.title.clone())));
         let thread = self.active.read(cx);
-        let usage =
-            crate::usage_meter::render(thread.usage(), cx).map(IntoElement::into_any_element);
-        let (dot, label) = match thread.status() {
-            ThreadStatus::Working => (cx.theme().success, "Working"),
-            ThreadStatus::Connecting => (cx.theme().warning, "Starting"),
-            ThreadStatus::Idle if thread.has_started() => {
+        let usage = match cli {
+            Some(_) => None,
+            None => {
+                crate::usage_meter::render(thread.usage(), cx).map(IntoElement::into_any_element)
+            }
+        };
+        let (dot, label) = match (&cli, thread.status()) {
+            // Its state is on its tab and its card, as the CLI reports it.
+            (Some(_), _) => (cx.theme().muted_foreground.opacity(0.5), "In its CLI"),
+            (None, ThreadStatus::Working) => (cx.theme().success, "Working"),
+            (None, ThreadStatus::Connecting) => (cx.theme().warning, "Starting"),
+            (None, ThreadStatus::Idle) if thread.has_started() => {
                 (cx.theme().success.opacity(0.6), "Ready")
             }
-            ThreadStatus::Idle => (cx.theme().muted_foreground.opacity(0.5), "Idle"),
+            (None, ThreadStatus::Idle) => (cx.theme().muted_foreground.opacity(0.5), "Idle"),
         };
+        let spec = cli.as_ref().map_or(thread.agent(), |(agent, _)| *agent);
+        let shown_title = match &cli {
+            Some((_, title)) => title.clone(),
+            None => thread.title(),
+        };
+        let is_cli = cli.is_some();
         // The agent's mark with a dot for its state; the words are in the
         // tooltip, to keep the header small.
-        let tip = format!("{} · {label}", thread.agent().name);
+        let tip = format!("{} · {label}", spec.name);
         let agent = div()
             .id("chat-agent-state")
             .flex_none()
@@ -119,7 +137,7 @@ impl ChatPanel {
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
             })
-            .child(thread.agent().mark(ph_ui::rems_from_px(16.)))
+            .child(spec.mark(ph_ui::rems_from_px(16.)))
             .child(
                 div()
                     .absolute()
@@ -137,7 +155,11 @@ impl ChatPanel {
             .truncate()
             .text_sm()
             .font_weight(gpui_kit::FontWeight::MEDIUM)
-            .child(thread.title());
+            .child(shown_title);
+        let form = self.render_form_switch(spec, cx);
+        // A chat's menu (how much to show, compact, hand on) is the
+        // chat's: in its CLI those are the CLI's own commands.
+        let more = (!is_cli).then(|| self.render_more(cx).into_any_element());
         let back = side_of.map(|parent| {
             Button::new("side-chat-back")
                 .ghost()
@@ -166,8 +188,9 @@ impl ChatPanel {
                     .children(back)
                     .children(tabs.map(|tabs| div().flex_1().min_w_0().child(tabs)))
                     .child(agent)
+                    .children(form)
                     .children(usage)
-                    .child(self.render_more(cx))
+                    .children(more)
                     .when(self.history_menu, |this| {
                         this.child(self.render_history(cx))
                     }),
@@ -203,8 +226,9 @@ impl ChatPanel {
             .when(tabbed, |this| this.child(agent))
             .children(place)
             .child(title)
+            .children(form)
             .children(usage)
-            .child(self.render_more(cx))
+            .children(more)
             .when(!tabbed && self.history_menu, |this| {
                 this.child(self.render_history(cx))
             });
@@ -214,6 +238,44 @@ impl ChatPanel {
             .child(probe)
             .children(which)
             .child(this_chat)
+    }
+
+    /// Chat | CLI: the session's two forms (see [`Form`]), where a session
+    /// has both: a workspace's chat, with an agent that has a CLI. The
+    /// conversation is the same; this picks what it is typed into.
+    fn render_form_switch(
+        &self,
+        agent: &'static AgentSpec,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use gpui_kit::component::tab::{Tab, TabBar};
+        if self.cli_view.is_none()
+            || self.context.is_some()
+            || self.project.read_only
+            || !ph_brand::enabled(ph_brand::Feature::Terminal)
+            || !agents::has_cli(agent.id)
+        {
+            return None;
+        }
+        let form = self.form();
+        Some(
+            TabBar::new("session-form")
+                .segmented()
+                .xsmall()
+                .flex_none()
+                .selected_index(usize::from(form == Form::Cli))
+                .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                    let to = if *ix == 1 { Form::Cli } else { Form::Chat };
+                    // Shown as it is until whoever switches it has.
+                    if to != this.form() {
+                        cx.emit(ChatPanelEvent::ShowAs(to));
+                    }
+                    cx.notify();
+                }))
+                .child(Tab::new().label("Chat"))
+                .child(Tab::new().label("CLI"))
+                .into_any_element(),
+        )
     }
 
     /// What is done with a chat once in a while, in one menu: how much of
@@ -290,6 +352,7 @@ impl ChatPanel {
             .map(|context| context.cwd.to_string_lossy().into_owned());
         let active = self.active.read(cx).session().map(|session| session.id);
         let panel = cx.weak_entity();
+        let outside = self.cli_view.is_some() && self.context.is_none();
         h_flex()
             .flex_none()
             .gap_0p5()
@@ -300,7 +363,7 @@ impl ChatPanel {
                     .icon(Icons::RotateCcwClock)
                     .tooltip("Past chats")
                     .accessibility_label("Past chats")
-                    .menu(gpui_kit::Anchor::TopRight, move |menu, _, cx| {
+                    .menu(gpui_kit::Anchor::TopRight, move |menu, window, cx| {
                         let sessions: Vec<_> = store
                             .sessions(project_id)
                             .unwrap_or_default()
@@ -309,6 +372,35 @@ impl ChatPanel {
                                 only.is_none() || session.cwd.as_ref() == only.as_ref()
                             })
                             .collect();
+                        // An agent's own sessions here that did not start
+                        // in this app (in another terminal, another
+                        // editor): picked from the agent's list.
+                        let outside = outside.then(|| {
+                            let panel = panel.clone();
+                            PopupMenu::build(window, cx, move |menu, _, _| {
+                                AGENTS
+                                    .iter()
+                                    .filter(|agent| agents::has_cli(agent.id))
+                                    .fold(menu, |menu, agent| {
+                                        let panel = panel.clone();
+                                        menu.item(PopupMenuItem::new(agent.name).on_click(
+                                            move |_, _, cx| {
+                                                _ = panel.update(cx, |_, cx| {
+                                                    cx.emit(ChatPanelEvent::PickOutsideSession(
+                                                        agent.id,
+                                                    ))
+                                                });
+                                            },
+                                        ))
+                                    })
+                            })
+                        });
+                        let menu = match outside {
+                            Some(agents) => menu
+                                .item(PopupMenuItem::submenu("Started outside this app", agents))
+                                .separator(),
+                            None => menu,
+                        };
                         if sessions.is_empty() {
                             return menu.label("No chats yet");
                         }
@@ -1349,7 +1441,7 @@ impl ChatPanel {
 impl Render for ChatPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.terminal_session.is_some() {
-            return self.render_terminal_session(cx);
+            return self.render_cli(window, cx);
         }
         let (narrow, probe) = ph_ui::measure::narrower_than("chat-width", 440., window, cx);
         self.narrow = narrow;
@@ -1390,14 +1482,13 @@ impl ChatPanel {
     /// away.
     fn render_terminal_offer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let agent = self.active.read(cx).agent();
-        if !self.runs_terminals
+        if self.cli_view.is_none()
             || !agents::chat_unsupported(agent.id)
             || !ph_brand::enabled(ph_brand::Feature::Terminal)
             || self.project.read_only
         {
             return None;
         }
-        let cwd = self.project.path.clone();
         Some(
             h_flex()
                 .flex_none()
@@ -1416,20 +1507,16 @@ impl ChatPanel {
                         .text_color(cx.theme().warning),
                 )
                 .child(div().flex_1().min_w_0().text_sm().child(format!(
-                    "{} here has no chat mode. It works in a terminal, followed like a chat.",
+                    "{} here has no chat mode. It works in its CLI, in this same place.",
                     agent.name
                 )))
                 .child(
                     Button::new("run-agent-in-terminal")
                         .primary()
                         .small()
-                        .label(format!("Run {} in a terminal", agent.name))
+                        .label(format!("Open {}'s CLI", agent.name))
                         .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(ChatPanelEvent::ResumeInTerminal {
-                                agent: agent.id,
-                                session: None,
-                                cwd: cwd.clone(),
-                            })
+                            cx.emit(ChatPanelEvent::ShowAs(Form::Cli))
                         })),
                 )
                 .into_any_element(),

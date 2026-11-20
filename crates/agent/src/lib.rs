@@ -57,11 +57,12 @@ pub mod view_mode;
 
 pub use attachments::{Attachment, LiveSources, PullBrief};
 pub use chat_panel::{
-    ChatContext, ChatPanel, ChatPanelEvent, HeaderTabs, Instructions, Prepare, Starter,
+    ChatContext, ChatPanel, ChatPanelEvent, CliView, Form, HeaderTabs, Instructions, Prepare,
+    Starter,
 };
 pub use chats::{
     ChatHub, ChatState, ChatSummary, ChatsActivity, Preparing, WorkspaceChats, WorkspaceChatsEvent,
 };
 pub use connection::AgentConnection;
 pub use permission::{ApprovalInbox, PermissionRequest};
-pub use thread::{ChatThread, ReviewTurn, ThreadStatus};
+pub use thread::{ChatThread, Handover, ReviewTurn, ThreadStatus, own_tools_command};

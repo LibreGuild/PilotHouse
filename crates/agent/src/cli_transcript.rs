@@ -708,6 +708,88 @@ impl Tail {
     }
 }
 
+/// The steps the session file at `path` holds, all of them.
+fn steps_of(format: Format, path: &std::path::Path) -> Vec<Step> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let mut parsed = Parsed::default();
+    parsed.feed(format, &String::from_utf8_lossy(&bytes));
+    parsed.steps(format)
+}
+
+/// How many steps the session file at `path` holds. A chat whose
+/// conversation goes on in the agent's CLI keeps this as its mark: what
+/// the file holds after it was said there.
+pub fn step_count(format: Format, path: &std::path::Path) -> usize {
+    steps_of(format, path).len()
+}
+
+/// Adds to chat `session`'s transcript what the agent's session file says
+/// after its first `from` steps: the part of a conversation that went on
+/// in the agent's CLI, taken in when it comes back to the chat. Returns
+/// how many entries were added.
+///
+/// These read plainer than a chat's own (a tool is its name, without its
+/// output or its diff): the file says less than the agent tells a chat.
+/// A file with fewer than `from` steps is not the conversation the chat
+/// knew (the CLI started another): nothing is added, and that is an error
+/// to tell the user of.
+pub fn take_in(
+    store: &ph_store::Store,
+    session: ph_store::sessions::SessionId,
+    format: Format,
+    path: &std::path::Path,
+    from: usize,
+) -> anyhow::Result<usize> {
+    use crate::transcript::StoredEntry;
+    let steps = steps_of(format, path);
+    anyhow::ensure!(
+        steps.len() >= from,
+        "the session file holds {} steps, fewer than the {from} the chat knew",
+        steps.len()
+    );
+    let stored: Vec<(&str, String)> = steps
+        .into_iter()
+        .enumerate()
+        .skip(from)
+        .filter_map(|(ix, step)| {
+            let (role, entry) = match step {
+                Step::User(text) => (
+                    "user",
+                    StoredEntry::User {
+                        text,
+                        attachments: Vec::new(),
+                        checkpoint: None,
+                    },
+                ),
+                Step::Agent(text) => ("agent", StoredEntry::Agent { text }),
+                step @ Step::Tool(_) => match step.into_entry(ix) {
+                    Entry::Tool(tool) => ("agent", StoredEntry::Tool(tool)),
+                    _ => return None,
+                },
+            };
+            serde_json::to_string(&entry).ok().map(|body| (role, body))
+        })
+        .collect();
+    store.append_messages(session, &stored)?;
+    Ok(stored.len())
+}
+
+/// Adds a line of PilotHouse's own to chat `session`'s transcript.
+pub fn note(
+    store: &ph_store::Store,
+    session: ph_store::sessions::SessionId,
+    text: &str,
+) -> anyhow::Result<()> {
+    let entry = crate::transcript::StoredEntry::Notice {
+        text: text.to_string(),
+        is_error: false,
+    };
+    store.append_messages(session, &[("agent", serde_json::to_string(&entry)?)])?;
+    Ok(())
+}
+
 impl Step {
     /// The entry of step `ix` (its id keeps tool runs apart).
     fn into_entry(self, ix: usize) -> Entry {
@@ -851,6 +933,70 @@ mod tests {
                 Step::Agent("Fixed.".into()),
             ]
         );
+    }
+
+    /// A conversation that went on in the agent's CLI comes back to its
+    /// chat: only what was said there is added.
+    #[test]
+    fn what_was_said_in_the_cli_is_taken_into_the_chat() {
+        let dir = std::env::temp_dir().join(format!("ph-take-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("session.jsonl");
+        let before = [
+            r#"{"type":"user","message":{"content":"Fix the bug"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed."}]}}"#,
+        ];
+        std::fs::write(&file, before.join("\n") + "\n").unwrap();
+        // The mark the chat keeps as it goes to the CLI.
+        let mark = step_count(Format::Claude, &file);
+        assert_eq!(mark, 2);
+        // In the CLI: one more turn, with a command.
+        let after = [
+            r#"{"type":"user","message":{"content":"Now run the tests"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"All pass."}]}}"#,
+        ];
+        let all = before.iter().chain(&after).copied().collect::<Vec<_>>();
+        std::fs::write(&file, all.join("\n") + "\n").unwrap();
+
+        let store = ph_store::Store::open_in_memory().unwrap();
+        let place = store.add_project(&dir).unwrap();
+        let chat = store.create_session(place.id, "Bug", "claude").unwrap();
+        assert_eq!(
+            take_in(&store, chat.id, Format::Claude, &file, mark).unwrap(),
+            3
+        );
+        let said: Vec<(String, serde_json::Value)> = store
+            .messages(chat.id)
+            .unwrap()
+            .into_iter()
+            .map(|message| {
+                (
+                    message.role.clone(),
+                    serde_json::from_str(&message.body).unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(said.len(), 3);
+        assert_eq!(said[0].0, "user");
+        assert_eq!(said[0].1["entry"], "user");
+        assert_eq!(said[0].1["text"], "Now run the tests");
+        assert_eq!(said[1].1["entry"], "tool");
+        assert_eq!(said[1].1["title"], "Bash: cargo test");
+        assert_eq!(said[2].1["text"], "All pass.");
+        // Nothing new: nothing added. A file that is not the conversation
+        // the chat knew (fewer steps than its mark) is refused.
+        assert_eq!(
+            take_in(&store, chat.id, Format::Claude, &file, 5).unwrap(),
+            0
+        );
+        assert!(take_in(&store, chat.id, Format::Claude, &file, 9).is_err());
+        assert_eq!(store.messages(chat.id).unwrap().len(), 3);
+        // A file that is gone holds nothing.
+        assert_eq!(step_count(Format::Claude, &dir.join("none.jsonl")), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

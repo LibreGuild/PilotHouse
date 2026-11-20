@@ -43,6 +43,24 @@ const HISTORY_PREAMBLE_CHARS: usize = 8_000;
 /// background command or subagent) counts as done after this long without
 /// an update and with no tool call running…
 const BACKGROUND_QUIET: Duration = Duration::from_secs(8);
+/// What an agent's own program needs to go on with a chat's conversation
+/// (see [`ChatThread::hand_over`]).
+#[derive(Debug, Clone)]
+pub struct Handover {
+    pub agent: &'static AgentSpec,
+    /// The chat as stored; `None` for one nothing was sent in.
+    pub session: Option<Session>,
+    /// The agent's own session to go on with; `None` when there is none
+    /// yet, and the program starts one.
+    pub resume: Option<String>,
+    /// Where the agent works.
+    pub cwd: std::path::PathBuf,
+    /// The chat's model and mode, as the agent names them, to start the
+    /// program with: a switch must not quietly change either.
+    pub model: Option<String>,
+    pub mode: Option<String>,
+}
+
 /// How long an agent has to stop when asked, before Stop offers to end its
 /// process instead. Longer than a second press by mistake.
 const STOP_GRACE: Duration = Duration::from_secs(3);
@@ -344,26 +362,89 @@ impl ChatThread {
     /// keeps the session, and what it holds for it, until it exits: Claude
     /// Code a process of its own and its MCP servers, hundreds of MB.
     fn end_session_on_release(cx: &mut Context<Self>) {
-        cx.on_release(|this, cx| {
-            let Some(connection) = this.connection.take() else {
-                return;
-            };
-            let (known, setup) = (this.acp_session_id.take(), this.setup.take());
-            if known.is_none() && setup.is_none() {
-                return;
+        cx.on_release(|this, cx| this.end_agent_session(cx))
+            .detach();
+    }
+
+    /// Ends the chat's agent session, where the agent can, and lets go of
+    /// the agent. The agent keeps the conversation: a next message here
+    /// would load it again.
+    fn end_agent_session(&mut self, cx: &mut App) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        let (known, setup) = (self.acp_session_id.take(), self.setup.take());
+        if known.is_none() && setup.is_none() {
+            return;
+        }
+        // A session still being set up (a draft warmed a moment ago) is
+        // closed once it exists.
+        let session = async move {
+            match (known, setup) {
+                (Some(id), _) => Some(id),
+                (None, Some(setup)) => setup.await.ok(),
+                (None, None) => None,
             }
-            // A session still being set up (a draft warmed a moment ago) is
-            // closed once it exists.
-            let session = async move {
-                match (known, setup) {
-                    (Some(id), _) => Some(id),
-                    (None, Some(setup)) => setup.await.ok(),
-                    (None, None) => None,
-                }
-            };
-            connection.read(cx).close_session(session, cx);
-        })
-        .detach();
+        };
+        connection.read(cx).close_session(session, cx);
+    }
+
+    /// Hands the conversation to the agent's own program (a session's CLI
+    /// form): the chat's agent session ends, since two programs must never
+    /// go on with one conversation, and what the program needs to go on is
+    /// returned. Refused, with why, while the chat works or waits for an
+    /// answer: a turn under way cannot be moved.
+    pub fn hand_over(&mut self, cx: &mut Context<Self>) -> Result<Handover, SharedString> {
+        let name = self.agent.name;
+        if self.status != ThreadStatus::Idle || self.background {
+            return Err(format!(
+                "{name} is still working. Stop it, or wait, then switch to its CLI."
+            )
+            .into());
+        }
+        if !self.pending.is_empty() {
+            return Err(format!("{name} waits for an answer. Answer it, then switch.").into());
+        }
+        if !self.queued.is_empty() {
+            return Err("Messages are still waiting to be sent in this chat.".into());
+        }
+        // The agent keeps a session once something was said in it. One
+        // only warmed up has nothing to go on with (and no file of its
+        // own to find): the CLI then starts a session of its own.
+        let said = self
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::User { .. }));
+        let resume = said
+            .then(|| {
+                self.acp_session_id.clone().or_else(|| {
+                    self.session
+                        .as_ref()
+                        .and_then(|session| session.acp_session_id.clone())
+                })
+            })
+            .flatten();
+        let choice = |category: options::OptionCategory| {
+            self.options
+                .iter()
+                .find(|option| option.category == category)
+                .map(|option| option.current.clone())
+                .filter(|value| !value.is_empty())
+        };
+        let handover = Handover {
+            agent: self.agent,
+            session: self.session.clone(),
+            resume,
+            cwd: self.project.path.clone(),
+            model: choice(options::OptionCategory::Model),
+            mode: choice(options::OptionCategory::Mode),
+        };
+        self.persist(cx);
+        self.end_agent_session(cx);
+        self.reads_this_turn = false;
+        self.app_tools_this_turn = false;
+        cx.notify();
+        Ok(handover)
     }
 
     /// Whether this chat is a new one nothing happened in yet (no message,
@@ -2652,26 +2733,47 @@ pub(crate) fn pilothouse_mcp_server(
     agent_id: &str,
     project_id: ProjectId,
 ) -> Option<McpServer> {
+    let (exe, args, env) = own_tools_command(project_path, agent_id, project_id)?;
+    Some(McpServer::Stdio(
+        McpServerStdio::new("pilothouse", exe).args(args).env(
+            env.into_iter()
+                .map(|(name, value)| EnvVariable::new(name, value))
+                .collect(),
+        ),
+    ))
+}
+
+/// A command to start: its program, its arguments and the environment it
+/// needs.
+pub type ToolsCommand = (std::path::PathBuf, Vec<String>, Vec<(String, String)>);
+
+/// The PilotHouse MCP server as a command. An agent's own program in a
+/// terminal takes its servers as flags, not from a session's set-up.
+pub fn own_tools_command(
+    project_path: &std::path::Path,
+    agent_id: &str,
+    project_id: ProjectId,
+) -> Option<ToolsCommand> {
     let exe = ph_store::paths::helper_program("mcp").ok()?;
     let mut env = Vec::new();
     if let Some(dir) = std::env::var_os(ph_store::paths::DATA_DIR_ENV) {
-        env.push(EnvVariable::new(
-            ph_store::paths::DATA_DIR_ENV,
+        env.push((
+            ph_store::paths::DATA_DIR_ENV.to_string(),
             dir.to_string_lossy().to_string(),
         ));
     }
-    Some(McpServer::Stdio(
-        McpServerStdio::new("pilothouse", exe)
-            .args(vec![
-                "mcp".into(),
-                "--project".into(),
-                project_path.to_string_lossy().to_string(),
-                "--agent".into(),
-                agent_id.to_string(),
-                "--workspace".into(),
-                project_id.to_string(),
-            ])
-            .env(env),
+    Some((
+        exe,
+        vec![
+            "mcp".into(),
+            "--project".into(),
+            project_path.to_string_lossy().to_string(),
+            "--agent".into(),
+            agent_id.to_string(),
+            "--workspace".into(),
+            project_id.to_string(),
+        ],
+        env,
     ))
 }
 
@@ -3065,6 +3167,98 @@ done"#,
             assert!(text.contains("stopped from another chat"), "{text}");
             assert!(is_error);
         });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A chat's conversation goes on in its agent's own program: the chat
+    /// lets go of the session first, and only at rest.
+    #[gpui_kit::test]
+    fn a_chat_hands_its_conversation_to_the_agents_cli(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = temp_dir("handover");
+        // It answers a prompt at once, and can close sessions.
+        let spec = fake_agent_that(
+            &dir,
+            r#"{\"sessionCapabilities\":{\"close\":{}}}"#,
+            r#"session/prompt) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}" ;;"#,
+        );
+        let store = Store::open_in_memory().unwrap();
+        let place = store.add_project(&dir).unwrap();
+        let here = ThreadProject {
+            id: place.id,
+            ..project(&dir)
+        };
+        let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+        let thread = cx.new(|cx| ChatThread::draft(store.clone(), here, spec, cx));
+        // Nothing said yet: there is no conversation to go on with, and
+        // the agent's program starts one of its own.
+        thread.update(cx, |thread, cx| thread.warm_up(connection.clone(), cx));
+        wait_until(cx, "the session to start", |cx| {
+            thread.read_with(cx, |thread, _| thread.acp_session_id.is_some())
+        });
+        let empty = thread
+            .update(cx, |thread, cx| thread.hand_over(cx))
+            .unwrap();
+        assert!(empty.resume.is_none() && empty.session.is_none());
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.acp_session_id.is_none() && thread.connection.is_none())
+        });
+        wait_until(cx, "the warmed session to be closed", |_| {
+            methods(&dir).iter().any(|m| m == "session/close")
+        });
+
+        // Something said: the session it was said in is what goes on.
+        thread.update(cx, |thread, cx| {
+            thread.send(
+                "go".into(),
+                Vec::new(),
+                "go".into(),
+                say("go"),
+                connection.clone(),
+                cx,
+            );
+            // Not while it works: a turn under way cannot be moved.
+            let refused = thread.hand_over(cx).unwrap_err();
+            assert!(refused.contains("still working"), "{refused}");
+        });
+        wait_until(cx, "the turn to end", |cx| {
+            thread.read_with(cx, |thread, _| {
+                thread.status == ThreadStatus::Idle && thread.acp_session_id.is_some()
+            })
+        });
+        let closes = |dir: &Path| {
+            methods(dir)
+                .iter()
+                .filter(|m| *m == "session/close")
+                .count()
+        };
+        let before = closes(&dir);
+        let handover = thread
+            .update(cx, |thread, cx| thread.hand_over(cx))
+            .unwrap();
+        assert_eq!(handover.resume.as_deref(), Some("fake-2"));
+        assert_eq!(handover.agent.id, "fake");
+        assert_eq!(handover.cwd, dir);
+        let stored = handover
+            .session
+            .expect("a chat something was said in is stored");
+        assert_eq!(
+            store
+                .session(stored.id)
+                .unwrap()
+                .unwrap()
+                .acp_session_id
+                .as_deref(),
+            Some("fake-2")
+        );
+        // Never two programs on one conversation: the chat's session ends.
+        wait_until(cx, "the chat's session to be closed", |_| {
+            closes(&dir) > before
+        });
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.acp_session_id.is_none() && thread.connection.is_none())
+        });
+        drop(connection);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

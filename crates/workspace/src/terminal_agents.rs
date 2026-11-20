@@ -754,63 +754,171 @@ fn settings_dir() -> PathBuf {
     paths::data_dir().join("terminal-agents")
 }
 
-/// Starts agent `agent_id`'s CLI in a new terminal of `terminals` in `cwd`,
-/// followed by PilotHouse; `resume` continues one of its sessions.
+/// What an agent's CLI is started with.
+pub(crate) struct Launch<'a> {
+    pub agent_id: &'a str,
+    pub project: ProjectId,
+    /// Where it works.
+    pub cwd: PathBuf,
+    /// One of its own sessions to go on with.
+    pub resume: Option<&'a str>,
+    /// The chat this CLI is the other form of: what it does is kept with
+    /// that chat, instead of a chat of its own. `named` says the chat has
+    /// its name already, which the first thing asked here must not change.
+    pub chat: Option<(SessionId, bool)>,
+    /// The model and the mode to start with, as the agent names them in a
+    /// chat (a session that changes form keeps both).
+    pub model: Option<&'a str>,
+    pub mode: Option<&'a str>,
+}
+
+/// The command that starts an agent's CLI: its program, the session to go
+/// on with, the model and mode asked for, and `more` (hooks, PilotHouse's
+/// own tools), each already written as the shell takes it.
+fn command(start: &Launch, more: &[String]) -> anyhow::Result<String> {
+    let name = |id: &str| {
+        ph_agent::agents::find(id).map_or_else(|| id.to_string(), |agent| agent.name.to_string())
+    };
+    let program = ph_agent::agents::cli_of(start.agent_id)
+        .ok_or_else(|| anyhow::anyhow!("{} has no CLI", name(start.agent_id)))?;
+    // Only what could be a flag's value: these are typed into a shell.
+    let plain = |value: &&str| {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-:/[]".contains(c))
+    };
+    let model = start
+        .model
+        .filter(plain)
+        .filter(|model| *model != "default");
+    let mode = start.mode.filter(plain);
+    let mut words = vec![program.to_string()];
+    match start.agent_id {
+        "claude" => {
+            if let Some(session) = start.resume {
+                words.extend(["--resume".into(), session.to_string()]);
+            }
+            if let Some(model) = model {
+                words.extend(["--model".into(), model.to_string()]);
+            }
+            // The modes a chat and the CLI name alike; the plain one
+            // ("default", the CLI's "manual") is what it starts in anyway.
+            if let Some(mode) = mode.filter(|mode| {
+                [
+                    "acceptEdits",
+                    "plan",
+                    "bypassPermissions",
+                    "auto",
+                    "dontAsk",
+                ]
+                .contains(mode)
+            }) {
+                words.extend(["--permission-mode".into(), mode.to_string()]);
+            }
+        }
+        "codex" => {
+            if let Some(session) = start.resume {
+                words.extend(["resume".into(), session.to_string()]);
+            }
+            if let Some(model) = model {
+                words.extend(["--model".into(), model.to_string()]);
+            }
+        }
+        "gemini" => {
+            if let Some(session) = start.resume {
+                words.extend(["--resume".into(), session.to_string()]);
+            }
+            if let Some(model) = model {
+                words.extend(["--model".into(), model.to_string()]);
+            }
+        }
+        "antigravity" => {
+            if let Some(session) = start.resume {
+                words.extend(["--conversation".into(), session.to_string()]);
+            }
+        }
+        "cline" => {
+            if let Some(session) = start.resume {
+                words.extend(["--id".into(), session.to_string()]);
+            }
+        }
+        _ => anyhow::bail!("{} cannot run in a terminal", name(start.agent_id)),
+    }
+    words.extend(more.iter().cloned());
+    Ok(words.join(" "))
+}
+
+/// PilotHouse's own tools (the browser, devices, tests) for an agent's CLI,
+/// as the flags it takes MCP servers by: a chat gets them when its session
+/// is set up, and a session's CLI form must not have less. `file` is where
+/// a CLI that reads its servers from a file finds them.
+fn own_tools(agent_id: &str, cwd: &Path, project: ProjectId, file: &Path) -> Vec<String> {
+    let Some((program, args, env)) = ph_agent::own_tools_command(cwd, agent_id, project) else {
+        return Vec::new();
+    };
+    match agent_id {
+        "claude" => {
+            let servers = serde_json::json!({ "mcpServers": { "pilothouse": {
+                "command": program,
+                "args": args,
+                "env": env.into_iter().collect::<HashMap<String, String>>(),
+            } } });
+            match serde_json::to_vec_pretty(&servers)
+                .ok()
+                .and_then(|json| std::fs::write(file, json).ok())
+            {
+                Some(()) => vec!["--mcp-config".into(), quoted(file)],
+                None => Vec::new(),
+            }
+        }
+        // Settings given for this run only (`-c key=value`, the value as
+        // TOML): nothing is written to the user's own configuration.
+        "codex" => {
+            let text = |value: &str| serde_json::Value::from(value).to_string();
+            let list = |values: &[String]| {
+                let items: Vec<String> = values.iter().map(|value| text(value)).collect();
+                format!("[{}]", items.join(","))
+            };
+            let mut flags = vec![
+                "-c".to_string(),
+                quoted(Path::new(&format!(
+                    "mcp_servers.pilothouse.command={}",
+                    text(&program.to_string_lossy())
+                ))),
+                "-c".to_string(),
+                quoted(Path::new(&format!(
+                    "mcp_servers.pilothouse.args={}",
+                    list(&args)
+                ))),
+            ];
+            for (name, value) in env {
+                flags.push("-c".into());
+                flags.push(quoted(Path::new(&format!(
+                    "mcp_servers.pilothouse.env.{name}={}",
+                    text(&value)
+                ))));
+            }
+            flags
+        }
+        // The others read their servers from their own settings.
+        _ => Vec::new(),
+    }
+}
+
+/// Starts an agent's CLI in a new terminal of `terminals`, followed by
+/// PilotHouse.
 pub(crate) fn launch(
-    agent_id: &str,
-    project: ProjectId,
+    start: Launch,
     terminals: &Entity<WorkspaceTerminals>,
-    cwd: PathBuf,
-    resume: Option<&str>,
     cx: &mut App,
 ) -> anyhow::Result<Entity<Terminal>> {
-    let agent = ph_agent::agents::find(agent_id)
-        .ok_or_else(|| anyhow::anyhow!("{agent_id} is not a known agent"))?;
-    let resume = resume.filter(|session| is_session_id(session));
-    if agent_id != "claude" {
-        // Followed by what it says in the terminal (program status, title).
-        let command = match (agent_id, resume) {
-            ("codex", Some(session)) => format!("codex resume {session}"),
-            ("codex", None) => "codex".to_string(),
-            ("gemini", Some(session)) => format!("gemini --resume {session}"),
-            ("gemini", None) => "gemini".to_string(),
-            ("antigravity", Some(session)) => format!("agy --conversation {session}"),
-            ("antigravity", None) => "agy".to_string(),
-            ("cline", Some(session)) => format!("cline --id {session}"),
-            ("cline", None) => "cline".to_string(),
-            _ => anyhow::bail!("{} cannot run in a terminal", agent.name),
-        };
-        let label = free_label(agent.name, terminals, cx);
-        let terminal = terminals
-            .update(cx, |terminals, cx| {
-                terminals.run_in(&label, &command, Some(cwd), cx)
-            })
-            .ok_or_else(|| anyhow::anyhow!("Could not open a terminal"))?;
-        // Known from the start, even if it never says how it is doing in
-        // its output (Cline): its chat is saved once its session is found.
-        // (Agents whose terminal closed are left to `sync`, which keeps
-        // what they said.)
-        let agents = cx.default_global::<TerminalAgents>();
-        agents.agents.push(TerminalAgent {
-            pane: terminal_pane(&terminal),
-            source: Source::Launched,
-            project,
-            terminal: terminal.downgrade(),
-            agent,
-            state: ChatState::Idle,
-            title: None,
-            line: None,
-            session_id: resume.map(str::to_string),
-            transcript: None,
-            updated_at: now(),
-            since: now(),
-            session: None,
-            saved: Saved::default(),
-            looked_at: 0,
-            looks: 0,
-        });
-        return Ok(terminal);
-    }
+    let agent = ph_agent::agents::find(start.agent_id)
+        .ok_or_else(|| anyhow::anyhow!("{} is not a known agent", start.agent_id))?;
+    let start = Launch {
+        resume: start.resume.filter(|session| is_session_id(session)),
+        ..start
+    };
     let pane = format!(
         "p{}",
         std::time::SystemTime::now()
@@ -818,39 +926,82 @@ pub(crate) fn launch(
             .map(|time| time.as_nanos())
             .unwrap_or_default()
     );
-    let settings = settings_dir().join(format!("{pane}.json"));
     std::fs::create_dir_all(settings_dir())?;
-    std::fs::write(
-        &settings,
-        serde_json::to_vec_pretty(&hook_settings(&hook_command(&pane)?))?,
-    )?;
-    let mut command = format!("claude --settings {}", quoted(&settings));
-    if let Some(session) = resume {
-        command.push_str(&format!(" --resume {session}"));
+    let mut more = Vec::new();
+    // Claude Code tells PilotHouse what it does through hooks, set for
+    // this run only; the others are followed by what they say in the
+    // terminal (program status, title).
+    let hooked = start.agent_id == "claude";
+    if hooked {
+        let settings = settings_dir().join(format!("{pane}.json"));
+        std::fs::write(
+            &settings,
+            serde_json::to_vec_pretty(&hook_settings(&hook_command(&pane)?))?,
+        )?;
+        more.extend(["--settings".to_string(), quoted(&settings)]);
     }
+    more.extend(own_tools(
+        start.agent_id,
+        &start.cwd,
+        start.project,
+        &settings_dir().join(format!("{pane}.mcp.json")),
+    ));
+    let command = command(&start, &more)?;
     let label = free_label(agent.name, terminals, cx);
     let terminal = terminals
         .update(cx, |terminals, cx| {
-            terminals.run_in(&label, &command, Some(cwd), cx)
+            terminals.run_program(&label, &command, start.cwd.clone(), cx)
         })
         .ok_or_else(|| anyhow::anyhow!("Could not open a terminal"))?;
+    // A chat that has its name keeps it; its row is there already.
+    let (session, title) = match start.chat {
+        Some((chat, named)) => {
+            let title = named
+                .then(|| {
+                    crate::AppState::store(cx)
+                        .session(chat)
+                        .ok()
+                        .flatten()
+                        .map(|session| session.title)
+                })
+                .flatten();
+            (Some(chat), title)
+        }
+        None => (None, None),
+    };
+    // Known from the start, even if it never says how it is doing in its
+    // output (Cline): its chat is saved once its session is found. (Agents
+    // whose terminal closed are left to `sync`, which keeps what they
+    // said.)
     cx.default_global::<TerminalAgents>()
         .agents
         .push(TerminalAgent {
-            pane,
-            source: Source::Hooks,
-            project,
+            pane: if hooked {
+                pane
+            } else {
+                terminal_pane(&terminal)
+            },
+            source: if hooked {
+                Source::Hooks
+            } else {
+                Source::Launched
+            },
+            project: start.project,
             terminal: terminal.downgrade(),
             agent,
             state: ChatState::Idle,
-            title: None,
+            title: title.clone(),
             line: None,
-            session_id: resume.map(str::to_string),
+            session_id: start.resume.map(str::to_string),
             transcript: None,
             updated_at: now(),
             since: now(),
-            session: None,
-            saved: Saved::default(),
+            session,
+            saved: Saved {
+                title,
+                session_id: session.and(start.resume.map(str::to_string)),
+                ..Saved::default()
+            },
             looked_at: 0,
             looks: 0,
         });
@@ -1132,6 +1283,72 @@ fn last_reply(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn start<'a>(agent_id: &'a str, resume: Option<&'a str>) -> Launch<'a> {
+        Launch {
+            agent_id,
+            project: 1,
+            cwd: PathBuf::from("/work"),
+            resume,
+            chat: None,
+            model: None,
+            mode: None,
+        }
+    }
+
+    #[test]
+    fn each_agents_cli_goes_on_with_its_session_its_own_way() {
+        let id = "0199a213-81c0-7800-8aa1-bbab2a035a53";
+        for (agent, fresh, resumed) in [
+            ("claude", "claude", format!("claude --resume {id}")),
+            ("codex", "codex", format!("codex resume {id}")),
+            ("gemini", "gemini", format!("gemini --resume {id}")),
+            ("antigravity", "agy", format!("agy --conversation {id}")),
+            ("cline", "cline", format!("cline --id {id}")),
+        ] {
+            assert_eq!(command(&start(agent, None), &[]).unwrap(), fresh);
+            assert_eq!(command(&start(agent, Some(id)), &[]).unwrap(), resumed);
+        }
+        assert!(command(&start("nobody", None), &[]).is_err());
+    }
+
+    #[test]
+    fn a_session_keeps_its_model_and_mode_in_its_cli() {
+        let with = |agent, model, mode| {
+            command(
+                &Launch {
+                    model,
+                    mode,
+                    ..start(agent, None)
+                },
+                &["--settings 'hooks.json'".to_string()],
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            with("claude", Some("opus"), Some("plan")),
+            "claude --model opus --permission-mode plan --settings 'hooks.json'"
+        );
+        // The plain mode is what the CLI starts in; "default" is no model.
+        assert_eq!(
+            with("claude", Some("default"), Some("default")),
+            "claude --settings 'hooks.json'"
+        );
+        assert_eq!(
+            with("codex", Some("gpt-5.6-luna"), Some("read-only")),
+            "codex --model gpt-5.6-luna --settings 'hooks.json'"
+        );
+        // Nothing that the shell would read as more than a value.
+        assert_eq!(
+            with("claude", Some("opus; rm -rf ~"), Some("plan && true")),
+            "claude --settings 'hooks.json'"
+        );
+        // An agent whose CLI takes neither.
+        assert_eq!(
+            with("cline", Some("x"), Some("plan")),
+            "cline --settings 'hooks.json'"
+        );
+    }
 
     #[test]
     #[cfg(not(windows))]

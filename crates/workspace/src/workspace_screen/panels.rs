@@ -279,12 +279,6 @@ impl WorkspaceScreen {
                         .update(cx, |chat, cx| chat.ask_about(attachment, None, window, cx));
                     cx.notify();
                 }
-                ph_terminal::TerminalPanelEvent::StartAgent { agent, cwd } => {
-                    this.start_terminal_agent(agent, cwd.clone(), None, window, cx)
-                }
-                ph_terminal::TerminalPanelEvent::ResumeAgent { agent, cwd } => {
-                    this.pick_agent_session(agent, cwd.clone(), window, cx)
-                }
                 ph_terminal::TerminalPanelEvent::Open { link, cwd } => {
                     this.open_link(link, Some(cwd), window, cx)
                 }
@@ -492,40 +486,9 @@ impl WorkspaceScreen {
         self.make_terminal_panel(window, cx)
     }
 
-    /// Starts agent `agent`'s CLI in a new terminal in `cwd`, followed by
-    /// PilotHouse (`resume`: one of its sessions), and shows it.
-    pub(crate) fn start_terminal_agent(
-        &mut self,
-        agent: &str,
-        cwd: std::path::PathBuf,
-        resume: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let panel = self.terminal_panel(window, cx);
-        let terminals = panel.read(cx).terminals().clone();
-        let started = crate::terminal_agents::launch(
-            agent,
-            self.project.id,
-            &terminals,
-            cwd,
-            resume.as_deref(),
-            cx,
-        );
-        match started {
-            Ok(terminal) => {
-                self.show_tab(ContextTab::Terminal, window, cx);
-                panel.update(cx, |panel, cx| panel.focus(&terminal, window, cx));
-            }
-            Err(err) => {
-                use gpui_kit::component::WindowExt as _;
-                window.push_notification(format!("Could not start the agent: {err:#}"), cx);
-            }
-        }
-    }
-
-    /// Lists Claude Code's past sessions in `cwd`; the one picked resumes
-    /// in a new terminal.
+    /// Lists an agent's own past sessions in `cwd` (those started outside
+    /// PilotHouse too: in another terminal, another editor); the one
+    /// picked goes on here, as a session of the workspace.
     pub(crate) fn pick_agent_session(
         &mut self,
         agent: &'static str,
@@ -537,16 +500,13 @@ impl WorkspaceScreen {
         let list =
             cx.background_spawn(async move { ph_agent::cli_sessions::sessions(agent, &folder) });
         let name = ph_agent::agents::find(agent).map_or(agent, |spec| spec.name);
-        let loads_sessions =
-            ph_agent::agents::find(agent).is_some_and(|spec| !spec.quirks.no_session_load);
         cx.spawn_in(window, async move |this, cx| {
             let sessions = list.await;
             _ = this.update_in(cx, |_, window, cx| {
                 let screen = cx.entity().downgrade();
                 window.open_dialog(cx, move |dialog, window, cx| {
                     let rows = sessions.iter().map(|session| {
-                        let (screen, cwd, id) = (screen.clone(), cwd.clone(), session.id.clone());
-                        let (chat_screen, past) = (screen.clone(), session.clone());
+                        let (screen, past) = (screen.clone(), session.clone());
                         let group = SharedString::from(format!("agent-session-row-{}", session.id));
                         gpui_kit::component::h_flex()
                             .id(SharedString::from(format!("agent-session-{}", session.id)))
@@ -567,34 +527,6 @@ impl WorkspaceScreen {
                                     .text_sm()
                                     .child(session.title.clone()),
                             )
-                            // The row resumes in a terminal; this, in a chat
-                            // (for agents that can take a session back).
-                            .when(loads_sessions, |row| {
-                                row.child(
-                                    gpui_kit::div()
-                                        .invisible()
-                                        .group_hover(group, |style| style.visible())
-                                        .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .child(
-                                            Button::new(SharedString::from(format!(
-                                                "agent-session-chat-{}",
-                                                session.id
-                                            )))
-                                            .ghost()
-                                            .xsmall()
-                                            .label("Open in chat")
-                                            .on_click(move |_, window, cx| {
-                                                cx.stop_propagation();
-                                                window.close_dialog(cx);
-                                                _ = chat_screen.update(cx, |screen, cx| {
-                                                    screen.resume_in_chat(agent, &past, window, cx)
-                                                });
-                                            }),
-                                        ),
-                                )
-                            })
                             .child(
                                 gpui_kit::div()
                                     .flex_none()
@@ -605,18 +537,12 @@ impl WorkspaceScreen {
                             .on_click(move |_, window, cx| {
                                 window.close_dialog(cx);
                                 _ = screen.update(cx, |screen, cx| {
-                                    screen.start_terminal_agent(
-                                        agent,
-                                        cwd.clone(),
-                                        Some(id.clone()),
-                                        window,
-                                        cx,
-                                    )
+                                    screen.open_outside_session(agent, &past, window, cx)
                                 });
                             })
                     });
                     dialog
-                        .title(format!("Resume a {name} session"))
+                        .title(format!("Go on with a {name} session"))
                         .w(ph_ui::scaled_px(560., window))
                         .child(if sessions.is_empty() {
                             gpui_kit::div()
@@ -642,7 +568,7 @@ impl WorkspaceScreen {
     /// Opens a link ⌘-clicked in a terminal: a dev server's page in the
     /// Browser tool, another web page in the system browser, a file of the
     /// workspace in the editor at its line.
-    fn open_link(
+    pub(super) fn open_link(
         &mut self,
         link: &ph_terminal::links::Link,
         cwd: Option<&std::path::Path>,
@@ -736,6 +662,41 @@ impl WorkspaceScreen {
         }
     }
 
+    /// Goes on here with one of an agent's own sessions that did not start
+    /// here: in a chat, which takes the session back and plays its history
+    /// in; for an agent that cannot do that (Cline), in its CLI. The
+    /// header's switch then offers the other form.
+    pub(crate) fn open_outside_session(
+        &mut self,
+        agent: &'static str,
+        past: &ph_agent::cli_sessions::PastSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let loads = ph_agent::agents::find(agent).is_some_and(|spec| !spec.quirks.no_session_load);
+        if loads || !ph_brand::enabled(ph_brand::Feature::Terminal) {
+            return self.resume_in_chat(agent, past, window, cx);
+        }
+        let store = AppState::store(cx).clone();
+        let cwd = self.project.path.to_string_lossy().into_owned();
+        let made = store
+            .create_session(self.project.id, &past.title, agent)
+            .and_then(|session| {
+                store.set_session_acp_id(session.id, Some(&past.id))?;
+                store.set_session_place(session.id, "terminal", Some(&cwd))?;
+                Ok(session.id)
+            });
+        match made {
+            Ok(id) => {
+                self.reload_sessions(cx);
+                self.reveal_chat(cx);
+                self.select_session(id, cx);
+                self.show_as(ph_agent::Form::Cli, window, cx);
+            }
+            Err(err) => tracing::warn!("going on with the session failed: {err:#}"),
+        }
+    }
+
     /// Shows `terminal` in the Terminal tool, with the keyboard in it.
     pub(crate) fn show_terminal(
         &mut self,
@@ -743,6 +704,11 @@ impl WorkspaceScreen {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A chat's CLI shows in its chat, not among the Terminal tab's.
+        if let Some(session) = super::cli::chat_of(self.project.id, terminal, cx) {
+            self.select_session(session, cx);
+            return;
+        }
         let panel = self.terminal_panel(window, cx);
         let terminals = panel.read(cx).terminals().clone();
         terminals.update(cx, |terminals, cx| {
