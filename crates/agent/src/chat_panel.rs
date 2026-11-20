@@ -50,6 +50,7 @@ use crate::thread::{ChatThread, ThreadEvent, ThreadProject, ThreadStatus};
 use crate::transcript_scroll::TranscriptList;
 use crate::{setup, setup_view};
 
+mod cli_pick;
 mod dropped;
 mod fit;
 mod history;
@@ -99,6 +100,13 @@ pub enum ChatPanelEvent {
     TypeInCli(String),
     /// Asked of a chat from its row in Past chats (see `history`).
     ChatAction(Box<Session>, ChatAction),
+    /// The new chat in front is to start in this agent's CLI, in this
+    /// account of it (empty: the agent's own): picked where new sessions
+    /// open as a CLI (see `cli_pick`).
+    StartCli {
+        agent: &'static str,
+        account: String,
+    },
 }
 
 pub use history::{ChatAction, ChatMarks};
@@ -280,6 +288,8 @@ pub struct ChatPanel {
     /// opens; and who says which are marked done.
     history_open: bool,
     all_chats: bool,
+    /// The agent of a new CLI session is being asked (see `cli_pick`).
+    cli_pick: bool,
     history: Vec<Session>,
     chat_marks: Option<ChatMarks>,
     /// The shared Chrome tabs are being read (`@tabs`): the message waits
@@ -390,6 +400,7 @@ impl ChatPanel {
             cli_view: None,
             history_open: false,
             all_chats: false,
+            cli_pick: false,
             history: Vec::new(),
             chat_marks: None,
             reading_tabs: false,
@@ -430,6 +441,7 @@ impl ChatPanel {
     pub fn set_session(&mut self, session: Option<Session>, cx: &mut Context<Self>) {
         // A chat was picked (from the list, a tab, anywhere): it shows.
         self.all_chats = false;
+        self.cli_pick = false;
         self.terminal_session = None;
         if let Some(session) = session
             .as_ref()

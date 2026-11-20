@@ -1084,6 +1084,64 @@ fn past_chats_are_one_list_with_what_can_be_done(cx: &mut TestAppContext) {
     let _ = sessions;
 }
 
+/// Where new sessions open as a CLI, *New chat* asks which agent's first:
+/// nothing starts until one is picked, and the header's switch shows the
+/// chat instead.
+#[gpui_kit::test]
+fn a_new_cli_session_asks_which_agent(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let (alpha, _beta) = two_workspaces("cli-pick", window, &workspace, cx);
+    cx.update(|cx| {
+        let store = AppState::store(cx);
+        let mut profiles = ph_agent::profiles::Profiles::load(store);
+        profiles.open_as = ph_agent::profiles::OpenAs::Cli;
+        profiles.save(store).unwrap();
+    });
+    click_id(window, ("rail-workspace", alpha as u64), cx);
+    click(window, "chat-new", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("cli-pick-claude").is_some()
+                && window.try_find("cli-pick-codex").is_some(),
+            "the agents that have a CLI are offered"
+        );
+        assert!(
+            window.try_find("send-message").is_none(),
+            "in place of the chat"
+        );
+        assert!(
+            ph_terminal::TerminalHub::existing_agent_terminals(alpha, cx).is_none(),
+            "nothing starts until one is picked"
+        );
+        // The chat instead: the new chat it is, and still nothing started.
+        let chat = window.find_by_label("Chat").bounds().center();
+        gpui_kit::test::TestEventExt::pointer_down(window, chat, gpui_kit::MouseButton::Left, cx);
+        gpui_kit::test::TestEventExt::pointer_up(window, chat, gpui_kit::MouseButton::Left, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("cli-pick-claude").is_none());
+        assert!(window.try_find("send-message").is_some());
+        assert!(ph_terminal::TerminalHub::existing_agent_terminals(alpha, cx).is_none());
+        assert!(
+            AppState::store(cx).sessions(alpha).unwrap().is_empty(),
+            "no session was made for asking"
+        );
+    })
+    .unwrap();
+    // Back to how sessions open by default, for the tests after this one
+    // (the profiles as last read are kept for the whole run).
+    cx.update(|cx| {
+        let store = AppState::store(cx);
+        let mut profiles = ph_agent::profiles::Profiles::load(store);
+        profiles.open_as = ph_agent::profiles::OpenAs::Chat;
+        profiles.save(store).unwrap();
+    });
+}
+
 /// A session has two forms, the chat and its agent's CLI. One stored in its
 /// CLI form whose program is not running (the app was started again) shows
 /// what was said read only, with a way to go on there, and the header's

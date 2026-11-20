@@ -115,7 +115,9 @@ pub struct WorkspaceScreen {
     /// Where the tabs over the chat are scrolled to, and the chat they
     /// were last scrolled to show.
     tabs_scroll: gpui_kit::ScrollHandle,
-    tabs_front: std::cell::Cell<Option<SessionId>>,
+    /// The chat in front and how long its name was when its tab was last
+    /// scrolled into view.
+    tabs_front: std::cell::Cell<Option<(SessionId, usize)>>,
     /// The chats whose tab was closed (see `tabs`).
     closed_tabs: std::collections::HashSet<SessionId>,
     /// Shared with the sidebar, which lists them on each draw.
@@ -251,6 +253,9 @@ impl WorkspaceScreen {
                 ChatPanelEvent::TypeInCli(text) => this.type_in_cli(text, window, cx),
                 ChatPanelEvent::ChatAction(session, action) => {
                     this.chat_action(session, *action, window, cx)
+                }
+                ChatPanelEvent::StartCli { agent, account } => {
+                    this.start_new_cli(agent, account, window, cx)
                 }
                 ChatPanelEvent::PickOutsideSession(agent) => {
                     let cwd = this.project.path.clone();
@@ -1244,7 +1249,14 @@ impl WorkspaceScreen {
         self.new_session(window, cx);
         let agent = self.chat.read(cx).active_thread().read(cx).agent().id;
         let opens = ph_agent::profiles::Profiles::load(AppState::store(cx)).opens_as(agent);
-        if opens == ph_agent::Form::Cli {
+        if opens != ph_agent::Form::Cli {
+            return;
+        }
+        // Which agent's CLI is asked first, where there is more than one
+        // to start: the one last used is not always the one wanted, and
+        // a CLI started for nothing is a session to put away.
+        let asked = self.chat.update(cx, |chat, cx| chat.ask_cli_agent(cx));
+        if !asked {
             self.show_as(ph_agent::Form::Cli, window, cx);
         }
     }

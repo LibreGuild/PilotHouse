@@ -85,6 +85,10 @@ pub(crate) struct Card {
     session: Option<Session>,
     pinned: bool,
     settled: bool,
+    /// Why its chat cannot be deleted as it is (said in its menu): its
+    /// CLI runs in a terminal of the Terminal tab, which deleting would
+    /// leave running with nothing to keep what it says.
+    held: Option<&'static str>,
     /// Its workspace has folders, so there can be changes to review.
     has_folders: bool,
     /// PilotHouse started it, not the user: a schedule's chat, a UI
@@ -247,6 +251,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                     session: None,
                     pinned: false,
                     settled: false,
+                    held: None,
                     has_folders: false,
                     automated: false,
                     folder: None,
@@ -278,6 +283,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                     session: None,
                     pinned: false,
                     settled: false,
+                    held: None,
                     has_folders: false,
                     automated: false,
                     folder: None,
@@ -304,6 +310,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                     session: None,
                     pinned: false,
                     settled: false,
+                    held: None,
                     has_folders: false,
                     automated: false,
                     folder: None,
@@ -349,6 +356,7 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                 session: Some(stored.clone()),
                 pinned: workspace.is_pinned(stored.id),
                 settled,
+                held: None,
                 has_folders,
                 automated: is_automated(stored),
                 folder: stored
@@ -363,16 +371,38 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
             });
         }
     }
-    // Agents in terminals, of the same places.
+    // Agents in terminals, of the same places. One with a stored session
+    // (all but one never asked anything) is that session's task: it is
+    // marked done, pinned, renamed and deleted as a chat's is.
     for agent in crate::terminal_agents::TerminalAgents::all(cx) {
         let Some((_, place, color, _)) = places.iter().find(|(id, ..)| *id == agent.project) else {
             continue;
         };
-        let label = agent
-            .terminal
-            .upgrade()
+        let terminal = agent.terminal.upgrade();
+        let label = terminal
+            .as_ref()
             .and_then(|terminal| terminal.read(cx).label().cloned())
             .unwrap_or_else(|| agent.agent.name.into());
+        let stored = agent.session.and_then(|id| {
+            workspace
+                .sessions_of(agent.project, cx)
+                .iter()
+                .find(|session| session.id == id)
+                .cloned()
+        });
+        let settled = stored
+            .as_ref()
+            .is_some_and(|session| workspace.is_settled(session.id));
+        let busy = matches!(agent.state, ChatState::Working | ChatState::NeedsYou);
+        // Marked done: off the live list until it works again.
+        if live && settled && !busy {
+            continue;
+        }
+        // The CLI a chat shows as goes with its chat; one in a terminal
+        // of its own would be left running.
+        let of_chat = terminal.as_ref().is_some_and(|terminal| {
+            crate::workspace_screen::cli::chat_of(agent.project, terminal, cx).is_some()
+        });
         cards.push(Card {
             project: agent.project,
             github: false,
@@ -390,9 +420,12 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                 agent: agent.agent,
                 line: agent.line.clone(),
             },
-            session: None,
-            pinned: false,
-            settled: false,
+            pinned: stored
+                .as_ref()
+                .is_some_and(|session| workspace.is_pinned(session.id)),
+            settled,
+            held: (!of_chat).then_some("close its terminal first"),
+            session: stored,
             has_folders: false,
             automated: false,
             folder: None,
@@ -982,7 +1015,7 @@ fn card_view(
             card.project,
             session,
             (card.pinned, card.settled),
-            busy,
+            if busy { Some(STILL_WORKING) } else { card.held },
         )
     });
     // What the column is for, one press away.
@@ -1085,6 +1118,28 @@ fn card_view(
                     .into_any_element(),
             )
         }
+        // A session in its agent's CLI is put away as a chat is: it has
+        // no review of its own here (its changes are the workspace's).
+        (Column::Review, Target::Terminal(_)) => card.session.as_ref().map(|session| {
+            let (project, session, done) = (card.project, session.id, entity.clone());
+            // In a row, as a chat's buttons are: at the card's left.
+            h_flex()
+                .child(
+                    Button::new(SharedString::from(format!("bridge-done-{key}")))
+                        .ghost()
+                        .small()
+                        .icon(Icons::Check)
+                        .label("Done")
+                        .tooltip("Mark this task as done")
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            _ = done.update(cx, |workspace, cx| {
+                                workspace.settle_all(&[(project, session)], cx)
+                            });
+                        }),
+                )
+                .into_any_element()
+        }),
         _ => None,
     };
     v_flex()
@@ -1515,7 +1570,7 @@ fn chat_menu(
     project: ProjectId,
     session: Session,
     marks: (bool, bool),
-    busy: bool,
+    held: Option<&'static str>,
 ) -> impl IntoElement {
     let id = session.id;
     Button::new(SharedString::from(format!("chat-menu-{id}")))
@@ -1525,20 +1580,24 @@ fn chat_menu(
         .accessibility_label("Task menu")
         .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
             let marks = (Some(marks.0), marks.1);
-            chat_menu_items(menu, &workspace, project, &session, marks, busy)
+            chat_menu_items(menu, &workspace, project, &session, marks, held)
         })
 }
 
+/// Why a chat at work is not deleted.
+pub(crate) const STILL_WORKING: &str = "still working";
+
 /// What can be done with a chat (pinned and marked done as `marks` say):
 /// the menu of its card, and of its tab over a workspace's chat. A tab
-/// has no pinning (`None`): that orders the Bridge's cards.
+/// has no pinning (`None`): that orders the Bridge's cards. `held` is why
+/// it cannot be deleted as it is, said beside *Delete*.
 pub(crate) fn chat_menu_items(
     menu: PopupMenu,
     workspace: &WeakEntity<Workspace>,
     project: ProjectId,
     session: &Session,
     (pinned, settled): (Option<bool>, bool),
-    busy: bool,
+    held: Option<&'static str>,
 ) -> PopupMenu {
     let id = session.id;
     let (pin, settle, rename, delete) = (
@@ -1578,13 +1637,12 @@ pub(crate) fn chat_menu_items(
     )
     .separator()
     .item(
-        PopupMenuItem::new(if busy {
-            "Delete (still working)"
-        } else {
-            "Delete"
+        PopupMenuItem::new(match held {
+            Some(why) => format!("Delete ({why})"),
+            None => "Delete".to_string(),
         })
         .icon(Icon::new(Icons::Trash))
-        .disabled(busy)
+        .disabled(held.is_some())
         .on_click(move |_, window, cx| {
             _ = delete.update(cx, |workspace, cx| {
                 workspace.delete_chat(project, &delete_session, window, cx)
@@ -1634,6 +1692,7 @@ mod tests {
             session: None,
             pinned: false,
             settled,
+            held: None,
             has_folders: true,
             automated,
             folder: None,

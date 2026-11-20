@@ -174,7 +174,13 @@ fn agent_updates_item(cx: &mut Context<Workspace>) -> Option<AnyElement> {
                             )))
                             .small()
                             .outline()
-                            .label("Update")
+                            // Its updater runs in a terminal; the row goes
+                            // once the CLI says it is the newest.
+                            .label(if crate::agent_updates::updating(agent.id, cx) {
+                                "Updating…"
+                            } else {
+                                "Update"
+                            })
                             .tooltip(ph_ui::tip(
                                 crate::agent_updates::update_command(agent.id)
                                     .map(|command| format!("Runs `{command}` in a terminal"))
@@ -192,10 +198,27 @@ fn agent_updates_item(cx: &mut Context<Workspace>) -> Option<AnyElement> {
                     .gap_3()
                     .p_1()
                     .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child("Agent updates"),
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .child("Agent updates"),
+                            )
+                            .child(
+                                Button::new("agent-updates-check")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(Icons::RotateCw)
+                                    .loading(crate::agent_updates::looking(cx))
+                                    .tooltip(ph_ui::tip(
+                                        "Check again: asks each CLI its version and looks for newer ones",
+                                    ))
+                                    .accessibility_label("Check again")
+                                    .on_click(|_, _, cx| crate::agent_updates::look(cx)),
+                            ),
                     )
                     .children(rows)
                     .child(

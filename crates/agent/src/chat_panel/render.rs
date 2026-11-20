@@ -93,6 +93,9 @@ impl ChatPanel {
         // The whole list of chats shows under it: the header says which
         // chats there are, and nothing about the one behind the list.
         let listing = self.shows_all_chats();
+        // A new session's agent is being asked: there is no agent to
+        // show yet, and the session has no name.
+        let picking = self.asks_cli_agent();
         // With the room, the tabs and the rest are one row (the tab in
         // front says the title); two rows are for a narrow panel, where
         // one would leave the tabs no room for their names.
@@ -119,6 +122,7 @@ impl ChatPanel {
         };
         let spec = cli.as_ref().map_or(thread.agent(), |(agent, _)| *agent);
         let shown_title = match &cli {
+            _ if picking => "New session".into(),
             Some((_, title)) => title.clone(),
             None => thread.title(),
         };
@@ -185,7 +189,9 @@ impl ChatPanel {
                     .border_color(cx.theme().border)
                     .children(back)
                     .children(tabs.map(|tabs| div().flex_1().min_w_0().child(tabs)))
-                    .when(!listing, |this| this.child(agent).children(form))
+                    .when(!listing, |this| {
+                        this.when(!picking, |this| this.child(agent)).children(form)
+                    })
                     .when(self.history_menu, |this| {
                         this.child(self.render_history(cx))
                     }),
@@ -226,7 +232,7 @@ impl ChatPanel {
             // In a workspace the agent's mark leads (the window's bar
             // names the place); elsewhere the place does, and the mark
             // follows the title as it did.
-            .when(tabbed, |this| this.child(agent))
+            .when(tabbed && !picking, |this| this.child(agent))
             .children(place)
             .child(title)
             .children(form)
@@ -335,25 +341,29 @@ impl ChatPanel {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         use gpui_kit::component::tab::{Tab, TabBar};
-        if self.cli_view.is_none()
-            || self.context.is_some()
-            || self.project.read_only
-            || !ph_brand::enabled(ph_brand::Feature::Terminal)
-            || !agents::has_cli(agent.id)
-        {
+        if !self.has_cli_form() || !agents::has_cli(agent.id) {
             return None;
         }
-        let form = self.form();
+        // While a new CLI session's agent is asked the switch stands on
+        // CLI, though nothing has started.
+        let picking = self.asks_cli_agent();
+        let form = if picking { Form::Cli } else { self.form() };
         Some(
             TabBar::new("session-form")
                 .segmented()
                 .xsmall()
                 .flex_none()
                 .selected_index(usize::from(form == Form::Cli))
-                .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                .on_click(cx.listener(move |this, ix: &usize, window, cx| {
                     let to = if *ix == 1 { Form::Cli } else { Form::Chat };
-                    // Shown as it is until whoever switches it has.
-                    if to != this.form() {
+                    if this.cli_pick {
+                        // Nothing started: the chat is the new chat it is.
+                        if to == Form::Chat {
+                            this.cli_pick = false;
+                            this.focus_composer(window, cx);
+                        }
+                    } else if to != this.form() {
+                        // Shown as it is until whoever switches it has.
                         cx.emit(ChatPanelEvent::ShowAs(to));
                     }
                     cx.notify();
@@ -1564,6 +1574,9 @@ impl Render for ChatPanel {
         if self.shows_all_chats() {
             return self.render_all_chats(window, cx);
         }
+        if self.asks_cli_agent() {
+            return self.render_cli_pick(window, cx);
+        }
         if self.terminal_session.is_some() {
             return self.render_cli(window, cx);
         }
@@ -1876,7 +1889,7 @@ pub(super) fn option_menu(
 /// than the pane (the child takes `my_auto()`). Centring alone
 /// (`justify_center`) cuts tall content off at both ends, out of reach: a
 /// narrow chat beside a pull request, a large interface size.
-fn centered_scroll(id: &'static str) -> gpui_kit::Stateful<gpui_kit::Div> {
+pub(super) fn centered_scroll(id: &'static str) -> gpui_kit::Stateful<gpui_kit::Div> {
     v_flex()
         .id(id)
         .size_full()

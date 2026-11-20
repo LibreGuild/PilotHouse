@@ -11,6 +11,14 @@
 //! the look can be switched off (Settings → Agents). A build whose brand
 //! turns updates off never looks.
 //!
+//! Once an update was started from the pop-up, that CLI is asked its
+//! version every few seconds for a few minutes: the updater runs in a
+//! terminal and does not say when it is done, and the status bar should
+//! not go on saying *1 agent update* for a day. That asks the CLI only
+//! (the newest version is known already), so nothing goes over the
+//! network for it. The pop-up also has *Check again*, which looks at
+//! everything anew.
+//!
 //! This is about the CLI on the user's `PATH`: what a session's CLI form
 //! runs. A chat runs on the adapter this version of the app was built
 //! with, which a CLI's update does not change.
@@ -26,6 +34,11 @@ const FIRST_LOOK: Duration = Duration::from_secs(60);
 const EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// The longest a CLI gets to say its version.
 const VERSION_WAIT: Duration = Duration::from_secs(10);
+/// After an update was started: how often its CLI is asked its version,
+/// and for how long (an updater that downloads a new build takes a while;
+/// one that needs an answer in its terminal, longer).
+const WATCH_EVERY: Duration = Duration::from_secs(4);
+const WATCH_FOR: Duration = Duration::from_secs(5 * 60);
 
 /// An installed CLI that is behind its newest release.
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +51,11 @@ pub(crate) struct AgentUpdate {
 #[derive(Default)]
 pub(crate) struct AgentUpdates {
     behind: Vec<AgentUpdate>,
+    /// A look is under way.
+    looking: bool,
+    /// The agents whose update was started and is watched, each with the
+    /// watch.
+    watched: Vec<(&'static str, Task<()>)>,
     _look: Option<Task<()>>,
     _schedule: Option<Task<()>>,
 }
@@ -82,6 +100,8 @@ pub(crate) fn set_enabled(on: bool, cx: &mut App) {
     } else {
         let updates = cx.default_global::<AgentUpdates>();
         updates.behind.clear();
+        updates.watched.clear();
+        updates.looking = false;
         updates._look = None;
         cx.refresh_windows();
     }
@@ -110,6 +130,87 @@ pub(crate) fn install(cx: &mut App) {
         _schedule: Some(schedule),
         ..Default::default()
     });
+}
+
+/// Whether a look is under way (the pop-up's *Check again* turns).
+pub(crate) fn looking(cx: &App) -> bool {
+    cx.try_global::<AgentUpdates>()
+        .is_some_and(|updates| updates.looking)
+}
+
+/// Whether agent `id`'s update was started and is being watched.
+pub(crate) fn updating(id: &str, cx: &App) -> bool {
+    cx.try_global::<AgentUpdates>()
+        .is_some_and(|updates| updates.watched.iter().any(|(agent, _)| *agent == id))
+}
+
+/// Agent `id`'s updater was started: its CLI is asked its version every
+/// few seconds until it is no longer behind (it then leaves the list), or
+/// for [`WATCH_FOR`]. Only the CLI is asked; the newest version is known.
+pub(crate) fn watch(id: &'static str, cx: &mut App) {
+    let Some(update) = behind(cx)
+        .iter()
+        .find(|update| update.agent.id == id)
+        .cloned()
+    else {
+        return;
+    };
+    let cli = update.agent.cli;
+    let watch = cx.spawn(async move |cx| {
+        let started = std::time::Instant::now();
+        while started.elapsed() < WATCH_FOR {
+            cx.background_executor().timer(WATCH_EVERY).await;
+            // Mid-update the CLI may be gone or not answer: asked again.
+            let Some(installed) = cx
+                .background_spawn(async move { installed_version(cli) })
+                .await
+            else {
+                continue;
+            };
+            let changed = cx.update(|cx| {
+                seen_at(
+                    &mut cx.default_global::<AgentUpdates>().behind,
+                    id,
+                    &installed,
+                )
+            });
+            if changed {
+                cx.update(|cx| cx.refresh_windows());
+            }
+            let gone = cx.update(|cx| !behind(cx).iter().any(|update| update.agent.id == id));
+            if gone {
+                break;
+            }
+        }
+        cx.update(|cx| {
+            cx.default_global::<AgentUpdates>()
+                .watched
+                .retain(|(agent, _)| *agent != id);
+            cx.refresh_windows();
+        });
+    });
+    let updates = cx.default_global::<AgentUpdates>();
+    // Pressed again: watched from now, once.
+    updates.watched.retain(|(agent, _)| *agent != id);
+    updates.watched.push((id, watch));
+    cx.refresh_windows();
+}
+
+/// Agent `id`'s CLI now says it is version `installed`: it leaves `behind`
+/// when that is the newest, and says the version it is at when that
+/// changed on the way. Whether the list changed.
+fn seen_at(behind: &mut Vec<AgentUpdate>, id: &str, installed: &str) -> bool {
+    let Some(at) = behind.iter().position(|update| update.agent.id == id) else {
+        return false;
+    };
+    if !newer(&behind[at].latest, installed) {
+        behind.remove(at);
+    } else if behind[at].installed != installed {
+        behind[at].installed = installed.to_string();
+    } else {
+        return false;
+    }
+    true
 }
 
 /// Looks now (off the UI thread), unless switched off.
@@ -142,13 +243,22 @@ pub(crate) fn look(cx: &mut App) {
         let behind = found.await;
         cx.update(|cx| {
             let updates = cx.default_global::<AgentUpdates>();
-            if updates.behind != behind {
-                updates.behind = behind;
-                cx.refresh_windows();
-            }
+            updates.looking = false;
+            updates.behind = behind;
+            // An agent no longer behind is no longer watched.
+            let behind: Vec<&str> = updates
+                .behind
+                .iter()
+                .map(|update| update.agent.id)
+                .collect();
+            updates.watched.retain(|(agent, _)| behind.contains(agent));
+            cx.refresh_windows();
         });
     });
-    cx.default_global::<AgentUpdates>()._look = Some(look);
+    let updates = cx.default_global::<AgentUpdates>();
+    updates.looking = true;
+    updates._look = Some(look);
+    cx.refresh_windows();
 }
 
 /// The version `cli` says it is (`--version`), when it is installed and
@@ -276,6 +386,32 @@ mod tests {
         assert!(!newer("1.5.0", "1.6.0"));
         assert!(!newer("latest", "1.0.0"));
         assert!(!newer("1.0.0", ""));
+    }
+
+    #[test]
+    fn an_updated_cli_leaves_the_list() {
+        let update = |id: &str, installed: &str, latest: &str| AgentUpdate {
+            agent: ph_agent::agents::find(id).unwrap(),
+            installed: installed.into(),
+            latest: latest.into(),
+        };
+        let mut behind = vec![
+            update("claude", "2.1.3", "2.2.0"),
+            update("codex", "0.164.0", "0.171.0"),
+        ];
+        // Still the version it was: nothing to draw again.
+        assert!(!seen_at(&mut behind, "codex", "0.164.0"));
+        // A step on the way: still behind, at the version it now says.
+        assert!(seen_at(&mut behind, "codex", "0.170.0"));
+        assert_eq!(behind[1].installed, "0.170.0");
+        // At the newest (or past it): off the list, the other stays.
+        assert!(seen_at(&mut behind, "codex", "0.171.0"));
+        assert_eq!(behind.len(), 1);
+        assert_eq!(behind[0].agent.id, "claude");
+        assert!(seen_at(&mut behind, "claude", "2.3.1"));
+        assert!(behind.is_empty());
+        // Off the list already (a look took it): nothing changes.
+        assert!(!seen_at(&mut behind, "claude", "2.3.1"));
     }
 
     #[test]

@@ -734,6 +734,7 @@ impl GithubView {
                 ChatPanelEvent::ShowAs(_)
                 | ChatPanelEvent::PickOutsideSession(_)
                 | ChatPanelEvent::TypeInCli(_)
+                | ChatPanelEvent::StartCli { .. }
                 | ChatPanelEvent::ChatAction(..) => {}
             },
         );

@@ -44,8 +44,12 @@ pub(super) fn render(
         });
         // The tab of the chat in front is scrolled into view when the chat
         // changes, not on every draw: the row stays where it was dragged.
-        if this.tabs_front.replace(front) != front
-            && let Some(at) = open.iter().position(|chat| Some(chat.session.id) == front)
+        // Also when its name changes (the first thing asked names it): a
+        // longer name would push its tab out of the row's end.
+        let at = open.iter().position(|chat| Some(chat.session.id) == front);
+        let shown = at.map(|at| (open[at].session.id, open[at].summary.title.len()));
+        if this.tabs_front.replace(shown) != shown
+            && let Some(at) = at
         {
             this.tabs_scroll.scroll_to_item(at);
         }
@@ -139,7 +143,8 @@ fn chat_tab(
         let settled = chat.settled;
         move |menu, _: &mut Window, _: &mut Context<gpui_kit::component::menu::PopupMenu>| {
             // Pinning orders the Bridge's cards; a row of tabs has no top.
-            crate::bridge::chat_menu_items(menu, &shell, project, &session, (None, settled), busy)
+            let held = busy.then_some(crate::bridge::STILL_WORKING);
+            crate::bridge::chat_menu_items(menu, &shell, project, &session, (None, settled), held)
         }
     };
     let show = screen.clone();

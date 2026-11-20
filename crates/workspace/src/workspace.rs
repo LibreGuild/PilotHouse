@@ -856,6 +856,12 @@ impl Workspace {
             if let Some(chats) = ph_agent::ChatHub::existing(*project, cx) {
                 chats.update(cx, |chats, cx| chats.settle(*id, cx));
             }
+            // One in its agent's CLI: what it finished counts as seen.
+            let pane = crate::terminal_agents::TerminalAgents::of_session(*id, cx)
+                .map(|agent| agent.pane.clone());
+            if let Some(pane) = pane {
+                crate::terminal_agents::TerminalAgents::seen(&pane, cx);
+            }
         }
         self.save_settled(cx);
         // The dots and counts follow at once, not at the next look.
@@ -926,6 +932,10 @@ impl Workspace {
                     let renamed = workspace.chats_of(project, cx).and_then(|chats| {
                         chats.update(cx, |chats, cx| chats.rename(id, &title, cx))
                     });
+                    // One in its agent's CLI is called that there too.
+                    if renamed.is_ok() {
+                        crate::terminal_agents::TerminalAgents::renamed(id, &title, cx);
+                    }
                     if let Err(err) = renamed {
                         window.push_notification(
                             Notification::error(format!("Could not rename the chat: {err:#}")),
@@ -1671,13 +1681,9 @@ impl Workspace {
         self.with_active_space(window, cx, |space, window, cx| {
             space.run_in_terminal(&format!("Update {}", agent.name), command, window, cx)
         });
-        cx.spawn(async move |_, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(90))
-                .await;
-            cx.update(crate::agent_updates::look);
-        })
-        .detach();
+        // The updater does not say when it is done: its CLI is asked its
+        // version until it is the newest, so the status bar follows.
+        crate::agent_updates::watch(agent.id, cx);
     }
 
     fn with_active_space(

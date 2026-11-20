@@ -138,7 +138,7 @@ impl WorkspaceScreen {
         let done = match (shown, form) {
             (Form::Chat, Form::Cli) => self.chat_to_cli(window, cx),
             (Form::Cli, Form::Cli) => self.continue_cli(window, cx),
-            (Form::Cli, Form::Chat) => self.cli_to_chat(window, cx),
+            (Form::Cli, Form::Chat) => self.cli_to_chat(false, window, cx),
             (Form::Chat, Form::Chat) => Ok(()),
         };
         if let Err(why) = done {
@@ -241,6 +241,23 @@ impl WorkspaceScreen {
         Ok(())
     }
 
+    /// A new session starts in the CLI of the agent (and account of it)
+    /// picked for it.
+    pub(super) fn start_new_cli(
+        &mut self,
+        agent: &str,
+        account: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(agent) = ph_agent::agents::find(agent) else {
+            return;
+        };
+        self.chat
+            .update(cx, |chat, cx| chat.start_with(agent, account, cx));
+        self.show_as(Form::Cli, window, cx);
+    }
+
     /// A session in its CLI form whose program is not running goes on:
     /// the CLI starts again and resumes it.
     fn continue_cli(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<()> {
@@ -272,7 +289,13 @@ impl WorkspaceScreen {
     }
 
     /// The session in front, in its CLI form, goes on in the chat.
-    fn cli_to_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<()> {
+    /// `looked`: the agent's own session was just looked for.
+    fn cli_to_chat(
+        &mut self,
+        looked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
         let session = self
             .chat
             .read(cx)
@@ -306,13 +329,40 @@ impl WorkspaceScreen {
         }
         let cli_id = cli_id.or_else(|| session.acp_session_id.clone());
         // Never on a guess: something was said there, and which of the
-        // agent's sessions holds it is not known yet.
+        // agent's sessions holds it is not known yet (an agent without
+        // hooks says so only in its files, which are looked at every so
+        // often). Looked for now, and the switch goes on once it is
+        // known, rather than asking for a second press a moment later.
         if cli_id.is_none() && asked {
-            bail!(
-                "{} has not said which of its sessions this is yet. Try again in a moment.",
-                agent.name
-            );
+            if looked {
+                bail!(
+                    "{} has not written this session down yet, so what was said in its CLI cannot be read. Try again once it has answered.",
+                    agent.name
+                );
+            }
+            let found = crate::terminal_agents::find_session_now(session.id, cx);
+            cx.spawn_in(window, async move |this, cx| {
+                found.await;
+                _ = this.update_in(cx, |this, window, cx| {
+                    // Still the session in front, in its CLI: it goes on
+                    // (or says why not, now for good).
+                    let front = this.chat.read(cx).shown_session(cx).map(|shown| shown.id);
+                    if front == Some(session.id) && this.chat.read(cx).form() == Form::Cli {
+                        if let Err(why) = this.cli_to_chat(true, window, cx) {
+                            use gpui_kit::component::WindowExt as _;
+                            window.push_notification(format!("{why:#}"), cx);
+                        }
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+            return Ok(());
         }
+        // What is known of it by now is kept first (the name the first
+        // thing asked gave it, its own session): the look that keeps it
+        // every second may not have come by since.
+        crate::terminal_agents::save_now(cx);
         // The program ends first: never two on one conversation.
         self.close_cli(session.id, cx);
         let store = AppState::store(cx).clone();
