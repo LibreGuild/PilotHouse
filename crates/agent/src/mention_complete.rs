@@ -9,6 +9,9 @@ use std::ops::Range;
 
 /// Most suggestions shown.
 pub const LIMIT: usize = 8;
+/// The most of an agent's commands offered for `/` (the menu shows
+/// [`LIMIT`] at a time).
+pub const COMMANDS: usize = 200;
 
 /// The mention being typed at the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,9 +99,12 @@ pub fn suggestions(typing: &Typing, files: &[impl AsRef<str>], extra: &Extra) ->
                 })
                 .collect();
             matched.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.0.cmp(&b.1.0)));
+            // All of them: the menu shows a few at a time and moves with
+            // the selection, so a command past the eighth is reached
+            // without knowing its name.
             matched
                 .into_iter()
-                .take(LIMIT)
+                .take(COMMANDS)
                 .map(|(_, (name, description))| Suggestion {
                     label: format!("/{name}"),
                     detail: description.clone(),

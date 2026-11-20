@@ -63,7 +63,7 @@ Some chats need something made before their agent can start: a review needs the 
 - An empty chat suggests starter prompts.
 - **While the agent works**, Enter queues the message instead of sending it. Queued messages wait above the composer and go one at a time when a turn ends; each can be edited or removed. **Send now** adds the first to the turn under way when the agent supports steering (Claude Code and Codex: `_session/steering`, advertised in the handshake's `_meta.steering`), and otherwise (Gemini CLI, Antigravity) stops the agent and sends it.
 - **⌘Enter** (Ctrl+Enter elsewhere) sends and opens a new chat at once: the sent one carries on behind it, and its card on the Bridge shows how it does.
-- **Commands.** `/` at the start of a message offers the agent's own commands (ACP `available_commands_update`, e.g. Claude Code's `/review` or `/compact`) with their descriptions.
+- **Commands.** `/` at the start of a message offers the agent's own commands (ACP `available_commands_update`, e.g. Claude Code's `/review` or `/compact`) with their descriptions: all of them, eight at a time, the list moving with the arrow keys (it says "9 of 41").
 
 ## Mentions
 
