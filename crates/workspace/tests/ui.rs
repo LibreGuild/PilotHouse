@@ -28,6 +28,9 @@ fn open_workspace_on(
         std::fs::create_dir_all(&dir).unwrap();
         // SAFETY: set once, before any test reads it, and never changed.
         unsafe { std::env::set_var("PILOTHOUSE_DATA_DIR", &dir) };
+        // The same two agents on every machine: with none found, a chat
+        // greets a first run and has no message box to test.
+        ph_agent::agents::assume_installed(&["claude", "codex"]);
     });
     cx.update(|cx| {
         gpui_kit::init(cx);

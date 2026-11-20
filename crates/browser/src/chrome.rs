@@ -18,7 +18,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 
@@ -303,6 +302,9 @@ fn stop_leftover(profile: &Path) {
         profile.display()
     );
     let _ = Command::new("kill").arg(pid.to_string()).status();
+    // (Named here: this function is the only one that waits, and it is
+    // not built on Windows.)
+    use std::time::{Duration, Instant};
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline && profile.join("SingletonLock").symlink_metadata().is_ok() {
         std::thread::sleep(Duration::from_millis(100));
