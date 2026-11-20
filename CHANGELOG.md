@@ -6,6 +6,8 @@ Each release also has **Merge notes** for organisations that build their own cop
 
 ## Unreleased
 
+- **The working mark has colours of its own.** Its four bars were purple, blue, cyan and green, which read as other products' four-colour marks. They now run from the violet of the app's icon to a hot pink. The animation is as it was.
+- **The status bar is a little lower.** The room above its text is gone (the gap under the panels is enough), so the text sits in the strip's middle and the panels are 4 px taller.
 - **Fixed: "has not said which of its sessions this is yet. Try again in a moment" when going from a CLI back to the chat.** Codex and Antigravity say which session they are in only in their own files, which were looked at 30 seconds after the last look. They are now looked at two seconds after the agent is asked something, and at once when you switch back, so the switch goes through the first time. A session named by the first thing asked in its CLI also keeps that name when you switch back right away.
 - **New chat asks which agent when sessions open as a CLI.** With *Open agents as: CLI* (Settings → Agents), *New chat* started the CLI of the agent last used at once. It now shows the installed agents (and each one's accounts) to pick from, and starts nothing before you do. *Chat* in the header shows the new chat instead.
 - **Agent updates: the status bar follows an update, and can be checked again.** After *Update*, that CLI is asked its version every few seconds (for up to five minutes) until it is the newest: its row says *Updating…* and then goes, and the count in the status bar with it. The pop-up has *Check again* for looking at everything anew.

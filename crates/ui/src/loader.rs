@@ -5,6 +5,14 @@
 //! text; the pennant is a little wider, each bar in a colour of its own,
 //! and its wave reads as motion at a glance without spinning.
 //!
+//! The colours are the pennant's own ([`HUES`]): the violet of the app's
+//! mark at the mast, running to a hot pink at the fly. One family of hue,
+//! so the mark reads as one thing and as this app's. (It was purple, blue,
+//! cyan and green: four hues side by side, which read as the four-colour
+//! marks of other products.) They keep clear of the colours that mean
+//! something here: red and amber for what went wrong or waits, green for
+//! what is done, the blue of what is at work.
+//!
 //! With motion reduced (the system's setting: *Reduce motion* on macOS,
 //! *Animation effects* switched off on Windows, which many machines have)
 //! nothing moves, but the mark must not stand still either: a still mark
@@ -28,6 +36,17 @@ const STEP: Duration = Duration::from_millis(380);
 /// Each bar's height as a part of the mark's: tall at the mast, tapering to
 /// the fly, as a pennant does.
 const BARS: [f32; 4] = [1.0, 0.82, 0.62, 0.42];
+
+/// Each bar's hue in degrees, from the mast to the fly: violet, purple,
+/// fuchsia, hot pink.
+const HUES: [f32; 4] = [262., 286., 310., 334.];
+
+/// The pennant's colours on a dark or a light background: vivid, and as
+/// light as reads on each.
+fn pennant(dark: bool) -> [Hsla; 4] {
+    let (saturation, lightness) = if dark { (0.95, 0.69) } else { (0.86, 0.55) };
+    HUES.map(|hue| gpui_kit::hsla(hue / 360., saturation, lightness, 1.))
+}
 
 /// What the bars show at one moment.
 #[derive(Clone, Copy)]
@@ -97,13 +116,10 @@ impl RenderOnce for Loader {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let height = self.height();
         // A colour asked for (on a filled button, say) is every bar's;
-        // else each has its own, cool ones: none reads as a warning.
+        // else each has the pennant's own.
         let colors = match self.color {
             Some(color) => [color; BARS.len()],
-            None => {
-                let theme = cx.theme();
-                [theme.magenta, theme.blue, theme.cyan, theme.green]
-            }
+            None => pennant(cx.theme().is_dark()),
         };
         let bar_width = (height / 5.).max(2.);
         let bars = move |beat: Beat| {
@@ -158,5 +174,31 @@ impl RenderOnce for Loader {
             move |mark, phase| mark.children(bars(Beat::Wave(phase))),
         )
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_pennant_has_colours_of_its_own() {
+        // One family of hue, from violet to pink, in order.
+        assert!(HUES.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(HUES.iter().all(|hue| (250. ..=345.).contains(hue)));
+        // Clear of what colours mean here: red and amber (wrong, waiting),
+        // green (done), the blue of what is at work.
+        let meant = [(345., 360.), (0., 70.), (80., 170.), (190., 245.)];
+        for hue in HUES {
+            assert!(
+                !meant.iter().any(|(from, to)| (*from..=*to).contains(&hue)),
+                "{hue} is a colour that means something"
+            );
+        }
+        // Solid, and lighter on a dark background than on a light one.
+        for (dark, light) in pennant(true).into_iter().zip(pennant(false)) {
+            assert_eq!((dark.a, light.a), (1., 1.));
+            assert!(dark.l > light.l);
+        }
     }
 }

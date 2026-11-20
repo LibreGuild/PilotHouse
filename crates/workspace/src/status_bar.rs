@@ -77,6 +77,10 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
         // Part of the window's frame: clear, and no line over it.
         .bg(gpui_kit::transparent_black())
         .border_t_0()
+        // The islands end a gap over it already: with room of its own
+        // above as well, its text stood lower than the strip's middle and
+        // the strip was taller than it needs to be.
+        .pt_0()
         .left(
             h_flex()
                 .gap_3()

@@ -79,7 +79,7 @@ Each place has one way in on screen: the column of icons for what the window sho
 ## 7. Feedback
 
 - Match feedback to duration: nothing under 100 ms; disabled under 1 s; the working mark from 1 to 3 s; a stage label ("Building… 12s") beyond.
-- **The working mark** is `ph_ui::Loader`: a pennant of four bars that flutters, after the app's icon, in the accent colour. Use it wherever something is under way (`xsmall()` beside captions, `small()` beside row text, plain over a label, `large()` alone in a pane); a bare 12 px spinner went unnoticed. It stands still when the system asks for less motion.
+- **The working mark** is `ph_ui::Loader`: a pennant of four bars that flutters, after the app's icon, in the icon's own colours: violet at the mast running through purple and fuchsia to a hot pink at the fly (`loader.rs`, `HUES`). One family of hue, so it reads as one mark and as this app's; four different hues side by side read as other products' marks. The colours keep clear of red, amber, green and blue, which mean something here. A colour passed in (`.color(…)`, on a filled button) is every bar's. Use it wherever something is under way (`xsmall()` beside captions, `small()` beside row text, plain over a label, `large()` alone in a pane); a bare 12 px spinner went unnoticed. It stands still when the system asks for less motion.
 - Copy never claims more than is known: "Installing…" while it runs, "Installed" only after.
 - Empty states say what goes here and offer the action that fills them.
 - Transient results are notifications; errors the user must read or act on stay inline.
