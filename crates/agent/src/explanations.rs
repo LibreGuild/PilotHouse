@@ -408,6 +408,7 @@ mod tests {
             children: Vec::new(),
             agent_text: String::new(),
             run: Default::default(),
+            images: Vec::new(),
             expanded: false,
             started: None,
             touched: None,

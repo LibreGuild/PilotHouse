@@ -6,6 +6,7 @@ Each release also has **Merge notes** for organisations that build their own cop
 
 ## Unreleased
 
+- **Chat: a picture a tool gives back is shown.** A screenshot tool's call said one line of text and its picture was dropped. The picture now shows with the call, small, and opens large on a click.
 - **A chat's mode is its own.** Putting one chat in plan mode (or on another model) changed what every later chat with that agent started in. A choice made once something was said now stays with that chat, and a chat picked up again is put back in what it was in; a choice in a new, empty chat still sets how chats start.
 - **A chat takes the agent's own name for it.** Chats were named after the first words of their first message. When the agent names the session, that name is used; one you gave stays.
 - **Terminals come back where they were.** After a restart a terminal's shell started in the workspace's folder, whatever folder it had been in; it starts where it was (macOS and Linux), under the name its tab had.

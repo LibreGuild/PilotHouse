@@ -785,7 +785,10 @@ fn render_tool(thread: &Entity<ChatThread>, ix: usize, tool: &ToolEntry, cx: &Ap
     } else {
         tool_status_icon(tool, cx)
     };
-    let has_details = !tool.output.trim().is_empty() || !tool.diffs.is_empty() || subagent;
+    let has_details = !tool.output.trim().is_empty()
+        || !tool.diffs.is_empty()
+        || !tool.images.is_empty()
+        || subagent;
     let root = thread.read(cx).folder().to_path_buf();
     let thread_for_output = thread.clone();
     let thread = thread.clone();
@@ -798,6 +801,12 @@ fn render_tool(thread: &Entity<ChatThread>, ix: usize, tool: &ToolEntry, cx: &Ap
         Some(match steps {
             1 => "1 step".into(),
             steps => format!("{steps} steps").into(),
+        })
+    } else if !tool.images.is_empty() {
+        // A picture came back (a screenshot): said, so it is opened.
+        Some(match tool.images.len() {
+            1 => "1 image".into(),
+            images => format!("{images} images").into(),
         })
     } else if let Some(code) = tool.run.exit.filter(|code| *code != 0) {
         // A command says how it failed.
@@ -861,6 +870,20 @@ fn render_tool(thread: &Entity<ChatThread>, ix: usize, tool: &ToolEntry, cx: &Ap
                                         .map(|diff| render_diff(diff, &tool.id, Some(&root), cx)),
                                 ),
                         )
+                    })
+                    .when(!tool.images.is_empty(), |this| {
+                        // What the tool gave back to look at: small, each
+                        // opening large on a click.
+                        this.child(h_flex().flex_wrap().gap_2().children(
+                            tool.images.iter().enumerate().map(|(n, path)| {
+                                crate::attachment_view::thumbnail(
+                                    SharedString::from(format!("tool-image-{}-{n}", tool.id)),
+                                    tool.display_title(),
+                                    path.clone(),
+                                    cx,
+                                )
+                            }),
+                        ))
                     })
                     .when(!tool.output.trim().is_empty(), |this| {
                         // All of what was kept, in a box that scrolls. A

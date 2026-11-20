@@ -23,6 +23,8 @@ const MAX_DIFF_LINES: usize = 80;
 /// hundreds of MB for text no one sees.
 const OUTPUT_LINES: usize = 60;
 const OUTPUT_BYTES: usize = 8_000;
+/// The most pictures of one tool call that are kept.
+const MAX_TOOL_IMAGES: usize = 8;
 /// Plans and other calls whose text is the point (a plan to approve, a
 /// subagent's answer) keep up to this much.
 const WHOLE_OUTPUT_BYTES: usize = 64_000;
@@ -124,6 +126,9 @@ pub struct ToolEntry {
     /// printed while it ran).
     #[serde(default, skip_serializing_if = "CommandRun::is_unknown")]
     pub run: CommandRun,
+    /// The pictures the tool gave back (a screenshot), saved as files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<std::path::PathBuf>,
     #[serde(skip)]
     pub expanded: bool,
     /// When the call started, if in this run of the app.
@@ -360,6 +365,7 @@ impl ToolEntry {
             children: Vec::new(),
             agent_text: String::new(),
             run: CommandRun::default(),
+            images: Vec::new(),
             expanded: false,
             started: None,
             touched: None,
@@ -454,6 +460,7 @@ impl ToolEntry {
             children: Vec::new(),
             agent_text: String::new(),
             run: CommandRun::default(),
+            images: Vec::new(),
             expanded: false,
             started: Some(std::time::Instant::now()),
             touched: None,
@@ -565,7 +572,58 @@ impl ToolEntry {
         self.set_diffs(content);
     }
 
+    /// Keeps the pictures in a tool's result (a screenshot tool gives one
+    /// back) as files beside the app's other captures, to show with the
+    /// call. Each is written once: a call's content comes with every
+    /// update of it.
+    fn keep_images(&mut self, content: &[ToolCallContent]) {
+        self.keep_images_in(content, &ph_store::paths::data_dir().join("captures"));
+    }
+
+    /// [`Self::keep_images`], in folder `dir`.
+    fn keep_images_in(&mut self, content: &[ToolCallContent], dir: &std::path::Path) {
+        let pictures = content.iter().filter_map(|item| match item {
+            ToolCallContent::Content(content) => match &content.content {
+                ContentBlock::Image(image) => Some(image),
+                _ => None,
+            },
+            _ => None,
+        });
+        // A tool's id may hold anything; a file's name must not.
+        let name: String = self
+            .id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .take(48)
+            .collect();
+        let mut images = Vec::new();
+        for (ix, image) in pictures.enumerate().take(MAX_TOOL_IMAGES) {
+            let extension = match image.mime_type.as_str() {
+                "image/png" => "png",
+                "image/jpeg" | "image/jpg" => "jpg",
+                "image/webp" => "webp",
+                "image/gif" => "gif",
+                // Not one the app draws.
+                _ => continue,
+            };
+            let path = dir.join(format!("tool-{name}-{ix}.{extension}"));
+            if !path.is_file() {
+                let Some(bytes) = crate::attachments::unbase64(&image.data) else {
+                    continue;
+                };
+                if std::fs::create_dir_all(dir).is_err() || std::fs::write(&path, bytes).is_err() {
+                    continue;
+                }
+            }
+            images.push(path);
+        }
+        if !images.is_empty() {
+            self.images = images;
+        }
+    }
+
     fn set_diffs(&mut self, content: &[ToolCallContent]) {
+        self.keep_images(content);
         self.diffs = content
             .iter()
             .filter_map(|item| match item {
@@ -1210,6 +1268,7 @@ mod tests {
             children: Vec::new(),
             agent_text: String::new(),
             run: Default::default(),
+            images: Vec::new(),
             expanded: false,
             started: None,
             touched: None,
@@ -1324,6 +1383,59 @@ mod tests {
         assert_eq!(bar.output, "done\n");
     }
 
+    /// A tool that gives a picture back (a screenshot) shows it: it was
+    /// dropped, and the call said one line of text.
+    #[test]
+    fn a_picture_a_tool_gives_back_is_kept() {
+        let dir = std::env::temp_dir().join(format!("ph-tool-images-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let png: &[u8] = b"\x89PNG\r\n\x1a\nnot really a picture";
+        let content: Vec<ToolCallContent> = serde_json::from_value(serde_json::json!([
+            { "type": "content", "content": { "type": "text", "text": "Took a screenshot." } },
+            { "type": "content", "content": {
+                "type": "image", "mimeType": "image/png",
+                "data": crate::attachments::base64(png)
+            } },
+            // Not a kind the app draws: passed over.
+            { "type": "content", "content": {
+                "type": "image", "mimeType": "image/tiff", "data": "AAAA"
+            } },
+            { "type": "content", "content": {
+                "type": "image", "mimeType": "image/png", "data": "not base64!"
+            } },
+        ]))
+        .unwrap();
+        let mut call = ToolEntry {
+            id: "toolu_01/../x".into(),
+            ..ToolEntry::placeholder()
+        };
+        call.keep_images_in(&content, &dir);
+        assert_eq!(call.images.len(), 1);
+        let path = call.images[0].clone();
+        assert_eq!(std::fs::read(&path).unwrap(), png);
+        assert!(path.starts_with(&dir), "{}", path.display());
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            "tool-toolu_01x-0.png",
+            "a file's name holds nothing of a path"
+        );
+        // The same content again (every update carries it) writes nothing
+        // new, and an update without pictures keeps the ones there are.
+        let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+        call.keep_images_in(&content, &dir);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            written
+        );
+        call.keep_images_in(&content[..1], &dir);
+        assert_eq!(call.images, vec![path]);
+        // Kept with the chat.
+        let stored = serde_json::to_value(&call).unwrap();
+        let back: ToolEntry = serde_json::from_value(stored).unwrap();
+        assert_eq!(back.images, call.images);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn output_reads_as_a_terminal_left_it() {
         // Colours and cursor moves are taken out.
@@ -1368,6 +1480,7 @@ mod tests {
             children: Vec::new(),
             agent_text: String::new(),
             run: Default::default(),
+            images: Vec::new(),
             expanded: false,
             started: None,
             touched: None,
