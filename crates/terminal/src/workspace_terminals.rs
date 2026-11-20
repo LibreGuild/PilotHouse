@@ -34,6 +34,13 @@ const RESTORE_PAUSE: std::time::Duration = std::time::Duration::from_millis(40);
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Kept {
     text: String,
+    /// The folder its shell was in (where it went with `cd`, where the
+    /// system tells): the one brought back starts there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    folder: Option<PathBuf>,
+    /// The name its tab had, when it had one of its own (a run's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
 }
 
 impl Global for TerminalHub {}
@@ -114,8 +121,13 @@ impl TerminalHub {
                 .terminals()
                 .iter()
                 .take(KEPT_TERMINALS)
-                .map(|terminal| Kept {
-                    text: terminal.read(cx).history_text(KEPT_LINES),
+                .map(|terminal| {
+                    let terminal = terminal.read(cx);
+                    Kept {
+                        text: terminal.history_text(KEPT_LINES),
+                        folder: Some(terminal.current_dir()),
+                        label: terminal.label().map(|label| label.to_string()),
+                    }
                 })
                 .filter(|kept| !kept.text.trim().is_empty())
                 .collect();
@@ -184,10 +196,17 @@ impl TerminalHub {
             let terminals = terminals.read(cx);
             (terminals.active_index(), terminals.terminals().len())
         };
-        let Some(terminal) = terminals.update(cx, |terminals, cx| terminals.new_terminal(cx))
-        else {
+        // In the folder it was in, while that is still there.
+        let folder = kept.folder.clone().filter(|folder| folder.is_dir());
+        let Some(terminal) = terminals.update(cx, |terminals, cx| match folder {
+            Some(folder) => terminals.new_terminal_in(folder, cx),
+            None => terminals.new_terminal(cx),
+        }) else {
             return false;
         };
+        if let Some(label) = &kept.label {
+            terminal.update(cx, |terminal, _| terminal.set_label(label.clone()));
+        }
         terminal.read(cx).show_restored(
             &kept.text,
             concat!("from the last run of ", ph_brand::name!()),
@@ -601,6 +620,26 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{active_after_close, run_with};
+
+    #[test]
+    fn a_kept_terminal_says_where_it_was_and_what_it_was_named() {
+        let kept = super::Kept {
+            text: "$ cargo test\n".into(),
+            folder: Some(PathBuf::from("/work/api")),
+            label: Some("dev server".into()),
+        };
+        let json = serde_json::to_string(&[&kept]).unwrap();
+        let back: Vec<super::Kept> = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back[0].folder.as_deref(),
+            Some(std::path::Path::new("/work/api"))
+        );
+        assert_eq!(back[0].label.as_deref(), Some("dev server"));
+        // What an older version kept (the text alone) is still read.
+        let old: Vec<super::Kept> = serde_json::from_str(r#"[{"text":"hi"}]"#).unwrap();
+        assert_eq!(old[0].text, "hi");
+        assert!(old[0].folder.is_none() && old[0].label.is_none());
+    }
 
     #[test]
     fn a_program_is_run_by_the_users_shell() {

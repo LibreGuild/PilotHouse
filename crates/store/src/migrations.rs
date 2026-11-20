@@ -353,6 +353,12 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE sessions ADD COLUMN account TEXT NOT NULL DEFAULT '';
     "#,
+    // 20: a chat's own choices (its mode, model and the like, as JSON by
+    // option id). A chat keeps what was chosen in it: another chat's
+    // choice, or a new default for the agent, does not change it.
+    r#"
+    ALTER TABLE sessions ADD COLUMN options TEXT NOT NULL DEFAULT '';
+    "#,
 ];
 
 /// Backups kept of a database file, newest first; older ones are deleted.

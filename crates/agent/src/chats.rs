@@ -319,6 +319,11 @@ impl WorkspaceChats {
                     cx.emit(WorkspaceChatsEvent::SessionsChanged);
                     cx.notify();
                 }
+                // Its agent named it: the lists show the name.
+                if let ThreadEvent::Renamed = event {
+                    cx.emit(WorkspaceChatsEvent::SessionsChanged);
+                    cx.notify();
+                }
             }),
         ];
         self.threads.insert(

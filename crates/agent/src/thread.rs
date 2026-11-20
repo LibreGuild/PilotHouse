@@ -175,6 +175,8 @@ pub enum ThreadEvent {
     TurnEnded,
     /// The first send created the stored session.
     SessionCreated(Box<Session>),
+    /// The agent named the session: lists of the chats show the new name.
+    Renamed,
     /// A review card asks to open a file, or for a new review run.
     Review(ReviewCardEvent),
 }
@@ -223,6 +225,10 @@ pub struct ChatThread {
     /// Which of the agent's accounts the chat is in (`profiles`); empty
     /// for the agent's own. Fixed once something was said.
     account: String,
+    /// The name the chat was given by itself (from its first message, or
+    /// by its agent), in this run: the agent's own name for the session
+    /// may replace this one, never a name the user gave.
+    auto_title: Option<String>,
     entries: Vec<Entry>,
     /// The questions of `entries` still waiting for an answer, oldest
     /// first: the sidebar and title bar ask on every frame, and a long
@@ -329,6 +335,7 @@ impl ChatThread {
             recap_due: false,
             stop_asked: None,
             account: String::new(),
+            auto_title: None,
             entries: Vec::new(),
             pending: Vec::new(),
             views: VecDeque::new(),
@@ -740,6 +747,9 @@ impl ChatThread {
         thread.scroller = cx.new(|cx| TranscriptScroll::new(entries.len(), cx));
         thread.entries = entries;
         thread.account = session.account.clone();
+        // It shows what was chosen in it, not what new chats start in.
+        thread.options =
+            options::with_preferences(std::mem::take(&mut thread.options), &session.options);
         thread.session = Some(session);
         thread
     }
@@ -1050,6 +1060,29 @@ impl ChatThread {
         self.acp_session_id.is_some() || self.setup.is_some() || !self.entries.is_empty()
     }
 
+    /// The agent's own name for the session takes the place of the name
+    /// the chat got from its first message (that one is the message cut
+    /// short; the agent's says what the work is). A name the user gave
+    /// stays.
+    fn take_agent_title(&mut self, title: &str, cx: &mut Context<Self>) {
+        let title = title.trim();
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        if title.is_empty()
+            || session.title == title
+            || self.auto_title.as_deref() != Some(session.title.as_str())
+        {
+            return;
+        }
+        if self.store.rename_session(session.id, title).is_ok() {
+            session.title = title.to_string();
+            self.auto_title = Some(title.to_string());
+            cx.emit(ThreadEvent::Renamed);
+            cx.notify();
+        }
+    }
+
     /// Which of the agent's accounts the chat is in; empty for its own.
     pub fn account(&self) -> &str {
         &self.account
@@ -1146,7 +1179,18 @@ impl ChatThread {
         // `cline::launch_env`): Cline is started again on it.
         let pinned_before = (self.agent.id == "cline" && option_id == "provider")
             .then(|| crate::cline::pinned(&self.store));
-        options::remember(&self.store, self.agent.id, option_id, value);
+        // In a chat nothing was said in yet, a choice is how the user wants
+        // chats with this agent to start. Once something was said it is
+        // this chat's own: putting one chat in plan mode must not put the
+        // next one there. (Cline's provider is the agent's, always.)
+        let said = self
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::User { .. }));
+        if !said || pinned_before.is_some() {
+            options::remember(&self.store, self.agent.id, option_id, value);
+        }
+        self.keep_choice(option_id, value);
         if let Some(before) = pinned_before {
             let after = crate::cline::pinned(&self.store);
             if crate::cline::needs_restart(before.as_deref(), after.as_deref()) {
@@ -1192,6 +1236,24 @@ impl ChatThread {
             });
         })
         .detach();
+    }
+
+    /// Keeps a choice with the chat (once it is stored): what it is put
+    /// back in when it is picked up again, whatever the agent's defaults
+    /// are by then.
+    fn keep_choice(&mut self, option_id: &str, value: &str) {
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        if session.options.get(option_id).map(String::as_str) == Some(value) {
+            return;
+        }
+        session
+            .options
+            .insert(option_id.to_string(), value.to_string());
+        if let Err(err) = self.store.set_session_options(session.id, &session.options) {
+            tracing::warn!("keeping a chat's choice: {err:#}");
+        }
     }
 
     /// Starts the agent again, in every workspace, for an option it takes
@@ -1266,6 +1328,15 @@ impl ChatThread {
                         let _ = self.store.set_session_account(session.id, &self.account);
                         session.account = self.account.clone();
                     }
+                    self.auto_title = Some(session.title.clone());
+                    // What the chat starts in is its own from here on.
+                    session.options = self
+                        .options
+                        .iter()
+                        .filter(|option| !option.current.is_empty())
+                        .map(|option| (option.id.clone(), option.current.clone()))
+                        .collect();
+                    let _ = self.store.set_session_options(session.id, &session.options);
                     if let Some(review_id) = self.review_id {
                         let cwd = self.project.path.to_string_lossy().to_string();
                         let _ = self
@@ -1604,7 +1675,22 @@ impl ChatThread {
                     .find(|option| option.category == options::OptionCategory::Mode)
                 {
                     mode.current = update.current_mode_id.0.to_string();
+                    // The agent changed it (out of plan mode once the plan
+                    // was approved): the chat keeps that.
+                    let (id, value) = (mode.id.clone(), mode.current.clone());
+                    self.keep_choice(&id, &value);
                     cx.notify();
+                }
+                return;
+            }
+            // The agent's own name for the session (Claude Code and Codex
+            // name one after a turn or two).
+            SessionUpdate::SessionInfoUpdate(info) => {
+                let title = serde_json::to_value(info)
+                    .ok()
+                    .and_then(|info| info["title"].as_str().map(str::to_string));
+                if let Some(title) = title {
+                    self.take_agent_title(&title, cx);
                 }
                 return;
             }
@@ -2079,7 +2165,11 @@ impl ChatThread {
             .session
             .as_ref()
             .and_then(|session| session.acp_session_id.clone());
-        let prefs = options::preferences(&self.store, agent.id);
+        // The agent's defaults, with the chat's own choices over them.
+        let mut prefs = options::preferences(&self.store, agent.id);
+        if let Some(session) = &self.session {
+            prefs.extend(session.options.clone());
+        }
         let store = self.store.clone();
         let mcp = pilothouse_mcp_server(&cwd, agent.id, self.project.id);
         // The servers set up in Settings → MCP & skills, for every agent.
@@ -3212,6 +3302,140 @@ done"#,
             assert!(text.contains("stopped from another chat"), "{text}");
             assert!(is_error);
         });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The agent's own name for a session replaces the name the chat got
+    /// from its first message, and never one the user gave.
+    #[gpui_kit::test]
+    fn the_agents_name_for_a_session_replaces_the_first_messages(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = temp_dir("named");
+        let spec = fake_agent_that(
+            &dir,
+            "{}",
+            r#"session/prompt) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}" ;;"#,
+        );
+        let store = Store::open_in_memory().unwrap();
+        let place = store.add_project(&dir).unwrap();
+        let here = ThreadProject {
+            id: place.id,
+            ..project(&dir)
+        };
+        let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+        let thread = cx.new(|cx| ChatThread::draft(store.clone(), here, spec, cx));
+        thread.update(cx, |thread, cx| {
+            thread.send(
+                "fix it".into(),
+                Vec::new(),
+                "fix it".into(),
+                say("fix it"),
+                connection.clone(),
+                cx,
+            )
+        });
+        wait_until(cx, "the turn to end", |cx| {
+            thread.read_with(cx, |thread, _| thread.status == ThreadStatus::Idle)
+        });
+        let named = |title: &str| -> SessionUpdate {
+            serde_json::from_value(
+                json!({ "sessionUpdate": "session_info_update", "title": title }),
+            )
+            .unwrap()
+        };
+        let stored_title = |cx: &mut TestAppContext| {
+            let id = thread.read_with(cx, |thread, _| thread.session().unwrap().id);
+            store.session(id).unwrap().unwrap().title
+        };
+        thread.update(cx, |thread, cx| {
+            thread.apply_update(named("Fix the tide table's off-by-one"), None, cx)
+        });
+        assert_eq!(stored_title(cx), "Fix the tide table's off-by-one");
+        // The agent may name it again as the work goes on.
+        thread.update(cx, |thread, cx| {
+            thread.apply_update(named("Tide table fixes"), None, cx)
+        });
+        assert_eq!(stored_title(cx), "Tide table fixes");
+        // The user's own name stays, whatever the agent says after.
+        thread.update(cx, |thread, cx| {
+            let id = thread.session().unwrap().id;
+            thread.store.rename_session(id, "Tides").unwrap();
+            thread.set_title("Tides", cx);
+            thread.apply_update(named("Something else"), None, cx);
+            thread.apply_update(named("  "), None, cx);
+        });
+        assert_eq!(stored_title(cx), "Tides");
+        drop(connection);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Putting one chat in plan mode must not put the next one there: a
+    /// choice made once something was said is the chat's own.
+    #[gpui_kit::test]
+    fn a_choice_made_in_a_chat_is_the_chats_own(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = temp_dir("choices");
+        let spec = fake_agent_that(
+            &dir,
+            "{}",
+            r#"session/prompt) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}" ;;"#,
+        );
+        let store = Store::open_in_memory().unwrap();
+        let place = store.add_project(&dir).unwrap();
+        let here = ThreadProject {
+            id: place.id,
+            ..project(&dir)
+        };
+        let connection = cx.new(|cx| AgentConnection::start(spec, dir.to_path_buf(), cx));
+        let thread = cx.new(|cx| ChatThread::draft(store.clone(), here.clone(), spec, cx));
+        // Before anything is said: how chats with this agent start.
+        thread.update(cx, |thread, cx| thread.set_option("mode", "default", cx));
+        assert_eq!(
+            options::preferences(&store, "fake")
+                .get("mode")
+                .map(String::as_str),
+            Some("default")
+        );
+        thread.update(cx, |thread, cx| {
+            thread.send(
+                "plan it".into(),
+                Vec::new(),
+                "plan it".into(),
+                say("plan it"),
+                connection.clone(),
+                cx,
+            )
+        });
+        wait_until(cx, "the turn to end", |cx| {
+            thread.read_with(cx, |thread, _| thread.status == ThreadStatus::Idle)
+        });
+        // Something was said: this chat goes to plan mode, by itself.
+        thread.update(cx, |thread, cx| thread.set_option("mode", "plan", cx));
+        assert_eq!(
+            options::preferences(&store, "fake")
+                .get("mode")
+                .map(String::as_str),
+            Some("default"),
+            "the next chat does not start in plan mode"
+        );
+        let id = thread.read_with(cx, |thread, _| thread.session().unwrap().id);
+        let stored = store.session(id).unwrap().unwrap();
+        assert_eq!(stored.options.get("mode").map(String::as_str), Some("plan"));
+        // Picked up again, it is still its own, whatever new chats start in.
+        options::remember(&store, "fake", "mode", "acceptEdits");
+        let again = cx.new(|cx| ChatThread::open(store.clone(), here, stored, cx));
+        again.read_with(cx, |again, _| {
+            assert_eq!(
+                again
+                    .session()
+                    .unwrap()
+                    .options
+                    .get("mode")
+                    .map(String::as_str),
+                Some("plan")
+            )
+        });
+        drop(connection);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

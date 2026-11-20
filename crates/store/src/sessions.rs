@@ -34,6 +34,9 @@ pub struct Session {
     /// Which of its agent's accounts it is in (Settings → Agents); empty
     /// for the agent's own.
     pub account: String,
+    /// Its own choices, by the agent's option id (its mode, its model…):
+    /// what it is put back in when it is picked up again.
+    pub options: std::collections::HashMap<String, String>,
     /// What it did, in numbers, as of its last turn.
     pub facts: Option<SessionFacts>,
 }
@@ -87,6 +90,9 @@ impl Session {
             kind: row.get("kind")?,
             last_line: row.get("last_line")?,
             account: row.get("account")?,
+            // Choices that no longer parse are none: the agent's defaults
+            // hold until one is made again.
+            options: serde_json::from_str(&row.get::<_, String>("options")?).unwrap_or_default(),
             // Facts that no longer parse are none: the next turn writes
             // them again.
             facts: row
@@ -122,8 +128,22 @@ impl Store {
             kind: "chat".into(),
             last_line: None,
             account: String::new(),
+            options: Default::default(),
             facts: None,
         })
+    }
+
+    /// Keeps session `id`'s own choices (by the agent's option id).
+    pub fn set_session_options(
+        &self,
+        id: SessionId,
+        options: &std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET options = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(options)?],
+        )?;
+        Ok(())
     }
 
     /// Puts session `id` in `account` of its agent (empty: the agent's

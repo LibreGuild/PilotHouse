@@ -21,3 +21,7 @@ serde_json.workspace = true
 ph-theme.workspace = true
 ph-ui.workspace = true
 smol.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Where a shell is (its current folder), asked of the system.
+libc = "0.2"

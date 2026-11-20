@@ -1089,6 +1089,7 @@ impl ChatPanel {
                         cx.emit(ChatPanelEvent::SessionsChanged);
                     }
                     ThreadEvent::TurnEnded => cx.emit(ChatPanelEvent::TurnEnded),
+                    ThreadEvent::Renamed => cx.emit(ChatPanelEvent::SessionsChanged),
                     ThreadEvent::Review(ReviewCardEvent::OpenFile { path, line }) => {
                         cx.emit(ChatPanelEvent::OpenFile {
                             path: path.clone(),
