@@ -30,7 +30,7 @@ A screenshot goes stale each time the app's look changes, in every theme. A draw
 `main.js` adds the motion; the comment at the top of each of its parts says what it does.
 
 - **The hero is one scene**: a sky of stars, the words, the window, and a sea in front with the agents afloat on it as small boats. On a wide screen the scene stays in place for a stretch of scrolling (`.hero.pin`): the words leave, and the window comes up out of the sea and flat to the reader. One number, `--p`, goes from 0 to 1 over that stretch and the styles follow it.
-- **The window plays a task** on a loop: the request is typed, the agent works, asks, gets a yes, the tests pass, the files are ticked as read, the change is committed. The steps and their timing are the `play` function; the parts it shows carry `data-d`, the things it points at `data-demo`, and the row of phases above the window says where the task is.
+- **The window plays a task** on a loop: the request is typed, the agent works, asks, gets a yes, the tests pass, the files are ticked as read, the change is committed. The steps and their timing are the `play` function; the parts it shows carry `data-d`, the things it points at `data-demo`, and the row of phases above the window says where the task is. On a phone the window has room for one pane, so the script switches it (`data-view`): the chat while the agent works, the Git pane for the review and the commit.
 - **A task in four moves** keeps one window in place on a wide screen while the four steps scroll by, and shows each step's drawing in it. On a narrow one each step has its drawing under it.
 - **The Bridge's cards** go from column to column (the `script` list), and a reader can answer one: Allow, Deny and Review changes move its card.
 - **The tiles'** small drawings loop while they are on screen (CSS keyframes), and a light follows the pointer across the grid.
@@ -41,7 +41,7 @@ Each of these runs only while it is on screen. For a reader who asked their syst
 
 ## Look
 
-A night watch that ends at dawn: the page starts dark, the sky lightens through the privacy section, and the download is in daylight. The mark's violet is the accent, with the app's amber, blue and green for the states. The colours are the custom properties at the top of `styles.css`; `.day` switches them for the light end of the page.
+A night watch that ends at dawn: the page starts dark, the sky lightens through the privacy section, and the download is in daylight. The night is black glass, not a colour: near-black grounds, panes with a faint sheen, and light only from the accent. The accent is teal (a reader can try the others in *Make it yours*), with the app's amber, blue and green for the states. Keep blue and violet glows out of it: they make a page look like every other one. The colours are the custom properties at the top of `styles.css`; `.day` switches them for the light end of the page.
 
 ## To look at it locally
 

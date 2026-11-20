@@ -89,7 +89,7 @@ function fit(canvas, context) {
 }
 
 // The page's accent, as the sky and the sea draw it.
-const accent = { first: "#a78bfa", second: "#f0abfc" };
+const accent = { first: "#4fd6c7", second: "#a5f3c4" };
 const readAccent = () => {
   const style = getComputedStyle(root);
   const first = style.getPropertyValue("--accent").trim();
@@ -134,7 +134,7 @@ for (const heading of $$("[data-reveal]")) {
         r: Math.random() < 0.1 ? 1.5 : 0.4 + Math.random() * 0.7,
         phase: Math.random() * 6.283,
         speed: 0.4 + Math.random() * 1.7,
-        tint: Math.random() < 0.28 ? "#cfd8ff" : "#ffffff",
+        tint: Math.random() < 0.28 ? "#dfe6ea" : "#ffffff",
       }));
     };
 
@@ -311,9 +311,10 @@ function sea(canvas, look) {
 if ($("#sea")) {
   sea($("#sea"), {
     line: 0.34,
-    water: ["#171d4a", "#0c1130", "#070b16"],
-    wash: 0.16,
-    lines: () => [accent.first, "#6ea8ff", accent.second],
+    // Black water: it ends in the colour of the section under it.
+    water: ["#16181b", "#0e0f11", "#08090a"],
+    wash: 0.14,
+    lines: () => [accent.first, accent.second, accent.first],
     glint: () => accent.second,
     shine: 0.6,
     spread: 0.36,
@@ -463,6 +464,8 @@ if ($("#sea-day")) {
       ask.classList.remove("gone");
       chatIdle.classList.remove("off");
       paneIdle.classList.remove("off");
+      // A phone shows one pane of the window at a time: the chat first.
+      win.dataset.view = "chat";
       typed.textContent = "";
       tabDot.className = "dot";
       phase("none");
@@ -520,7 +523,11 @@ if ($("#sea-day")) {
         show("tests");
         tabDot.className = "dot green";
         phase("review");
-        // The review: each file ticked as read, then the commit.
+        // The review: on a phone the Git pane takes the chat's place; then
+        // each file is ticked as read, and the change committed.
+        await sleep(750);
+        if (stale()) return;
+        win.dataset.view = "result";
         for (const tick of ["t1", "t2"]) {
           await sleep(450);
           if (stale()) return;
@@ -713,10 +720,10 @@ if ($("#sea-day")) {
 {
   // The accent, the colour its gradients run to, and its shade for daylight.
   const ACCENTS = {
-    violet: ["#a78bfa", "#f0abfc", "#5a3fd0"],
-    blue: ["#6ea8ff", "#8fe3ff", "#2a66d4"],
     teal: ["#4fd6c7", "#a5f3c4", "#0d8377"],
     green: ["#63d98f", "#d6f58b", "#1f8a50"],
+    blue: ["#6ea8ff", "#8fe3ff", "#2a66d4"],
+    violet: ["#a78bfa", "#f0abfc", "#5a3fd0"],
     amber: ["#f5b83d", "#ff9e7a", "#a96a05"],
     pink: ["#f58bc8", "#ffb199", "#c0307c"],
   };
