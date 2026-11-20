@@ -151,6 +151,12 @@ impl WorkspaceScreen {
     /// The chat in front goes on in its agent's CLI: once the agent's side
     /// has let go of the conversation, and not before.
     fn chat_to_cli(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<()> {
+        // Asked for again while the first is on its way (the agent's side
+        // takes a few seconds to let go): one conversation, one CLI. A
+        // second press started a second program on it.
+        if self.cli_opening {
+            return Ok(());
+        }
         let store = AppState::store(cx).clone();
         let thread = self.chat.read(cx).active_thread().clone();
         let (handover, released) = thread
@@ -211,6 +217,7 @@ impl WorkspaceScreen {
         self.chat.update(cx, |chat, cx| {
             chat.set_busy(Some(format!("Opening {}'s CLI…", agent.name)), cx)
         });
+        self.cli_opening = true;
         cx.spawn_in(window, async move |this, cx| {
             let mark = mark.await;
             // Never two programs on one conversation: the CLI starts once
@@ -218,6 +225,7 @@ impl WorkspaceScreen {
             // session closed).
             released.await;
             _ = this.update_in(cx, |this, window, cx| {
+                this.cli_opening = false;
                 set_mark(&store, session.id, Some(mark));
                 this.chat.update(cx, |chat, cx| chat.set_busy(None, cx));
                 let started = this.start_cli(
@@ -447,6 +455,10 @@ impl WorkspaceScreen {
         (model, mode): (Option<String>, Option<String>),
         cx: &mut Context<Self>,
     ) -> Result<()> {
+        // One conversation, one CLI: a session whose CLI runs has it.
+        if cli_terminal(self.project.id, session.id, cx).is_some() {
+            return Ok(());
+        }
         let terminals =
             TerminalHub::agent_terminals(self.project.id, self.project.path.clone(), cx);
         // A CLI that ends (the user left it, it failed to start) closes

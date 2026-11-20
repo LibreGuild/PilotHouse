@@ -177,6 +177,9 @@ pub struct WorkspaceScreen {
     _subscriptions: Vec<Subscription>,
     /// The views of the agent CLIs the chat shows (see `cli`).
     cli_views: cli::CliViews,
+    /// A chat is on its way to its agent's CLI (its side is letting go of
+    /// the conversation): asking again meanwhile starts nothing more.
+    cli_opening: bool,
     /// Watches the workspace's agent terminals, once one was started.
     _cli_watch: Option<Subscription>,
     /// Each shown agent transcript's "Continue in a chat", by terminal.
@@ -361,6 +364,7 @@ impl WorkspaceScreen {
         let mut space = Self {
             cli_views,
             _cli_watch: None,
+            cli_opening: false,
             layout,
             shown: HashSet::new(),
             _save_split: None,
