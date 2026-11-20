@@ -29,6 +29,7 @@ Agents and terminals use your **login shell's** environment (`ph-env`), so tools
    - **View** (the layers button in the header, for every chat, kept in `chat.view_mode`): *Detailed* shows every step, *Normal* folds runs, *Summary* shows only messages, replies, questions and the turn summaries.
 4. **Permission requests** appear inline and in the title-bar **Approvals** inbox (across all projects). Answering either one answers the agent once. Stop, or an agent exit, cancels them. Once answered, a request shrinks to a muted line.
    - **What is being approved** shows under the card's title (`permission::Asked`): an edit as its diff, a command in full when the title does not already say all of it (a script of several lines, the script a shell is started with), and any other tool as what it is called with, a line per field. A title is one line, and "Edit files" is not enough to say yes to.
+   - **What "always" leaves behind.** An approval answered *Always* is kept by the agent, not by PilotHouse: Claude Code writes a rule (`Bash(cargo test:*)`) to the folder's `.claude/settings.local.json` and never asks for that again. A Claude Code chat's ⋯ menu has **Always allowed here…**, which lists those rules and takes one back (`claude_rules.rs`; everything else in the file stays). The project's own rules (`.claude/settings.json`, shared through the repository) are listed too and left to be changed there. The other agents keep such answers for the session, or in files of their own that are not read.
    - **Plans.** When the agent asks to leave plan mode (ACP `switch_mode`), the card shows the plan, as Markdown, above the choices.
    - **Questions.** PilotHouse accepts ACP form elicitation (`elicitation/create`, `form.rs`): Claude Code's *AskUserQuestion* and MCP servers asking for values arrive as a question card. Pick one (radio) or several (checks) of the offered answers, or type your own (*Other*); **Answer** sends, **Skip** declines. A single one-answer question is answered by the pick. Questions wait in the inbox like permissions, and make the chat *Needs you*.
    - **Subagents.** While subagents work, a line above the composer says how many ("2 subagents running"); it opens to each one's state, latest step, steps and time, and a row jumps to it in the transcript. Claude starts subagents in the background, so one counts as working while a step of it runs or for a few seconds after its last. Codex's `spawnAgent` calls show as subagents too, but its adapter keeps their own steps to itself.
@@ -217,7 +218,12 @@ This is about the CLI on your `PATH`, which a session's CLI form runs. A chat ru
 | `connection.rs` | One agent process: handshake, routing updates and permission requests to threads |
 | `thread.rs` | One session: prompt turns, checkpoints and restores, applying updates, persistence |
 | `transcript.rs` | Entry model, stored form, diff summaries |
-| `permission.rs` | Permission requests and the approval inbox |
+| `permission.rs` | Permission requests, what a card shows of the action (`Asked`), and the approval inbox |
+| `claude_rules.rs` | What Claude Code may do in a folder without asking: read, and taken back |
+| `profiles.rs` | How each agent is run: open as chat or CLI, command, arguments, environment, accounts |
+| `agents_view.rs` | Settings → Agents |
+| `cli_transcript.rs` | An agent's own session file as a transcript; what was said in its CLI taken into a chat |
+| `cli_sessions.rs` | An agent's own sessions in a folder, from its files (per account) |
 | `options.rs` | Agent config options (model, mode, effort…), remembered choices |
 | `installed.rs` | Which agents are installed, looked for at start and on request |
 | `preload.rs` | Agents' models, loaded in the background after start |

@@ -22,6 +22,7 @@ mod attachment_view;
 pub mod attachments;
 mod chat_panel;
 pub mod chats;
+pub mod claude_rules;
 pub mod cli_sessions;
 pub mod cli_transcript;
 pub mod cline;

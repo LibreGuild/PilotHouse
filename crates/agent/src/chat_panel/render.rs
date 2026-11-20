@@ -362,6 +362,9 @@ impl ChatPanel {
         let rested = thread.has_started() && *thread.status() == ThreadStatus::Idle;
         let store = self.store.clone();
         let panel = cx.weak_entity();
+        // Claude Code keeps its rules in the folder it works in.
+        let rules_root = (current_agent == "claude" && !self.project.read_only)
+            .then(|| thread.folder().to_path_buf());
         Button::new("chat-more")
             .ghost()
             .xsmall()
@@ -383,6 +386,26 @@ impl ChatPanel {
                         )
                     },
                 );
+                // What the agent no longer asks about here ("Always allow"
+                // leaves a rule with the agent): to see, and to take back.
+                let menu = match rules_root.clone() {
+                    Some(root) => menu.separator().item(
+                        PopupMenuItem::new("Always allowed here…")
+                            .icon(Icons::ShieldCheck)
+                            .on_click(move |_, window, cx| {
+                                use gpui_kit::component::WindowExt as _;
+                                let view =
+                                    cx.new(|_| crate::claude_rules::RulesView::new(root.clone()));
+                                window.open_dialog(cx, move |dialog, window, _| {
+                                    dialog
+                                        .title("Always allowed for Claude Code")
+                                        .w(ph_ui::scaled_px(520., window))
+                                        .child(view.clone())
+                                });
+                            }),
+                    ),
+                    None => menu,
+                };
                 if !rested {
                     return menu;
                 }

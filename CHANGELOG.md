@@ -6,6 +6,7 @@ Each release also has **Merge notes** for organisations that build their own cop
 
 ## Unreleased
 
+- **Chat: what "Always allow" left behind can be seen and taken back.** An approval answered *Always* leaves a rule with the agent, which then never asks again, and nothing showed it. A Claude Code chat's ⋯ menu has **Always allowed here…**: the rules for the folder, each with a button that takes it back.
 - **Chat: a picture a tool gives back is shown.** A screenshot tool's call said one line of text and its picture was dropped. The picture now shows with the call, small, and opens large on a click.
 - **A chat's mode is its own.** Putting one chat in plan mode (or on another model) changed what every later chat with that agent started in. A choice made once something was said now stays with that chat, and a chat picked up again is put back in what it was in; a choice in a new, empty chat still sets how chats start.
 - **A chat takes the agent's own name for it.** Chats were named after the first words of their first message. When the agent names the session, that name is used; one you gave stays.
