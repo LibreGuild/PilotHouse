@@ -92,6 +92,9 @@ pub enum ChatPanelEvent {
     /// Pick one of an agent's own sessions in this folder that did not
     /// start here (the agent's id), to go on with it.
     PickOutsideSession(&'static str),
+    /// Something was sent to the session in front while it is in its CLI
+    /// form: this text is to be typed into the CLI, for the user to send.
+    TypeInCli(String),
 }
 
 /// The two forms of a session with an agent: the chat, or the agent's own
@@ -468,6 +471,9 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.type_in_cli(Some(&attachment), text, cx) {
+            return;
+        }
         let existing = self.composer.read(cx).value().trim().to_string();
         let draft = if existing.is_empty() {
             text.to_string()
@@ -495,6 +501,9 @@ impl ChatPanel {
     /// Begins a message for the user to finish: `text` in the composer,
     /// focused, the cursor after it.
     pub fn begin_message(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.type_in_cli(None, text, cx) {
+            return;
+        }
         self.composer.update(cx, |composer, cx| {
             composer.set_value(text.to_string(), window, cx)
         });
@@ -936,6 +945,14 @@ impl ChatPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // In its CLI the question is typed there, for the user to send.
+        let question = prompt
+            .as_ref()
+            .map_or("", |(_, prompt)| prompt.as_str())
+            .to_string();
+        if self.type_in_cli(Some(&attachment), &question, cx) {
+            return;
+        }
         if matches!(
             self.active.read(cx).status(),
             ThreadStatus::Working | ThreadStatus::Connecting
@@ -995,7 +1012,54 @@ impl ChatPanel {
         }
     }
 
+    /// What is sent to the session in front while it is in its CLI form
+    /// (a file, a capture, selected text, the start of a message) is typed
+    /// into the CLI instead, for the user to send there: the message box
+    /// is not on screen, and what went into it would be lost. True when
+    /// the session is in that form.
+    fn type_in_cli(
+        &mut self,
+        attachment: Option<&Attachment>,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.terminal_session.is_none() {
+            return false;
+        }
+        let mut typed = String::new();
+        match attachment {
+            // An agent's CLI reads a file or an image it is given the path
+            // of; text goes as it is.
+            Some(Attachment::File(path)) => {
+                let path = std::path::Path::new(path);
+                let path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    self.project.path.join(path)
+                };
+                typed.push_str(&path.to_string_lossy());
+                typed.push(' ');
+            }
+            Some(Attachment::Image { path, .. }) => {
+                typed.push_str(&path.to_string_lossy());
+                typed.push(' ');
+            }
+            Some(Attachment::Text { label, text }) => {
+                typed.push_str(&format!("{label}:\n{}\n", text.trim_end()));
+            }
+            None => {}
+        }
+        typed.push_str(text.trim());
+        if !typed.trim().is_empty() {
+            cx.emit(ChatPanelEvent::TypeInCli(typed));
+        }
+        true
+    }
+
     pub fn attach(&mut self, attachment: Attachment, window: &mut Window, cx: &mut Context<Self>) {
+        if self.type_in_cli(Some(&attachment), "", cx) {
+            return;
+        }
         if !self.attachments.contains(&attachment) {
             self.attachments.push(attachment);
         }

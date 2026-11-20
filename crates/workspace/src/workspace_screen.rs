@@ -238,6 +238,7 @@ impl WorkspaceScreen {
                 }
                 ChatPanelEvent::WantPulls => this.feed_pulls(window, cx),
                 ChatPanelEvent::ShowAs(form) => this.show_as(*form, window, cx),
+                ChatPanelEvent::TypeInCli(text) => this.type_in_cli(text, window, cx),
                 ChatPanelEvent::PickOutsideSession(agent) => {
                     let cwd = this.project.path.clone();
                     this.pick_agent_session(agent, cwd, window, cx)

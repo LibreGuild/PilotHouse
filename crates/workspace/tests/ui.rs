@@ -813,6 +813,87 @@ fn open_chats_are_tabs_over_the_chat(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+/// A session has two forms, the chat and its agent's CLI. One stored in its
+/// CLI form whose program is not running (the app was started again) shows
+/// what was said read only, with a way to go on there, and the header's
+/// switch takes it back to the chat. Nothing starts by itself.
+#[gpui_kit::test]
+fn a_session_in_its_cli_form_goes_on_in_the_chat(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let (alpha, _beta) = two_workspaces("forms", window, &workspace, cx);
+    let session = cx.update(|cx| {
+        let store = AppState::store(cx);
+        let session = store
+            .create_session(alpha, "Sort the arrivals", "claude")
+            .unwrap();
+        // As a chat that went on in its agent's CLI is kept.
+        store
+            .set_session_place(session.id, "terminal", None)
+            .unwrap();
+        session.id
+    });
+    workspace.update(cx, |workspace, cx| {
+        workspace.unload_idle(std::time::Duration::ZERO, cx)
+    });
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_chat(alpha, session, window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("cli-continue").is_some(),
+            "its CLI is not running, and can be started"
+        );
+        assert!(
+            window.try_find("send-message").is_none(),
+            "there is no message box in its CLI form"
+        );
+        // It keeps its tab among the workspace's chats, and has the switch.
+        assert!(window.try_find(("chat-tab", session as u64)).is_some());
+        assert!(window.try_find_by_label("Chat").is_some());
+        assert!(window.try_find_by_label("CLI").is_some());
+        // No agent program was started for showing it.
+        assert!(
+            ph_terminal::TerminalHub::existing_agent_terminals(alpha, cx).is_none(),
+            "nothing starts by itself"
+        );
+        // Back to the chat.
+        let chat = window.find_by_label("Chat").bounds().center();
+        gpui_kit::test::TestEventExt::pointer_down(window, chat, gpui_kit::MouseButton::Left, cx);
+        gpui_kit::test::TestEventExt::pointer_up(window, chat, gpui_kit::MouseButton::Left, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    // What its CLI part held is read off the UI thread first.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        let kind = cx.update(|cx| AppState::store(cx).session(session).unwrap().unwrap().kind);
+        if kind == "chat" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the session did not go back to the chat"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("send-message").is_some(),
+            "the chat has its message box"
+        );
+        assert!(window.try_find("cli-continue").is_none());
+        assert!(window.try_find(("chat-tab", session as u64)).is_some());
+    })
+    .unwrap();
+}
+
 /// The Git tool lists the changed files and shows their changes in one
 /// diff beside (or under) the list: a row has a tick for "looked at" where
 /// the arrow that unfolded the file in the list was.

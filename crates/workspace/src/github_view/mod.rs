@@ -730,7 +730,9 @@ impl GithubView {
                     cx,
                 ),
                 // Terminal agents' chats belong to workspaces, not here.
-                ChatPanelEvent::ShowAs(_) | ChatPanelEvent::PickOutsideSession(_) => {}
+                ChatPanelEvent::ShowAs(_)
+                | ChatPanelEvent::PickOutsideSession(_)
+                | ChatPanelEvent::TypeInCli(_) => {}
             },
         );
         self.chats.insert(id.clone(), (chat.clone(), subscription));

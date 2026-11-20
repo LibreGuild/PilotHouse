@@ -408,6 +408,29 @@ impl WorkspaceScreen {
         Ok(())
     }
 
+    /// Types `text` into the CLI of the session in front, for the user to
+    /// send there (it is pasted, not entered). A session whose CLI is not
+    /// running says so: nothing is typed into nowhere.
+    pub(super) fn type_in_cli(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let terminal = self
+            .chat
+            .read(cx)
+            .active_session_id(cx)
+            .and_then(|session| cli_terminal(self.project.id, session, cx));
+        let Some(terminal) = terminal else {
+            use gpui_kit::component::WindowExt as _;
+            window.push_notification(
+                "This session's CLI is not running. Continue it, or switch to the chat, then send that again.",
+                cx,
+            );
+            return;
+        };
+        terminal.read(cx).paste_text(text);
+        if let Some((view, _)) = self.cli_views.borrow().get(&terminal.entity_id()) {
+            view.read(cx).focus_handle(cx).focus(window, cx);
+        }
+    }
+
     /// Closes the CLI of `session` (its program ends).
     pub(crate) fn close_cli(&mut self, session: SessionId, cx: &mut Context<Self>) {
         let Some(terminal) = cli_terminal(self.project.id, session, cx) else {

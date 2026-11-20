@@ -177,6 +177,8 @@ What keeps that true (`workspace_screen/cli.rs`, `ChatThread::hand_over`, `termi
 
 The CLI is the terminal's own program: the user's shell starts it (`-l -i -c`, so `PATH` and aliases are theirs) and ends with it, so leaving the CLI leaves no prompt behind. Its terminal belongs to the chat: it is not among the Terminal tab's, and the session keeps its tab over the chat and its card on the Bridge, with the state the CLI reports ([terminal.md](terminal.md#agents-in-a-terminal)).
 
+**What the app sends to a chat goes to the CLI too.** Selected code to ask about, a file from the tree, a capture of the browser or a phone, lines of a log: with the session in its CLI form these are typed into the CLI (pasted, not entered), for you to send there. A file or an image goes as its path, which an agent's CLI reads; text as it is. With the CLI not running, the app says so instead of putting it in a message box that is not on screen (`ChatPanel::type_in_cli`).
+
 A session in its CLI form whose program is not running (after a restart, or once you left the CLI) shows what its session file says, read only, with **Continue**: nothing starts by itself. A chat nothing was sent in has no conversation yet: its CLI starts a session of its own, named by the first thing asked there. *Past chats → Started outside this app* lists an agent's own sessions in the folder to go on with here (a chat that takes the session back; for Cline, which cannot, its CLI).
 
 What does not carry over: a turn under way; work an agent left running in its process when you switch; and for Cline the way back to the chat is a summary, not its memory (it cannot load a session), which the chat says.

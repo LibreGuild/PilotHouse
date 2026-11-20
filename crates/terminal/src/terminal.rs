@@ -472,6 +472,12 @@ impl Terminal {
         }));
     }
 
+    /// Types `text` into the program as a paste (see [`Self::paste`]): what
+    /// the app puts into a program for the user to send.
+    pub fn paste_text(&self, text: &str) {
+        self.paste(text);
+    }
+
     /// Pastes `text`, bracketed when the program asked for that.
     pub(crate) fn paste(&self, text: &str) {
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
