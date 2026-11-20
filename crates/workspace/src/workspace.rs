@@ -1649,6 +1649,37 @@ impl Workspace {
     /// Runs `update` on the workspace last in front, bringing its screen
     /// forward first: what a command does there is not done unseen behind
     /// the Bridge or Reviews.
+    /// Updates `agent`'s CLI with its own updater, in a terminal of the
+    /// workspace in front (shown, so it is seen to run and to fail), and
+    /// looks again a while after for whether it is still behind.
+    pub(crate) fn update_agent_cli(
+        &mut self,
+        agent: &'static ph_agent::agents::AgentSpec,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(command) = crate::agent_updates::update_command(agent.id) else {
+            return;
+        };
+        if self.active_space().is_none() {
+            window.push_notification(
+                Notification::info("Open a workspace first: the update runs in its terminal."),
+                cx,
+            );
+            return;
+        }
+        self.with_active_space(window, cx, |space, window, cx| {
+            space.run_in_terminal(&format!("Update {}", agent.name), command, window, cx)
+        });
+        cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(90))
+                .await;
+            cx.update(crate::agent_updates::look);
+        })
+        .detach();
+    }
+
     fn with_active_space(
         &mut self,
         window: &mut Window,

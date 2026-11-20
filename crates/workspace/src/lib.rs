@@ -12,6 +12,7 @@
 //! See `docs/architecture.md` for how the pieces fit together.
 
 mod actions;
+mod agent_updates;
 mod app_state;
 mod arch_map;
 mod attention;
@@ -104,6 +105,7 @@ pub fn init(cx: &mut App) {
     // models, so the picker lists them the first time.
     ph_agent::installed::install(AppState::store(cx).clone(), cx);
     updates::install(cx);
+    agent_updates::install(cx);
     actions::bind_keys(cx);
     network_drives::install(cx);
     sidebar::load_sizes(cx);

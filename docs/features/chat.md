@@ -192,6 +192,14 @@ What does not carry over: a turn under way; work an agent left running in its pr
   - One agent process serves one account (`WorkspaceChats::connection` keeps them by agent and account), and a session's account is stored with it (`sessions.account`).
   - What reads the agent's own files follows the session's account (`cli_sessions::sessions_in`): going back to the chat from the CLI, a terminal session's transcript, the last reply kept with a chat. Usage counts every account's files. The limit meter in the status bar is the agent's own account's.
 
+## Newer versions of the agents' CLIs
+
+`ph_workspace::agent_updates`. A minute after the app starts and once a day, each installed CLI is asked its version (`claude --version`) and the npm registry the newest version of the package that carries its releases (`@anthropic-ai/claude-code`, `@openai/codex`, `@google/gemini-cli`, `cline`): one small request each, naming only the package. Nothing about you or this computer is sent. A CLI that is behind shows at the right of the status bar (*2 agent updates*); its pop-up lists each with its version and the newest, and **Update** runs the agent's own updater in a terminal of the workspace in front (`claude update`, `codex update`, `cline update`; for Gemini CLI, `npm install -g @google/gemini-cli@latest`), where it is seen to run. Antigravity publishes nowhere a version can be read from, so it is not looked at.
+
+Switch it off in *Settings → Agents → Updates*. A build whose brand turns updates off (`[updates] enabled = false`) never looks.
+
+This is about the CLI on your `PATH`, which a session's CLI form runs. A chat runs on the adapter this version of the app was built with (`agents.rs`), which a CLI's update does not change.
+
 ## Stopping
 
 **Stop** asks the agent to end its turn (ACP `session/cancel`); the agent answers when it has. An agent that does not (a tool that hangs, an agent that no longer reads) leaves the turn running: after three seconds the working line says so and Stop turns red, and pressing it again ends the agent's process (`ChatThread::force_stop`). One process serves every chat of that agent in the workspace, so the others at work lose their turn too and are told why. Each chat keeps its session and picks it up with its next message.

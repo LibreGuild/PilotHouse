@@ -793,7 +793,29 @@ fn agents_page(agents: gpui_kit::Entity<ph_agent::agents_view::AgentsView>) -> S
                     ),
             ),
         )
+        .groups(agent_updates_group())
         .groups(web_pages_group())
+}
+
+/// Settings → Agents → Updates: whether to look for newer versions of the
+/// agents' CLIs (`agent_updates`). Not in a build whose brand turns
+/// updates off, which never looks.
+fn agent_updates_group() -> Option<SettingGroup> {
+    ph_brand::UPDATES_ENABLED.then(|| {
+        SettingGroup::new().title("Updates").item(
+            SettingItem::new(
+                "Look for new versions of the agents' CLIs",
+                SettingField::switch(
+                    crate::agent_updates::enabled,
+                    crate::agent_updates::set_enabled,
+                ),
+            )
+            .description(
+                "Once a day each installed CLI is asked its version, and the npm registry the newest one of its package. Nothing about you or this computer is sent. A CLI that is behind shows at the bottom of the window, where you can update it.",
+            )
+            .keywords(["update", "version", "upgrade", "cli", "npm", "registry"]),
+        )
+    })
 }
 
 /// Settings → Agents → Web pages: which browser agents open pages in first

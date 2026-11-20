@@ -112,9 +112,103 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                 .gap_3()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
+                .children(agent_updates_item(cx))
                 .children(limits(cx))
                 .when(!stacks.is_empty(), |this| this.child(stacks.join(" · "))),
         )
+}
+
+/// The agents' CLIs that are behind their newest release, when any is
+/// (`agent_updates`): how many, and a pop-up that updates each with the
+/// agent's own updater, in a terminal where it is seen to run.
+fn agent_updates_item(cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    use gpui_kit::component::v_flex;
+    let behind = crate::agent_updates::behind(cx).to_vec();
+    if behind.is_empty() {
+        return None;
+    }
+    let label = match behind.len() {
+        1 => "1 agent update".to_string(),
+        n => format!("{n} agent updates"),
+    };
+    let workspace = cx.weak_entity();
+    Some(
+        Popover::new("agent-updates")
+            .offset(ph_ui::POPUP_GAP)
+            .anchor(gpui_kit::Anchor::BottomRight)
+            .trigger(
+                Button::new("status-agent-updates")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(Icons::Download).xsmall())
+                    .label(label)
+                    .tooltip("Newer versions of the agents' CLIs"),
+            )
+            .content(move |_, _, cx| {
+                let rows = behind.iter().map(|update| {
+                    let (agent, workspace) = (update.agent, workspace.clone());
+                    h_flex()
+                        .gap_2()
+                        .child(agent.mark(ph_ui::rems_from_px(16.)))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_sm().child(agent.name))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "{} → {}",
+                                            update.installed, update.latest
+                                        )),
+                                ),
+                        )
+                        .child(
+                            Button::new(gpui_kit::SharedString::from(format!(
+                                "agent-update-{}",
+                                agent.id
+                            )))
+                            .small()
+                            .outline()
+                            .label("Update")
+                            .tooltip(
+                                crate::agent_updates::update_command(agent.id)
+                                    .map(|command| format!("Runs `{command}` in a terminal"))
+                                    .unwrap_or_default(),
+                            )
+                            .on_click(move |_, window, cx| {
+                                _ = workspace.update(cx, |workspace, cx| {
+                                    workspace.update_agent_cli(agent, window, cx)
+                                });
+                            }),
+                        )
+                });
+                v_flex()
+                    .w(ph_ui::rems_from_px(340.))
+                    .gap_3()
+                    .p_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child("Agent updates"),
+                    )
+                    .children(rows)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(concat!(
+                                "Each runs the agent's own updater in a terminal of the workspace in front. This updates the CLI; a chat runs on the adapter this version of ",
+                                ph_brand::name!(),
+                                " was built with."
+                            )),
+                    )
+            })
+            .into_any_element(),
+    )
 }
 
 /// What waits across every workspace, in a few words, whatever is in
