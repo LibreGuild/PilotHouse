@@ -6078,6 +6078,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-writer"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5e456864a7a304047bff84977dc6fb162bd956475d40ba50b2dcecaada7f753"
+dependencies = [
+ "bitflags 2.13.2",
+ "itoa",
+ "memchr",
+ "ryu",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6495,7 +6507,7 @@ dependencies = [
  "objc2-core-media",
  "objc2-core-video",
  "objc2-foundation 0.3.2",
- "pdf-writer",
+ "pdf-writer 0.15.0",
  "ph-brand",
  "ph-control",
  "ph-env",
@@ -8550,7 +8562,7 @@ dependencies = [
  "log",
  "miniz_oxide 0.8.9",
  "once_cell",
- "pdf-writer",
+ "pdf-writer 0.12.1",
  "resvg 0.45.1",
  "siphasher",
  "subsetter",
