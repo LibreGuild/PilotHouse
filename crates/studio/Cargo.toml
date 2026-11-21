@@ -36,7 +36,7 @@ svgtypes = "0.16"
 roxmltree = "0.21"
 # PDF: each slide's SVG as a page (svg2pdf works on usvg 0.45, already in
 # the tree through GPUI).
-pdf-writer = "0.12"
+pdf-writer = "0.15"
 svg2pdf = "0.13"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 # Code on slides, coloured as the editor colours it.
