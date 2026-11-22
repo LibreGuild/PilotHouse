@@ -123,12 +123,6 @@ Get the newest version from [**Releases**](https://github.com/LibreGuild/PilotHo
 | Any Linux (x86-64) | `PilotHouse-Linux-x86_64.AppImage` | `chmod +x`, then run |
 | Any Linux (x86-64) | `PilotHouse-Linux-x86_64.tar.gz` | Unpack and run |
 
-### Mirrors
-The newest release, with `SHA256SUMS` beside the files:
-
-- `https://libreguild.skatech.org/pilothouse/latest/<file>`
-- `https://pub-6c540d377bd4404f87ff33fb14c18c21.r2.dev/pilothouse/latest/<file>`
-
 ### First launch
 The builds are not code-signed yet. On **macOS**, the first open is blocked: open System Settings → Privacy & Security → **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/PilotHouse.app`. On **Windows**, if SmartScreen appears, choose **More info → Run anyway**.
 
@@ -139,7 +133,7 @@ PilotHouse works with the agent CLIs you install and sign in to yourself: `claud
 
 ## Quick start
 
-1. **Open PilotHouse.** It starts in a chat that needs no folder. To work on code, open a folder (<kbd>⌘</kbd>/<kbd>Ctrl</kbd> <kbd>O</kbd>): it becomes a workspace.
+1. **Open PilotHouse.** The first start shows a short welcome tour of what it has (*Settings → About* shows it again). Then it starts in a chat that needs no folder. To work on code, open a folder (<kbd>⌘</kbd>/<kbd>Ctrl</kbd> <kbd>O</kbd>): it becomes a workspace.
 2. **Pick an agent and ask.** The model button in the composer lists the agents and their models. Type what you want and press <kbd>Enter</kbd>; point at things with `@`.
 3. **Answer when it asks.** The agent asks before it runs a command or edits files, in the chat and on its card on the Bridge.
 4. **Review, understand, commit.** The Git tab shows what changed. Keep or undo any part, press **Explain** to have it told in plain words, then commit.
