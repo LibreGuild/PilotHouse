@@ -658,6 +658,12 @@ mod tests {
             ],
         );
         let suites = detect(&root);
+        // Python as the system has it: Windows installs `python`.
+        let pytest = if cfg!(windows) {
+            "python -m pytest"
+        } else {
+            "python3 -m pytest"
+        };
         let found: Vec<(&str, &str, &str)> = suites
             .iter()
             .map(|suite| {
@@ -676,7 +682,7 @@ mod tests {
                     "cargo test",
                     "cargo test --workspace --no-fail-fast"
                 ),
-                ("api/pytest", "api · pytest", "python3 -m pytest"),
+                ("api/pytest", "api · pytest", pytest),
                 ("tool/npm", "tool · npm test", "npm test"),
                 ("web/vitest", "web · Vitest", "pnpm exec vitest run"),
                 (
