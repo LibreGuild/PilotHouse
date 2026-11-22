@@ -70,6 +70,39 @@ fn instructions(browsers: Browsers) -> String {
             the result visually. browser_logs shows console errors and failed requests."
         ));
     }
+    if enabled(Feature::Artifacts) {
+        text.push_str(concat!(
+            "\n",
+            ph_brand::name!(),
+            " artifacts: web pages ",
+            ph_brand::name!(),
+            " keeps for the user and serves from this computer (a planner, a dashboard, a small \
+            game), listed under Artifacts in the app. When the user asks for a ",
+            ph_brand::name!(),
+            " artifact, or to publish something to ",
+            ph_brand::name!(),
+            ", read artifact_guide once, build the page in the workspace, then artifact_publish \
+            it, and again after every change. They are this app's own: not Claude's or ChatGPT's \
+            artifact or canvas, which only those tools make."
+        ));
+    }
+    if enabled(Feature::Artifacts) && enabled(Feature::Presentations) {
+        text.push_str(concat!(
+            "\n",
+            ph_brand::name!(),
+            " Slides: a deck is a folder of web pages (deck.json, deck.css, one HTML file a slide) \
+            that the user changes by hand, comments on, presents and exports to PowerPoint or \
+            PDF. When the user asks for a presentation, a deck, slides or a PowerPoint in a \
+            workspace's chat, make one with deck_create (not artifact_publish, and not a script \
+            that writes a .pptx): it shows beside the chat as you write it. A deck made under \
+            Artifacts → Slides has a chat of its own (each message there says so). Either \
+            way you change the deck by editing its files: read deck_guide once first, call \
+            deck_look after changing slides (it says what does not fit, what the user changed \
+            by hand, and shows slides), answer the user's comments with deck_comments, turn a \
+            .pptx into slides with deck_import, and export with deck_export only when asked. \
+            deck_list shows a workspace's decks; `deck` names one when there are several."
+        ));
+    }
     if enabled(Feature::Devices) {
         text.push_str(
             "\nDevices: Android emulators and phones connected over adb. device_list first, then \

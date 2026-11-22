@@ -15,11 +15,14 @@ ph-changes.workspace = true
 ph-env.workspace = true
 ph-git.workspace = true
 ph-github.workspace = true
+ph-preview.workspace = true
 ph-review.workspace = true
 ph-store.workspace = true
 ph-ui.workspace = true
+serde.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+ph-github = { workspace = true, features = ["testing"] }
 ph-theme.workspace = true

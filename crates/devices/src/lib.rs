@@ -18,6 +18,7 @@
 pub mod adb;
 pub mod android_project;
 mod android_run;
+mod app_picker;
 pub mod avd;
 mod avd_dialog;
 mod connect_dialog;
@@ -31,6 +32,7 @@ pub mod logcat;
 mod logcat_panel;
 mod logcat_view;
 mod manager;
+mod scrcpy;
 mod screen;
 pub mod sdk;
 pub mod ui_tree;
@@ -39,11 +41,16 @@ pub use android_run::{AndroidRun, AndroidRunEvent};
 pub use devices_panel::{
     DevicesPanel, MirrorChanged, OpenLogcat, StreamQualityChanged, device_menu,
 };
-pub use logcat_panel::LogcatPanel;
-pub use manager::{DeviceManager, DevicesChanged};
-pub use screen::{DeviceScreen, ScreenEvent, StreamQuality, SystemKey};
+pub use logcat::Crash;
+pub use logcat_panel::{LogcatPanel, LogcatPanelEvent};
+pub use logcat_view::SourceRef;
+pub use manager::{DeviceManager, DevicesChanged, SavedDevice};
+pub use screen::{DeviceScreen, ScreenEvent, StreamMode, StreamQuality, SystemKey};
 
-/// Registers the control methods. Call once at startup.
-pub fn init(cx: &mut gpui_kit::App) {
+/// Registers the control methods, and gives the device manager the store
+/// it keeps its memory in (the devices connected before, the one chosen).
+/// Call once at startup.
+pub fn init(store: ph_store::Store, cx: &mut gpui_kit::App) {
+    manager::remember_in(store, cx);
     control::register(cx);
 }

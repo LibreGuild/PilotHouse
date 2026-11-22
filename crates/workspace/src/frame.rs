@@ -126,7 +126,7 @@ pub(crate) fn layers(workspace: &Workspace, cx: &mut App) -> Vec<AnyElement> {
     layers
 }
 
-/// The colour of the workspace in front, when one is.
+/// The colour of the workspace in front, when one is (*Chats* has none).
 pub(crate) fn tint(workspace: &Workspace, cx: &App) -> Option<Hsla> {
     if workspace.view() != View::Workspaces {
         return None;
@@ -136,10 +136,7 @@ pub(crate) fn tint(workspace: &Workspace, cx: &App) -> Option<Hsla> {
         .projects()
         .iter()
         .find(|project| project.id == id)?;
-    Some(ph_ui::workspace_color(
-        project.shade(ph_ui::WORKSPACE_COLORS.len()),
-        cx.theme().is_dark(),
-    ))
+    workspace.color_of(project, cx)
 }
 
 /// An island of the frame: a rounded panel between the title bar and the

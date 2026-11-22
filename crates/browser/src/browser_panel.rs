@@ -1,4 +1,5 @@
-//! The browser pane: address bar, live page, annotation tools and logs.
+//! The browser pane: address bar (with the tools to pick, mark, capture and
+//! record the page), live page and logs.
 
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Selectable as _, Sizable as _,
@@ -321,7 +322,17 @@ impl BrowserPanel {
             .update(cx, |browser, cx| browser.set_viewport(viewport, cx));
     }
 
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // In a narrow pane the address keeps its room: the live tools go
+        // into the ⋯ menu, leaving in the row only what is going on.
+        // What the row has beside the tools: its padding and gaps, Back,
+        // Forward and Reload, the least of the address, and ⋯.
+        const BESIDE_TOOLS: f32 = 16. + 3. * 28. + 180. + 28. + 12.;
+        let (width, probe) = ph_ui::measure::width_of("browser-toolbar", window, cx);
+        let needed = BESIDE_TOOLS + self.tools.read(cx).width(false, cx);
+        let fold = width.is_some_and(|width| ph_ui::measure::design_px(width, window) < needed);
+        self.tools
+            .update(cx, |tools, cx| tools.set_folded(fold, cx));
         let browser = self.browser.read(cx);
         let loading = browser.is_loading();
         // Starting counts: the menu then stops the start, rather than
@@ -339,12 +350,14 @@ impl BrowserPanel {
                 .accessibility_label(label)
         };
         h_flex()
+            .relative()
             .flex_none()
             .h_11()
             .px_2()
             .gap_1()
             .border_b_1()
             .border_color(cx.theme().border)
+            .child(probe)
             .child(
                 nav("browser-back", IconName::ArrowLeft, "Back")
                     .on_click(cx.listener(|this, _, _, cx| this.browser.read(cx).go_back())),
@@ -375,6 +388,9 @@ impl BrowserPanel {
                         .when(loading, |this| this.suffix(ph_ui::Loader::new().xsmall())),
                 ),
             )
+            // Pick, mark, capture, record: here, where they hide nothing of
+            // the page.
+            .when(running, |this| this.child(self.tools.clone()))
             .child(
                 Button::new("browser-menu")
                     .ghost()
@@ -383,8 +399,16 @@ impl BrowserPanel {
                     .accessibility_label("Browser options")
                     .menu(gpui_kit::Anchor::TopRight, {
                         let browser = self.browser.clone();
-                        move |menu, _, _| {
+                        let tools = self.tools.clone();
+                        move |menu, window, cx| {
                             let stop = browser.clone();
+                            // The live tools, while the row has no room
+                            // for them.
+                            let menu = if fold && running {
+                                LiveTools::menu(&tools, menu, window, cx)
+                            } else {
+                                menu
+                            };
                             menu
                                 // Not in a build whose brand leaves the extension out.
                                 .when(
@@ -518,17 +542,51 @@ impl BrowserPanel {
                 .into_any_element(),
             // Not running: it starts when asked to here (or when an agent
             // uses it), never by the pane coming into view.
-            BrowserStatus::Stopped => EmptyState::new("The browser is not running")
-                .icon(Icons::Power)
-                .description("Start it to open pages here. Its logins are kept for this workspace, and it also starts when an agent uses it.")
-                .action(
-                    Button::new("browser-start")
-                        .small()
-                        .primary()
-                        .label("Start the browser")
-                        .on_click(cx.listener(|this, _, _, cx| this.browser.update(cx, |browser, cx| browser.ensure_started(cx)))),
-                )
-                .into_any_element(),
+            BrowserStatus::Stopped => {
+                // The other browser there is: said here, where one decides
+                // which to use, with the way to its settings. Not in a
+                // build whose brand leaves the extension out.
+                let chrome = ph_brand::enabled(ph_brand::Feature::ChromeExtension);
+                EmptyState::new("The browser is not running")
+                    .icon(Icons::Power)
+                    .description(if chrome {
+                        "Start the built-in browser to open pages here: its logins are kept for this workspace, and it also starts when an agent uses it. Or let agents use your own Chrome, with the sign-ins it already has."
+                    } else {
+                        "Start it to open pages here. Its logins are kept for this workspace, and it also starts when an agent uses it."
+                    })
+                    .action(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .justify_center()
+                            .child(
+                                Button::new("browser-start")
+                                    .small()
+                                    .primary()
+                                    .label("Start the browser")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.browser
+                                            .update(cx, |browser, cx| browser.ensure_started(cx))
+                                    })),
+                            )
+                            .when(chrome, |this| {
+                                this.child(
+                                    Button::new("browser-your-chrome")
+                                        .small()
+                                        .outline()
+                                        .icon(IconName::Globe)
+                                        .label("Your Chrome in Settings")
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(
+                                                Box::new(crate::OpenChromeExtensionSettings),
+                                                cx,
+                                            )
+                                        }),
+                                )
+                            }),
+                    )
+                    .into_any_element()
+            }
             BrowserStatus::NoBrowser => EmptyState::new("No browser found")
                 .icon(Icons::Globe)
                 .description(concat!(ph_brand::name!(), " drives a Chromium-family browser: Chrome, Edge, Brave or Chromium. Install one, or choose one you already have."))
@@ -773,10 +831,9 @@ impl Render for BrowserPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_viewport(window, cx);
         let overlay = self.render_overlay(cx);
-        let show_tools = overlay.is_none() && self.browser.read(cx).dialog().is_none();
         v_flex()
             .size_full()
-            .child(self.render_toolbar(cx))
+            .child(self.render_toolbar(window, cx))
             .child(
                 div()
                     .relative()
@@ -785,10 +842,7 @@ impl Render for BrowserPanel {
                     .overflow_hidden()
                     .child(div().absolute().inset_0().child(self.surface.clone()))
                     .children(overlay)
-                    .children(self.render_dialog(cx))
-                    .when(show_tools, |this| {
-                        this.child(div().absolute().inset_0().child(self.tools.clone()))
-                    }),
+                    .children(self.render_dialog(cx)),
             )
             .child(self.render_drawer(cx))
     }

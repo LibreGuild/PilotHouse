@@ -30,8 +30,8 @@ pub fn register(cx: &mut App) {
         Ok(browser.screenshot(params["full_page"].as_bool().unwrap_or(false), cx))
     });
     method("browser.click", cx, |browser, params, cx| {
-        let target = match params["selector"].as_str() {
-            Some(selector) => ClickTarget::Selector(selector.to_string()),
+        let target = match element(&params) {
+            Some(target) => target,
             None => ClickTarget::Point(
                 params["x"]
                     .as_f64()
@@ -39,15 +39,15 @@ pub fn register(cx: &mut App) {
                 params["y"].as_f64().context("`y` is required with `x`")? as f32,
             ),
         };
-        Ok(browser.click(target, cx))
+        Ok(browser.click(target, wait(&params), cx))
     });
     method("browser.type", cx, |browser, params, cx| {
         let text = string(&params, "text")?;
-        let selector = params["selector"].as_str().map(str::to_string);
         Ok(browser.type_text(
             text,
-            selector,
+            element(&params),
             params["submit"].as_bool().unwrap_or(false),
+            wait(&params),
             cx,
         ))
     });
@@ -75,12 +75,41 @@ pub fn register(cx: &mut App) {
     method("browser.clear_cache", cx, |browser, _, cx| {
         Ok(browser.clear_cache(cx))
     });
+    // What the sites of `urls` keep (sign-ins, storage) and cached pages.
+    method("browser.clear_sites", cx, |browser, params, cx| {
+        let urls = params["urls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|url| url.as_str().map(str::to_string))
+            .collect();
+        Ok(browser.clear_sites(urls, cx))
+    });
+    method("browser.text", cx, |browser, _, cx| Ok(browser.text(cx)));
     method("browser.evaluate", cx, |browser, params, cx| {
         Ok(browser.evaluate(string(&params, "expression")?, cx))
     });
     method("browser.snapshot", cx, |browser, _, cx| {
         Ok(browser.snapshot(cx))
     });
+
+    // Where the pane is, without starting Chrome: a new UI test starts there.
+    ControlServer::handle(
+        "browser.where",
+        |params, cx| {
+            let project_id = params["project_id"]
+                .as_i64()
+                .context("missing `project_id`")?;
+            // Made if there was none, which starts nothing: it knows where
+            // the pane was when the app last ran.
+            let url = BrowserHub::browser(project_id, cx)
+                .read(cx)
+                .url()
+                .to_string();
+            Ok(json!({ "url": url }))
+        },
+        cx,
+    );
 
     // Logs are already in memory: answer at once, without starting Chrome.
     ControlServer::handle(
@@ -131,7 +160,11 @@ fn method(name: &'static str, cx: &mut App, body: BrowserMethod) {
             let Some(project_id) = params["project_id"].as_i64() else {
                 return Task::ready(Err(anyhow::anyhow!("missing `project_id`")));
             };
-            BrowserHub::agent_uses(project_id, cx);
+            // A UI test's run shows its own progress (`quiet`): the pane is
+            // not brought in front of the Tests tab for it.
+            if params["quiet"] != true {
+                BrowserHub::agent_uses(project_id, cx);
+            }
             let browser: Entity<Browser> = BrowserHub::browser(project_id, cx);
             match browser.update(cx, |browser, cx| body(browser, params, cx)) {
                 Ok(task) => task,
@@ -140,6 +173,23 @@ fn method(name: &'static str, cx: &mut App, body: BrowserMethod) {
         },
         cx,
     );
+}
+
+/// The element a call names: as a UI test does (`target`), else by
+/// `selector`.
+fn element(params: &Value) -> Option<ClickTarget> {
+    if params["target"].is_object() {
+        return Some(ClickTarget::Element(params["target"].clone()));
+    }
+    params["selector"]
+        .as_str()
+        .map(|selector| ClickTarget::Selector(selector.to_string()))
+}
+
+/// How long a call waits for its element (`wait_ms`): not at all unless it
+/// says, so an agent learns at once that its selector matches nothing.
+fn wait(params: &Value) -> std::time::Duration {
+    std::time::Duration::from_millis(params["wait_ms"].as_u64().unwrap_or(0).min(60_000))
 }
 
 fn string(params: &Value, key: &str) -> Result<String> {

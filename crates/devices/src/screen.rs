@@ -3,16 +3,19 @@
 //! - Emulators: frames stream over the emulator's gRPC endpoint (tens of
 //!   frames per second, only when the screen changes) and touches are sent
 //!   in real time, so dragging and scrolling feel native.
-//! - Phones (and emulators without gRPC): `screenrecord` streams H.264
-//!   video from the phone's hardware encoder, sent only when the screen
-//!   changes and decoded here by the system (see [`crate::h264`]), as
-//!   Android Studio's mirroring does. Where that cannot run it streams raw
-//!   frames instead, which costs the phone far more (it reads every frame
-//!   back from its GPU, and a busy screen can outrun the cable); devices
-//!   that cannot do either are polled with `screencap` (slow: full-size
-//!   frames). Gestures are sent as `input tap`/`swipe` through one
-//!   long-lived `adb shell` ([`InputShell`]), scrolling gathered into a
-//!   swipe at a time so a slow phone never falls behind.
+//! - Phones (and emulators without gRPC): scrcpy's server
+//!   ([`crate::scrcpy`]) streams H.264 video from the phone's hardware
+//!   encoder, sent only when the screen changes and decoded here by the
+//!   system (see [`crate::h264`]), and takes touches, keys and text as they
+//!   come, as Android Studio's mirroring does. A phone it will not start on
+//!   is recorded with `screenrecord` instead (the same video; gestures are
+//!   then sent on release as `input tap`/`swipe` through one long-lived
+//!   `adb shell`, [`InputShell`], scrolling gathered into a swipe at a
+//!   time). A phone that streams no video at all is shown in snapshots
+//!   (`screencap`, a few a second), which leaves it usable.
+//! - Where this computer has no H.264 decoder (Linux), `screenrecord`
+//!   streams raw frames. That costs the phone far more: it reads every
+//!   frame back from its GPU, and scrolling on it stutters meanwhile.
 
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +28,7 @@ use ph_media::{Frame, PointerKind, SurfacePointer};
 use crate::adb::{self, Adb};
 use crate::emulator::{self, EmulatorControl};
 use crate::input_shell::InputShell;
+use crate::scrcpy::{self, Control, Touch};
 
 /// Largest frame requested from an emulator (it scales to fit). Enough to
 /// fill a tall pane on a Retina screen; full resolution would double the
@@ -91,16 +95,22 @@ impl StreamQuality {
     }
 
     /// The video's bit rate (bits per second), over USB or Wi-Fi.
-    fn bit_rate(self, wireless: bool) -> &'static str {
-        match (self, wireless) {
-            (Self::Low, false) => "3M",
-            (Self::Low, true) => "1500K",
-            (Self::Medium, false) => "8M",
-            (Self::Medium, true) => "4M",
-            (Self::High, false) => "12M",
-            (Self::High, true) => "6M",
-            (Self::Full, false) => "16M",
-            (Self::Full, true) => "8M",
+    fn bit_rate(self, wireless: bool) -> u32 {
+        let megabits = match self {
+            Self::Low => 3,
+            Self::Medium => 8,
+            Self::High => 12,
+            Self::Full => 16,
+        };
+        megabits * 1_000_000 / if wireless { 2 } else { 1 }
+    }
+
+    /// What is asked of scrcpy's server.
+    fn video_options(self, wireless: bool) -> scrcpy::VideoOptions {
+        scrcpy::VideoOptions {
+            max_size: self.video_fit().map_or(0, |(_, long)| long),
+            bit_rate: self.bit_rate(wireless),
+            max_fps: MAX_FPS,
         }
     }
 
@@ -113,6 +123,15 @@ impl StreamQuality {
         }
     }
 }
+/// Pictures a second asked of the phone at most: what the pane draws
+/// twice over, and half of what a 120 Hz screen would have encoded.
+const MAX_FPS: u32 = 60;
+/// Wheel movement (frame pixels) that is one notch of a mouse wheel to
+/// Android.
+const SCROLL_NOTCH: f32 = 40.0;
+/// How often a phone that streams no video is asked for a snapshot: often
+/// enough to follow what one does on it, seldom enough to leave it usable.
+const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(250);
 /// How long the stream must pause before the bytes held are taken as a
 /// whole picture: the phone writes each picture at once.
 const PICTURE_GAP: Duration = Duration::from_millis(10);
@@ -141,6 +160,38 @@ pub enum ScreenEvent {
     Frame(Frame),
     /// The source failed (device gone, endpoint refused).
     Failed(String),
+    /// The phone's clipboard, after a Copy or Cut asked of it.
+    Clipboard(String),
+}
+
+/// How a screen reaches the pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamMode {
+    /// Not known yet.
+    Connecting,
+    /// Video: an emulator's own stream, scrcpy's or `screenrecord`'s.
+    Video,
+    /// Raw frames: this computer has no H.264 decoder. Heavy for the phone.
+    RawFrames,
+    /// Snapshots: the device streams no video.
+    Snapshots,
+}
+
+impl StreamMode {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Video,
+            2 => Self::RawFrames,
+            3 => Self::Snapshots,
+            _ => Self::Connecting,
+        }
+    }
+}
+
+/// A phone's scrcpy server while it streams.
+struct Live {
+    control: Control,
+    server: Arc<scrcpy::Server>,
 }
 
 /// Phone keys shown as buttons.
@@ -165,9 +216,14 @@ pub struct DeviceScreen {
     /// The phone's `screenrecord`, killed when the pane closes (it waits
     /// for the next change of a still screen).
     recorder: Arc<Mutex<Option<Child>>>,
+    /// The phone's scrcpy server while it streams: input goes through it.
+    live: Arc<Mutex<Option<Live>>>,
+    /// How the screen streams now (a [`StreamMode`]).
+    mode: Arc<std::sync::atomic::AtomicU8>,
     shell: Option<InputShell>,
     press: Option<Press>,
     _stream: Option<Task<()>>,
+    _clipboard: Option<Task<()>>,
     /// Stops the phone's recording when PilotHouse quits (views are not
     /// dropped then): left running, it keeps the phone busy.
     _quit: Option<gpui_kit::Subscription>,
@@ -199,6 +255,10 @@ impl DeviceScreen {
             let _ = child.kill();
             let _ = child.wait();
         }
+        // Ends the video its thread waits on, and the server with it.
+        if let Some(live) = self.live.lock().ok().and_then(|mut slot| slot.take()) {
+            live.server.end();
+        }
         self.shell = None;
     }
 }
@@ -215,9 +275,12 @@ impl DeviceScreen {
             frame_size: (0, 0),
             stop: Arc::default(),
             recorder: Arc::default(),
+            live: Arc::default(),
+            mode: Arc::default(),
             shell: None,
             press: None,
             _stream: None,
+            _clipboard: None,
             _quit: None,
         };
         screen._quit = Some(cx.on_app_quit(|screen, _| {
@@ -236,11 +299,35 @@ impl DeviceScreen {
         self.emulator.is_some()
     }
 
+    /// How the screen reaches the pane now.
+    pub fn mode(&self) -> StreamMode {
+        StreamMode::from_u8(self.mode.load(Ordering::Relaxed))
+    }
+
+    /// The phone's scrcpy server's controls, while it streams.
+    fn control(&self) -> Option<Control> {
+        let live = self.live.lock().ok()?;
+        live.as_ref().map(|live| live.control.clone())
+    }
+
     fn start(&mut self, cx: &mut Context<Self>) {
         let (serial, adb, stop) = (self.serial.clone(), self.adb.clone(), self.stop.clone());
         let quality = self.quality;
         let recorder = self.recorder.clone();
+        let (live, mode) = (self.live.clone(), self.mode.clone());
         let (frames, ready) = Latest::new();
+        // The phone's clipboard comes from its server's thread.
+        let (copied, clipboard) = smol::channel::bounded::<String>(4);
+        self._clipboard = Some(cx.spawn(async move |this, cx| {
+            while let Ok(text) = clipboard.recv().await {
+                if this
+                    .update(cx, |_, cx| cx.emit(ScreenEvent::Clipboard(text)))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }));
         self._stream = Some(cx.spawn(async move |this, cx| {
             // Connect and learn the display size off the UI thread.
             let setup_serial = serial.clone();
@@ -268,15 +355,22 @@ impl DeviceScreen {
             std::thread::Builder::new()
                 .name(format!("screen-{serial}"))
                 .spawn(move || match control {
-                    Some(control) => stream_emulator(&control, &frames, &stop),
+                    Some(control) => {
+                        mode.store(StreamMode::Video as u8, Ordering::Relaxed);
+                        stream_emulator(&control, &frames, &stop)
+                    }
                     None => {
                         let phone = Phone {
                             adb: &adb,
                             serial: &serial,
                             recorder: &recorder,
+                            live: &live,
+                            mode: &mode,
+                            copied,
                             quality,
                         };
                         if !phone.stream(display, &frames, &stop) {
+                            mode.store(StreamMode::Snapshots as u8, Ordering::Relaxed);
                             poll_adb(&adb, &serial, &frames, &stop);
                         }
                     }
@@ -353,6 +447,22 @@ impl DeviceScreen {
             }
             return;
         }
+        // A phone with scrcpy's server takes touches as they come, in the
+        // video's own pixels.
+        if let Some(control) = self.control() {
+            let (at, size) = ((pointer.x as i32, pointer.y as i32), self.frame_size);
+            match pointer.kind {
+                PointerKind::Down => control.touch(Touch::Down, at, size),
+                PointerKind::Move => control.touch(Touch::Move, at, size),
+                PointerKind::Up => control.touch(Touch::Up, at, size),
+                // The fingers going up show what is below, as a wheel
+                // turned towards oneself does: Android counts that as down.
+                PointerKind::Scroll { dx, dy } => {
+                    control.scroll(at, size, (dx / SCROLL_NOTCH, -dy / SCROLL_NOTCH))
+                }
+            }
+            return;
+        }
         let at = (x as f32, y as f32);
         match pointer.kind {
             PointerKind::Down => {
@@ -410,7 +520,12 @@ impl DeviceScreen {
         };
         match (named, &self.emulator) {
             (Some((key, _)), Some(control)) => control.key(key),
-            (Some((_, code)), None) => self.shell_command(&format!("input keyevent {code}")),
+            (Some((_, code)), None) => match self.control() {
+                // Back also wakes a screen that is off.
+                Some(control) if code == 4 => control.back(),
+                Some(control) => control.key(code),
+                None => self.shell_command(&format!("input keyevent {code}")),
+            },
             (None, _) => {
                 let Some(text) = keystroke.key_char.clone().filter(|text| !text.is_empty()) else {
                     return;
@@ -420,10 +535,32 @@ impl DeviceScreen {
         }
     }
 
+    /// Types `text` as keys would.
     pub fn type_text(&mut self, text: &str) {
-        match &self.emulator {
-            Some(control) => control.text(text),
-            None => self.shell_command(&adb::input_text_command(text)),
+        match (&self.emulator, self.control()) {
+            (Some(control), _) => control.text(text),
+            // Android has keys for ASCII; anything else goes through the
+            // clipboard, which takes every script.
+            (None, Some(control)) if text.is_ascii() => control.text(text),
+            (None, Some(control)) => control.paste(text),
+            (None, None) => self.shell_command(&adb::input_text_command(text)),
+        }
+    }
+
+    /// Pastes `text` into the device: through its clipboard where scrcpy's
+    /// server runs (text of any length and script, at once), else typed.
+    pub fn paste(&mut self, text: &str) {
+        match self.control() {
+            Some(control) => control.paste(text),
+            None => self.type_text(text),
+        }
+    }
+
+    /// Copies (or cuts) what is selected on the phone: its clipboard comes
+    /// back as [`ScreenEvent::Clipboard`]. Only with scrcpy's server.
+    pub fn copy(&mut self, cut: bool) {
+        if let Some(control) = self.control() {
+            control.copy(cut);
         }
     }
 
@@ -433,9 +570,14 @@ impl DeviceScreen {
             SystemKey::Home => ("GoHome", 3),
             SystemKey::Recents => ("AppSwitch", 187),
         };
-        match &self.emulator {
-            Some(control) => control.key(name),
-            None => self.shell_command(&format!("input keyevent {code}")),
+        match (&self.emulator, self.control()) {
+            (Some(control), _) => control.key(name),
+            (None, Some(control)) => match key {
+                SystemKey::Back => control.back(),
+                SystemKey::Home => control.key(scrcpy::KEY_HOME),
+                SystemKey::Recents => control.key(scrcpy::KEY_APP_SWITCH),
+            },
+            (None, None) => self.shell_command(&format!("input keyevent {code}")),
         }
     }
 
@@ -520,6 +662,10 @@ struct Phone<'a> {
     adb: &'a Adb,
     serial: &'a str,
     recorder: &'a Mutex<Option<Child>>,
+    live: &'a Mutex<Option<Live>>,
+    mode: &'a std::sync::atomic::AtomicU8,
+    /// Where the phone's clipboard goes when it was asked for.
+    copied: smol::channel::Sender<String>,
     quality: StreamQuality,
 }
 
@@ -535,12 +681,29 @@ enum Recorded {
 
 impl Phone<'_> {
     /// Streams frames until the pane closes; `false` when the device cannot,
-    /// before any frame was sent. Video first, raw frames if not.
+    /// before any frame was sent. Video from scrcpy's server first, from
+    /// `screenrecord` if not; raw frames only where this computer cannot
+    /// decode video.
     fn stream(&self, display: Option<(u32, u32)>, frames: &Latest, stop: &AtomicBool) -> bool {
         let wireless = adb::is_wireless(self.serial);
         if let Ok(decoder) = crate::h264::Decoder::new() {
             let mut quality = self.quality;
             let mut decoder = decoder;
+            let mut streamed = false;
+            loop {
+                match self.mirror(wireless, &mut decoder, frames, stop) {
+                    Recorded::Stopped => return true,
+                    Recorded::Ended => streamed = true,
+                    // It worked before: the phone went away or is restarting.
+                    Recorded::Unsupported if streamed => {}
+                    Recorded::Unsupported => break,
+                }
+                if stop.load(Ordering::Relaxed) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            tracing::info!("{}: no screen server, recording the screen", self.serial);
             let mut streamed = false;
             loop {
                 // The video takes the screen's current shape: asked for
@@ -557,8 +720,8 @@ impl Phone<'_> {
                     Some(fit) => video_size(shape, fit),
                     None => video_size(shape, shape),
                 };
-                let rate = quality.bit_rate(wireless);
-                match self.record_video(size, rate, turned, &mut decoder, frames, stop) {
+                let rate = quality.bit_rate(wireless).to_string();
+                match self.record_video(size, &rate, turned, &mut decoder, frames, stop) {
                     Recorded::Stopped => return true,
                     Recorded::Ended => streamed = true,
                     Recorded::Unsupported if streamed => {
@@ -569,15 +732,22 @@ impl Phone<'_> {
                         tracing::info!("{}: full size refused, streaming 1080p", self.serial);
                         quality = StreamQuality::High;
                     }
-                    // Not this device's (or this decoder's): raw frames.
-                    Recorded::Unsupported => break,
+                    // No video from this device: snapshots. Raw frames
+                    // would show more, and leave the phone hard to use.
+                    Recorded::Unsupported => {
+                        tracing::info!("{}: no video stream, taking snapshots", self.serial);
+                        return false;
+                    }
                 }
                 if stop.load(Ordering::Relaxed) {
                     return true;
                 }
             }
-            tracing::info!("{}: no video stream, streaming raw frames", self.serial);
         }
+        tracing::info!(
+            "{}: no video decoder here, streaming raw frames",
+            self.serial
+        );
         let fit = if wireless {
             WIRELESS_STREAM_SIZE
         } else {
@@ -601,6 +771,84 @@ impl Phone<'_> {
                 return true;
             }
         }
+    }
+
+    /// One run of scrcpy's server, its video decoded as it arrives, its
+    /// controls there for the pane meanwhile.
+    fn mirror(
+        &self,
+        wireless: bool,
+        decoder: &mut crate::h264::Decoder,
+        frames: &Latest,
+        stop: &AtomicBool,
+    ) -> Recorded {
+        let copied = self.copied.clone();
+        let started = scrcpy::start(
+            self.adb,
+            self.serial,
+            self.quality.video_options(wireless),
+            move |text| {
+                let _ = copied.try_send(text);
+            },
+        );
+        let (mut video, control, server) = match started {
+            Ok(started) => started,
+            Err(err) => {
+                tracing::info!("{}: no screen server: {err:#}", self.serial);
+                return Recorded::Unsupported;
+            }
+        };
+        let server = Arc::new(server);
+        if let Ok(mut live) = self.live.lock() {
+            *live = Some(Live {
+                control,
+                server: server.clone(),
+            });
+        }
+        // Pictures shown, and decoding failures.
+        let (mut shown, mut failed) = (0usize, 0usize);
+        let ended = loop {
+            if stop.load(Ordering::Relaxed) {
+                break Recorded::Stopped;
+            }
+            let data = match video.next() {
+                // The size is in the parameter sets that follow.
+                Ok(scrcpy::Packet::Session { .. }) => continue,
+                Ok(scrcpy::Packet::Config(data) | scrcpy::Packet::Picture(data)) => data,
+                Err(_) if shown > 0 => break Recorded::Ended,
+                Err(_) => {
+                    tracing::info!("{}: the screen server said: {}", self.serial, server.said());
+                    break Recorded::Unsupported;
+                }
+            };
+            match decoder.decode(&crate::h264::split_nals(&data)) {
+                Ok(Some(frame)) => {
+                    shown += 1;
+                    self.mode.store(StreamMode::Video as u8, Ordering::Relaxed);
+                    if !frames.put(Ok(frame)) {
+                        break Recorded::Stopped;
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    failed += 1;
+                    tracing::info!("decoding the screen: {err:#}");
+                    // A decoder that never makes a picture is not one to keep.
+                    if shown == 0 && failed >= 3 {
+                        break Recorded::Unsupported;
+                    }
+                }
+            }
+        };
+        // Its controls go with it: input falls back to the shell meanwhile.
+        if let Ok(mut live) = self.live.lock() {
+            *live = None;
+        }
+        drop(server);
+        if stop.load(Ordering::Relaxed) {
+            return Recorded::Stopped;
+        }
+        ended
     }
 
     /// One `screenrecord --output-format=h264` run, decoded as it arrives.
@@ -703,6 +951,7 @@ impl Phone<'_> {
                 match decoder.decode(&picture) {
                     Ok(Some(frame)) => {
                         counts.0 += 1;
+                        self.mode.store(StreamMode::Video as u8, Ordering::Relaxed);
                         turn.saw(looks_turned(frame.width, frame.height, frame.bgra()));
                         if !frames.put(Ok(frame)) {
                             return false;
@@ -801,6 +1050,8 @@ impl Phone<'_> {
                 };
             };
             sent += 1;
+            self.mode
+                .store(StreamMode::RawFrames as u8, Ordering::Relaxed);
             if !frames.put(Ok(frame)) {
                 break Recorded::Stopped;
             }
@@ -964,8 +1215,10 @@ fn parse_frame(packet: &[u8]) -> Option<Frame> {
     Some(Frame::from_rgb_slice(width, height, &rows))
 }
 
-/// Polls `screencap` as fast as the device answers. Raw pixels are faster on
-/// emulators and fast cables; PNG is used if a raw grab is slow.
+/// Polls `screencap` a few times a second: a grab is the whole screen read
+/// back and sent, and as fast as the device answers would leave it hard to
+/// use. Raw pixels are faster on emulators and fast cables; PNG is used if
+/// a raw grab is slow.
 fn poll_adb(adb: &Adb, serial: &str, frames: &Latest, stop: &AtomicBool) {
     let mut raw = true;
     let mut failures = 0;
@@ -989,7 +1242,7 @@ fn poll_adb(adb: &Adb, serial: &str, frames: &Latest, stop: &AtomicBool) {
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(40).saturating_sub(started.elapsed()));
+        std::thread::sleep(SNAPSHOT_INTERVAL.saturating_sub(started.elapsed()));
     }
 }
 

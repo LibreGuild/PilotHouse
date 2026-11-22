@@ -39,6 +39,25 @@ pub fn file_of(text: &str) -> Result<PathBuf> {
 /// `file` is opens that same path, and a link put in its place (or in any
 /// folder on its way) after the check is refused, not followed.
 pub fn query_at(file: &Path, input: &Input) -> Result<String> {
+    let sql = input.second.trim();
+    if sql.is_empty() {
+        let tables = tables_at(file)?;
+        if tables.is_empty() {
+            return Ok("No tables.".into());
+        }
+        return Ok(tables
+            .iter()
+            .filter(|table| !table.view)
+            .map(|table| format!("{} ({} rows)", table.name, table.rows.unwrap_or(-1)))
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    Ok(text_of(&rows_at(file, sql)?))
+}
+
+/// The file opened read-only, one file only, with no functions from its
+/// own schema.
+fn open(file: &Path) -> Result<Connection> {
     // An absolute path never starts with `file:`, which this SQLite (built
     // with `SQLITE_USE_URI`) reads as a URI whatever the open flags say.
     if !file.is_absolute() {
@@ -56,7 +75,142 @@ pub fn query_at(file: &Path, input: &Input) -> Result<String> {
     // file), no functions from the file's own schema, and a time limit.
     db.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_ATTACHED, 0)?;
     db.pragma_update(None, "trusted_schema", false)?;
-    within_limit(&db, |db| run(db, input))
+    Ok(db)
+}
+
+/// A table or view of a database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableInfo {
+    pub name: String,
+    pub view: bool,
+    /// Rows in a table (views are not counted: that runs their query).
+    pub rows: Option<i64>,
+    /// Each column's name and declared type.
+    pub columns: Vec<(String, String)>,
+}
+
+/// The tables and views of the database at `file` (opened as [`query_at`]
+/// does), tables first.
+pub fn tables_at(file: &Path) -> Result<Vec<TableInfo>> {
+    let db = open(file)?;
+    within_limit(&db, |db| {
+        let mut statement = db.prepare(
+            "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        )?;
+        let listed = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)? == "view"))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        listed
+            .into_iter()
+            .map(|(name, view)| {
+                let quoted = name.replace('"', "\"\"");
+                let rows = (!view).then(|| {
+                    db.query_row(&format!("SELECT COUNT(*) FROM \"{quoted}\""), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap_or(-1)
+                });
+                let mut info = db.prepare(&format!("PRAGMA table_info(\"{quoted}\")"))?;
+                let columns = info
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(TableInfo {
+                    name,
+                    view,
+                    rows,
+                    columns,
+                })
+            })
+            .collect()
+    })
+}
+
+/// A value read from a database.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cell {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    /// A blob: only its size is kept.
+    Blob(usize),
+}
+
+impl std::fmt::Display for Cell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Cell::Null => f.write_str("NULL"),
+            Cell::Integer(value) => write!(f, "{value}"),
+            Cell::Real(value) => write!(f, "{value}"),
+            Cell::Text(text) => f.write_str(text),
+            Cell::Blob(size) => write!(f, "<{size} bytes>"),
+        }
+    }
+}
+
+/// What a query gave: its columns (name, declared type when it comes from
+/// a table's column) and up to [`MAX_ROWS`] rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rows {
+    pub columns: Vec<(String, Option<String>)>,
+    pub rows: Vec<Vec<Cell>>,
+    /// There were more rows than shown.
+    pub more: bool,
+}
+
+/// The rows a query that only reads gives, from the database at `file`
+/// (opened as [`query_at`] does).
+pub fn rows_at(file: &Path, sql: &str) -> Result<Rows> {
+    let db = open(file)?;
+    within_limit(&db, |db| {
+        let mut statement = db.prepare(sql).context("The query is not valid")?;
+        // Reading only (`VACUUM INTO` would write a file anywhere).
+        if !statement.readonly() {
+            bail!("Only queries that read are run here.");
+        }
+        let columns: Vec<(String, Option<String>)> = statement
+            .columns()
+            .iter()
+            .map(|column| {
+                (
+                    column.name().to_string(),
+                    column.decl_type().map(str::to_string),
+                )
+            })
+            .collect();
+        let count = columns.len();
+        let mut rows = statement.query([])?;
+        let mut read = Vec::new();
+        let mut more = false;
+        while let Some(row) = rows.next()? {
+            if read.len() == MAX_ROWS {
+                more = true;
+                break;
+            }
+            read.push(
+                (0..count)
+                    .map(|ix| match row.get_ref(ix) {
+                        Ok(ValueRef::Null) | Err(_) => Cell::Null,
+                        Ok(ValueRef::Integer(value)) => Cell::Integer(value),
+                        Ok(ValueRef::Real(value)) => Cell::Real(value),
+                        Ok(ValueRef::Text(text)) => {
+                            Cell::Text(String::from_utf8_lossy(text).into_owned())
+                        }
+                        Ok(ValueRef::Blob(blob)) => Cell::Blob(blob.len()),
+                    })
+                    .collect(),
+            );
+        }
+        Ok(Rows {
+            columns,
+            rows: read,
+            more,
+        })
+    })
 }
 
 /// A network path (`\\server\share`, `//server/share`): opening one on
@@ -97,64 +251,16 @@ fn within_limit<T>(db: &Connection, read: impl FnOnce(&Connection) -> Result<T>)
     })
 }
 
-fn run(db: &Connection, input: &Input) -> Result<String> {
-    let sql = input.second.trim();
-    if sql.is_empty() {
-        let mut statement =
-            db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
-        let names = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        if names.is_empty() {
-            return Ok("No tables.".into());
-        }
-        let lines: Vec<String> = names
+/// The rows as an aligned table, for agents.
+fn text_of(rows: &Rows) -> String {
+    let mut table: Vec<Vec<String>> =
+        vec![rows.columns.iter().map(|(name, _)| name.clone()).collect()];
+    table.extend(
+        rows.rows
             .iter()
-            .map(|name| {
-                let count: i64 = db
-                    .query_row(
-                        &format!("SELECT COUNT(*) FROM \"{}\"", name.replace('"', "\"\"")),
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(-1);
-                format!("{name} ({count} rows)")
-            })
-            .collect();
-        return Ok(lines.join("\n"));
-    }
-    let mut statement = db.prepare(sql).context("The query is not valid")?;
-    // Reading only (`VACUUM INTO` would write a file anywhere).
-    if !statement.readonly() {
-        bail!("Only queries that read are run here.");
-    }
-    let columns: Vec<String> = statement
-        .column_names()
-        .iter()
-        .map(|name| name.to_string())
-        .collect();
-    let mut rows = statement.query([])?;
-    let mut table = vec![columns.clone()];
-    let mut more = false;
-    while let Some(row) = rows.next()? {
-        if table.len() > MAX_ROWS {
-            more = true;
-            break;
-        }
-        table.push(
-            (0..columns.len())
-                .map(|ix| match row.get_ref(ix) {
-                    Ok(ValueRef::Null) => "NULL".to_string(),
-                    Ok(ValueRef::Integer(value)) => value.to_string(),
-                    Ok(ValueRef::Real(value)) => value.to_string(),
-                    Ok(ValueRef::Text(text)) => String::from_utf8_lossy(text).into_owned(),
-                    Ok(ValueRef::Blob(blob)) => format!("<{} bytes>", blob.len()),
-                    Err(_) => "?".to_string(),
-                })
-                .collect(),
-        );
-    }
-    let widths: Vec<usize> = (0..columns.len())
+            .map(|row| row.iter().map(ToString::to_string).collect()),
+    );
+    let widths: Vec<usize> = (0..rows.columns.len())
         .map(|ix| {
             table
                 .iter()
@@ -184,12 +290,12 @@ fn run(db: &Connection, input: &Input) -> Result<String> {
             .join("-+-"),
     );
     out.extend(table[1..].iter().map(line));
-    out.push(if more {
+    out.push(if rows.more {
         format!("(the first {MAX_ROWS} rows)")
     } else {
-        format!("({} rows)", table.len() - 1)
+        format!("({} rows)", rows.rows.len())
     });
-    Ok(out.join("\n"))
+    out.join("\n")
 }
 
 #[cfg(test)]
@@ -217,6 +323,19 @@ mod tests {
             ..Input::new(file)
         });
         assert!(write.is_err(), "read only");
+        let tables = tables_at(&dunce::canonicalize(&path).unwrap()).unwrap();
+        assert_eq!(tables[0].rows, Some(2));
+        assert_eq!(
+            tables[0].columns[1],
+            ("age".to_string(), "INTEGER".to_string())
+        );
+        let rows = rows_at(
+            &dunce::canonicalize(&path).unwrap(),
+            "SELECT age FROM people ORDER BY name",
+        )
+        .unwrap();
+        assert_eq!(rows.columns[0].1.as_deref(), Some("INTEGER"));
+        assert_eq!(rows.rows, vec![vec![Cell::Integer(36)], vec![Cell::Null]]);
     }
 
     #[test]

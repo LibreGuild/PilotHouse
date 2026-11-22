@@ -10,8 +10,8 @@
 //! The same table holds kinds of space that are not workspaces (see
 //! [`ProjectKind`]): the *Chats* space, for chats that belong to no
 //! workspace; one space per GitHub repository the GitHub view works in
-//! (its managed clone); and one per presentation (its folder), for Studio's
-//! slides. They give those chats everything a workspace's chats have
+//! (its managed clone); and one per deck of slides (its artifact's folder).
+//! They give those chats everything a workspace's chats have
 //! (agents, checkpoints, usage) without showing up as workspaces.
 
 use std::path::{Path, PathBuf};
@@ -33,7 +33,9 @@ pub enum ProjectKind {
     Empty,
     /// A GitHub repository's managed clone, used by the GitHub view.
     GitHub,
-    /// A presentation's folder, used by Studio's slides.
+    /// A deck of slides (its artifact's folder): the deck's chats. Named
+    /// `presentation` in the database, as it was before decks were
+    /// artifacts.
     Presentation,
 }
 
@@ -636,6 +638,27 @@ impl Store {
         self.conn().execute(
             "UPDATE projects SET last_opened_at = ?2 WHERE id = ?1",
             params![id, now_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// The presentation whose folder was `from` is in `to` now (it was
+    /// renamed): its space, with its chats, goes with it. Nothing happens
+    /// when there is no such space yet.
+    pub fn move_presentation_space(&self, from: &Path, to: &Path) -> Result<()> {
+        let to =
+            crate::paths::canonical(to).with_context(|| format!("resolving {}", to.display()))?;
+        // `from` is gone by now: its own name under what its parent
+        // resolves to, as it was when its space was made.
+        let from = match (from.parent(), from.file_name()) {
+            (Some(parent), Some(name)) => crate::paths::canonical(parent)
+                .map(|parent| parent.join(name))
+                .unwrap_or_else(|_| from.to_path_buf()),
+            _ => from.to_path_buf(),
+        };
+        self.conn().execute(
+            "UPDATE projects SET path = ?2 WHERE path = ?1 AND kind = 'presentation'",
+            params![from.to_string_lossy(), to.to_string_lossy()],
         )?;
         Ok(())
     }

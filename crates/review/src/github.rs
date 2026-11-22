@@ -189,10 +189,91 @@ pub fn sync(store: &Store, pull: &PullRef) -> Result<Synced> {
     Ok(synced)
 }
 
-/// Publishes the newest round: line comments (when `mode` is inline), the
-/// summary comment (rewritten in place), threads of findings dealt with
-/// resolved. Ticks and replies are read first, so none is overwritten.
+/// How a review is finished: what goes to GitHub, in one review.
+#[derive(Debug, Clone)]
+pub struct Finish {
+    /// How it ends.
+    pub event: pulls::ReviewEvent,
+    /// The reviewer's own words.
+    pub note: String,
+    /// The findings to send, by label; the others stay on this computer.
+    pub picked: Vec<String>,
+    /// The reviewer's own line comments.
+    pub own: Vec<ph_github::models::DraftComment>,
+    /// Whether a summary comment the author can tick is written.
+    pub summary: bool,
+}
+
+/// Finishes the review of `pull`: the findings picked and the reviewer's
+/// own comments in one GitHub review that ends as chosen, then the summary
+/// comment. The pull request is watched from then on, so the author's
+/// answer is announced. Works without an agent's round too (a person's
+/// review: a note, comments, an approval).
+pub fn finish(store: &Store, pull: &PullRef, finish: &Finish) -> Result<String> {
+    let (client, repo, _) = client_for(store, pull)?;
+    let mut said = match current(store, pull)? {
+        Some(_) => send(
+            store,
+            pull,
+            &post::Plan {
+                mode: PostMode::Inline,
+                picked: Some(&finish.picked),
+                own: &finish.own,
+                event: finish.event,
+                note: &finish.note,
+                summary: finish.summary && !finish.picked.is_empty(),
+            },
+        )?,
+        None => {
+            let head = pulls::get(&client, &repo, pull.number)?.head.sha;
+            let target = post::Target {
+                client: &client,
+                repo: &repo,
+                number: pull.number,
+                head: &head,
+            };
+            let plan = post::Plan {
+                own: &finish.own,
+                event: finish.event,
+                note: &finish.note,
+                summary: false,
+                ..post::Plan::default()
+            };
+            let published = post::publish(&target, &[], &[], &plan, &|_| String::new(), None)?;
+            said_of(pull, &published)
+        }
+    };
+    said = match finish.event {
+        pulls::ReviewEvent::Approve => format!("Approved. {said}"),
+        pulls::ReviewEvent::RequestChanges => format!("Changes requested. {said}"),
+        pulls::ReviewEvent::Comment => said,
+    };
+    // The review is out: it is the author's turn, and their answer is news.
+    if let Err(err) = set_watched(store, pull, true) {
+        tracing::info!("watching #{} after its review: {err:#}", pull.number);
+    }
+    Ok(said)
+}
+
+/// Brings GitHub up to date with what became of the findings there: the
+/// summary comment rewritten in place, threads of findings dealt with
+/// resolved. Nothing new is put on the code (that is [`finish`]).
 pub fn publish(store: &Store, pull: &PullRef, mode: PostMode) -> Result<String> {
+    send(
+        store,
+        pull,
+        &post::Plan {
+            mode,
+            picked: Some(&[]),
+            summary: false,
+            ..post::Plan::default()
+        },
+    )
+}
+
+/// Sends `plan` for the newest round. Ticks and replies are read first, so
+/// none is overwritten.
+fn send(store: &Store, pull: &PullRef, plan: &post::Plan) -> Result<String> {
     sync(store, pull)?;
     let Some((round, findings)) = current(store, pull)? else {
         bail!("Nothing to post: review the pull request first.");
@@ -231,13 +312,18 @@ pub fn publish(store: &Store, pull: &PullRef, mode: PostMode) -> Result<String> 
         })
     };
     let existing = store.summary_comment_of(pull)?;
-    let published = post::publish(&target, &findings, &files, mode, &summary, existing)?;
-    store.set_summary_comment(round.id, published.summary_comment)?;
+    let published = post::publish(&target, &findings, &files, plan, &summary, existing)?;
+    if let Some(comment) = published.summary_comment {
+        store.set_summary_comment(round.id, comment)?;
+    }
     for mut finding in findings {
         let mut changed = false;
         if let Some((_, id)) = published.on_code.iter().find(|(l, _)| *l == finding.label) {
             finding.comment_id = Some(*id);
             finding.comment_kind = Some("line".into());
+            changed = true;
+        } else if published.off_code.contains(&finding.label) {
+            finding.comment_kind = Some(post::OFF_CODE.into());
             changed = true;
         }
         if published.resolved.contains(&finding.label) {
@@ -248,20 +334,26 @@ pub fn publish(store: &Store, pull: &PullRef, mode: PostMode) -> Result<String> 
             store.update_finding(&finding)?;
         }
     }
+    Ok(said_of(pull, &published))
+}
+
+/// What a post did, in a sentence.
+fn said_of(pull: &PullRef, published: &post::Published) -> String {
     let mut said = format!("Posted the review of #{}", pull.number);
-    if !published.on_code.is_empty() {
-        said.push_str(&format!(", {} on the code", published.on_code.len()));
+    let on_code = published.on_code.len() + published.own;
+    if on_code > 0 {
+        said.push_str(&format!(", {on_code} on the code"));
     }
     if !published.resolved.is_empty() {
         said.push_str(&format!(", {} threads resolved", published.resolved.len()));
     }
     if !published.off_code.is_empty() {
         said.push_str(&format!(
-            " ({} not on changed lines: in the summary)",
+            " ({} not on changed lines: said in the text)",
             published.off_code.len()
         ));
     }
-    Ok(said)
+    said
 }
 
 /// Sets finding `id`'s status by the user (with why), as the reviewer.
@@ -329,14 +421,30 @@ pub fn shared(
         .find_map(|comment| crate::comment::read_shared(&comment.body).map(|s| (comment.id, s))))
 }
 
-/// Opens an issue for finding `finding_id` (labelled `pilothouse`).
-pub fn create_issue(store: &Store, finding_id: i64, title: &str, body: &str) -> Result<u64> {
+/// Opens an issue for finding `finding_id` (labelled `pilothouse`),
+/// assigned to `assignees` (logins).
+pub fn create_issue(
+    store: &Store,
+    finding_id: i64,
+    title: &str,
+    body: &str,
+    assignees: &[String],
+) -> Result<u64> {
     let mut finding = store.pr_finding(finding_id)?.context("finding not found")?;
     let review = store
         .pr_review(finding.review_id)?
         .context("review not found")?;
     let (client, repo, _) = client_for(store, &review.pull)?;
-    let issue = pulls::create_issue(&client, &repo, title, body, &["pilothouse"])?;
+    let issue = ph_github::issues::create(
+        &client,
+        &repo,
+        title,
+        body,
+        &ph_github::issues::Extras {
+            labels: &["pilothouse"],
+            assignees,
+        },
+    )?;
     finding.issue_number = Some(issue.number);
     store.update_finding(&finding)?;
     Ok(issue.number)

@@ -603,7 +603,6 @@ impl WorkspaceScreen {
         self.active_session = Some(id);
         self.chat
             .update(cx, |chat, cx| chat.set_session(session, cx));
-        self.refresh_evidence(cx);
         self.save_layout(cx);
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();

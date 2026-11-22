@@ -36,6 +36,8 @@ pub(crate) fn of_action(action: &dyn Action) -> Option<Feature> {
         Feature::Logcat
     } else if any.is::<ShowGitHubView>() {
         Feature::GitHub
+    } else if any.is::<ShowArtifacts>() {
+        Feature::Artifacts
     } else if any.is::<ShowSchedules>() {
         Feature::Schedules
     } else if any.is::<ShowUtilities>() {
@@ -48,8 +50,10 @@ pub(crate) fn of_action(action: &dyn Action) -> Option<Feature> {
         Feature::NetworkDrives
     } else if any.is::<ShowParallelRuns>() {
         Feature::ParallelRuns
-    } else if any.is::<NewPresentation>() || any.is::<OpenPresentation>() {
+    } else if any.is::<NewSlides>() {
         Feature::Presentations
+    } else if any.is::<ShowTour>() {
+        Feature::Tour
     } else if any.is::<ph_browser::OpenChromeExtensionSettings>() {
         Feature::ChromeExtension
     } else {
@@ -61,6 +65,10 @@ pub(crate) fn of_action(action: &dyn Action) -> Option<Feature> {
 /// Whether this build has what `action` opens (an action that opens no
 /// feature always is).
 pub(crate) fn allows(action: &dyn Action) -> bool {
+    // Slides are kept with the artifacts: without those there are none.
+    if action.as_any().is::<NewSlides>() && !enabled(Feature::Artifacts) {
+        return false;
+    }
     of_action(action).is_none_or(enabled)
 }
 
@@ -75,7 +83,8 @@ mod tests {
             assert_eq!(of_action(&*tab.action()), Some(tab.feature()), "{tab:?}");
         }
         assert_eq!(of_action(&ShowGitHubView), Some(Feature::GitHub));
-        assert_eq!(of_action(&NewPresentation), Some(Feature::Presentations));
+        assert_eq!(of_action(&ShowArtifacts), Some(Feature::Artifacts));
+        assert_eq!(of_action(&NewSlides), Some(Feature::Presentations));
         assert_eq!(of_action(&NewSession), None);
         assert!(allows(&NewSession));
     }

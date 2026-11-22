@@ -1,0 +1,32 @@
+[package]
+name = "ph-artifacts"
+description = "Artifacts: web pages agents make, kept in a folder of the user's and served from this computer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ph-brand.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+# Real paths without Windows' `\\?\` spelling: what an agent may publish.
+dunce.workspace = true
+# The key of a shared artifact's link (already in the tree).
+getrandom = "0.4"
+gpui-kit.workspace = true
+# This computer's addresses, by interface: the one a shared artifact's link
+# carries must be the office network's, not a VPN's.
+if-addrs = "0.15"
+# The picture of an artifact in the list, made small (already in the tree).
+image = { version = "0.25", default-features = false, features = ["png"] }
+ph-control.workspace = true
+ph-ui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smol.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+ph-theme.workspace = true

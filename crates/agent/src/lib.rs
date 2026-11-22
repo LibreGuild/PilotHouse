@@ -40,6 +40,7 @@ mod mention_complete;
 mod model_picker;
 pub mod oneshot;
 pub mod options;
+pub mod own_files;
 mod permission;
 pub mod preload;
 pub mod profiles;

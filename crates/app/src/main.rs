@@ -91,9 +91,10 @@ fn run_app(open: Vec<std::path::PathBuf>, quick_chat: bool) -> Result<()> {
         ph_ui::rich_copy::use_system_clipboard();
         ph_theme::init(cx);
         ph_browser::init(store.clone(), cx);
-        ph_devices::init(cx);
+        ph_devices::init(store.clone(), cx);
         let projects = store.clone();
         ph_runs::init(
+            store.clone(),
             move |id| {
                 projects
                     .project(id)
@@ -166,6 +167,11 @@ fn instance_lock() -> std::io::Result<Option<std::fs::File>> {
 fn open_main_window(cx: &mut App) -> Result<()> {
     let (handle, workspace) = ph_workspace::open_window(None, cx)?;
     ph_workspace::set_main_window(handle, &workspace, cx);
+    // What the app has, said once: after an install, and after an update
+    // that added something.
+    _ = handle.update(cx, |_, window, cx| {
+        ph_workspace::tour::open_if_due(window, cx)
+    });
     Ok(())
 }
 

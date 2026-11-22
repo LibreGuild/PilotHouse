@@ -16,6 +16,9 @@ pub struct AndroidModule {
     pub path: String,
     pub dir: PathBuf,
     pub variants: Vec<Variant>,
+    /// The lowest API level the app runs on, when the build file says it
+    /// as a number.
+    pub min_sdk: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +36,17 @@ impl Variant {
             name,
             flavors,
             build_type,
+        }
+    }
+
+    /// A variant by its name alone, for one the build files do not show
+    /// (flavors set up by a plugin of the project's own): what it builds
+    /// is found by its name.
+    pub fn custom(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            flavors: Vec::new(),
+            build_type: name.to_string(),
         }
     }
 
@@ -63,15 +77,70 @@ pub fn gradle_root(folder: &Path) -> Option<PathBuf> {
         .then(|| folder.to_path_buf())
 }
 
-/// App modules under `root`, two levels deep at most (`app`, `apps/phone`).
+/// The app modules of the Gradle project at `root`: those among the
+/// projects its settings file includes, wherever they are. Where the
+/// settings name none in so many words (they are worked out), the folders
+/// are looked through instead, two levels deep at most (`app`,
+/// `apps/phone`).
 pub fn find_modules(root: &Path) -> Vec<AndroidModule> {
     let mut modules = Vec::new();
-    visit(root, root, 0, &mut modules);
+    let included = included_projects(root);
+    if included.is_empty() {
+        visit(root, root, 0, &mut modules);
+    }
+    for path in included {
+        // `:apps:phone` is the folder `apps/phone`.
+        let dir = path
+            .split(':')
+            .filter(|part| !part.is_empty())
+            .fold(root.to_path_buf(), |dir, part| dir.join(part));
+        if let Some(text) = build_file(&dir)
+            && is_app_module(&text)
+        {
+            modules.push(AndroidModule {
+                path,
+                dir,
+                variants: variants(&text),
+                min_sdk: min_sdk(&text),
+            });
+        }
+    }
     modules.sort_by(|a, b| {
         // `:app` first, then by path.
         (a.path != ":app", &a.path).cmp(&(b.path != ":app", &b.path))
     });
     modules
+}
+
+/// The projects the settings file includes, as Gradle paths (`:app`):
+/// `include ':app', ':lib'`, `include(":app")`. A folder with a build
+/// file that is not among them is no part of the build, and building it
+/// fails.
+fn included_projects(root: &Path) -> Vec<String> {
+    let Some(settings) = ["settings.gradle.kts", "settings.gradle"]
+        .iter()
+        .find_map(|name| std::fs::read_to_string(root.join(name)).ok())
+    else {
+        return Vec::new();
+    };
+    let mut projects: Vec<String> = settings
+        .lines()
+        .map(str::trim_start)
+        // Not `includeBuild`, which names another build.
+        .filter(|line| {
+            line.strip_prefix("include")
+                .is_some_and(|rest| rest.starts_with([' ', '(', '\t', '\'', '"']))
+        })
+        .flat_map(all_quoted)
+        .filter(|path| {
+            path.chars()
+                .all(|c| c.is_alphanumeric() || ":_-.".contains(c))
+        })
+        .map(|path| format!(":{}", path.trim_start_matches(':')))
+        .collect();
+    projects.sort();
+    projects.dedup();
+    projects
 }
 
 fn visit(root: &Path, dir: &Path, depth: usize, modules: &mut Vec<AndroidModule>) {
@@ -89,6 +158,7 @@ fn visit(root: &Path, dir: &Path, depth: usize, modules: &mut Vec<AndroidModule>
             path: format!(":{path}"),
             dir: dir.to_path_buf(),
             variants: variants(&text),
+            min_sdk: min_sdk(&text),
         });
         return;
     }
@@ -108,6 +178,64 @@ fn visit(root: &Path, dir: &Path, depth: usize, modules: &mut Vec<AndroidModule>
             visit(root, &entry.path(), depth + 1, modules);
         }
     }
+}
+
+/// The application ids of the apps in `folder`, for telling their lines in
+/// the device's log: what each module's build file declares, and what its
+/// builds so far were given (a variant's suffix is only known from those).
+pub fn application_ids(folder: &Path) -> Vec<String> {
+    let Some(root) = gradle_root(folder) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for module in find_modules(&root) {
+        ids.extend(build_file(&module.dir).and_then(|text| declared_id(&text)));
+        ids.extend(
+            module
+                .variants
+                .iter()
+                .filter_map(|variant| variant.built_apk(&module.dir))
+                .map(|(id, _)| id),
+        );
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// `minSdk = 24`, `minSdkVersion 24`: the lowest API level, when it is a
+/// number written out.
+fn min_sdk(build: &str) -> Option<u32> {
+    build.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix("minSdk")?;
+        let rest = rest.strip_prefix("Version").unwrap_or(rest);
+        let digits: String = rest
+            .trim_start_matches([' ', '=', '(', '\t'])
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        // Only where the number follows at once: not `minSdk = libs.…`.
+        (rest.starts_with([' ', '=', '(', '\t'])).then(|| digits.parse().ok())?
+    })
+}
+
+/// The id a build file gives its app: `applicationId`, else `namespace`
+/// (which the id is when none is set). Only one written out: an id that is
+/// worked out by the build is known once it has built.
+fn declared_id(build: &str) -> Option<String> {
+    let after = |key: &str| {
+        build.lines().find_map(|line| {
+            let rest = line.trim_start().strip_prefix(key)?;
+            // `applicationId "…"`, `applicationId = "…"`: not
+            // `applicationIdSuffix`.
+            rest.starts_with([' ', '=', '(', '\t'])
+                .then(|| first_quoted(rest))
+                .flatten()
+        })
+    };
+    after("applicationId")
+        .or_else(|| after("namespace"))
+        .filter(|id| crate::adb::is_package_name(id))
 }
 
 fn build_file(dir: &Path) -> Option<String> {
@@ -434,6 +562,56 @@ android {
         assert_eq!(id, "com.example.app");
         assert!(apk.ends_with("app-debug.apk"));
         let _ = std::fs::remove_dir_all(&module);
+    }
+
+    #[test]
+    fn reads_the_lowest_api_level() {
+        assert_eq!(min_sdk("defaultConfig {\n    minSdk = 24\n}"), Some(24));
+        assert_eq!(min_sdk("  minSdkVersion 21"), Some(21));
+        assert_eq!(min_sdk("minSdk(26)"), Some(26));
+        assert_eq!(min_sdk("minSdk = libs.versions.minSdk.get().toInt()"), None);
+        assert_eq!(min_sdk("android { }"), None);
+    }
+
+    #[test]
+    fn reads_the_id_a_build_file_declares() {
+        let kotlin = "android {\n  namespace = \"com.example.app\"\n  defaultConfig {\n    applicationId = \"com.example\"\n  }\n  buildTypes { debug { applicationIdSuffix = \".debug\" } }\n}";
+        assert_eq!(declared_id(kotlin).as_deref(), Some("com.example"));
+        let groovy = "android {\n  buildTypes { debug { applicationIdSuffix '.debug' } }\n  namespace 'com.example.lib'\n}";
+        assert_eq!(declared_id(groovy).as_deref(), Some("com.example.lib"));
+        // Worked out by the build: not known from the file.
+        assert_eq!(declared_id("applicationId = appId"), None);
+        assert_eq!(declared_id("android { }"), None);
+    }
+
+    #[test]
+    fn only_the_projects_the_settings_include_are_modules() {
+        let root = std::env::temp_dir().join(format!("ph-android-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["app", "phone", "deep/down/here/tv", "lib"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let app = "plugins { id(\"com.android.application\") }";
+        // Left over, not part of the build any more.
+        std::fs::write(root.join("app/build.gradle.kts"), app).unwrap();
+        std::fs::write(root.join("phone/build.gradle.kts"), app).unwrap();
+        std::fs::write(root.join("deep/down/here/tv/build.gradle"), app).unwrap();
+        std::fs::write(
+            root.join("lib/build.gradle.kts"),
+            "plugins { id(\"com.android.library\") }",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("settings.gradle.kts"),
+            "rootProject.name = \"Demo\"\ninclude(\":phone\", \":lib\")\ninclude(\":deep:down:here:tv\")\nincludeBuild(\"build-logic\")\n",
+        )
+        .unwrap();
+        let paths: Vec<String> = find_modules(&root)
+            .into_iter()
+            .map(|module| module.path)
+            .collect();
+        assert_eq!(paths, [":deep:down:here:tv", ":phone"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

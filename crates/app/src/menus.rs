@@ -1,7 +1,8 @@
 //! The native menu bar. Items dispatch the same actions as shortcuts and the
 //! command palette, so all three stay in sync.
 
-use gpui_kit::{App, Menu, MenuItem};
+use gpui_kit::base::input;
+use gpui_kit::{App, Menu, MenuItem, OsAction};
 use ph_workspace::*;
 
 pub fn install(cx: &mut App) {
@@ -17,6 +18,16 @@ pub fn install(cx: &mut App) {
             MenuItem::action("New Workspace", NewWorkspace),
             MenuItem::action("Add Folder to Workspace…", AddFolderToWorkspace),
             MenuItem::action("New Chat", NewSession),
+        ]),
+        // The system's own editing commands. In the app's fields its keys
+        // act first, as before; a web page shown in a window (a deck of
+        // slides) gets them only from here: without this menu ⌘C, ⌘V and
+        // ⌘A do nothing in one.
+        Menu::new("Edit").items([
+            MenuItem::os_action("Cut", input::Cut, OsAction::Cut),
+            MenuItem::os_action("Copy", input::Copy, OsAction::Copy),
+            MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
+            MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
         ]),
         Menu::new("View").items(view_items()),
     ]);

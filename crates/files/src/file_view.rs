@@ -2741,16 +2741,16 @@ impl FileView {
                     .into_any_element(),
             );
         }
-        if is_powerpoint(&self.absolute) {
+        if opens_as_slides(&self.absolute) {
             let path = self.absolute.clone();
             actions.push(
-                Button::new("edit-slides")
+                Button::new("open-as-slides")
                     .ghost()
                     .xsmall()
-                    .icon(Icons::SlidersHorizontal)
-                    .label("Edit")
+                    .icon(Icons::Presentation)
+                    .label("Open as Slides")
                     .tooltip(ph_ui::tip(
-                        "Open the deck in Studio Slides, to edit it by hand or with an agent",
+                        "Make a deck from this file in Slides, to change it by hand or with an agent. The file itself stays as it is",
                     ))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(FileViewEvent::EditMedia(path.clone()))
@@ -2932,12 +2932,16 @@ fn word_at(text: &str, offset: usize) -> String {
     text[start..end].to_string()
 }
 
-/// Whether `path` is a PowerPoint deck or template, which Studio Slides
-/// edits.
-fn is_powerpoint(path: &std::path::Path) -> bool {
-    path.extension()
-        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
-        .is_some_and(|extension| extension == "pptx" || extension == "potx")
+/// Whether `path` is a PowerPoint deck or template in a build that makes
+/// Slides (decks, kept with the artifacts) from one.
+pub(crate) fn opens_as_slides(path: &std::path::Path) -> bool {
+    use ph_brand::{Feature, enabled};
+    enabled(Feature::Presentations)
+        && enabled(Feature::Artifacts)
+        && path
+            .extension()
+            .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+            .is_some_and(|extension| extension == "pptx" || extension == "potx")
 }
 
 #[cfg(test)]

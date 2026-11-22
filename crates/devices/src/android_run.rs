@@ -6,6 +6,14 @@
 //! (`android.injected.build.abi`), so native code is compiled once rather
 //! than for every ABI. The APK and the application id come from the
 //! plugin's `output-metadata.json`, so suffixes per variant need no parsing.
+//!
+//! The card keeps what was chosen (module and variant) per project. A run
+//! hands the app to Logcat, which then shows its lines and says when it
+//! crashes; a build that fails can be sent to the chat; an install the
+//! device refuses because another build of the app is on it offers to
+//! remove that one first. The app's menu does what one otherwise types
+//! `adb shell` for: stop it, clear its data, uninstall it, grant its
+//! permissions, open a link in it.
 
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
@@ -13,17 +21,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::{Input, InputState},
     menu::PopupMenuItem,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Task, Window, div,
+    App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
+    WeakEntity, Window, div,
 };
+use ph_media::ToChat;
 use ph_ui::Icons;
 use ph_ui::MenuButton as _;
 
@@ -46,16 +57,61 @@ enum Stage {
         apk: PathBuf,
         took: Duration,
     },
-    Failed(String),
+    /// Something asked of the app was done ("Cleared its data").
+    Done(String),
+    Failed {
+        message: String,
+        failure: Failure,
+    },
+}
+
+/// What failed, for what the card offers about it.
+#[derive(Debug, Clone, PartialEq)]
+enum Failure {
+    /// Gradle: its log says why, and the chat can be asked.
+    Build,
+    /// The device refused the APK because the app on it is another build
+    /// (other signature, newer version): removing that one helps.
+    Conflict {
+        package: String,
+    },
+    /// The app crashed: what its exception printed, for the chat.
+    Crash {
+        report: String,
+    },
+    Other,
 }
 
 pub enum AndroidRunEvent {
-    /// The app started on a device: show its screen.
-    Launched,
+    /// A run began: the device's log is wanted from now, so that what the
+    /// app writes as it starts is there.
+    Started,
+    /// The app `package` started on a device: show its screen.
+    Launched { package: String },
     /// Show the build log, in the bottom panel's terminal: run `command`
     /// (it follows the log file as the build writes it).
     ShowLog { command: String },
+    /// Something for the chat: a build's errors.
+    ToChat(ToChat),
 }
+
+/// What the card keeps per project: the module and each module's variant.
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Chosen {
+    #[serde(default)]
+    module: String,
+    #[serde(default)]
+    variants: std::collections::HashMap<String, String>,
+}
+
+/// The settings key of a project's choices.
+fn chosen_key(root: &std::path::Path) -> String {
+    format!("android.run:{}", root.display())
+}
+
+/// Lines of a failed build sent to the chat: its end, where Gradle says
+/// what went wrong.
+const BUILD_LOG_LINES: usize = 150;
 
 /// The Android card of the Run tab, for one Gradle project.
 pub struct AndroidRun {
@@ -64,6 +120,10 @@ pub struct AndroidRun {
     module: usize,
     /// The chosen variant of each module, by name.
     variant: Vec<String>,
+    /// Where the choices are kept between runs of the app.
+    store: Option<ph_store::Store>,
+    /// The app installed last, for its menu.
+    package: Option<String>,
     manager: Entity<DeviceManager>,
     stage: Stage,
     /// The build's output, as it comes, for the terminal that shows it.
@@ -98,19 +158,42 @@ impl AndroidRun {
         (!modules.is_empty()).then_some((root, modules))
     }
 
-    pub fn new(root: PathBuf, modules: Vec<AndroidModule>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        root: PathBuf,
+        modules: Vec<AndroidModule>,
+        store: Option<ph_store::Store>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let manager = DeviceManager::global(cx);
         manager.update(cx, |manager, cx| manager.ensure_tracking(cx));
         cx.observe(&manager, |_, _, cx| cx.notify()).detach();
+        let chosen: Chosen = store
+            .as_ref()
+            .map(|store| store.setting(&chosen_key(&root)))
+            .unwrap_or_default();
+        let modules = with_chosen_variants(modules, &chosen);
         let variant = modules
             .iter()
-            .map(|module| default_variant(module).unwrap_or_default())
+            .map(|module| {
+                chosen
+                    .variants
+                    .get(&module.path)
+                    .cloned()
+                    .or_else(|| default_variant(module))
+                    .unwrap_or_default()
+            })
             .collect();
+        let module = modules
+            .iter()
+            .position(|module| module.path == chosen.module)
+            .unwrap_or(0);
         Self {
             root,
             modules,
-            module: 0,
+            module,
             variant,
+            store,
+            package: None,
             manager,
             stage: Stage::Idle,
             log: None,
@@ -130,28 +213,73 @@ impl AndroidRun {
     /// Updates the modules after the build files changed, keeping the
     /// choices that still exist.
     pub fn set_modules(&mut self, modules: Vec<AndroidModule>, cx: &mut Context<Self>) {
+        let modules = with_chosen_variants(modules, &self.chosen());
         if modules == self.modules {
             return;
         }
-        let chosen = self.variant.get(self.module).cloned();
-        let path = self
-            .modules
-            .get(self.module)
-            .map(|module| module.path.clone());
+        let chosen = self.chosen();
         self.variant = modules
             .iter()
             .map(|module| {
-                let keep = chosen
-                    .clone()
-                    .filter(|_| Some(&module.path) == path.as_ref())
-                    .filter(|name| module.variants.iter().any(|variant| &variant.name == name));
-                keep.or_else(|| default_variant(module)).unwrap_or_default()
+                chosen
+                    .variants
+                    .get(&module.path)
+                    .filter(|name| module.variants.iter().any(|variant| &variant.name == *name))
+                    .cloned()
+                    .or_else(|| default_variant(module))
+                    .unwrap_or_default()
             })
             .collect();
-        self.module = path
-            .and_then(|path| modules.iter().position(|module| module.path == path))
+        self.module = modules
+            .iter()
+            .position(|module| module.path == chosen.module)
             .unwrap_or(0);
         self.modules = modules;
+        cx.notify();
+    }
+
+    /// What is chosen now.
+    fn chosen(&self) -> Chosen {
+        Chosen {
+            module: self
+                .modules
+                .get(self.module)
+                .map(|module| module.path.clone())
+                .unwrap_or_default(),
+            variants: self
+                .modules
+                .iter()
+                .zip(&self.variant)
+                .map(|(module, variant)| (module.path.clone(), variant.clone()))
+                .collect(),
+        }
+    }
+
+    /// Keeps what is chosen for the next time the project is open.
+    fn keep_choices(&self) {
+        if let Some(store) = &self.store {
+            let _ = store.set_setting(&chosen_key(&self.root), &self.chosen());
+        }
+    }
+
+    fn choose_module(&mut self, module: usize, cx: &mut Context<Self>) {
+        self.module = module;
+        self.keep_choices();
+        cx.notify();
+    }
+
+    fn choose_variant(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(module) = self.modules.get_mut(self.module) else {
+            return;
+        };
+        // One typed in, which the build files do not show.
+        if !module.variants.iter().any(|variant| variant.name == name) {
+            module
+                .variants
+                .push(android_project::Variant::custom(&name));
+        }
+        self.variant[self.module] = name;
+        self.keep_choices();
         cx.notify();
     }
 
@@ -188,11 +316,12 @@ impl AndroidRun {
         }
         let manager = self.manager.read(cx);
         let Some(adb) = manager.adb().cloned() else {
-            self.stage = Stage::Failed(if manager.looking_for_sdk() {
-                "Still looking for the Android SDK; try again in a moment.".into()
+            let message = if manager.looking_for_sdk() {
+                "Still looking for the Android SDK; try again in a moment."
             } else {
-                "The Android SDK was not found.".into()
-            });
+                "The Android SDK was not found."
+            };
+            self.stage = failed(message, Failure::Other);
             cx.notify();
             return;
         };
@@ -201,13 +330,33 @@ impl AndroidRun {
             .filter(|device| device.is_ready())
             .cloned()
         else {
-            self.stage = Stage::Failed("Pick a device, or start an emulator, first.".into());
+            self.stage = failed(
+                "Pick a device, or start an emulator, first.",
+                Failure::Other,
+            );
             cx.notify();
             return;
         };
         let Some(module) = self.modules.get(self.module).cloned() else {
             return;
         };
+        // Said now, not after a build the device then refuses.
+        if let (Some(needed), Some(has)) = (
+            module.min_sdk,
+            device.about.as_ref().and_then(|about| about.api),
+        ) && has < needed
+        {
+            self.stage = failed(
+                format!(
+                    "This app needs Android API {needed} or later; {} has API {has}.",
+                    device.display_name()
+                ),
+                Failure::Other,
+            );
+            cx.notify();
+            return;
+        }
+        cx.emit(AndroidRunEvent::Started);
         let Some(variant) = module
             .variants
             .iter()
@@ -243,7 +392,7 @@ impl AndroidRun {
         );
         self._run = Some(cx.spawn(async move |this, cx| {
             if let Err(message) = build.await {
-                let _ = this.update(cx, |run, cx| run.fail(message, cx));
+                let _ = this.update(cx, |run, cx| run.fail(message, Failure::Build, cx));
                 return;
             }
             let _ = this.update(cx, |run, cx| {
@@ -260,12 +409,13 @@ impl AndroidRun {
                 .await;
             let package = match installed {
                 Ok(package) => package,
-                Err(message) => {
-                    let _ = this.update(cx, |run, cx| run.fail(message, cx));
+                Err((message, failure)) => {
+                    let _ = this.update(cx, |run, cx| run.fail(message, failure, cx));
                     return;
                 }
             };
             let _ = this.update(cx, |run, cx| {
+                run.package = Some(package.clone());
                 run.stage = Stage::Launching;
                 run.push_log(format!("Starting {package}…"));
                 cx.notify();
@@ -282,13 +432,15 @@ impl AndroidRun {
                 match launched {
                     Ok(()) => {
                         run.push_log("Started.");
+                        cx.emit(AndroidRunEvent::Launched {
+                            package: package.clone(),
+                        });
                         run.stage = Stage::Running {
                             package,
                             took: started.elapsed(),
                         };
-                        cx.emit(AndroidRunEvent::Launched);
                     }
-                    Err(err) => run.fail(format!("{err:#}"), cx),
+                    Err(err) => run.fail(format!("{err:#}"), Failure::Other, cx),
                 }
                 cx.notify();
             });
@@ -416,20 +568,153 @@ impl AndroidRun {
                             took: started.elapsed(),
                         };
                     }
-                    Err(message) => run.fail(message, cx),
+                    Err(message) => run.fail(message, Failure::Build, cx),
                 }
                 cx.notify();
             });
         }));
     }
 
-    fn fail(&mut self, message: String, cx: &mut Context<Self>) {
+    fn fail(&mut self, message: String, failure: Failure, cx: &mut Context<Self>) {
         self._tick = None;
         self.push_log(message.clone());
-        self.stage = Stage::Failed(message);
-        // The log usually says why.
-        self.show_log(cx);
+        // A build's log says why it failed.
+        if failure == Failure::Build {
+            self.show_log(cx);
+        }
+        self.stage = Stage::Failed { message, failure };
         cx.notify();
+    }
+
+    /// Sends the end of the failed build's log to the chat.
+    fn send_build_log(&mut self, cx: &mut Context<Self>) {
+        let path = self.log_path.clone();
+        cx.spawn(async move |this, cx| {
+            let text = cx
+                .background_spawn(async move {
+                    let log = std::fs::read(&path).unwrap_or_default();
+                    let log = String::from_utf8_lossy(&log);
+                    let lines: Vec<&str> = log.lines().collect();
+                    lines[lines.len().saturating_sub(BUILD_LOG_LINES)..].join("\n")
+                })
+                .await;
+            let _ = this.update(cx, |_, cx| {
+                cx.emit(AndroidRunEvent::ToChat(ToChat::Text {
+                    label: "build log".into(),
+                    text: format!("The Android build failed:\n```\n{text}\n```"),
+                }))
+            });
+        })
+        .detach();
+    }
+
+    /// Removes the app the device would not replace, then runs again.
+    fn uninstall_and_run(&mut self, package: String, cx: &mut Context<Self>) {
+        let (Some(adb), Some(serial)) = (self.manager.read(cx).adb().cloned(), self.serial.clone())
+        else {
+            return;
+        };
+        self.stage = Stage::Installing;
+        self.push_log(format!("Uninstalling {package}…"));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let removed = cx
+                .background_spawn(async move { adb.uninstall(&serial, &package) })
+                .await;
+            let _ = this.update(cx, |run, cx| match removed {
+                Ok(()) => {
+                    run.stage = Stage::Idle;
+                    run.run(cx);
+                }
+                Err(err) => run.fail(format!("{err:#}"), Failure::Other, cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Does `action` to the project's app on the chosen device, off the UI
+    /// thread, and says `done` (or what went wrong).
+    fn on_app(
+        &mut self,
+        done: &'static str,
+        action: impl FnOnce(&Adb, &str, &str) -> anyhow::Result<String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_busy() {
+            return;
+        }
+        let manager = self.manager.read(cx);
+        let (Some(adb), Some(serial)) = (
+            manager.adb().cloned(),
+            manager
+                .selected()
+                .filter(|device| device.is_ready())
+                .map(|device| device.serial.clone()),
+        ) else {
+            self.stage = failed("Pick a device first.", Failure::Other);
+            cx.notify();
+            return;
+        };
+        // The app run last; else the one the chosen variant built.
+        let known = self.package.clone();
+        let built = self.modules.get(self.module).cloned().zip(
+            self.modules
+                .get(self.module)
+                .and_then(|module| {
+                    module
+                        .variants
+                        .iter()
+                        .find(|variant| variant.name == self.variant[self.module])
+                })
+                .cloned(),
+        );
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let package = known
+                        .or_else(|| {
+                            let (module, variant) = built?;
+                            variant.built_apk(&module.dir).map(|(id, _)| id)
+                        })
+                        .ok_or_else(|| anyhow::anyhow!("Run the app once first."))?;
+                    let said = action(&adb, &serial, &package)?;
+                    Ok::<_, anyhow::Error>(if said.is_empty() {
+                        format!("{done} {package}.")
+                    } else {
+                        said
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |run, cx| {
+                run.stage = match result {
+                    Ok(said) => Stage::Done(said),
+                    Err(err) => failed(format!("{err:#}"), Failure::Other),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The device's log says an app crashed: when it is the one this card
+    /// started, the card says so in place of "is running".
+    pub fn crashed(&mut self, crash: &crate::logcat::Crash, cx: &mut Context<Self>) {
+        let Stage::Running { package, .. } = &self.stage else {
+            return;
+        };
+        let ours = crash
+            .process
+            .as_deref()
+            .is_some_and(|process| crate::logcat::is_process_of(process, package, false));
+        if ours {
+            self.stage = failed(
+                format!("{package} crashed: {}", crash.summary()),
+                Failure::Crash {
+                    report: crash.report(),
+                },
+            );
+            cx.notify();
+        }
     }
 
     /// Stops the build, or the running app.
@@ -482,16 +767,96 @@ impl AndroidRun {
                 cx.theme().success,
                 false,
             ),
-            Stage::Failed(message) => (message.clone(), cx.theme().danger, false),
+            Stage::Done(said) => (said.clone(), muted, false),
+            Stage::Failed { message, .. } => (message.clone(), cx.theme().danger, false),
         };
         h_flex()
+            .id("android-status")
             .flex_1()
             .min_w_0()
             .gap_1p5()
             .text_xs()
             .text_color(color)
             .when(spinning, |this| this.child(ph_ui::Loader::new().xsmall()))
+            // One line in the card; all of it on hover.
+            .tooltip({
+                let all = ph_ui::tip(text.clone());
+                move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(all.clone()).build(window, cx)
+                }
+            })
             .child(div().min_w_0().truncate().child(text))
+    }
+
+    /// The app's menu: what one otherwise types `adb shell` for.
+    fn render_app_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        Button::new("android-app-menu")
+            .ghost()
+            .xsmall()
+            .icon(IconName::Ellipsis)
+            .tooltip("The app on the device: stop, clear data, uninstall…")
+            .accessibility_label("App actions")
+            .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                let item = |label: &'static str, act: fn(&mut Self, &mut Context<Self>)| {
+                    let this = this.clone();
+                    PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        _ = this.update(cx, act);
+                    })
+                };
+                let link = this.clone();
+                menu.item(item("Force stop", |run, cx| {
+                    run.on_app(
+                        "Stopped",
+                        |adb, serial, package| {
+                            adb.force_stop(serial, package).map(|()| String::new())
+                        },
+                        cx,
+                    )
+                }))
+                .item(item("Clear data", |run, cx| {
+                    run.on_app(
+                        "Cleared the data of",
+                        |adb, serial, package| {
+                            adb.clear_data(serial, package).map(|()| String::new())
+                        },
+                        cx,
+                    )
+                }))
+                .item(item("Grant its permissions", |run, cx| {
+                    run.on_app(
+                        "",
+                        |adb, serial, package| {
+                            let granted = adb.grant_permissions(serial, package)?;
+                            Ok(format!("Granted {granted} permissions to {package}."))
+                        },
+                        cx,
+                    )
+                }))
+                .item(
+                    PopupMenuItem::new("Open a link…")
+                        .on_click(move |_, window, cx| ask_link(link.clone(), window, cx)),
+                )
+                .item(item("App info on the device", |run, cx| {
+                    run.on_app(
+                        "Showing the settings of",
+                        |adb, serial, package| {
+                            adb.app_info(serial, package).map(|()| String::new())
+                        },
+                        cx,
+                    )
+                }))
+                .separator()
+                .item(item("Uninstall", |run, cx| {
+                    run.on_app(
+                        "Uninstalled",
+                        |adb, serial, package| {
+                            adb.uninstall(serial, package).map(|()| String::new())
+                        },
+                        cx,
+                    )
+                }))
+            })
     }
 
     fn render_pickers(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -516,10 +881,7 @@ impl AndroidRun {
                             PopupMenuItem::new(path.clone())
                                 .checked(ix == current_module)
                                 .on_click(move |_, _, cx| {
-                                    _ = this.update(cx, |run, cx| {
-                                        run.module = ix;
-                                        cx.notify();
-                                    });
+                                    _ = this.update(cx, |run, cx| run.choose_module(ix, cx));
                                 }),
                         )
                     })
@@ -531,38 +893,46 @@ impl AndroidRun {
             .map(|variant| variant.name.clone())
             .collect();
         let chosen = self.variant[self.module].clone();
-        let variant_picker = {
-            let this = this.clone();
-            let chosen_label = chosen.clone();
-            Button::new("android-variant")
-                .outline()
-                .xsmall()
-                .icon(Icons::Layers)
-                .label(chosen_label)
-                .dropdown_caret(true)
-                .tooltip("Build variant")
-                .menu(gpui_kit::Anchor::TopLeft, move |menu, window, _| {
-                    variants.iter().fold(
-                        menu.scrollable(true).max_h(ph_ui::scaled_px(360., window)),
-                        |menu, name| {
-                            let this = this.clone();
-                            let picked = name.clone();
-                            menu.item(
-                                PopupMenuItem::new(name.clone())
-                                    .checked(*name == chosen)
-                                    .on_click(move |_, _, cx| {
-                                        let picked = picked.clone();
-                                        _ = this.update(cx, |run, cx| {
-                                            let module = run.module;
-                                            run.variant[module] = picked;
-                                            cx.notify();
-                                        });
-                                    }),
+        let variant_picker =
+            {
+                let this = this.clone();
+                let chosen_label = chosen.clone();
+                Button::new("android-variant")
+                    .outline()
+                    .xsmall()
+                    .icon(Icons::Layers)
+                    .label(chosen_label)
+                    .dropdown_caret(true)
+                    .tooltip("Build variant")
+                    .menu(gpui_kit::Anchor::TopLeft, move |menu, window, _| {
+                        let other = this.clone();
+                        variants
+                            .iter()
+                            .fold(
+                                menu.scrollable(true).max_h(ph_ui::scaled_px(360., window)),
+                                |menu, name| {
+                                    let this = this.clone();
+                                    let picked = name.clone();
+                                    menu.item(
+                                        PopupMenuItem::new(name.clone())
+                                            .checked(*name == chosen)
+                                            .on_click(move |_, _, cx| {
+                                                let picked = picked.clone();
+                                                _ = this.update(cx, |run, cx| {
+                                                    run.choose_variant(picked, cx)
+                                                });
+                                            }),
+                                    )
+                                },
                             )
-                        },
-                    )
-                })
-        };
+                            .separator()
+                            // The build files are read, not run: flavors a
+                            // plugin of the project's own sets up are not seen.
+                            .item(PopupMenuItem::new("Other…").on_click(move |_, window, cx| {
+                                ask_variant(other.clone(), window, cx)
+                            }))
+                    })
+            };
         let manager = self.manager.read(cx);
         let device_label = manager
             .selected()
@@ -594,6 +964,10 @@ impl Render for AndroidRun {
         let running = matches!(self.stage, Stage::Running { .. });
         let built_apk = match &self.stage {
             Stage::Built { apk, .. } => Some(apk.clone()),
+            _ => None,
+        };
+        let failure = match &self.stage {
+            Stage::Failed { failure, .. } => Some(failure.clone()),
             _ => None,
         };
         let can_run = !busy
@@ -631,7 +1005,8 @@ impl Render for AndroidRun {
                             .disabled(!self.log_path.exists())
                             .tooltip("Show the build log in the terminal")
                             .on_click(cx.listener(|run, _, _, cx| run.show_log(cx))),
-                    ),
+                    )
+                    .child(self.render_app_menu(cx)),
             )
             .child(self.render_pickers(cx))
             .child(
@@ -683,6 +1058,44 @@ impl Render for AndroidRun {
                             .tooltip("Copy the APK's path"),
                         )
                     })
+                    .when_some(failure, |this, failure| match failure {
+                        Failure::Build => this.child(
+                            Button::new("android-build-to-chat")
+                                .ghost()
+                                .small()
+                                .icon(Icons::SendHorizontal)
+                                .label("Send to chat")
+                                .tooltip("Send the end of the build log to the chat")
+                                .on_click(cx.listener(|run, _, _, cx| run.send_build_log(cx))),
+                        ),
+                        Failure::Conflict { package } => this.child(
+                            Button::new("android-uninstall-run")
+                                .outline()
+                                .small()
+                                .label("Uninstall and run again")
+                                .tooltip(ph_ui::tip(
+                                    "Another build of the app is on the device. Removing it removes its data too.",
+                                ))
+                                .on_click(cx.listener(move |run, _, _, cx| {
+                                    run.uninstall_and_run(package.clone(), cx)
+                                })),
+                        ),
+                        Failure::Crash { report } => this.child(
+                            Button::new("android-crash-to-chat")
+                                .ghost()
+                                .small()
+                                .icon(Icons::SendHorizontal)
+                                .label("Send to chat")
+                                .tooltip("Send the exception and its stack to the chat")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(AndroidRunEvent::ToChat(ToChat::Text {
+                                        label: "crash".into(),
+                                        text: report.clone(),
+                                    }))
+                                })),
+                        ),
+                        Failure::Other => this,
+                    })
                     .when(busy || running, |this| {
                         this.child(
                             Button::new("android-stop")
@@ -701,6 +1114,115 @@ impl Render for AndroidRun {
                     .child(self.render_status(cx)),
             )
     }
+}
+
+fn failed(message: impl Into<String>, failure: Failure) -> Stage {
+    Stage::Failed {
+        message: message.into(),
+        failure,
+    }
+}
+
+/// `modules` with, for each, the variant chosen before when the build
+/// files do not show it (one typed in by the user).
+fn with_chosen_variants(mut modules: Vec<AndroidModule>, chosen: &Chosen) -> Vec<AndroidModule> {
+    for module in &mut modules {
+        if let Some(name) = chosen.variants.get(&module.path)
+            && !name.is_empty()
+            && !module.variants.iter().any(|variant| &variant.name == name)
+        {
+            module.variants.push(android_project::Variant::custom(name));
+        }
+    }
+    modules
+}
+
+/// Whether what the device said on refusing an APK means that the app on
+/// it is another build, which only removing it gets past.
+fn is_conflict(said: &str) -> bool {
+    [
+        "INSTALL_FAILED_UPDATE_INCOMPATIBLE",
+        "INSTALL_FAILED_VERSION_DOWNGRADE",
+        "signatures do not match",
+    ]
+    .iter()
+    .any(|sign| said.contains(sign))
+}
+
+/// A dialog with one field: `on_ok` gets what was typed, when anything was.
+fn ask(
+    title: &'static str,
+    placeholder: &'static str,
+    ok: &'static str,
+    on_ok: impl Fn(String, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+    let field = input.clone();
+    // The dialog is built again as it is drawn; each time with this.
+    let on_ok = std::rc::Rc::new(on_ok);
+    window.open_dialog(cx, move |dialog, window, _| {
+        let field = field.clone();
+        let typed = field.clone();
+        dialog
+            .title(title)
+            .w(ph_ui::scaled_px(420., window))
+            .child(Input::new(&field))
+            .footer(ph_ui::dialog_buttons(ok, true))
+            .on_ok({
+                let on_ok = on_ok.clone();
+                move |_, _, cx| {
+                    let text = typed.read(cx).value().trim().to_string();
+                    if text.is_empty() {
+                        return false;
+                    }
+                    on_ok(text, cx);
+                    true
+                }
+            })
+    });
+    input.update(cx, |input, cx| input.focus(window, cx));
+}
+
+/// Asks for a variant the build files do not show.
+fn ask_variant(run: WeakEntity<AndroidRun>, window: &mut Window, cx: &mut App) {
+    ask(
+        "Build variant",
+        "As Gradle names it, e.g. freeStagingDebug",
+        "Use",
+        move |name, cx| {
+            // A task name is made of it: letters and digits only.
+            if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                _ = run.update(cx, |run, cx| run.choose_variant(name, cx));
+            }
+        },
+        window,
+        cx,
+    );
+}
+
+/// Asks for a link to open in the app.
+fn ask_link(run: WeakEntity<AndroidRun>, window: &mut Window, cx: &mut App) {
+    ask(
+        "Open a link in the app",
+        "myapp://item/42 or https://example.com/item/42",
+        "Open",
+        move |url, cx| {
+            _ = run.update(cx, |run, cx| {
+                run.on_app(
+                    "",
+                    move |adb, serial, package| {
+                        adb.open_link(serial, &url, Some(package))?;
+                        Ok(format!("Opened the link in {package}."))
+                    },
+                    cx,
+                )
+            });
+        },
+        window,
+        cx,
+    );
 }
 
 /// The first debug variant, as Android Studio picks.
@@ -793,25 +1315,43 @@ fn build_with_gradle(
     }
 }
 
-/// Installs the APK of `variant`'s last build; returns its application id.
+/// Installs the APK of `variant`'s last build; returns its application id,
+/// or what went wrong and of what kind.
 fn install(
     adb: &Adb,
     serial: &str,
     variant: &android_project::Variant,
     module: &std::path::Path,
-) -> Result<String, String> {
+) -> Result<String, (String, Failure)> {
     let (package, apk) = variant.built_apk(module).ok_or_else(|| {
-        format!(
-            "No APK of {} was found under {}.",
-            variant.name,
-            module.display()
+        (
+            format!(
+                "No APK of {} was found under {}.",
+                variant.name,
+                module.display()
+            ),
+            Failure::Other,
         )
     })?;
     if !adb::is_package_name(&package) {
-        return Err(format!("`{package}` is not a package name."));
+        return Err((
+            format!("`{package}` is not a package name."),
+            Failure::Other,
+        ));
     }
-    adb.install(serial, &apk)
-        .map_err(|err| format!("{err:#}"))?;
+    adb.install(serial, &apk).map_err(|err| {
+        let said = format!("{err:#}");
+        if is_conflict(&said) {
+            (
+                format!("Another build of {package} is on the device."),
+                Failure::Conflict {
+                    package: package.clone(),
+                },
+            )
+        } else {
+            (said, Failure::Other)
+        }
+    })?;
     Ok(package)
 }
 

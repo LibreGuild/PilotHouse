@@ -73,7 +73,7 @@ More in [docs/features/explanations.md](docs/features/explanations.md).
 
 ### The Bridge and workspaces
 - **The Bridge:** every task in four columns. A card says its branch, what it changed, how it checked that, and its pull request with its checks. Answer an agent's question right on its card.
-- **Workspaces** with any number of folders (each Git repository has its own tools) or none. Each has a colour, a badge and a dot for what it is doing, and can move to a window of its own.
+- **Workspaces** with any number of folders (each Git repository has its own tools) or none. Each has a colour and a dot for what it is doing, and can move to a window of its own; one list, opened from the workspace's name in the title bar, goes between them.
 - **Tasks on their own branch:** a worktree per task, so an agent works there while your checkout stays as it is.
 - **Two panes:** the chat, and one result pane for Git, Preview, Terminal and Files. Either folds away to give the other the window.
 
@@ -81,7 +81,7 @@ More in [docs/features/explanations.md](docs/features/explanations.md).
 - **Code:** a file tree with Git marks, an editor with language servers (diagnostics, hover, definition, references, rename, outline), workspace search, and a viewer for multi-gigabyte logs.
 - **Git:** one review of every change beside the list of files; keep or undo a file or a hunk; commit, branches, history graph, stashes, conflicts and blame.
 - **Explain** and **Why Is This Here?** ([above](#explain-understand-what-an-agent-changed)).
-- **Reviews**, for whoever reviews for a team: pull requests waiting for you across repositories as a queue, agent reviews of several at once in PilotHouse's own clone, findings you post as comments, and a walkthrough of any pull request. Nothing is posted until you say so.
+- **Reviews**, for whoever reviews for a team: pull requests across repositories by whose turn it is, agent reviews of several at once in PilotHouse's own clone, findings written to be read, your own comments on lines, and a walkthrough of any pull request. A review is finished in one step and sent once; nothing is posted until you say so. A repository's issues are beside its pull requests, each one a task away from fixed.
 - **Network drives:** for code on a server's share, Git, terminals and run configurations work on the server over SSH.
 
 ### Browser, Android and your Chrome
@@ -89,20 +89,21 @@ More in [docs/features/explanations.md](docs/features/explanations.md).
 - **Chrome extension:** agents work in your own Chrome, with your sign-ins, in the tabs you share, with tools for debugging pages (performance, audits, emulation, mocks, memory, mapped errors). You send pages, selections, screenshots and recorded bug reports from Chrome to a chat.
 
 ### Tests and automation
-- **UI tests** recorded from what an agent does, replayed without AI on several screen sizes or devices, compared with accepted screens, and repaired by an agent.
+- **Tests in one tab:** the project's own (`cargo test`, pytest, Vitest, Jest, Playwright, Gradle, Maven, Go) run and read back one line per test, with the failure, its place and *Fix with agent*; and **UI tests** recorded from what an agent does, replayed without AI from a clean start on several screen sizes or devices, with look checks where asked, repaired by an agent, and exported as Playwright or Maestro files.
 - **Schedules:** agent prompts and test runs at set times, or when files change, a commit lands, a pull request opens or checks fail.
-- **Run configurations and ports,** and an offline utilities toolbox (JSON, JWT, hashes, times, cron, regex, SQLite) for people and agents.
+- **Run configurations and ports,** and an offline utilities toolbox in the column of icons (JSON, JWT, certificates, hashes, times, cron, regex, colors, SQLite…), each shown as what it is, for people and agents.
 
-### Studio: pictures, video and slides
+### Studio, artifacts and slides
 For what goes with the work, by hand or by asking the agent in the chat beside it, with every step undoable.
 - **Pictures:** arrows, boxes, numbered steps, labels and highlights; blur or pixelate emails and tokens; crop, resize and frame for docs.
 - **Video:** cut and speed up parts of a screen recording on a timeline, add labels and blurs that show at set times, and export MP4, HEVC, WebM or GIF.
-- **Slides:** decks drafted by an agent from a few lines, with charts, tables, diagrams, icons, themes and your PowerPoint templates; present with notes; open any `.pptx` and export editable PowerPoint, PDF or pictures.
+- **Artifacts:** a page an agent made for you (a planner, a dashboard, a small game) kept with an address of its own on your computer; it remembers what you enter, you ask for changes beside it, and you can share it with the people on your network to use together, live.
+- **Slides:** a deck made beside a chat: the agent drafts and changes it, you move, type and restyle things by hand, and point at something to comment on it or send it to the agent. Charts keep their numbers; present with notes; share it on your network; start from any `.pptx` and export editable PowerPoint, PDF, a web page or pictures.
 
 <p align="center">
   <img src="docs/images/shots/studio-picture.webp" alt="Studio marking up a screenshot: an email blurred, one row spotlit and a label added" width="290">
   <img src="docs/images/shots/studio-video.webp" alt="Studio editing a screen recording on a timeline, one part at double speed" width="290">
-  <img src="docs/images/shots/slides.webp" alt="A slide deck with a column chart in Studio, the slides down the side" width="290">
+  <img src="docs/images/shots/slides.webp" alt="A deck of slides beside its chat: the slide on the stage, the slides in a strip under it" width="290">
 </p>
 
 ### Make it yours

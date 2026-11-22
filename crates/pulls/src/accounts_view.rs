@@ -1,9 +1,11 @@
-//! Settings → GitHub: the accounts PilotHouse can use, one per host, and a
-//! form to add one with a personal access token.
+//! Settings → GitHub: the accounts PilotHouse can use, one per host, a
+//! form to add one with a personal access token, and what happens when a
+//! pull request asks for a review ([`crate::ReviewSettings`]).
 
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
     h_flex,
     input::{Input, InputState},
     v_flex,
@@ -288,6 +290,60 @@ impl Render for AccountsView {
                             .child(concat!(ph_brand::name!(), " checks the token with the host, then keeps it in the system keychain. It talks only to the hosts you add.")),
                     ),
             )
+            // What a new request for review does, once there is an account
+            // to hear of one.
+            .when(!self.accounts.is_empty(), |this| {
+                let settings = crate::ReviewSettings::read(&self.store);
+                let hint = |text: &'static str| {
+                    div()
+                        .pl_6()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(text)
+                };
+                this.child(
+                    v_flex()
+                        .gap_1p5()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                .child("When a pull request asks for your review"),
+                        )
+                        .child(
+                            Checkbox::new("reviews-announce")
+                                .checked(settings.announce)
+                                .label("Tell me")
+                                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                    crate::ReviewSettings {
+                                        announce: *checked,
+                                        ..settings
+                                    }
+                                    .save(&this.store);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(hint(
+                            "A system notification. The lists are read every few minutes while the app runs.",
+                        ))
+                        .child(
+                            Checkbox::new("reviews-auto")
+                                .checked(settings.auto_review)
+                                .label("Have an agent review it")
+                                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                    crate::ReviewSettings {
+                                        auto_review: *checked,
+                                        ..settings
+                                    }
+                                    .save(&this.store);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(hint(
+                            "With the default agent and review template, on its own copy of the repository. It only reads: nothing is sent to GitHub until you finish the review. Three run at a time. Drafts and bots' pull requests are left alone.",
+                        )),
+                )
+            })
     }
 }
 

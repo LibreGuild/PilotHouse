@@ -12,14 +12,14 @@ Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 │ 💬 │                      │ │                                      │ │
 │ + ╰──────────────────────╯ ╰─────────────────────────────────────╯ │
 │ ⚙                                                                    │
-└ status bar: branch · CI · folder · ports · tasks        agent limits ┘
+└ status bar: branch · CI · folder · ports · tasks               usage ┘
 ```
 
 - **Three places, one column of icons.** The window shows the **Bridge** (every task, by state), **Reviews** (other people's pull requests) or **a workspace's screen** (a task: its chat and what it produced). They are picked in the column of icons at the left edge; there is no list beside it and no column of tools on the right.
 - **The status bar is one line of small text with no room of its own above it**: the islands end a gap (6 px) over it, and that gap is the room above. (It had 4 px more, which put its text under the strip's middle and cost the islands that height.)
 - **The frame and its islands** (`frame.rs`). The title bar, the column of icons and the status bar are one piece, the window's frame, with no line between them: what stays the same whatever is shown. What changes sits in it as islands, rounded panels with a small gap between them: the chat and the result pane (in Reviews: the list, the page, the pull request's chat; the Bridge is one island). The frame is lit from above, a little lighter at its top than at its bottom, in the theme's own colour. **With a workspace in front the light has that workspace's colour**, strongest in the title bar and fading down the column (and the workspace's dot stands before its name in the title bar), so the window's edge says where a new chat would go; the Bridge and Reviews belong to no workspace and stay plain. The colour is faint on purpose: it says which workspace, and is not there to be looked at. A window whose frame shows the desktop or a picture (Settings → Appearance → Window) has that behind it instead of the light, the workspace's colour over it.
 - **Rounded corners.** The UI framework clips children to a panel's rectangle, not to its rounding, so a tab bar or a terminal that fills an island would poke out of its corners. An island (`frame::island`, a `ph_ui::Surface` told what is behind it) paints its corners over with the frame's colour at that height, worked out from the same numbers the frame is painted with (`Paint::at`). No such fill where the frame is not a colour (the desktop, a picture).
-- **`Workspace`** (`workspace.rs`) is a window's root: the title bar, the column of icons, what is in front (`View`: `Bridge`, `Workspaces` for a workspace's screen, `GitHub` for Reviews, `Custom` for an organisation's view) and the status bar. It keeps one `WorkspaceScreen` per workspace opened in the window, and the window's [Reviews view](pulls.md#reviews) once shown. Which of the Bridge or a workspace was in front is kept (`workspace.front_view`); a window opens on the Bridge when there are workspaces, and on the chat when there are none yet.
+- **`Workspace`** (`workspace.rs`) is a window's root: the title bar, the column of icons, what is in front (`View`: `Bridge`, `Workspaces` for a workspace's screen, `GitHub` for Reviews, `Artifacts`, `Custom` for an organisation's view) and the status bar. It keeps one `WorkspaceScreen` per workspace opened in the window, and the window's [Reviews view](pulls.md#reviews) once shown. Which of the Bridge or a workspace was in front is kept (`workspace.front_view`); a window opens on the Bridge when there are workspaces, and on the chat when there are none yet.
 - The look follows [the style guide](../styleguide.md): quiet graphite chrome, colour only for state, focus and selection.
 - **`WorkspaceScreen`** (`workspace_screen.rs`) is a workspace's screen: the chat and one result pane (`workspace_screen/layout.rs`). Panels are made the first time they are shown. Its state is saved per workspace (`ProjectUiState`): the tool shown last, whether the result pane is open, whether the chat is folded and how wide it is, whether the folder tree shows, what Preview showed last, the chat and the open files.
 - **Running work outlives the screen.** Chats (`ph_agent::chats`), shells (`ph_terminal::TerminalHub`), test runs (`ph_uitest::runner`) and schedules (`schedules::Automation`) belong to the workspace or the app, not to a window. A screen can be closed and rebuilt (another window, folders changed, idle) without stopping anything.
@@ -27,19 +27,37 @@ Crate: `ph-workspace`. Code: `crates/workspace/src/`.
 
 ## Title bar
 
-- On the left, the app's mark (its icon in small) beside the window buttons (off macOS, where the window's buttons are on the right, it opens the app menu and stands centred over the column of icons under it) and the name of what is in front: *Bridge*, *Reviews* or the workspace (with its colour dot). The task in the chat is not named here: its title and state stood after the workspace's name for a while and crowded the corner; the chat's own header says both.
+- On the left, the app's mark (its icon in small) beside the window buttons (off macOS, where the window's buttons are on the right, it opens the app menu and stands centred over the column of icons under it) and the name of what is in front: *Bridge*, *Reviews* or the workspace (with its colour dot). A workspace's name is a button, in full strength, with the workspace's letter on its colour and an outline (as a dim word with a dot it went unnoticed, and so did that it can be pressed): it opens the list of workspaces, to go to another, and a right click is the workspace's menu. The task in the chat is not named here: its title and state stood after the workspace's name for a while and crowded the corner; the chat's own header says both.
 - In the middle, search and commands (⌘K).
 - On the right: the next step of the task in front, when there is one (*Review changes* while its chat changed files and another tool is in front; else the pull request of its branch, `#42`), updates, the inbox (bell), and with a workspace in front the two switches of its screen: the chat (⌘B) and the result pane (⌥⌘B). In Reviews the one switch shows or hides its list.
-- The bar has no fill or line of its own: it is part of the frame (above), which carries the colour of the workspace in front (`ph_ui::WORKSPACE_COLORS`, a chosen one saved in `projects.color`).
+- The bar has no fill or line of its own: it is part of the frame (above), which carries the colour of the workspace in front (`ph_ui::WORKSPACE_COLORS`, a chosen one saved in `projects.color`). *Chats* has no colour, as the Bridge and Reviews have none (`Workspace::color_of`): it is a place of the app, not one of your workspaces, so the frame is plain there, its menu has no *Colour*, and its chats' cards on the Bridge carry no dot.
 
 ## The column of icons
 
 `rail.rs`. From the top:
 
-- **Bridge** (⌘⇧E, also ⌘⇧A), **Reviews** (⌘⇧G), which shows how many pull requests wait for your review, and **Chats** (⌘⇧D), the chats that need no folder (below); then an organisation's own views. These are always there, in these places. A line parts them from the user's workspaces.
-- **One badge per workspace of the user's**, newest first (an order that stays put as they are used): its first letter on its colour, a ring when it is in front, and a dot for what goes on there (amber: an agent waits for an answer; red: a turn failed; green: news not seen; blue: working). The tooltip says the name, what it is doing and its shortcut (⌃1–⌃9, Alt+1–9 off macOS). A click opens the workspace; right-click is its menu: *New chat*, *New task*, *Add a folder*, *Rename*, *Open in new window*, *Colour*, *Finish task*, *Remove from PilotHouse*. The badges scroll when there are many.
-- **+**: open a folder as a workspace, or make one without folders.
+The places are in the order a day goes: where the work is done, then what goes on across all of it, then what is around the work. The workspaces lead: they are what the app is for, and where someone new begins. (Until 0.7.0 the Bridge and Reviews came first, which put the two places a new user has least use for at the top.)
+
+- **Workspaces**: the user's own, as one place however many there are. From elsewhere it brings the workspace used last in front; with one in front it opens the list of them (below). Its dot says what goes on in the workspaces not in front (amber: an agent waits for an answer; red: a turn failed; green: news not seen; blue: working); a right click is the menu of the one in front. With no workspace yet (a first start, or the last one removed) it shows what a workspace is and the two ways to make one, *Open a folder…* and *New workspace without folders* (`no_workspaces.rs`); it used to ask for a folder at once, which says nothing of what the folder is for. (Until 0.7.0 each workspace was a badge here: with many, the column was full of them, the button to add one was past its end, and every place added to the column would have pushed them down.)
+- **Chats** (⌘⇧D): the chats that need no folder (below). Always there, in this place.
+- **Bridge** (⌘⇧E, also ⌘⇧A): every task in every workspace, by what it needs from the user; its count says how many wait.
+- **Reviews** (⌘⇧G), which shows how many pull requests wait for your review.
+- **Artifacts**: the pages agents made for you, kept and served from this computer ([artifacts.md](artifacts.md)).
+- An organisation's own views, after these five.
 - **Settings**, at the foot.
+
+### The list of workspaces
+
+`workspace_switcher.rs`. The name of the workspace in front, in the title bar, opens it (as a project switcher does in an editor); so do ⌘E, *Workspaces* in the column while a workspace is in front, and *Switch workspace…* in the palette.
+
+- **The one used last is on top**, then the one before it, and so on: each with its letter on its colour, its name over its folder (`~/…`, or the last folders of a long path; *and 2 more* for a workspace of several), the dot for what goes on in it, and a tick on the one in front. A folder line that leaves something out (a long path cut short, folders not named) says all of it in a tooltip. The workspace Ctrl+Tab goes back to says that key.
+- **Type to find one** by a part of its name or of a folder. The arrow keys move through the rows and Enter opens the one they are on: on opening, that is the workspace used before the one in front, so ⌘E and Enter go back and forth between two, as Ctrl+Tab does without the list.
+- **No numbers.** Each workspace had a key of its own (⌃1–⌃9, Alt+1–9 off macOS) while each was a badge in the column of icons, where the numbers could be counted. In a list by last use they would be scattered, and in any order they would say nothing one can see without opening it. Two keys do the work: the list, and back.
+- **What can be done with a workspace** opens under its row, from the ⋯ at its end or a right click: *New chat*, *New task*, *Finish task*, *Add a folder*, *Rename*, *New window*, *Colour* (the colours, to pick one) and *Remove*. (In place, not as a menu: the list is a popover, and a menu over it would close it.) The same is the right-click menu of the name in the title bar, for the workspace in front.
+- **Open a folder…** and **New workspace without folders** are at its foot, always in view.
+- *Chats*, the workspace for chats that need no folder, is not in the list: it has its place in the column.
+
+The place in front is marked on its icon: a rounded box behind the icon alone, and its name under it in full strength. (The box held the name too until 0.7.0, and a long name, *Workspaces*, touched its edges.) An entry pointed at shows the same box, lighter in meaning: it goes when the pointer does. Counts and dots sit at the icon's corner.
 
 Names show under the icons; *Settings → Appearance → Names under the icons* switches them off, and they show in tooltips then. (They were off unless switched on before 0.7. The setting is kept under a new key, `rail_names`, so everyone starts with the names after updating; the old `tool_labels` is no longer read.)
 
@@ -88,7 +106,7 @@ The setup sees `PILOTHOUSE_PORT`, a port of the task's own (4100, 4110, …) for
 
 ## Status bar
 
-Left: the branch (ahead/behind, an operation under way; opens the branch picker), **CI** for the commit checked out (a check when every GitHub check passed, a spinner while some run, red with the count when one failed; the tooltip names them, a click opens the failed or running one), the folder, the network drive, and the **ports** the workspace's processes listen on (opens the Run tool). `signals.rs` reads ports every 10 seconds and CI every minute or when HEAD moves (seen in the Git model, without running Git), only for the workspace on screen and not on network drives; while PilotHouse is behind another program both are read once a minute, and ports not at all on Windows, where the system does not say which folder a listener was started in; the Android bridge and emulator are left out (the Devices tool has them). Right: agent limits and the detected stack. (The version is in Settings → About.)
+Left: the branch (ahead/behind, an operation under way; opens the branch picker), **CI** for the commit checked out (a check when every GitHub check passed, a spinner while some run, red with the count when one failed; the tooltip names them, a click opens the failed or running one), the folder, the network drive, and the **ports** the workspace's processes listen on (opens the Run tool). `signals.rs` reads ports every 10 seconds and CI every minute or when HEAD moves (seen in the Git model, without running Git), only for the workspace on screen and not on network drives; while PilotHouse is behind another program both are read once a minute, and ports not at all on Windows, where the system does not say which folder a listener was started in; the Android bridge and emulator are left out (the Devices tool has them). Right: **Usage** and the detected stack. *Usage* is one item for every agent's limits: it says *Usage* while all is well and names the limit that is close (amber) or reached (red) when one is; a click opens what each agent has said of its limits (its windows, how full, when they reset), which agents have said nothing and why, and *All usage*. Each agent's windows used to stand in the bar side by side, which showed Codex and nobody else most of the time (Codex writes its limits to its own files, so they are always known; Claude Code says its own only while it works, on a subscription; the others say none) and had no room for five. (The version is in Settings → About.)
 
 ## Agent limits
 
@@ -102,7 +120,7 @@ Underneath it is a workspace without folders, where agents work in a private scr
 
 But it is not one of the user's projects, and does not look like one:
 
-- **It has a place of its own**, at the top of the column of icons under the Bridge and Reviews, with an icon. It is not a letter on a colour among the workspaces, moving down as they are added, and it is not counted in their numbers (⌃1–9 are the user's workspaces, `Workspace::listed`).
+- **It has a place of its own**, in the column of icons under *Workspaces*, with an icon. It is not one of the list of workspaces (those are the user's own, `Workspace::listed`).
 - **It is not removed.** Its menu has no *Remove*, the command says why, and `Store::remove_project` refuses. Its chats are deleted one by one, from a card's or a tab's menu.
 - **It takes no folder.** *Add a folder* while it is in front opens the folder as a workspace of its own (`Store::add_workspace_folder` refuses); its menu has no *Add a folder* or *New task in a worktree*.
 
@@ -116,17 +134,20 @@ Before 0.7 it was a space of a kind of its own (a row of kind `chats`), with exc
 
 `workspace_screen/layout.rs`, `workspace_screen/render.rs`. Two islands side by side: the **chat**, and one **result pane** for what the task produced, under a row of names.
 
-- **Git**: the review of what changed, with the repository's branches, history and stashes; its list of changed files has one diff of them beside it ([Git](changes.md)). **Preview**: what the work looks like when it runs, the browser or a phone (a switch at the end of the row picks, and the name remembers which). **Terminal**. **Files**: the folder tree and the files open from it, side by side (the button at the end of the row hides the tree). The workspace's other tools (Run, Tests, Pull requests, Logcat) are under **⋯**, and the one in use shows as a name of its own beside the four. A name shows only for a tool the workspace has a use for (*Git* with a Git repository; Git is under ⋯ where none was seen) and that is switched on; *Preview* stands for whichever of the browser and the phone is.
+- **Git**: the review of what changed, with the repository's branches, history and stashes; its list of changed files has one diff of them beside it ([Git](changes.md)). **Preview**: what the work looks like when it runs, the browser or a phone (a switch at the end of the row picks, and the name remembers which). **Terminal**. **Files**: the folder tree and the files open from it, side by side (the button at the end of the row hides the tree). The workspace's other tools (Run, Tests, Pull requests) are under **⋯**, and the one in use shows as a name of its own beside the four. Logcat is not in that list: it is a drawer under the phone's screen (Preview → Phone), which can give it the whole pane, and then it too has a name beside the four.
+
+**The row in a narrow pane.** Nothing in it is cut off. Preview's switch (**Browser | Phone**) gives way first, to its two icons (a globe, the Android mark; their names in tooltips); if the names of the tools still do not fit, those not in front fold to their icons too. A name shows only for a tool the workspace has a use for (*Git* with a Git repository; Git is under ⋯ where none was seen) and that is switched on; *Preview* stands for whichever of the browser and the phone is.
 - **One tool at a time**, with the whole pane: the browser and a phone need the room. Each tool was a tab in a dock before, which could be dragged anywhere; few arranged it, an arrangement saved could come back wrong, every tool was named twice (its icon in a column and its tab), and the wide tools sat in a narrow column.
 - **Files** is the first tool (⌘1): the folder tree, each folder a root when there are several (the primary one says so), with an icon per file type, chevrons, indent guides and Git marks (**M** changed, **U** new, **D** deleted; a dot on a folder holding changes). Its header's search button (⌘⇧F) turns the tree into workspace search; the others make a file or a folder, fold every folder and add a folder to the workspace. Right-click any row for the file menu ([files](files.md)); a folder root's also makes it primary or takes it out. Picking a file (from the tree, ⌘P, search, a link in the chat) shows Files with that file in the editor.
 - **Sizes.** The chat starts at two fifths of the window (never under its least width, 380 px, unless the window is too small for both panes); drag the gap between the two to change it. Where it is left is kept per workspace, as a share of the window's width (`chat_share`), so it holds in a window of another size.
 - **Showing and hiding.** ⌘B (and the title bar's left switch) folds the chat to a strip at the pane's edge, so the result pane has the window; the strip says what the chat is doing and brings it back, as does anything sent to the chat. ⌥⌘B (the right switch) hides the result pane, and brings it back as it was. ⌘⇧J gives the result pane the window in one step. ⌘J and Ctrl+backtick show the terminal; pressed again they go back to what was there (the chat alone, when the result pane was shut). Something is always on screen: with the result pane hidden the chat cannot be folded. With the chat folded the keyboard goes to the file in front, else to the window (`WorkspaceScreen::focus_chat`), never to the composer that is not drawn: no shortcut would reach the window from there. A chat asked for (a card on the Bridge, ⌘N) unfolds it. *Reset the layout* (the palette) shows both again.
 - **Several chats are tabs over the chat** (`workspace_screen/tabs.rs`, drawn in the chat panel's header): one tab for each chat of the workspace that is still open (what the Bridge has outside *Done*) and for the one in front, in the order they were started, each with its state (the working mark, or a dot: amber needs you, red stopped, green finished and not looked at). A click shows the chat; the cross on a tab (shown while the pointer is on it) closes the tab and leaves the chat as it is, in *Past chats* and on the Bridge, until it is opened again or needs you; right-click is the chat's menu (done, rename, delete), and a chat marked done leaves the row. At the end of the tabs are *Past chats* (the clock: the chats last used, where a chat is also marked done, renamed or deleted, and the way to all of them) and *New chat* (⌘N). In a narrow panel the tabs are a row of their own over the row of the chat in front; from 760 px the two are one row ([chat](chat.md)).
+- **A right click on a tab** closes it, the other tabs or all of them (the chats stay, in *Past chats* and on the Bridge; one that needs you keeps its tab), over what can be done with its chat.
 - **Layouts from before.** An arrangement of the dock saved by 0.6.4 or earlier (`workspace.dock.<id>`) is not read any more; the tool shown last, whether the pane was open, the chat and the open files come back as they were.
 
 ## Several workspaces
 
-- Switch with the badges in the column of icons, with ⌃1–⌃9 (macOS) or Alt+1–9 (elsewhere) for the first nine, or Ctrl+Tab for the one before.
+- Switch with the list of workspaces (the name in the title bar, or ⌘E), or Ctrl+Tab for the one before.
 - Coming back to a workspace shows **While you were away**: the chats that finished and a test run that ended, one click each.
 - Clicking a schedule's or reminder's system notification opens its workspace (and the chat it ran).
 - **Removing a workspace** (*Remove from PilotHouse*, its menu) removes its chats with it and leaves its folders alone. With any chats it says how many and asks first.
@@ -137,7 +158,7 @@ Before 0.7 it was a space of a kind of its own (a row of kind `chats`), with exc
 
 A **workspace** (a `Project` in the code, table `projects`) is a name and any number of folders, from none up.
 
-- *New workspace* makes an empty one; add folders whenever you like (the Files tool, the workspace's menu on its badge, the palette). *Open folder* (⌘O) is a shortcut that makes a workspace with that folder, or reopens the one that has it.
+- *New workspace* makes an empty one; add folders whenever you like (the Files tool, the workspace's row in the list of workspaces, the palette). *Open folder* (⌘O) is a shortcut that makes a workspace with that folder, or reopens the one that has it.
 - The first folder is the **primary** one: agents work there, and the terminal and run tools start there. Every folder:
   - is a root of Files, its paths named with the folder first (`server/src/main.js`), in ⌘P, search and `@` mentions too (`ph_files::roots`);
   - is given to agents as an extra root (ACP `additionalDirectories`), and a chat's first message tells the agent the folders and how paths name them;
@@ -162,7 +183,7 @@ Removing a folder leaves it on disk; removing the primary folder makes the next 
 | ⌘⇧E / ⌘⇧D / ⌘⇧G | The Bridge / Chats (the chats that need no folder) / Reviews |
 | ⌘1 | Files |
 | ⌘2, ⌘4–9 | Git, Terminal, Browser, Devices, Run, PRs, Tests (⌘3 was the board's, and is free) |
-| ⌃1–⌃9 (Alt+1–9 off macOS) | Workspace 1–9 in the column of icons |
+| ⌘E | The list of workspaces (Enter there: the one before) |
 | Ctrl+Tab | The workspace shown before |
 | ⌘P / ⌘⇧F | Go to file / search in workspace |
 | ⌘, | Settings |
@@ -173,10 +194,6 @@ Stored in the `settings` table:
 - **Appearance**: the theme (`appearance`: the system's light or dark one, or a theme by name), accent, density; see [Themes](themes.md), with designing your own and importing; names under tool icons.
 - **Features**: turn tools off (`features.disabled`); *System* holds the file manager menu switch.
 - **Zoom**: ⌘= and ⌘- (Ctrl+= and Ctrl+- elsewhere) make the interface, code and terminal text half a point larger or smaller together, kept within each size's bounds; ⌘0 (Ctrl+0) goes back to the default sizes (`Preferences::zoom`). Saved with the other appearance preferences. Back in the editor keeps ⌃- on a Mac and Alt+← elsewhere, so the keys do not meet.
-
-## Architecture map
-
-*Architecture map* in the palette (`arch_map/`) draws the project's parts in layers, foundations at the bottom: the members of a Cargo or npm/yarn/pnpm workspace with their internal dependencies, or the top-level folders otherwise. Each box shows lines of code and main languages (manifests and docs are not counted); a line goes from a part to what it uses directly, transitive ones left out so the picture stays readable. Read from the manifests on this computer, nothing run. *Explain with agent* sends the map to the chat and asks for a short explanation of each part, the main flows and where to start.
 
 ## Opening from outside
 

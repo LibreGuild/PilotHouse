@@ -359,8 +359,7 @@ fn run_tests(project_id: ProjectId, cx: &mut App) -> Task<(String, bool)> {
         for (_, test) in tests {
             let name = test.name.clone();
             let dir = ph_uitest::run::report_dir(project_id, &ph_uitest::model::slug(&name));
-            let variant = (!test.is_android()).then(|| ph_uitest::run::screens().remove(0));
-            let task = cx.update(|cx| ph_uitest::run::run(test, project_id, variant, dir, cx));
+            let task = cx.update(|cx| ph_uitest::run::run_once(test, project_id, dir, cx));
             match task.await {
                 Ok(report) if report.passed() => {}
                 Ok(report) => failing.push(match report.failure() {

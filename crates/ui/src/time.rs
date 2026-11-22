@@ -18,6 +18,15 @@ pub fn ago(time: i64) -> String {
     format!("{value} {unit}{} ago", if value == 1 { "" } else { "s" })
 }
 
+/// "3 days ago" from a time as GitHub writes it (`2026-10-24T08:12:00Z`);
+/// the text itself when it is not one.
+pub fn ago_of(stamp: &str) -> String {
+    match stamp.parse::<jiff::Timestamp>() {
+        Ok(at) => ago(at.as_second()),
+        Err(_) => stamp.to_string(),
+    }
+}
+
 /// How long ago `millis` was, as lists say it: *now*, *5m*, *3h*, *Tue*,
 /// *Mar 4*.
 pub fn age(millis: i64) -> String {
@@ -53,6 +62,8 @@ mod tests {
             .as_secs() as i64;
         assert_eq!(ago(now), "just now");
         assert_eq!(ago(now - 120), "2 minutes ago");
+        assert_eq!(ago_of("1970-01-01T00:00:00Z"), ago(0));
+        assert_eq!(ago_of("soon"), "soon");
         assert_eq!(ago(now - 3_600), "1 hour ago");
         assert_eq!(ago(now - 3 * 86_400), "3 days ago");
     }

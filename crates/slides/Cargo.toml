@@ -1,0 +1,40 @@
+[package]
+name = "ph-slides"
+description = "Slides: decks made of web pages, edited beside a chat, kept as artifacts."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# The deck window's test methods on the control socket (deck.screen,
+# deck.script, deck.keys). Development builds only. See docs/testing.md.
+automation = []
+
+[dependencies]
+ph-artifacts.workspace = true
+ph-brand.workspace = true
+ph-control.workspace = true
+ph-theme.workspace = true
+ph-ui.workspace = true
+ph-webview.workspace = true
+anyhow.workspace = true
+# Pictures and fonts inside an exported web page, and pictures for agents.
+base64 = "0.23"
+gpui-kit.workspace = true
+# A slide's picture made smaller for an agent to look at (already in the tree).
+image = { version = "0.25", default-features = false, features = ["png"] }
+# An agent writes a deck's files with its own tools: the open page follows.
+notify.workspace = true
+# A PowerPoint file is XML in a zip: written for an export, read for a deck
+# started from one (both already in the tree).
+roxmltree = "0.21"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+serde.workspace = true
+serde_json.workspace = true
+smol.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+dunce.workspace = true

@@ -29,7 +29,7 @@ mod truncated;
 mod workspace_colors;
 
 pub use agent_logos::{agent_logo, logo_mark};
-pub use assets::{PilotHouseAssets, custom_icon};
+pub use assets::{PilotHouseAssets, android_icon, custom_icon};
 pub use copy_button::{CopyButton, copy_with_toast};
 pub use diagram::DiagramCard;
 pub use dialog_buttons::dialog_buttons;

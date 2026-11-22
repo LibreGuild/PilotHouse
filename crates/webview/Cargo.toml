@@ -1,0 +1,36 @@
+[package]
+name = "ph-webview"
+description = "The system's web view placed inside one of the app's windows, for pages that are part of the app."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+smol.workspace = true
+tracing.workspace = true
+
+# The system's own web view: WebKit on macOS, WebView2 on Windows. Linux has
+# none that can sit inside a window that is not GTK's, so it is not built
+# there (see `supported`).
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+wry = "0.57"
+
+# A picture of the page and the page as a PDF come from WebKit itself.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSResponder", "NSView", "NSWindow", "NSApplication", "NSEvent", "NSGraphicsContext", "NSRunningApplication"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSDictionary", "NSError", "NSProcessInfo", "NSString"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKSnapshotConfiguration", "WKPDFConfiguration"] }
+# Joins the pages WebKit makes one at a time into one PDF.
+objc2-pdf-kit = { version = "0.3", default-features = false, features = ["std", "PDFDocument", "PDFPage"] }
+
+# A picture of the page and the page printed to a PDF come from WebView2
+# itself (the versions the web view library is built on).
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }

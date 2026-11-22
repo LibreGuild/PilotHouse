@@ -495,6 +495,16 @@ impl Store {
         Ok(())
     }
 
+    /// Saves a finding's wording as the reviewer edited it (before it is
+    /// posted under their name).
+    pub fn set_finding_text(&self, id: i64, title: &str, body: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE pr_findings SET title = ?2, body = ?3 WHERE id = ?1",
+            params![id, title, body],
+        )?;
+        Ok(())
+    }
+
     pub fn set_finding_status(&self, id: i64, status: &str) -> Result<()> {
         self.conn().execute(
             "UPDATE pr_findings SET status = ?2 WHERE id = ?1",

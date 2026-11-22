@@ -78,7 +78,9 @@ pub struct SurfaceView {
     mode: SurfaceMode,
     shapes: Vec<Shape>,
     /// A mark of the owner's (the outline of a picked element): drawn and
-    /// captured with the user's marks, but not theirs to undo or clear.
+    /// captured with the user's marks. Clearing the marks takes it too, and
+    /// so does the next press on the device or page, which it would no
+    /// longer fit.
     highlight: Option<Shape>,
     drawing: Option<Shape>,
     focus_handle: FocusHandle,
@@ -223,17 +225,24 @@ impl SurfaceView {
         cx.notify();
     }
 
+    /// Takes every mark off the picture: the user's, and the owner's
+    /// highlight with them.
     pub fn clear_annotations(&mut self, cx: &mut Context<Self>) {
         self.shapes.clear();
+        self.highlight = None;
         cx.notify();
     }
 
     /// Shows `shape` as the owner's own mark (the outline of a picked
-    /// element), in place of the one before; `None` takes it away. Undo and
-    /// Clear leave it alone: they are for the user's marks.
+    /// element), in place of the one before; `None` takes it away. Undo
+    /// leaves it alone: that is for the marks the user drew.
     pub fn set_highlight(&mut self, shape: Option<Shape>, cx: &mut Context<Self>) {
         self.highlight = shape;
         cx.notify();
+    }
+
+    pub fn has_highlight(&self) -> bool {
+        self.highlight.is_some()
     }
 
     /// What a capture burns in: the user's marks and the owner's highlight.
@@ -291,6 +300,8 @@ impl SurfaceView {
         };
         match self.mode {
             SurfaceMode::Interact => {
+                // What was outlined is about to move or go.
+                self.highlight = None;
                 let right_button = event.button == MouseButton::Right;
                 self.press = Some(Press {
                     at: (x, y),
@@ -432,6 +443,13 @@ impl SurfaceView {
         // editing ones (copy, paste, cut, select all, undo), which the owner
         // maps for the target: with ⌘ on macOS, with Ctrl elsewhere.
         let editing = editing_shortcut(&event.keystroke, cx);
+        // Escape leaves picking or marking; the app's own Escape (Back on a
+        // phone) is for when the pointer is the app's.
+        if self.mode != SurfaceMode::Interact && event.keystroke.key == "escape" {
+            self.set_mode(SurfaceMode::Interact, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.mode != SurfaceMode::Interact || (event.keystroke.modifiers.platform && !editing) {
             return;
         }

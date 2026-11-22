@@ -32,7 +32,7 @@ releases = "https://git.acme.example/tools/code-desk/releases/latest"
 The app reads this file when it is built (`crates/brand`), and so do the packaging scripts (`scripts/package/brand.sh`), so it is the one place to change. A mistake (an unknown key, a name with a `/`) stops the build with a message saying what is wrong.
 
 - **A new `data_folder` is a separate install.** Nothing is copied from the old folder. That is usually what you want: your build and PilotHouse can be installed side by side without touching each other's data. If your people already use PilotHouse and should keep their chats, keep `data_folder = "PilotHouse"` (and `keychain`).
-- **About** says "Acme Code Desk 0.7.0 · based on PilotHouse · Apache-2.0".
+- **About** says "Acme Code Desk 0.8.0 · based on PilotHouse · Apache-2.0".
 - The installers and their file names follow the name: `Acme Code Desk.app`, `AcmeCodeDesk-macOS-universal.dmg`, `AcmeCodeDesk-Windows-Setup-x64.exe`, `AcmeCodeDesk-Linux-x86_64.AppImage` (the name without spaces).
 
 **Icons** are in `brand/icons/`. Make them all from one square picture (a PNG, 1024 px or more):
@@ -53,7 +53,7 @@ That writes `app-1024.png` (Linux), `app-256.png` (in the app), `title-bar.png` 
 - the `refs/pilothouse/*` Git refs and checkpoint commits
 - the `<!-- pilothouse-… -->` markers in pull request comments
 - `PILOTHOUSE_*` environment variables and `TERM_PROGRAM=PilotHouse` in terminals
-- the slide deck data inside `.pptx` files
+- a deck's files (`deck.json`, `deck.css`, `slides/*.html`), the `data-` attributes its slides carry (`data-id`, `data-chart`, `data-shape`) and the `/_artifact/slides/` paths its page calls
 - the Chrome extension, which is named PilotHouse. To give it your name, change `crates/browser/extension/manifest.json` (and its `key`, which sets its id), `EXTENSION_ID`, `HOST_NAME` and `GROUP_TITLE` in `crates/browser/src/extension.rs`, and `HOST` and `GROUP_TITLE` in `crates/browser/extension/background.js`. Or switch the extension off (below).
 
 ## 2. Features on or off
@@ -79,10 +79,12 @@ A feature that is off is not in the app at all. It is not in the tools beside th
 | `usage` | The usage dashboard |
 | `network_drives` | Network drives: Git, shells and runs on a server over SSH |
 | `parallel_runs` | One prompt to several agents, each in its own copy |
-| `presentations` | Slides in Studio, and their agent tools |
+| `presentations` | Slides (decks made under Artifacts, which they need), and their agent tools (`deck_`) |
 | `chrome_extension` | Agents in the user's own Chrome, through PilotHouse's extension |
 | `quick_chat` | A small chat window over every app, opened with a global shortcut |
 | `explanations` | Changes explained in plain words: *Explain* in the Git tab and on a commit, *Why Is This Here?* in the editor |
+| `tour` | The welcome tour: the cards that say what the app has, at a first start and after an update that added some ([features/tour.md](features/tour.md)). An organisation with features of its own can add cards for them, or switch the tour off |
+| `artifacts` | Web pages agents make, kept in the Documents folder and served from this computer, which their owner can share with people on the same network: the *Artifacts* place, and the agents' `artifact_` tools |
 
 Your people can still switch tools off for themselves in *Settings → Features*; that list only shows the tools your build has.
 
@@ -233,13 +235,13 @@ Keep it current: ask your agent to update it whenever it customises something.
 
 ## 7. Merging a new PilotHouse release
 
-PilotHouse publishes a tag per release (`v0.7.0`), one commit each. To take one in:
+PilotHouse publishes a tag per release (`v0.8.0`), one commit each. To take one in:
 
 ```sh
 git remote add upstream https://github.com/LibreGuild/PilotHouse.git   # once
 git fetch upstream --tags
-git switch -c merge-v0.7.0
-git merge v0.7.0
+git switch -c merge-v0.8.0
+git merge v0.8.0
 ```
 
 Then, or ask your coding agent to (the `merge-upstream` skill in `.claude/skills/` walks it through):

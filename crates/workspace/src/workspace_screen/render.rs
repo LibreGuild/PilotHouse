@@ -47,11 +47,7 @@ impl WorkspaceScreen {
                 .outline()
                 .xsmall()
                 .icon(Icons::FlaskConical)
-                .label(if failed {
-                    "UI test failed"
-                } else {
-                    "UI test run done"
-                })
+                .label(if failed { "Tests failed" } else { "Tests done" })
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.show_tab(ContextTab::Tests, window, cx);
                     this.dismiss_away(cx);
@@ -156,6 +152,10 @@ impl WorkspaceScreen {
             match ResultTab::of(tab) {
                 // The one in front has a name of its own, beside the four.
                 other @ ResultTab::Other(_) if front == Some(other) => names.push(other),
+                // Logcat's place is under the phone's screen (Preview →
+                // Phone), whose drawer gives it the whole pane: it is not
+                // also in the list of tools.
+                ResultTab::Other(ContextTab::Logcat) => {}
                 ResultTab::Other(_) => more.push(tab),
                 _ => {}
             }
@@ -173,7 +173,7 @@ impl WorkspaceScreen {
 
     /// The row over the result pane: what it can show, and what the tool
     /// in front adds (the browser or a phone; the tree beside the editor).
-    fn render_result_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_result_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let space = cx.entity();
         let (names, more) = self.result_names(cx);
         let front = self.layout.tab();
@@ -199,6 +199,7 @@ impl WorkspaceScreen {
             .icon(Icon::new(tab.icon()))
             .selected(tab == front)
         });
+        let tabs: Vec<ph_ui::PillTab> = tabs.collect();
         let more_menu = (!more.is_empty()).then(|| {
             let space = space.clone();
             Button::new("more-tools")
@@ -223,12 +224,45 @@ impl WorkspaceScreen {
         // Preview: the browser or a phone, when the build has both; the
         // one switch other panes have for two views of one thing (a
         // file's changes, unified or split).
-        let preview = (front == ResultTab::Preview
+        let has_preview = front == ResultTab::Preview
             && enabled.contains(&ContextTab::Browser)
-            && enabled.contains(&ContextTab::Devices))
-        .then(|| {
+            && enabled.contains(&ContextTab::Devices);
+        // In a pane without room for every name, the switch gives way
+        // first, to its two icons (which say as much: a browser, an Android
+        // device); the tabs fold after it, if they still do not fit.
+        const SWITCH: f32 = 152.;
+        const BUTTON: f32 = 32.;
+        let named = ph_ui::PillTabs::full_width(&tabs)
+            + 16.
+            + if more_menu.is_some() { BUTTON } else { 0. }
+            + if has_preview { SWITCH + 4. } else { 0. };
+        let (narrow, probe) = ph_ui::measure::narrower_than("context-tabs-room", named, window, cx);
+        let preview = has_preview.then(|| {
+            use gpui_kit::component::tab::{Tab, TabBar};
             let space = space.clone();
-            gpui_kit::component::tab::TabBar::new("preview-kind")
+            // An icon in place of a name says the name when pointed at.
+            let icon = |id: &'static str, icon: Icon, name: &'static str| {
+                div().id(id).child(icon.small()).tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(name).build(window, cx)
+                })
+            };
+            let (browser, phone) = if narrow {
+                (
+                    Tab::new().aria_label("Browser").child(icon(
+                        "preview-browser",
+                        Icon::new(ContextTab::Browser.icon()),
+                        "Browser",
+                    )),
+                    Tab::new().aria_label("Phone").child(icon(
+                        "preview-phone",
+                        ph_ui::android_icon(),
+                        "Phone",
+                    )),
+                )
+            } else {
+                (Tab::new().label("Browser"), Tab::new().label("Phone"))
+            };
+            TabBar::new("preview-kind")
                 .segmented()
                 .small()
                 .selected_index(usize::from(self.layout.tool == ContextTab::Devices))
@@ -240,8 +274,8 @@ impl WorkspaceScreen {
                     };
                     space.update(cx, |space, cx| space.show_tab(tool, window, cx))
                 })
-                .child(gpui_kit::component::tab::Tab::new().label("Browser"))
-                .child(gpui_kit::component::tab::Tab::new().label("Phone"))
+                .child(browser)
+                .child(phone)
                 .into_any_element()
         });
         // Files: the tree makes way for the editor.
@@ -266,17 +300,19 @@ impl WorkspaceScreen {
         });
         h_flex()
             .id("context-tabs")
+            .relative()
             .flex_none()
             .px_2()
             .py_1p5()
             .gap_1()
             .border_b_1()
             .border_color(cx.theme().border)
+            .child(probe)
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(ph_ui::PillTabs::new("result-tabs", tabs.collect())),
+                    .child(ph_ui::PillTabs::new("result-tabs", tabs)),
             )
             .children(more_menu)
             .children(preview)
@@ -494,7 +530,7 @@ impl Render for WorkspaceScreen {
                 .into_any_element()
         });
         let result = self.layout.result_open.then(|| {
-            let bar = self.render_result_bar(cx);
+            let bar = self.render_result_bar(window, cx);
             let content = self.render_result(window, cx);
             crate::frame::island(window, cx)
                 .child(bar)

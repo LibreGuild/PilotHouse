@@ -30,7 +30,6 @@ pub fn register_control_methods(cx: &mut App) {
     ControlServer::handle("studio.edit", edit, cx);
     ControlServer::handle("studio.undo", undo, cx);
     ControlServer::handle_async("studio.export", export, cx);
-    crate::slides::control::register_control_methods(cx);
 }
 
 /// A document open in Studio.

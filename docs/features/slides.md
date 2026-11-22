@@ -1,140 +1,118 @@
 # Slides
 
-Crate: `ph-studio` (`slides/`). Window: `ph_workspace::studio_window` (`open_presentation`). Dialogs: `ph_workspace::presentations`.
+Crates: `ph-slides` (the deck, its page, comments, exports, PowerPoint in and out) and `ph-webview` (the system's web view inside a window). Window: `ph_workspace::slides_window`. Agent tools: `crates/mcp/src/tools/decks.rs`.
 
-Slides is Studio's presentation editor: decks made by hand or by describing them to an agent in the chat beside them, in a model of PowerPoint's own kind, drawn by PilotHouse and exported as editable PPTX, PDF or pictures.
+Slides makes presentations beside a chat: the agent drafts and changes the deck, the user changes it by hand, points at things and comments on them, presents it, shares it and exports it. A deck is an [artifact](artifacts.md) of the kind `slides`: a folder of web pages, kept and served like any other artifact.
 
 ## Finding it
 
-The **More** button (⋯) right of the search in the title bar has **New presentation**, **Open presentation…** and the five latest presentations, then the tools only the palette reached before (Utilities, Architecture map, Parallel runs, Schedules, Usage, Network drives, Agent instructions, Search chats) and Help (Keyboard shortcuts, Settings). The command palette has New and Open presentation too.
+- The **Slides** card at the head of the Artifacts page makes a deck and opens its window. Decks are listed with the other artifacts (their card says *Slides*) and open in their window; the palette has **New slides**.
+- **In a workspace's chat**, ask for a presentation of what is there ("make a deck about how sign-in works here"): the agent makes the deck, reads the code, and writes the slides. See [From a workspace](#from-a-workspace).
+- A PowerPoint file (`.pptx`, `.potx`) in Files has **Open as Slides**: a deck is made from it and opened. The file itself is not changed.
 
-- **New presentation**: a title, a size (16:9, 16:10, 4:3, A4 and US Letter either way, 1:1, 4:5, 9:16) and a theme, picked from a title slide drawn in each (the built-in ones and the user's own). An optional brief is sent to the agent when the window opens, to draft the deck.
-- **Open presentation**: every presentation, newest first, with a picture of its first slide, searchable. **Open a PowerPoint file** opens any `.pptx` or `.potx` (see [PowerPoint files](#powerpoint-files)). In the Files tree, a PowerPoint file's menu has **Open in Studio Slides**.
-
-## Spaces
-
-Each presentation is a folder in `Documents/PilotHouse Presentations/` (the home folder without a Documents folder; `PILOTHOUSE_PRESENTATIONS` overrides it, for scratch profiles and tests):
-
-| | |
-|---|---|
-| `deck.json` | The deck |
-| `media/` | Its pictures, named by what they hold (the same picture added twice is kept once); pictures over 3,840 pixels a side are made smaller when added, and a copy at most 960 pixels a side (`media/.small/`) draws the small pictures quickly |
-| `references/` | Files to work from (the References panel), for the agent and for slides |
-| `source.pptx` | The PowerPoint file the deck was opened from, when it was (its masters and layouts are written back from it) |
-| `exports/` | What Export writes |
-| `.versions/` | The deck as it was, kept every five minutes while it changes (the last 20) |
-| `.thumbnail.png` | Its first slide, for the Open dialog |
-
-The deck saves itself 0.7 seconds after the last change, written beside the file and moved over it, and once more when the window closes. Themes the user saves are in `Themes/*.json` there.
-
-The space is also a project in the store (`ProjectKind::Presentation`, found or made by `presentation_space`): its chats, agents, checkpoints and usage stay with it, and it is not shown as a workspace. The agent works in the presentation's folder.
+The feature is the brand's `presentations` key and needs `artifacts`.
 
 ## The window
 
+The chat is on the left (its width is kept; at least 340 points), the deck on the right. The deck is a web page shown in the system's web view (WKWebView on macOS, WebView2 on Windows) with no browser controls, so it reads as part of the window; its colours and sizes follow the app's theme and interface size. On Linux there is no web view to put in the window: the deck opens in the user's browser and the window keeps the chat.
+
+The system draws a web view over everything the app draws, and gives it the keyboard when it is clicked. The window deals with both:
+
+- **Keys.** A click in the app's part of the window takes the keyboard back from the web view (`WebView::release_keys`), so what is typed in the chat never acts on the deck. When the page takes the keyboard it says so, and the app's focus moves to the window itself, so ⌘Z, ⌘V or ⌘A meant for the deck never act on the chat's box. On macOS the *Edit* menu (Cut, Copy, Paste, Select All) is what sends those commands to a web view.
+- **What the app draws over the deck.** While a dialog, a sheet, a note at the window's edge, or a menu or pop-up of the chat is open, the web view steps aside and a picture of it stands in its place (`DeckView::cover`), so the deck seems to stay and the app's thing shows over it. A tooltip of a button at the chat's right edge can still be cut by the deck.
+
+## From a workspace
+
+A deck about a project is made where the project is: in the workspace's chat, whose agent has the code. The deck then *belongs* to that workspace (`artifact.json`: `source`), and the workspace's chats are the deck's.
+
+1. The user asks in the workspace's chat. The agent calls `deck_create` (a title, a look), which makes the deck with the artifacts (not in the workspace) and says where its files are.
+2. The deck shows beside the chat at once, in the result pane's browser: the slides alone (the deck's page with `?preview`), the one written last in front, updating as the agent writes. Nothing else opens by itself.
+3. **Open in Slides**, on that preview, opens the deck's window: the deck on the right, and on the left *the same conversation*, since the chat of a workspace's deck is the workspace's (same agent, same folders, same history; the two windows show one chat). There the user changes the deck by hand, comments, presents and exports, and the agent still knows the code.
+4. Later, from Artifacts, the deck opens in that window with the workspace's chat it was last worked on in (`slides.chat.<deck>` in the settings).
+
+Details:
+
+- **Which workspace** a deck works from is said at the right of the deck window's title bar, and changed there: any workspace, or *No workspace: this deck only* (the deck's own chat, working in the deck's folder). A deck made under Artifacts can be given a workspace this way. When a deck's workspace is gone, the deck opens with its own chat.
+- **Permissions.** Making a deck (`deck_create`) and exporting one ask as the chat's mode says. In a workspace that has a deck, its chats read and change the deck's files and use `deck_guide`, `deck_look`, `deck_comments`, `deck_import` and `deck_list` without being asked, as a deck's own chat does (`ph_agent::own_files`, kept up by the window shell as decks are made, renamed, given away and deleted).
+- **Several decks.** The deck tools work on the workspace's deck changed last, unless `deck` names one (its id or title); `deck_list` shows them. Messages sent from a deck's window name that deck.
+- **Without the deck's window.** What does not fit, pictures of slides and exports need the deck drawn somewhere. A deck whose window is not open is drawn out of sight in another window of the app (`Decks::drawer`: a web view beyond the window's edge, kept for the two decks drawn last), so `deck_look` and `deck_export` work from the workspace's chat before the user has opened anything. Its picture in the Artifacts list is taken there too.
+- **What the user changed by hand** since the agent last looked is said by `deck_look` (and with each message sent from the deck's window).
+- In a build without the built-in browser, the deck's window opens in place of the preview.
+
+## The deck's files
+
 ```
-┌ title: Studio · title                  ↶ ↷ ⋯ ▶ Present ▾  [Export ▾] [Agent] ┐
-│ + Slide ▾ │ Text Shape▾ Picture Table▾ Chart▾ Icon Code SVG │ Layout Theme Size −%+ 💬 📁 ✎│
-├──────────┬─────────────────────────────────────────┬─────────────┬──────────┤
-│ 1 ▭      │                                         │ Comments or │ chat     │
-│ 2 ▭      │                the slide                │ References  │ (toggle) │
-│ 3 ▭      │                                         │ (toggle)    │          │
-│          ├─────────────────────────────────────────┤             │          │
-│ + New ▾  │ the bar: what the selection takes       │             │          │
-│          │ speaker notes                           │             │          │
-└──────────┴─────────────────────────────────────────┴─────────────┴──────────┘
+<artifact>/
+  artifact.json        kind: "slides"
+  site/                what is served
+    deck.json          title, size, transition, the slides in order
+    deck.css           the deck's look: variables and rules for every slide
+    slides/<name>.html one slide each: a <section class="slide">
+    media/             pictures and videos, named by what they hold
+  references/          files to work from (never served)
+  exports/             what Export writes
+  comments.json        comments (never served as a file)
 ```
 
-- **The rail**: the slides, a picture each (made only for those in view and near it). Click to go to one; drag to move it; right-click for a new slide after it, duplicate, hide in presenting, start a section (named, shown on the slide that starts it), present from here, move up or down, delete.
-- **The toolbar**: a new slide in a layout, a text box (typed in at once), shapes (lines and arrows, rectangles, ovals, arrows, stars, callouts and more), pictures (from files, or pasted), tables, charts (column, stacked column, bar, line, area, pie, doughnut, scatter; the data dialog opens), icons (a searchable library of about 230), code (coloured as in an editor), and SVG drawings (pasted or from a file). Then the slide's layout, the theme (built in, the user's, colours and fonts, save this theme), the size (or a custom one in inches, centimetres, pixels or points; what is on the slides is scaled), the zoom and the notes. A narrow window (the chat open) shows icons only, their names in tooltips.
-- **The slide**: click to select (⇧ or ⌘ to add), drag in an empty place to select what is inside the box. Drag to move; ⇧ keeps to one axis; edges and middles snap to the slide's and to other elements' (guides show), ⌘ while dragging stops snapping. The eight handles resize (⇧ keeps proportions; pictures and icons keep them from a corner unless ⇧; ⌥ from the middle); the round handle above turns it (in 15° steps with ⇧, a full turn snapping back to none). Turned elements are picked, resized and snapped by their own outline.
-- **Typing in place**: double-click (or Enter) a text box, shape or code. The text shows as Markdown (`**bold**`, `*italic*`, `~~struck~~`, `` `code` ``, `[link](url)`, `- ` bullets, `1. ` numbers, two spaces more a level) in the element's own size, colour and font; ⌘B, ⌘I, ⇧⌘X and ⌘E mark the selected words. Escape or a click elsewhere ends it. A changed line becomes what was typed, keeping its colour, size and font; lines left as they were keep every style. An empty new text box goes away. Double-click a table or a chart for its cells or data, an icon to change it, a picture to replace it, an SVG drawing for its source.
-- **Lines and connectors**: a selected line shows its two ends, not a box. Drag an end onto the side of another element (its middles show as dots while dragging) and the end is fixed there, shown filled; the line then follows that element wherever it moves or resizes (`connectors.rs`, on every change). Dropping an end elsewhere, or moving the line on its own, lets go.
-- **Cropping**: a picture's **Crop** turns its handles into crop marks; dragging a side or corner cuts the picture (or uncovers it again, up to all of it) while the picture stays where it is. Esc, Done cropping or a click elsewhere ends it. A picture that filled or fitted its frame is cropped to what it showed, then stretched to the frame from there.
-- **The bar** shows what the selection takes. Text: font (the theme's heading, body or code font, or a family the system has), size, bold, italic, underline, strike, colour, alignment, bullets, numbers, indent, line spacing, where the text sits in its box, and what happens when there is too much (shrinks to fit, the box grows, runs over). Shapes: fill, outline colour, width and dashes, arrowheads on lines, shadow. Pictures: crop, fill or fit the frame, corners, shadow, replace. Tables: edit cells, header row, banded rows, header colour, text size. Charts: edit data, kind, legend, values. Code: language, dark, line numbers, size. Icons: colour, weight, change. Several: line them up, space them out, group. Each: how it comes in when presenting (**Animate**: appear, fade, fly in, zoom or wipe; on a click, with the one before or after it; from which side; how long; earlier or later in the slide's order), order (front, back), on the slide (centred, left …), opacity, duplicate, delete. Nothing selected: the slide's background, its transition (fade, push, wipe, cover, zoom or dissolve, from which side, how long) and hiding it in presenting.
-- **Comments** (💬, with the number open on this slide): the slide's comments, each with its replies; Reply, Resolve (resolved ones go below, dimmed, and can be reopened), Delete. A comment written with one element selected is about that element; its numbered marker sits on the element's corner and follows it. Clicking a marker opens the panel to reply to it. The agent reads comments with the slides and can answer and resolve them.
-- **References** (📁): the files in the space's `references/` folder, with their pages or slides counted. **Add files** or dropping files copies them in. Each one's menu puts it on the slide: a picture as itself; a PDF page or a PowerPoint slide as a picture (any of the first 40); Markdown or text as a text box; a CSV or TSV as a table, or as a column chart (the first column names the categories, each column of numbers a series). **Ask the agent to use it** starts a message about it in the chat; Open and Show in Finder too.
-- **Find and replace** (⌘F): text in every slide's boxes, shapes and tables; how many times it is found as it is typed; **Find next** goes to the slide and selects the element; **Replace all** is one step to undo.
-- **Colours** are offered as the theme's (text, background, accents) with lighter and darker steps of each, then standard colours. A colour picked from the theme stays the theme's: another theme recolours it.
-- **Speaker notes** under the bar, per slide.
-- **Keys**: ⌘Z, ⇧⌘Z; ⌘F find and replace; Delete; ⌘D duplicates (the slide when nothing is selected); ⌘C, ⌘X, ⌘V (elements, between decks too; text pastes as a text box, a picture as a picture); ⌘G and ⇧⌘G group and ungroup; ⌘A; arrows nudge a point (⇧ ten), or with nothing selected go through the slides; Page Up and Down; ⌘M a new slide; ⌘] ⌘[ forward and backward, ⇧ to the front and back; ⌘↩ presents from this slide, ⇧⌘↩ or F5 from the start.
-- **Title bar**: undo and redo; ⋯: rename (the window's title and the chat's heading follow), save the theme for other decks, earlier versions (go back to one, which can be undone), show in Finder; **Present ▾** (from this slide, from the start, rehearse); **Export**.
+`deck.json` lists each slide's file with its speaker notes, whether it is skipped, its section and transition; fields a build does not know are kept. A slide is 1920 × 1080 unless the deck says otherwise.
 
-## Model
+The files are the truth. The agent edits them with its own tools; a watcher sees the change (140 ms after the last write) and every open page draws it. A change made in the page is sent with the marks of the files it was made on, and is refused if one changed meanwhile (the page reads again and tries once more). Every change is one step of undo, whoever made it: typing within 2 seconds is one step, an agent's burst of writes within 6 seconds is one step.
 
-`model.rs`: lengths are points (16:9 is 960 × 540; the PPTX writes EMU, 12,700 a point).
+## Changing a deck by hand
 
-- **Deck**: title, size, theme, slides, sections. Slides are shared (`Arc`), so a copy of the deck (an undo step, a picture drawn off the UI thread) shares the slides it did not change.
-- **Slide**: its layout, background, elements, notes, hidden, transition (kind, the side it comes from, seconds), animations (in order: the element, effect, side, start, seconds, delay) and comments (author, text, where, the element, resolved, replies).
-- **Element**: an id that stays its own (`e12`), a name, a frame (x, y, w, h, rotation, flips), the placeholder it fills, opacity, and its kind: shape (24 outlines or a path, fill, line with arrowheads, shadow, text; a line may be fixed to elements' sides, and a PowerPoint outline name kept), text box, picture (crop, fit, corners), table (cells with fills and spans, header, banded rows), chart, code, icon, SVG, group, or a PowerPoint object kept as it was (a video, an equation, ink …: its XML and files, drawn from its picture, moved and resized only).
-- **Text**: paragraphs (alignment, level, bullet or number, spacing) of runs (font, size, bold, italic, underline, strike, colour, highlight, link, baseline). Unset properties come from the placeholder, then the theme. Text given as a string is read as Markdown.
-- **Colours**: a theme slot (`accent1`, `accent1+40` lighter, `accent1-25` darker) or `#RRGGBB[AA]`.
-- **Theme**: twelve colours, heading, body and code fonts, a background, decorations on every slide (a logo, a bar), title and body styles, and twelve layouts (title, title and content, section, two content, comparison, title only, statement, quote, picture and caption, agenda, closing, blank), made for the deck's size (portrait sizes get layouts of their own). Twelve built in (`theme.rs`): Clean, Harbor, Midnight, Slate, Paper, Bold, Corporate, Sunset, Forest, Mono, Pastel, Ocean.
-- **Operations** (`ops.rs`): every change, for the editor and for agents alike: add, duplicate, remove, move and update slides; add, update (a JSON merge), remove and order elements; set and style text; replace text; group, ungroup, align, distribute; animate and unanimate; add, reply to, resolve and remove comments; set the theme, a saved theme, its colours and fonts; set the size; sections; the title. A list applies as one step, all or none. SVG that does not parse and unknown icons are refused.
+- **Insert**: text (`T`), a picture, a video, a table, a chart, shapes. A picture or video can be dropped or pasted in; a chart keeps its numbers (`data-chart`) and is changed in a small sheet.
+- **Select, move, resize**: with snapping and guides; arrows nudge (Shift: ten at a time); pictures crop; ⌘D duplicates; ⌘C, ⌘X and ⌘V go through the system's clipboard, so a thing copied from one deck pastes into another.
+- **Type in place**: double click or Enter. The bar over the selection has the text style, colour, bold, italic, underline, link, lists and alignment; the panel on the right has text, layout, appearance, and the deck's and slide's own settings.
+- **Slides**: the strip under the stage, or the grid (with sections and notes); add one from ten layouts, duplicate, move, skip, delete; speaker notes under the slide.
+- **Looks**: six to start from (Paper, Midnight, Clean, Forest, Bold, Slate), chosen in an empty deck or the panel; `deck.css` is the deck's own and can say anything.
+- **Zoom**: `+`, `−` and `0` (fit), or the menu.
 
-## Drawing
+## Comments
 
-One renderer, so the editor, the rail, presenting, PNG, PDF and what the agent sees always match: a slide becomes SVG (`svg.rs`), which resvg draws (`raster.rs`) or svg2pdf writes as a PDF page (`pdf.rs`). Text is laid out by cosmic-text with the system's fonts (`text.rs`: wrapping, alignment, bullets and numbers, spacing, shrinking to fit) and drawn as SVG text at the widths laid out. A family missing here is drawn in a look-alike (Liberation, DejaVu …; `fonts.rs`), and its weight is the nearest the family has, so layout and drawing use the same face. Charts (`charts.rs`), code highlighted by syntect (`code.rs`), shapes (`shapes.rs`) and icons (`icons.rs`, Lucide) are drawn the same way.
+A comment is on an element or on a slide: a pin on the stage, a count on the slide's tile, a thread with replies, resolved when done. **Send to the agent** puts the comment in the chat as a message that names the slide's file and the element; the agent makes the change and answers in the thread (`deck_comments`).
 
-Pictures of slides are made off the UI thread (`document.rs`), the one being edited first, then those in the rail in view, a few at a time. Each is kept until its slide or the theme changes; a change shows the last picture until the new one is ready. Nothing is drawn while nothing changes.
+## Presenting and sharing
 
-## Presenting
-
-**Present** (⌘↩ from this slide; ⇧⌘↩ or F5 from the start) shows the slides full screen, hidden ones left out, on another screen when there is one. →, ↓, Space, Page Down, Enter, N or a click go on; ←, ↑, Page Up, Backspace, P or a right-click go back; Home and End; B or . blanks the screen; Esc ends.
-
-- **Transitions**: fade, push, wipe, cover, zoom and dissolve (drawn as a fade), from the side set, taking the time set.
-- **Animations**: going on plays the slide's next build (the elements that come in on one click, with those set to go with or after them) before the next slide; a first build not on a click plays by itself once the slide is in. Each element comes in its own way: appear, fade, fly in from a side, zoom, wipe from a side. A click during a build finishes it; going back undoes a build, then shows the slide before as it ended. Each element coming in is drawn alone (`svg::element_layer`), over the slide drawn without the elements still to come; nothing is drawn between builds.
-- **The presenter's view**: with a second screen, this one shows the slide (as it will be after the build playing), the next, the notes, the time, the slide and click it is at, and Back, Next and End. **Rehearse in the presenter's view** (Present ▾) opens that view in a window on this screen, to go through the talk with its notes and builds (transitions and animations are not played there).
-
-The slide shown (its builds either side) and the next are drawn at the screen's size ahead, so going on is instant; the others are let go, and each window frees the pictures it drew.
+- **Present** fills the screen with the slides. **Present with notes** keeps the presenter's view in the window (the slide, the next one, the notes, a clock) and opens the slides for the audience in a second window, on another screen when there is one.
+- A deck is shared like any artifact (*Share on your network*): people open its link in their browsers and see the slides, and follow the presenter while the deck is presented.
 
 ## Export
 
-**Export ▾**: for a deck opened from a `.pptx`, **Save to *name*.pptx** first (it asks before writing over that file); then PowerPoint (.pptx), PDF, PDF with speaker notes, pictures of every slide (PNG), a picture of this slide; **Export as** asks where; **More options** chooses the slides (all, this one, or `1-3, 5`), notes pages, and the pictures' width (1280, 1920, 3840). Files go to the presentation's `exports/` folder, named after its title, which opens when they are written.
+To the deck's `exports/` folder, shown in its folder when written:
 
-- **PPTX** (`pptx.rs`, own writer over `zip`): the theme's colours and fonts as a PowerPoint theme; its layouts as slide layouts (PowerPoint's New Slide offers them) with their placeholders; shapes as PowerPoint shapes (preset outlines, or paths as custom geometry) with real, editable text (sizes, styles, bullets, numbers, spacing, line breaks, the shrink worked out here, links); lines fixed to elements as PowerPoint connectors; pictures with their crop (fit by cropping or by the frame); tables with fills, borders and merged cells; charts as native charts with their data and an embedded workbook (`xlsx.rs`), so PowerPoint's Edit Data works; code as coloured text; icons and SVG as SVG pictures with a PNG beside for older readers; groups; notes; sections; hidden slides; transitions; animations as PowerPoint's timing (entrance effects, on click, with or after the previous); comments with their replies (as PowerPoint 2013's threaded comments; a resolved one is marked "[Resolved]"); PowerPoint objects kept as they were. Theme colours are written as theme colours, so another theme in PowerPoint recolours them. The deck's own JSON goes in as `pilothouse/deck.json`, with a fingerprint of the slides as written, so it opens here again exactly; a file changed since in another program is read from its slides instead.
-- **PDF**: a page a slide (with notes, a notes page after each), vector, text kept as text with its fonts in the file.
-- **PNG**: one picture, or a folder of them for several slides.
-
-## PowerPoint files
-
-`pptx_read.rs` reads any PowerPoint file into a presentation space of its own (best effort for files made elsewhere; a deck made here comes back exactly). Opening the same file again, unchanged since, opens that presentation again; a file changed since is read anew.
-
-- **Read**: the slide size; the theme (colours, fonts, the colour map); masters and layouts (backgrounds, decorations, placeholders matched to ours with PowerPoint's type and index kept); slides with backgrounds, shapes (outlines matched to ours, the preset kept), text boxes and placeholders (styles from the layout, master and theme, worked into the text), pictures with crops, tables, groups, connectors (fixed to their shapes), charts (from their cached data), SmartArt (from its drawing), sections, notes, hidden slides, transitions, entrance animations and comments (legacy, threaded and modern, with replies and resolution). What has no counterpart here (video, audio, equations, ink, OLE objects …) is kept as a PowerPoint object: drawn from its picture and written back as it was. What could not be read is listed when the file opens.
-- **Written back**: while the theme is the one read, an export reuses the file's own masters, layouts and theme verbatim (`source.pptx`), so a corporate template keeps its look exactly; a theme changed here is written as ours. **Save to *name*.pptx** writes over the original (after asking), and opening that file again opens this presentation.
-
-## With an agent
-
-The chat beside the deck is the presentation's own. Its starters: draft the deck, tighten the words, make it look better, an executive summary. Each message tells the agent which deck is open, its folder and `references/`, and what the user has selected (the slide, the elements, the words selected while typing), so "make this bigger" or "rewrite this paragraph" work. In this chat the tools that look at and change the deck run without asking; exporting asks.
-
-| Tool | Does |
+| | |
 |---|---|
-| `slides_get` | The deck in outline (size, theme, every slide's elements with ids, frames and text, the selection) and a guide to the model and every operation; `slide` shows one in full; `render` attaches pictures of slides |
-| `slides_edit` | `ops`: operations applied in order as one step the user can undo (all or none); `import` copies pictures into the deck's media first |
-| `slides_undo` | Undo, or redo |
-| `slides_themes` | The built-in themes with their colours and fonts, the saved ones, the current layouts and their placeholders' places, the sizes, and icon names |
-| `slides_export` | PPTX, PDF (notes) or PNG into `exports/` (or a path), never over a file unless asked |
+| PDF | One page a slide, text as text, as the page draws it |
+| Web page | One `.html` file with the slides, the look, the pictures and the fonts in it |
+| PNG | The slide on the stage |
+| PowerPoint, these fonts | Real text boxes, shapes, pictures, tables and charts (with their numbers), notes and transitions, each where the page draws it |
+| PowerPoint, basic fonts | The same, in Arial, Georgia and Courier New, for computers without the deck's fonts |
 
-They are the `slides.*` control methods (`control.rs`).
+A PDF, a picture and a PowerPoint file are made from the deck's page, in a second web view that is never shown, so the page the user works in is not disturbed.
 
-## Code map
+## PowerPoint files in
 
-| File | What |
+**Start from a PowerPoint file** in an empty deck, a `.pptx` dropped on the page, *Open as Slides* in Files, or the agent's `deck_import`: the file's slides become slides of the deck, each element where it was (`section.slide.imported`), with the file's colours and fonts, its pictures (in `media/`), tables, charts with their numbers, and notes. An empty deck takes the file's size and look. The file is read within limits (5,000 parts, 200 MB a part, 1 GB in all, 500 slides).
+
+## The agent
+
+Each message in a deck's chat tells the agent where the deck's files are, what is selected on the stage, and what the user changed by hand since its last turn. It changes the deck by editing the files, which it may do in `site/` without being asked (`ChatContext::own_files`), and has these tools (in a workspace's chat they work on that workspace's decks):
+
+| Tool | |
 |---|---|
-| `slides/model.rs` | The deck: slides, elements, text, colours, fills, themes and layouts |
-| `slides/ops.rs` | Every change, for the editor and for agents |
-| `slides/theme.rs` | The built-in themes and their layouts, for each size |
-| `slides/markdown.rs` | Markdown to slide text and back |
-| `slides/text.rs`, `slides/fonts.rs` | Styles resolved, text laid out; the system's fonts and look-alikes |
-| `slides/svg.rs`, `slides/raster.rs`, `slides/charts.rs`, `slides/code.rs`, `slides/shapes.rs`, `slides/icons.rs` | Drawing a slide |
-| `slides/pptx.rs`, `slides/xlsx.rs`, `slides/pdf.rs` | Export; charts' workbooks |
-| `slides/pptx_read.rs` | Reading any PowerPoint file |
-| `slides/connectors.rs` | Lines whose ends follow elements |
-| `slides/space.rs` | A presentation's folder: saving, versions, media, the list, saved themes, PowerPoint files opened (and opened again) |
-| `slides/document.rs` | One deck being edited: history, saving, pictures of slides, export |
-| `slides/editor/` | The window's content: `mod.rs` (commands, keys, title bar), `canvas.rs` (the slide, selecting, moving, typing), `geometry.rs` (hits, handles, resizing, snapping), `rail.rs`, `toolbar.rs`, `bar.rs`, `dialogs.rs` (also find and replace), `side.rs` (comments and references), `present.rs` (presenting, builds, transitions, rehearsing) |
-| `slides/control.rs` | `slides.*` for agents |
-| `workspace/presentations.rs`, `workspace/title_bar.rs` | New and Open presentation; the More menu |
+| `deck_create` | In a workspace's chat: makes a deck for the workspace (asks first) |
+| `deck_list` | The workspace's decks |
+| `deck_guide` | How a deck is written: the files, the rules, charts and shapes, what good looks like |
+| `deck_look` | The deck as drawn: each slide's title, what does not fit or is hard to read, the selection, open comments, what the user changed by hand; with `render`, pictures of up to 8 slides |
+| `deck_comments` | Reads the comments; replies to one and resolves it |
+| `deck_import` | Makes slides from a PowerPoint file |
+| `deck_export` | Writes a PDF, web page, picture or PowerPoint file (asks first) |
 
-## Not yet
+## Not there
 
-Exit and emphasis animations and motion paths (read as entrances, or left out), PowerPoint's modern comments written as such (they are written as threaded legacy comments, which PowerPoint reads), transitions beyond the six (each is read as the nearest), editable slides pulled in from a reference deck (they come in as pictures; the agent can rebuild them), and the presenter's view showing animations as they play.
+- On Linux the deck is in the browser, not in the window; exports that need the page (PDF, PNG, PowerPoint) need macOS or Windows.
+- Presentations made with the earlier editor (folders in `Documents/<name> Presentations`) are not opened. A `.pptx` exported from one opens as Slides.
+
+## Working on it
+
+The page is plain modules in `crates/slides/src/page/`, built into the app; a debug build reads them from the folder named by `PILOTHOUSE_SLIDES_PAGE`, so a change shows on reload. A development build (`automation`) has three methods for tests of the deck's window: `deck.screen` (a picture of the page as the window shows it), `deck.script` (a script in it) and `deck.keys` (who has the keyboard; a key pressed as the system presses it, on macOS). See [testing.md](../testing.md).

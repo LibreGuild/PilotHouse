@@ -23,9 +23,7 @@ pub mod text_dialog;
 pub use ph_git as git;
 
 pub use branch_picker::{BranchPicker, ago};
-pub use changes_panel::{
-    Attention, ChangesPanel, ChangesPanelEvent, Evidence, EvidenceKind, GitView,
-};
+pub use changes_panel::{Attention, ChangesPanel, ChangesPanelEvent, GitView};
 pub use commit_box::{Writer, clean_message, commit_prompt, cut};
 pub use ph_preview::diff::file_diff;
 pub use repo::{Repo, RepoEvent};

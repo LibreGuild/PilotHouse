@@ -114,9 +114,9 @@ impl LoneFile {
                 window,
                 |_, _, event: &ph_files::FileViewEvent, window, cx| {
                     if let ph_files::FileViewEvent::EditMedia(path) = event
-                        && ph_studio::slides::space::is_powerpoint(path)
+                        && crate::slides_window::opens(path, cx)
                     {
-                        crate::presentations::open_powerpoint(path.clone(), window, cx);
+                        crate::slides_window::create_from(path.clone(), window, cx);
                     } else if let ph_files::FileViewEvent::EditMedia(path) = event
                         && let Err(err) = crate::studio_window::open(path.clone(), None, cx)
                     {

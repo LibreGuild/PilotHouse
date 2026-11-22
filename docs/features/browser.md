@@ -6,7 +6,7 @@ Which browser: the one chosen in the pane (setting `browser.chrome_path`), else 
 
 ## How it works
 
-1. **Start when asked.** Chrome starts when you press **Start the browser** in the pane (which says *The browser is not running* until then), when you enter an address, or when an agent calls a browser tool. Showing the pane starts nothing (it did before: a look at Preview launched a program nobody asked for). It runs headless with a per-project profile in `<data dir>/browser/<project id>` (private to you), so logins are kept for the workspace.
+1. **Start when asked.** Chrome starts when you press **Start the browser** in the pane (which says *The browser is not running* until then, and names the other browser there is, your own Chrome with its sign-ins, with a button to its settings), when you enter an address, or when an agent calls a browser tool. Showing the pane starts nothing (it did before: a look at Preview launched a program nobody asked for). It runs headless with a per-project profile in `<data dir>/browser/<project id>` (private to you), so logins are kept for the workspace.
 2. **DevTools over a pipe.** PilotHouse talks to Chrome through `--remote-debugging-pipe` (file descriptors 3 and 4), attaches to the page with a flat session, and enables Page, Runtime, Log and Network. There is no localhost port that other processes could use, and Chrome exits on its own when PilotHouse does, even after a crash.
 3. **Frames.** While the pane is visible, `Page.startScreencast` sends JPEG frames sized to the pane (at the screen's scale). Each frame is decoded off the UI thread and acked after decoding, so only one frame is ever in flight. Hidden panes and other projects stream nothing.
 4. **Input.** Clicks, drags, the wheel and keys go through `Input.dispatch*Event`. ⌘V pastes, and ⌘C/⌘X copy the page selection through the system clipboard.
@@ -19,7 +19,7 @@ Chrome's sync, component updates, metrics and other Google services are switched
 ## The pane
 
 - **Address bar** with back, forward and reload. `localhost:3000`, `:5173` and `127.0.0.1:8080` work.
-- **Live tools** (the floating toolbar): annotate, pick an element, capture, record, before/after. See [live-panes.md](live-panes.md).
+- **Live tools** (in the toolbar, beside the address; in the **⋯** menu when the pane is too narrow for them and the address): pick an element, mark, capture, record. See [live-panes.md](live-panes.md).
 - **Console and Network** drawer, with error counts on the tabs, **Errors only**, and **Send to chat**.
 - **⋯ menu**: stop or start the browser, and *Let agents use your Chrome* (Settings → Chrome extension). (It could open a DevTools port for another client before 0.7, with an address to copy. Agents never needed it: they drive this browser through PilotHouse's own tools, over a private pipe. The address was one for tools and opened to nothing in a browser, and an open port lets any local process drive a signed-in browser. No port is opened now.)
 
@@ -144,4 +144,4 @@ It asks Chrome for `debugger`, `nativeMessaging`, `tabs` and `tabGroups` (agents
 
 Not yet: the pane on Windows (Chrome's pipe there uses handles, `--remote-debugging-io-pipes`). Agents' Chrome works there through the extension (a named pipe for the bridge, registry keys for the host), but has not been tried on Windows yet.
 
-UI test runs can fix the page at a screen size (`browser.emulate`, phone and tablet sizes laid out as on mobile; the pane shows it letterboxed) and clear the cache first (`browser.clear_cache`); the page follows the pane again afterwards.
+UI test runs fix the page at a screen size (`browser.emulate`, phone and tablet sizes laid out as on mobile; the pane shows it letterboxed) and start clean: what the test's sites keep is erased (`browser.clear_sites`; other sites keep theirs), or only the cache (`browser.clear_cache`) for a test that asks to keep it. The page follows the pane again afterwards. A test's steps name an element by what it is and says and wait for it (`browser.click` with `target` and `wait_ms`, `scripts.rs`); an agent's own click by selector is as it always was. A run does not bring the pane in front (`quiet`).

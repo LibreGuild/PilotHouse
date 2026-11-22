@@ -558,6 +558,11 @@ impl WorkspaceChats {
             .pending_request(cx)
     }
 
+    /// The chat shown in the workspace's chat column, if one is.
+    pub fn viewing(&self) -> Option<SessionId> {
+        self.viewing
+    }
+
     /// Whether `session` is the chat on screen.
     pub fn is_viewing(&self, session: SessionId) -> bool {
         self.on_screen && self.viewing == Some(session)

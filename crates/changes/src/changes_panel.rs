@@ -40,8 +40,6 @@ use crate::stash_view::StashView;
 
 mod review;
 
-pub use review::{Evidence, EvidenceKind};
-
 /// How many discards can be undone (each a click: a hunk, a file or a
 /// folder, whatever its size).
 const UNDO_DEPTH: usize = 20;
@@ -125,8 +123,6 @@ pub struct ChangesPanel {
     /// The changes drawn beside the list, and what was picked and ticked
     /// there.
     review: review::Review,
-    /// What the task's chat did to check its work, said over the changes.
-    evidence: Vec<Evidence>,
     /// The changes explained in plain words, as whoever shows the panel
     /// gives it (this crate knows no agents); `None` where the build has no
     /// explanations, and then nothing here offers one.
@@ -237,7 +233,6 @@ impl ChangesPanel {
             conflict: None,
             writer: None,
             review: review::Review::new(cx),
-            evidence: Vec::new(),
             explanation: None,
             explaining: false,
             wide: None,
@@ -1171,7 +1166,6 @@ impl ChangesPanel {
                 .child(div().flex_none().child(self.commit_box.clone()))
                 .children(self.render_conflicts(cx))
                 .child(div().flex_none().child(self.render_header(cx)))
-                .children(self.render_evidence(cx))
                 .children(self.render_notes_bar(cx))
                 .into_any_element(),
             Row::Folder(at) => div()
@@ -1188,53 +1182,6 @@ impl ChangesPanel {
                 .child(self.render_untracked(&changes.untracked, cx))
                 .into_any_element(),
         }
-    }
-
-    /// What the task's chat did to check its work (tests, commands,
-    /// screenshots), over the changes it made: the reviewer sees what stands
-    /// behind them before reading a line.
-    fn render_evidence(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.evidence.is_empty() {
-            return None;
-        }
-        let theme = cx.theme();
-        let chips = self.evidence.iter().enumerate().map(|(ix, item)| {
-            let color = match item.ok {
-                Some(true) => theme.success,
-                Some(false) => theme.danger,
-                None => theme.muted_foreground,
-            };
-            let detail = item.detail.clone();
-            h_flex()
-                .id(("evidence", ix))
-                .flex_none()
-                .h_6()
-                .px_2()
-                .gap_1()
-                .rounded(theme.radius)
-                .bg(theme.muted)
-                .text_xs()
-                .child(Icon::new(item.kind.icon()).xsmall().text_color(color))
-                .child(item.label.clone())
-                .when_some(detail, |this, detail| {
-                    this.tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(detail.clone()))
-                            .build(window, cx)
-                    })
-                })
-        });
-        Some(
-            h_flex()
-                .id("git-evidence")
-                .flex_none()
-                .flex_wrap()
-                .mx_2()
-                .mb_1p5()
-                .gap_1()
-                .children(chips)
-                .test_support()
-                .into_any_element(),
-        )
     }
 
     /// The bar over the changes while there are notes: how many, and
@@ -1688,7 +1635,6 @@ impl ChangesPanel {
                 this.child(div().flex_none().child(self.commit_box.clone()))
                     .children(self.render_conflicts(cx))
                     .child(div().flex_none().child(self.render_header(cx)))
-                    .children(self.render_evidence(cx))
                     .children(self.render_notes_bar(cx))
             })
             .child(div().flex_none().child(review))

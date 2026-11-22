@@ -1,11 +1,16 @@
 //! The GitHub view: what you would see on GitHub's own pages, apart from
-//! any workspace. Its sidebar lists the pull requests waiting for you
-//! across every repository (review requested, your own, assigned to you)
-//! and the repositories you follow: those your workspaces' folders come
-//! from, and any you add. The middle shows a list or a repository's pull
+//! any workspace. Its sidebar lists the pull requests by whose turn it is
+//! across every repository (those needing your review, those you reviewed
+//! that wait for their author, your own) and the repositories you follow:
+//! those your workspaces' folders come from, and any you add. The middle shows a list or a repository's pull
 //! requests and one PR in full; the chat on the right is the repository's.
-//! An inbox list is a reviewer's queue ([`queue`]): grouped by what an
-//! agent made of each pull request, with reviews of several at once.
+//! An inbox list is a queue ([`queue`]): grouped by what needs doing, with
+//! reviews of several at once.
+//!
+//! The lists are read again every few minutes while the app runs, so the
+//! count in the column of icons is current and a new request for review is
+//! announced; an agent can be started on each by itself (off unless asked
+//! for, Settings → GitHub).
 //!
 //! Agent reviews run here, in the view's own clone of the repository
 //! ([`ph_pulls::clones`]); the user's checkouts are never touched. Each
@@ -14,7 +19,7 @@
 //!
 //! `render` draws it.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use gpui_kit::component::{
     WindowExt as _,
@@ -47,13 +52,36 @@ const ADDED_KEY: &str = "github.repositories";
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(120);
 /// Watched pull requests are looked at this often.
 const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(180);
-/// Pull requests of each inbox list assessed for triage (each costs a few
-/// requests).
-const TRIAGED: usize = 15;
-/// Pull requests assessed at the same time (each is three GitHub calls).
-const ASSESSED_AT_ONCE: usize = 8;
+/// The lists are read again this often while the app runs (three searches
+/// per account), so the count is current and new requests are announced.
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+/// Reviews started from the queue that run at the same time; the rest wait
+/// their turn.
+pub(crate) const REVIEWS_AT_ONCE: usize = 3;
 /// Settings key: the inbox sorted for review (not by date).
 const REVIEW_FIRST_KEY: &str = "github.inbox.review_first";
+/// Settings key: the pull request's chat is folded away.
+const CHAT_HIDDEN_KEY: &str = "github.chat.hidden";
+/// Settings key: what the list of pull requests to review leaves out.
+const SHOWN_KEY: &str = "github.inbox.shown";
+
+/// What the list of pull requests needing a review shows beyond those
+/// asked of the user by name: all off unless turned on, so the count is of
+/// what really waits for them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct Shown {
+    pub drafts: bool,
+    /// Pull requests opened by an app (Dependabot, Renovate…).
+    pub bots: bool,
+}
+
+impl Shown {
+    /// Whether `pull` is left out of the list.
+    pub(crate) fn hides(self, pull: &FoundPull) -> bool {
+        (pull.draft && !self.drafts) || (pull.user.is_bot() && !self.bots)
+    }
+}
 
 /// A pull request in the inbox: host, owner, name, number.
 pub(crate) type PullKey = (String, String, String, u64);
@@ -86,6 +114,22 @@ pub(crate) struct RepoRow {
 pub struct GithubView {
     store: Store,
     workspace: WeakEntity<Workspace>,
+    /// The window, for what starts without a click (a review of a new
+    /// request, the next review in line).
+    window: gpui_kit::AnyWindowHandle,
+    /// What the list to review leaves out.
+    pub(crate) shown: Shown,
+    /// The box that narrows a list, made when the view is first drawn.
+    pub(crate) search: Option<(Entity<InputState>, Subscription)>,
+    /// The pull requests asking for a review as last read (`None` before
+    /// the first read: nothing is new then).
+    known_requests: Option<HashSet<PullKey>>,
+    /// Reviews asked for from the queue that wait their turn.
+    pub(crate) in_line: VecDeque<PullKey>,
+    /// The agent and template the queue's reviews run with, when chosen
+    /// there (else the defaults).
+    pub(crate) batch_agent: Option<&'static ph_agent::agents::AgentSpec>,
+    pub(crate) batch_template: Option<String>,
     pub(crate) accounts: Vec<Account>,
     pub(crate) inbox: HashMap<Inbox, List>,
     pub(crate) loading: bool,
@@ -126,6 +170,9 @@ pub struct GithubView {
     /// The "add a repository" box, while open.
     pub(crate) adding: Option<(Entity<InputState>, Subscription)>,
     pub(crate) sidebar_shown: bool,
+    /// The pull request's chat is shown beside it (it can be folded away
+    /// to give the page the room).
+    pub(crate) chat_shown: bool,
     /// What GitHub clones and their copies take on disk, as last measured.
     pub(crate) clones_size: Option<u64>,
     /// When the clones were measured (it walks every file: not often).
@@ -142,20 +189,28 @@ impl GithubView {
     pub fn new(
         workspace: WeakEntity<Workspace>,
         folders: Vec<(String, Vec<std::path::PathBuf>)>,
+        window: gpui_kit::AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> Self {
         let store = AppState::store(cx).clone();
         let rounds = ph_agent::review_rounds::ReviewRounds::global(cx);
         let mut view = Self {
             accounts: ph_github::accounts::accounts(&store),
+            shown: store.setting(SHOWN_KEY),
             store,
             workspace,
+            window,
+            search: None,
+            known_requests: None,
+            in_line: VecDeque::new(),
+            batch_agent: None,
+            batch_template: None,
             inbox: HashMap::new(),
             loading: false,
             loaded_at: None,
             folders,
             from_workspaces: Vec::new(),
-            page: Page::Inbox(Inbox::ReviewRequested),
+            page: Page::Inbox(Inbox::NeedsReview),
             panels: HashMap::new(),
             chats: HashMap::new(),
             attached: HashMap::new(),
@@ -173,6 +228,7 @@ impl GithubView {
             _reviews: None,
             adding: None,
             sidebar_shown: true,
+            chat_shown: !store_flag_off(AppState::store(cx), CHAT_HIDDEN_KEY),
             clones_size: None,
             clones_measured: None,
             _measure: None,
@@ -193,7 +249,118 @@ impl GithubView {
         };
         view.refresh(cx);
         view.watch(cx);
+        view.poll(cx);
         view
+    }
+
+    /// Reads the lists again every few minutes, shown or not.
+    fn poll(&mut self, cx: &mut Context<Self>) {
+        push_work(
+            &mut self._work,
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(POLL_EVERY).await;
+                    let alive = this.update(cx, |this, cx| {
+                        if !this.loading && !ph_github::accounts::accounts(&this.store).is_empty() {
+                            this.refresh(cx);
+                        }
+                    });
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            }),
+        );
+    }
+
+    /// What the list to review shows (drafts, bots), kept.
+    pub(crate) fn set_shown(&mut self, shown: Shown, cx: &mut Context<Self>) {
+        self.shown = shown;
+        let _ = self.store.set_setting(SHOWN_KEY, &shown);
+        cx.notify();
+    }
+
+    /// The pull requests of `kind` as the list shows them: for those to
+    /// review, without what is left out.
+    pub(crate) fn listed(&self, kind: Inbox) -> Vec<(String, FoundPull)> {
+        self.inbox
+            .get(&kind)
+            .map(|list| {
+                list.items
+                    .iter()
+                    .filter(|(_, pull)| kind != Inbox::NeedsReview || !self.shown.hides(pull))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The requests for review that came since the lists were last read:
+    /// announced, and reviewed by an agent when that is asked for.
+    fn greet_new_requests(&mut self, cx: &mut Context<Self>) {
+        let now: HashSet<PullKey> = self
+            .listed(Inbox::NeedsReview)
+            .iter()
+            .filter_map(|(host, pull)| queue::key_of(host, pull))
+            .collect();
+        let Some(known) = self.known_requests.replace(now.clone()) else {
+            return;
+        };
+        let new: Vec<(String, FoundPull)> = self
+            .listed(Inbox::NeedsReview)
+            .into_iter()
+            .filter(|(host, pull)| {
+                queue::key_of(host, pull).is_some_and(|key| !known.contains(&key))
+            })
+            .collect();
+        if new.is_empty() {
+            return;
+        }
+        let settings = ph_pulls::ReviewSettings::read(&self.store);
+        if settings.announce {
+            let body = match new.as_slice() {
+                [(_, pull)] => format!("{} by {}", pull.title, pull.user.login),
+                many => many
+                    .iter()
+                    .map(|(_, pull)| pull.title.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            };
+            cx.show_system_notification(gpui_kit::SystemNotification {
+                tag: "review-requests".into(),
+                title: match new.len() {
+                    1 => {
+                        let (_, pull) = &new[0];
+                        format!(
+                            "Review requested: {}/{} #{}",
+                            pull.owner, pull.name, pull.number
+                        )
+                    }
+                    n => format!("{n} pull requests ask for your review"),
+                }
+                .into(),
+                body: body.into(),
+                actions: Vec::new(),
+            });
+        }
+        if settings.auto_review {
+            let keys: Vec<PullKey> = new
+                .iter()
+                .filter_map(|(host, pull)| queue::key_of(host, pull))
+                .filter(|key| !self.reviews.contains_key(key))
+                .collect();
+            let window = self.window;
+            cx.spawn(async move |this, cx| {
+                _ = cx.update_window(window, |_, window, cx| {
+                    _ = this.update(cx, |this, cx| {
+                        for key in keys {
+                            this.line_up(key, window, cx);
+                        }
+                    });
+                });
+            })
+            .detach();
+        }
     }
 
     /// Looks at watched pull requests every few minutes: new commits and
@@ -304,6 +471,22 @@ impl GithubView {
         }
     }
 
+    /// Folds the pull request's chat away, or brings it back; kept.
+    pub fn toggle_chat(&mut self, cx: &mut Context<Self>) {
+        self.chat_shown = !self.chat_shown;
+        let _ = self
+            .store
+            .set_setting(CHAT_HIDDEN_KEY, &Some(!self.chat_shown));
+        cx.notify();
+    }
+
+    /// Brings the chat back: something was asked that is answered there.
+    pub(crate) fn reveal_chat(&mut self, cx: &mut Context<Self>) {
+        if !self.chat_shown {
+            self.toggle_chat(cx);
+        }
+    }
+
     pub fn set_sidebar_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.sidebar_shown = shown;
         for (chat, _) in self.chats.values() {
@@ -312,11 +495,38 @@ impl GithubView {
         cx.notify();
     }
 
-    /// How many pull requests wait for the user's review.
+    /// How many pull requests of list `kind` need the user now: those to
+    /// review; those reviewed whose author pushed since; one's own with
+    /// changes requested, checks failing or a conflict.
+    pub(crate) fn needs_you(&self, kind: Inbox) -> usize {
+        use ph_review::triage::Mine;
+        let listed = self.listed(kind);
+        match kind {
+            Inbox::NeedsReview => listed.len(),
+            Inbox::Waiting => listed
+                .iter()
+                .filter(|(host, pull)| {
+                    queue::key_of(host, pull)
+                        .and_then(|key| self.triage.get(&key))
+                        .is_some_and(|(_, triage)| triage.behind)
+                })
+                .count(),
+            Inbox::Mine => listed
+                .iter()
+                .filter(|(_, pull)| {
+                    matches!(
+                        Mine::of(pull),
+                        Mine::ChangesRequested | Mine::ChecksFailing | Mine::Conflicts
+                    )
+                })
+                .count(),
+        }
+    }
+
+    /// How many pull requests wait for the user's review (drafts and
+    /// bots' aside, unless they are shown).
     pub fn waiting_for_review(&self) -> usize {
-        self.inbox
-            .get(&Inbox::ReviewRequested)
-            .map_or(0, |list| list.items.len())
+        self.listed(Inbox::NeedsReview).len()
     }
 
     /// Reads the inbox lists from every account and finds the workspaces'
@@ -340,7 +550,6 @@ impl GithubView {
         let accounts = self.accounts.clone();
         let folders = self.folders.clone();
         let store = self.store.clone();
-        let assessed = self.triage.clone();
         self.loading = true;
         cx.notify();
         let load = cx.background_spawn(async move {
@@ -356,16 +565,14 @@ impl GithubView {
                         continue;
                     }
                 };
-                // The searches at once, then the pull requests not looked
-                // at yet (or changed since), a few at a time: the inbox
-                // waits for the slowest call, not their sum.
+                // The searches at once: each brings what its rows show.
                 let searches: Vec<_> = std::thread::scope(|scope| {
-                    let client = &client;
+                    let (client, me) = (&client, account.login.as_str());
                     Inbox::ALL
                         .map(|kind| {
                             (
                                 kind,
-                                scope.spawn(move || ph_github::search::pulls(client, kind)),
+                                scope.spawn(move || ph_github::search::pulls(client, kind, me)),
                             )
                         })
                         .into_iter()
@@ -377,56 +584,26 @@ impl GithubView {
                         })
                         .collect()
                 });
-                let mut fresh: Vec<(PullKey, String)> = Vec::new();
                 for (kind, found) in searches {
                     let list = inbox.entry(kind).or_default();
                     match found {
                         Ok(found) => {
-                            for pull in found.iter().take(TRIAGED) {
+                            for pull in &found {
                                 let Some((owner, name)) = pull.repo() else {
                                     continue;
                                 };
                                 let key = (account.host.clone(), owner, name, pull.number);
-                                if triage.contains_key(&key) || fresh.iter().any(|(k, _)| *k == key)
+                                let reviewed = reviewed_at(&store, &key);
+                                if let Some(assessed) =
+                                    ph_review::triage::assess(pull, reviewed.as_deref())
                                 {
-                                    continue;
-                                }
-                                let known = assessed
-                                    .get(&key)
-                                    .filter(|(updated, _)| *updated == pull.updated_at)
-                                    .map(|(_, known)| {
-                                        known
-                                            .clone()
-                                            .with_review(reviewed_at(&store, &key).as_deref())
-                                    });
-                                match known {
-                                    Some(known) => {
-                                        triage.insert(key, (pull.updated_at.clone(), known));
-                                    }
-                                    None => fresh.push((key, pull.updated_at.clone())),
+                                    triage.insert(key, (pull.updated_at.clone(), assessed));
                                 }
                             }
                             list.items
                                 .extend(found.into_iter().map(|pull| (account.host.clone(), pull)))
                         }
                         Err(err) => list.error = Some(format!("{}: {err:#}", account.host)),
-                    }
-                }
-                for batch in fresh.chunks(ASSESSED_AT_ONCE) {
-                    let assessed: Vec<_> = std::thread::scope(|scope| {
-                        let (store, client) = (&store, &client);
-                        batch
-                            .iter()
-                            .map(|(key, _)| scope.spawn(move || assess(store, client, key)))
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .map(|handle| handle.join().ok().flatten())
-                            .collect()
-                    });
-                    for ((key, updated), found) in batch.iter().zip(assessed) {
-                        if let Some(found) = found {
-                            triage.insert(key.clone(), (updated.clone(), found));
-                        }
                     }
                 }
             }
@@ -463,6 +640,7 @@ impl GithubView {
                 this.loading = false;
                 this.loaded_at = Some(std::time::Instant::now());
                 this.read_reviews(cx);
+                this.greet_new_requests(cx);
                 cx.notify();
             });
         }));
@@ -615,6 +793,12 @@ impl GithubView {
         let starters = std::rc::Rc::new(move || {
             ph_review::templates::all(&templates)
                 .into_iter()
+                // The page has these two already: its Review with agent
+                // button, and its Walkthrough tab.
+                .filter(|template| {
+                    template.id != ph_review::templates::REVIEW
+                        && template.id != ph_review::templates::EXPLAIN
+                })
                 .map(|template| ph_agent::Starter {
                     id: template.id,
                     title: template.name,
@@ -634,6 +818,7 @@ impl GithubView {
             prepare: Some(prepare),
             instructions: None,
             app_tools: false,
+            own_files: None,
         };
         let cwd_text = cwd.to_string_lossy().into_owned();
         let latest = self
@@ -937,6 +1122,7 @@ impl GithubView {
     /// Shows chat `session`, which may be one of a workspace's (an earlier
     /// review): the window shows it where it lives.
     fn show_session_id(&mut self, session: SessionId, window: &mut Window, cx: &mut Context<Self>) {
+        self.reveal_chat(cx);
         let workspace = self.workspace.clone();
         window.defer(cx, move |window, cx| {
             _ = workspace.update(cx, |workspace, cx| {
@@ -1022,7 +1208,7 @@ impl GithubView {
         if self.page == Page::Repo(id.clone())
             && !self.from_workspaces.iter().any(|(known, _)| known == id)
         {
-            self.page = Page::Inbox(Inbox::ReviewRequested);
+            self.page = Page::Inbox(Inbox::NeedsReview);
         }
         cx.notify();
     }
@@ -1036,31 +1222,9 @@ fn store_flag(store: &Store, key: &str) -> bool {
     store.setting::<Option<bool>>(key).unwrap_or(true)
 }
 
-/// Triage of inbox pull request `key` (host, owner, name, number):
-/// blocking, a few requests.
-fn assess(
-    store: &Store,
-    client: &ph_github::Client,
-    key: &PullKey,
-) -> Option<ph_review::triage::Triage> {
-    let (_, owner, name, number) = key;
-    let repo = ph_github::Repo::new(owner, name).ok()?;
-    let repo = &repo;
-    let (pull, files, checks) = std::thread::scope(|scope| {
-        let files = scope.spawn(move || ph_github::pulls::files(client, repo, *number));
-        let pull = ph_github::pulls::get(client, repo, *number).ok();
-        let checks = pull
-            .as_ref()
-            .map(|pull| ph_github::pulls::checks(client, repo, &pull.head.sha).unwrap_or_default());
-        let files = files.join().ok().and_then(Result::ok).unwrap_or_default();
-        Some((pull?, files, checks.unwrap_or_default()))
-    })?;
-    Some(ph_review::triage::assess(
-        &pull,
-        &files,
-        &checks,
-        reviewed_at(store, key).as_deref(),
-    ))
+/// A setting that is on only once set.
+fn store_flag_off(store: &Store, key: &str) -> bool {
+    store.setting::<Option<bool>>(key).unwrap_or(false)
 }
 
 /// The commit your newest review of inbox pull request `key` read.

@@ -22,6 +22,17 @@ impl GithubView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // What is asked here is answered in the chat: it comes back if it
+        // was folded away.
+        if matches!(
+            request,
+            AgentRequest::Review { .. }
+                | AgentRequest::Claim { .. }
+                | AgentRequest::Walkthrough { .. }
+                | AgentRequest::AskLines { .. }
+        ) {
+            self.reveal_chat(cx);
+        }
         match request {
             AgentRequest::Review { pull, kind } => {
                 let template = ph_review::templates::default_review(&self.store);
@@ -36,12 +47,22 @@ impl GithubView {
                 end,
                 question,
             } => self.ask_lines(hosting, *pull, path, start, end, question, window, cx),
-            request @ (AgentRequest::Fix { .. } | AgentRequest::Address { .. }) => {
+            request @ (AgentRequest::Fix { .. }
+            | AgentRequest::Address { .. }
+            | AgentRequest::FixCheck { .. }) => {
                 // Fixes are made in a task: a workspace on the PR's branch.
                 let workspace = self.workspace.clone();
                 window.defer(cx, move |window, cx| {
                     _ = workspace.update(cx, |workspace, cx| {
                         workspace.fix_pull(hosting, request, window, cx)
+                    });
+                });
+            }
+            AgentRequest::FixIssue { issue, text } => {
+                let workspace = self.workspace.clone();
+                window.defer(cx, move |window, cx| {
+                    _ = workspace.update(cx, |workspace, cx| {
+                        workspace.fix_issue(hosting, *issue, text, window, cx)
                     });
                 });
             }
@@ -193,7 +214,7 @@ impl GithubView {
                         }
                     });
                     if started && let Some(session) = chat.read(cx).active_session_id(cx) {
-                        this.set_running(key, space, session, cx);
+                        this.set_running(key, space, session, window, cx);
                     }
                     cx.notify();
                 });

@@ -35,8 +35,13 @@ pub enum RunsPanelEvent {
     },
     /// Show `url` in the project's browser pane.
     OpenUrl(String),
-    /// An Android app started on a device: show the Devices pane.
-    ShowDevices,
+    /// An Android app is being run: the device's log is wanted from now.
+    AppStarting,
+    /// The Android app `package` started on a device: show the Devices
+    /// pane, and its lines in Logcat.
+    AppLaunched { package: String },
+    /// Something for the chat (a failed build's log).
+    ToChat(ph_media::ToChat),
 }
 
 pub struct RunsPanel {
@@ -60,6 +65,9 @@ pub struct RunsPanel {
     /// its ports are listed, and opened through a tunnel.
     server: Option<ph_remote::Mapping>,
     _poll: Option<Task<()>>,
+    /// Reads the added configurations again when an agent adds or removes
+    /// one.
+    _added: gpui_kit::Subscription,
 }
 
 impl EventEmitter<RunsPanelEvent> for RunsPanel {}
@@ -75,7 +83,12 @@ impl RunsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let custom = store.setting::<Vec<RunConfig>>(&custom_key(project_id));
+        let custom = crate::configs::added(&store, project_id);
+        let changes = crate::configs::changes(cx);
+        let added = cx.observe(&changes, |this, _, cx| {
+            this.custom = crate::configs::added(&this.store, this.project_id);
+            cx.notify();
+        });
         let name_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Dev server"));
         let command_input = cx.new(|cx| {
@@ -97,6 +110,7 @@ impl RunsPanel {
             active: false,
             server: None,
             _poll: None,
+            _added: added,
         };
         panel.rescan(cx);
         panel
@@ -178,20 +192,36 @@ impl RunsPanel {
             android.update(cx, |android, cx| android.set_modules(modules, cx));
             return;
         }
-        let android = cx.new(|cx| ph_devices::AndroidRun::new(root, modules, cx));
+        let store = self.store.clone();
+        let android = cx.new(|cx| ph_devices::AndroidRun::new(root, modules, Some(store), cx));
         cx.subscribe(
             &android,
             |_, _, event: &ph_devices::AndroidRunEvent, cx| match event {
-                ph_devices::AndroidRunEvent::Launched => cx.emit(RunsPanelEvent::ShowDevices),
+                ph_devices::AndroidRunEvent::Started => cx.emit(RunsPanelEvent::AppStarting),
+                ph_devices::AndroidRunEvent::Launched { package } => {
+                    cx.emit(RunsPanelEvent::AppLaunched {
+                        package: package.clone(),
+                    })
+                }
                 ph_devices::AndroidRunEvent::ShowLog { command } => cx.emit(RunsPanelEvent::Run {
                     name: "Build log".into(),
                     command: command.clone(),
                     cwd: None,
                 }),
+                ph_devices::AndroidRunEvent::ToChat(message) => {
+                    cx.emit(RunsPanelEvent::ToChat(message.clone()))
+                }
             },
         )
         .detach();
         self.android = Some(android);
+    }
+
+    /// An app of this workspace crashed on the device.
+    pub fn app_crashed(&mut self, crash: &ph_devices::Crash, cx: &mut Context<Self>) {
+        if let Some(android) = &self.android {
+            android.update(cx, |android, cx| android.crashed(crash, cx));
+        }
     }
 
     fn save_custom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -225,10 +255,7 @@ impl RunsPanel {
     }
 
     fn persist(&self) {
-        if let Err(err) = self
-            .store
-            .set_setting(&custom_key(self.project_id), &self.custom)
-        {
+        if let Err(err) = crate::configs::save(&self.store, self.project_id, &self.custom) {
             tracing::warn!("saving run configurations failed: {err:#}");
         }
     }
@@ -276,6 +303,17 @@ impl RunsPanel {
             config.cwd.clone(),
         );
         let remove = config.custom.then(|| name.clone());
+        // Where an added one runs, when that is not the project folder:
+        // its command alone does not say (a found one's name does).
+        let place = config.cwd.as_ref().filter(|_| config.custom).map(|cwd| {
+            let inside = self
+                .folders
+                .first()
+                .and_then(|(_, root)| cwd.strip_prefix(root).ok())
+                .map(|path| path.to_path_buf())
+                .unwrap_or_else(|| cwd.clone());
+            format!("in {}", inside.to_string_lossy().replace('\\', "/"))
+        });
         h_flex()
             .id(("run-config", ix))
             .group("run-config")
@@ -303,7 +341,24 @@ impl RunsPanel {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_sm().truncate().child(config.name.clone()))
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .truncate()
+                                    .child(config.name.clone()),
+                            )
+                            .children(place.map(|place| {
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(place)
+                            })),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -475,10 +530,6 @@ fn listening(server: Option<&ph_remote::Mapping>) -> Vec<Port> {
     }
 }
 
-fn custom_key(project_id: i64) -> String {
-    format!("runs.{project_id}")
-}
-
 fn section(title: &'static str, count: Option<usize>, cx: &gpui_kit::App) -> gpui_kit::Div {
     h_flex()
         .px_2()
@@ -495,7 +546,20 @@ fn section(title: &'static str, count: Option<usize>, cx: &gpui_kit::App) -> gpu
 
 impl Render for RunsPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let configs: Vec<RunConfig> = self.custom.iter().chain(&self.detected).cloned().collect();
+        // The Android card builds and installs the app, on the chosen
+        // device and variant: the same as plain Gradle tasks is not listed
+        // beside it.
+        let has_card = self.android.is_some();
+        let configs: Vec<RunConfig> = self
+            .custom
+            .iter()
+            .chain(
+                self.detected
+                    .iter()
+                    .filter(|config| !(has_card && crate::detect::is_android_task(config))),
+            )
+            .cloned()
+            .collect();
         // This project's servers first; everything else behind a toggle.
         let (ours, others): (Vec<Port>, Vec<Port>) = self.ports.iter().cloned().partition(|port| {
             self.folders

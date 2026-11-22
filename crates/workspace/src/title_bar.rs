@@ -1,6 +1,7 @@
 //! Contents of the window title bar: the app's mark and the name of what is
-//! in front (a workspace with its colour, *Bridge*, *Reviews*), the command
-//! palette trigger in the middle, the next step of the task in front, and
+//! in front (*Bridge*, *Reviews*, or a workspace with its colour, whose name
+//! opens the list of workspaces to go to another), the command palette
+//! trigger in the middle, the next step of the task in front, and
 //! window-level buttons (inbox, the side panels).
 //!
 //! The task in front is not named here: its title and where it stands
@@ -8,7 +9,8 @@
 //! the corner and drew the eye from the work. The chat's own header says
 //! both. The bar is part of the window's
 //! frame (`frame`): it has no fill of its own. What the window shows is
-//! picked in the column of icons at its left edge (`rail`).
+//! picked in the column of icons at its left edge (`rail`), and which
+//! workspace, here (`workspace_switcher`).
 //!
 //! On Windows the whole bar is a caption (drag) area for the system, so a
 //! click on it moves the window and a double click maximises it. Every
@@ -19,7 +21,8 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     kbd::Kbd,
-    menu::PopupMenuItem,
+    menu::{ContextMenuExt as _, PopupMenuItem},
+    popover::Popover,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -43,11 +46,15 @@ pub(crate) fn render(
     // between the window's buttons: the side with less of the window's own
     // chrome gets that much more room (macOS's buttons are on the left,
     // Windows' and Linux's on the right).
+    //
+    // The search alone: the two sides grow by the same amount around it,
+    // so the ⋯ button beside it is part of the right side (it stood between
+    // them, and it was the search and the button together that were
+    // centred), and so is the bar's room at its right end.
     let (left_bias, right_bias) = chrome_bias(window);
     h_flex()
         .w_full()
         .h_full()
-        .pr_2p5()
         .gap_1()
         .child(
             h_flex()
@@ -98,13 +105,14 @@ pub(crate) fn render(
                 )
                 .when_some(palette_hint, |this, hint| this.child(hint)),
         )
-        .child(div().id("more-button").occlude().child(more_button()))
         .child(
             h_flex()
                 .flex_1()
                 .flex_basis(right_bias)
-                .justify_end()
+                .pr_2p5()
                 .gap_1()
+                .child(div().id("more-button").occlude().child(more_button()))
+                .child(div().flex_1())
                 .children(next_step(workspace, cx))
                 .children(update_item(cx))
                 .child(
@@ -224,9 +232,9 @@ fn more_button() -> impl IntoElement {
         .ghost()
         .small()
         .icon(IconName::Ellipsis)
-        .tooltip("More: presentations, tools, help")
+        .tooltip("More: tools, help")
         .accessibility_label("More")
-        .menu(gpui_kit::Anchor::TopLeft, |menu, _, cx| {
+        .menu(gpui_kit::Anchor::TopLeft, |menu, _, _| {
             let item =
                 |label: &'static str, icon: Icons, action: fn() -> Box<dyn gpui_kit::Action>| {
                     PopupMenuItem::new(label)
@@ -234,32 +242,8 @@ fn more_button() -> impl IntoElement {
                         .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
                 };
             let mut menu = menu;
-            if ph_brand::enabled(ph_brand::Feature::Presentations) {
-                menu = menu
-                    .label("Create")
-                    .item(item("New presentation", Icons::Presentation, || {
-                        Box::new(NewPresentation)
-                    }))
-                    .item(item("Open a presentation", Icons::FolderOpen, || {
-                        Box::new(OpenPresentation)
-                    }));
-                for listed in crate::presentations::listed(cx).iter().take(5) {
-                    let folder = listed.space.path.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(listed.title.clone())
-                            .icon(Icons::Presentation)
-                            .on_click(move |_, window, cx| {
-                                crate::presentations::open(folder.clone(), None, window, cx)
-                            }),
-                    );
-                }
-                menu = menu.separator();
-            }
-            let tools: [MenuEntry; 8] = [
+            let tools: [MenuEntry; 7] = [
                 ("Utilities", Icons::Wrench, || Box::new(ShowUtilities)),
-                ("Architecture map", Icons::Network, || {
-                    Box::new(ShowArchitecture)
-                }),
                 ("Parallel runs", Icons::Columns2, || {
                     Box::new(ShowParallelRuns)
                 }),
@@ -284,6 +268,9 @@ fn more_button() -> impl IntoElement {
             }
             menu.separator()
                 .label("Help")
+                .when(crate::features::allows(&ShowTour), |menu| {
+                    menu.item(item("Welcome tour", Icons::Sparkles, || Box::new(ShowTour)))
+                })
                 .item(item("Keyboard shortcuts", Icons::Keyboard, || {
                     Box::new(ShowShortcuts)
                 }))
@@ -317,8 +304,8 @@ fn chrome_bias(window: &Window) -> (gpui_kit::Pixels, gpui_kit::Pixels) {
 }
 
 /// The switches for what the view in front can show or hide: a
-/// workspace's chat and its result pane, Reviews' list. The Bridge has
-/// none.
+/// workspace's chat and its result pane, Reviews' list and its chat. The
+/// Bridge has none.
 fn panel_switches(workspace: &Workspace, cx: &App) -> Vec<AnyElement> {
     let switch = |id: &'static str,
                   icon: IconName,
@@ -365,18 +352,29 @@ fn panel_switches(workspace: &Workspace, cx: &App) -> Vec<AnyElement> {
                 ),
             ]
         }
-        View::GitHub => vec![switch(
-            "toggle-sidebar",
-            if workspace.is_sidebar_collapsed() {
-                IconName::PanelLeftOpen
-            } else {
-                IconName::PanelLeftClose
-            },
-            "the list",
-            "secondary-b",
-            || Box::new(ToggleSidebar),
-        )],
-        View::Bridge | View::Custom(_) => Vec::new(),
+        View::GitHub => vec![
+            switch(
+                "toggle-sidebar",
+                if workspace.is_sidebar_collapsed() {
+                    IconName::PanelLeftOpen
+                } else {
+                    IconName::PanelLeftClose
+                },
+                "the list",
+                "secondary-b",
+                || Box::new(ToggleSidebar),
+            ),
+            // The pull request's chat, on the right: the same key as a
+            // workspace's pane on that side.
+            switch(
+                "toggle-review-chat",
+                IconName::PanelRight,
+                "the chat",
+                "secondary-alt-b",
+                || Box::new(ToggleContextPanel),
+            ),
+        ],
+        View::Bridge | View::Custom(_) | View::NoWorkspaces | View::Artifacts => Vec::new(),
     }
 }
 
@@ -452,10 +450,12 @@ fn app_icon(cx: &App) -> AnyElement {
 /// organisation's view, or the workspace's name with its colour (*Chats*
 /// for the space without folders). The left column of icons switches
 /// between them; this names where the user is.
-fn front_name(workspace: &Workspace, cx: &App) -> Option<AnyElement> {
+fn front_name(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let name: gpui_kit::SharedString = match workspace.view() {
         View::Bridge => "Bridge".into(),
         View::GitHub => "Reviews".into(),
+        View::Artifacts => "Artifacts".into(),
+        View::NoWorkspaces => "Workspaces".into(),
         View::Custom(id) => ph_custom::views()
             .into_iter()
             .find(|custom| custom.id == id)?
@@ -472,23 +472,87 @@ fn front_name(workspace: &Workspace, cx: &App) -> Option<AnyElement> {
                 .into()
         }
     };
+    let theme = cx.theme();
+    // One of the user's workspaces: its name opens the list of them. The
+    // Bridge, Reviews and Chats are places of their own, named plainly.
+    let switches = workspace.view() == View::Workspaces
+        && workspace
+            .active_project_id()
+            .is_some_and(|id| workspace.listed().any(|project| project.id == id));
+    let tint = crate::frame::tint(workspace, cx);
+    let Some((id, color)) = workspace.active_project_id().zip(tint).filter(|_| switches) else {
+        return Some(
+            h_flex()
+                .min_w_0()
+                .gap_1p5()
+                .text_sm()
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                .text_color(theme.muted_foreground)
+                // A workspace's colour, as in the frame's light.
+                .children(tint.map(|color| {
+                    div()
+                        .flex_none()
+                        .size(ph_ui::rems_from_px(8.))
+                        .rounded_full()
+                        .bg(color)
+                }))
+                .child(div().min_w_0().truncate().child(name))
+                .into_any_element(),
+        );
+    };
+    // The workspace is what everything below belongs to, and its name is a
+    // control: so it is said in full strength, with the workspace's mark
+    // (as in the list it opens) and an outline. As a dim word with a dot it
+    // went unnoticed, and so did that it can be pressed.
+    let label = h_flex()
+        .min_w_0()
+        .gap_1p5()
+        .text_sm()
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+        .text_color(theme.foreground)
+        .child(crate::workspace_switcher::badge(
+            &name, color, true, 18., cx,
+        ))
+        .child(div().min_w_0().truncate().child(name))
+        .child(
+            Icon::new(IconName::ChevronDown)
+                .xsmall()
+                .text_color(theme.muted_foreground),
+        );
+    let switcher = workspace.switcher().clone();
+    let owner = cx.entity().downgrade();
+    let popover = Popover::new("workspace-switcher-popover")
+        .offset(ph_ui::POPUP_GAP)
+        .anchor(gpui_kit::Anchor::TopLeft)
+        .open(workspace.is_switcher_open())
+        .on_open_change(cx.listener(|workspace, open: &bool, window, cx| {
+            workspace.set_switcher_open(*open, window, cx)
+        }))
+        .trigger(
+            Button::new("workspace-switcher")
+                .outline()
+                .small()
+                .child(label)
+                .tooltip(if cfg!(target_os = "macos") {
+                    "Switch workspace (⌘E)"
+                } else {
+                    "Switch workspace (Ctrl+E)"
+                })
+                .accessibility_label("Switch workspace"),
+        )
+        .content(move |_, _, _| switcher.clone());
     Some(
-        h_flex()
+        div()
+            .id("workspace-name")
+            // The bar is the window's handle: what is pressed here is not.
+            .occlude()
             .min_w_0()
-            .gap_1p5()
-            .text_sm()
-            .font_weight(gpui_kit::FontWeight::MEDIUM)
-            .text_color(cx.theme().muted_foreground)
-            // A workspace's colour, as on its badge and in the frame's
-            // light: the three say the same thing.
-            .children(crate::frame::tint(workspace, cx).map(|color| {
-                div()
-                    .flex_none()
-                    .size(ph_ui::rems_from_px(8.))
-                    .rounded_full()
-                    .bg(color)
-            }))
-            .child(div().min_w_0().truncate().child(name))
+            .child(popover)
+            // What can be done with the workspace in front, as in its row
+            // of the list.
+            .context_menu(move |menu, window, cx| {
+                crate::bridge::workspace_menu_items(menu, owner.clone(), id, window, cx)
+            })
             .into_any_element(),
     )
 }

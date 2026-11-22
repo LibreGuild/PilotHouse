@@ -9,6 +9,24 @@ pub struct User {
     pub login: String,
     pub name: Option<String>,
     pub avatar_url: String,
+    /// `User`, `Bot`, `Organization`…
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+impl User {
+    /// An app or a bot account (Dependabot, Renovate…), not a person.
+    pub fn is_bot(&self) -> bool {
+        self.kind.eq_ignore_ascii_case("bot") || self.login.ends_with("[bot]")
+    }
+}
+
+/// A team asked to review.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Team {
+    pub name: String,
+    pub slug: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -58,8 +76,12 @@ pub struct PullRequest {
     pub base: Branch,
     pub labels: Vec<Label>,
     pub requested_reviewers: Vec<User>,
+    pub requested_teams: Vec<Team>,
     /// Only on a single pull request: `None` while GitHub computes it.
     pub mergeable: Option<bool>,
+    /// Only on a single pull request: `clean`, `blocked` (a required
+    /// review or check is missing), `behind`, `dirty` (conflicts),
+    /// `unstable` (a check fails), `draft`, `unknown`.
     pub mergeable_state: String,
     pub additions: u64,
     pub deletions: u64,
@@ -80,6 +102,8 @@ pub struct PullFile {
     /// The unified diff for the file (absent for binary or huge files).
     pub patch: Option<String>,
     pub previous_filename: Option<String>,
+    /// The file's content, as git names it: it changes when the file does.
+    pub sha: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -147,15 +171,46 @@ pub struct Review {
     pub state: String,
     pub body: Option<String>,
     pub submitted_at: Option<String>,
+    /// The commit it was made on.
+    pub commit_id: Option<String>,
 }
 
 /// One CI check (a check run, or a commit status).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Check {
     pub name: String,
     /// `success`, `failure`, `pending`, `neutral`, `skipped`, `cancelled`…
     pub outcome: String,
     pub url: String,
+    /// A check run's id (a commit status has none): its annotations, its
+    /// log and running it again go by it.
+    pub id: Option<u64>,
+    /// What the check said of itself (a title, a short summary).
+    pub summary: String,
+    /// A GitHub Actions job: its log can be read and the job run again.
+    pub actions: bool,
+}
+
+impl Check {
+    pub fn failed(&self) -> bool {
+        matches!(
+            self.outcome.as_str(),
+            "failure" | "timed_out" | "cancelled" | "action_required" | "startup_failure"
+        )
+    }
+}
+
+/// A place a check points at: a compiler error, a failed test.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Annotation {
+    pub path: String,
+    pub start_line: u64,
+    /// `failure`, `warning` or `notice`.
+    pub annotation_level: String,
+    pub title: Option<String>,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -167,10 +222,26 @@ pub(crate) struct CheckRuns {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct CheckRun {
+    pub id: u64,
     pub name: String,
     pub status: String,
     pub conclusion: Option<String>,
     pub html_url: String,
+    pub output: CheckOutput,
+    pub app: CheckApp,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct CheckOutput {
+    pub title: Option<String>,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct CheckApp {
+    pub slug: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -213,7 +284,7 @@ pub struct Thread {
     pub first_comment: u64,
 }
 
-/// An issue, as created.
+/// An issue.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Issue {
@@ -222,4 +293,14 @@ pub struct Issue {
     /// `open` or `closed`.
     pub state: String,
     pub html_url: String,
+    pub body: Option<String>,
+    pub user: User,
+    pub labels: Vec<Label>,
+    pub assignees: Vec<User>,
+    /// How many comments it has.
+    pub comments: u64,
+    pub created_at: String,
+    pub updated_at: String,
+    /// Set on a pull request, which GitHub also lists as an issue.
+    pub pull_request: Option<serde_json::Value>,
 }

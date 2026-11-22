@@ -1356,7 +1356,7 @@ fn window_name(window: &str) -> String {
 }
 
 /// "Resets in 4h 19m", or "Resets Sat 7 Nov" more than a day ahead.
-fn resets(at: Option<i64>) -> String {
+pub(crate) fn resets(at: Option<i64>) -> String {
     let Some(at) = at.and_then(|at| jiff::Timestamp::from_second(at).ok()) else {
         return "Reset time not reported".to_string();
     };

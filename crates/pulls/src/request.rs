@@ -31,4 +31,19 @@ pub enum AgentRequest {
     /// Work through the review comments on the user's own pull request, in
     /// a task on its branch.
     Address { pull: Box<PullRequest> },
+    /// Make a failing check pass, in a task on the pull request's branch:
+    /// the check's name, what it points at (place, message) and its log
+    /// around the first error.
+    FixCheck {
+        pull: Box<PullRequest>,
+        name: String,
+        annotations: Vec<(String, String)>,
+        log: String,
+    },
+    /// Fix an issue in a task: the issue, and it with its comments as
+    /// Markdown.
+    FixIssue {
+        issue: Box<ph_github::models::Issue>,
+        text: String,
+    },
 }

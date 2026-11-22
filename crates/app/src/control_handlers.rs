@@ -45,6 +45,13 @@ pub fn register(cx: &mut App) {
     );
     ph_workspace::theme_mods::register_control_methods(cx);
     ph_studio::register_control_methods(cx);
+    if ph_brand::enabled(ph_brand::Feature::Artifacts) {
+        ph_artifacts::register_control_methods(cx);
+        // Decks are artifacts of a kind: no artifacts, no decks.
+        if ph_brand::enabled(ph_brand::Feature::Presentations) {
+            ph_slides::register_control_methods(cx);
+        }
+    }
     // An agent's export from Studio may be written in its workspace's
     // folders (as they are when it asks), and nowhere else but the folder
     // of the file it works on.
@@ -160,7 +167,9 @@ fn app_state(cx: &mut App) -> Result<Value> {
             ph_workspace::View::Bridge => "bridge",
             ph_workspace::View::Workspaces => "workspaces",
             ph_workspace::View::GitHub => "github",
+            ph_workspace::View::Artifacts => "artifacts",
             ph_workspace::View::Custom(id) => id,
+            ph_workspace::View::NoWorkspaces => "no-workspaces",
         },
         "sidebar_collapsed": workspace.is_sidebar_collapsed(),
         "context_panel_open": space.map(|space| space.is_context_open()),

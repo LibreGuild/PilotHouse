@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>__TITLE__</title>
+    <style>
+      __FONTS__
+    </style>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+        font: 14px/1.3 system-ui, sans-serif;
+      }
+      #stage {
+        position: fixed;
+        inset: 0;
+        overflow: hidden;
+      }
+      .show-frame {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        translate: -50% -50%;
+        overflow: hidden;
+        background: #fff;
+      }
+      .show-frame > div {
+        position: absolute;
+        left: 0;
+        top: 0;
+      }
+      .show-blank .show-frame {
+        visibility: hidden;
+      }
+      #bar {
+        position: fixed;
+        left: 50%;
+        bottom: 14px;
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding: 4px;
+        border-radius: 10px;
+        background: rgb(28 28 30 / 0.86);
+        color: #f2f2f2;
+        translate: -50% 0;
+        opacity: 0;
+        transition: opacity 0.2s;
+      }
+      body:hover #bar,
+      #bar:focus-within {
+        opacity: 1;
+      }
+      #bar button {
+        height: 28px;
+        min-width: 28px;
+        padding: 0 8px;
+        border: 0;
+        border-radius: 6px;
+        background: none;
+        color: inherit;
+        font: inherit;
+      }
+      #bar button:hover {
+        background: rgb(255 255 255 / 0.14);
+      }
+      #count {
+        padding: 0 8px;
+        font-variant-numeric: tabular-nums;
+      }
+      @media print {
+        #bar {
+          display: none;
+        }
+      }
+    </style>
+    <script type="text/plain" id="slide-css">__SLIDE_CSS__</script>
+    <script type="text/plain" id="deck-css">__DECK_CSS__</script>
+    <script type="application/json" id="deck">__DATA__</script>
+  </head>
+  <body>
+    <div id="stage"></div>
+    <div id="bar">
+      <button type="button" id="back" aria-label="Back">&#8249;</button>
+      <span id="count"></span>
+      <button type="button" id="next" aria-label="Next">&#8250;</button>
+      <button type="button" id="full">Full screen</button>
+    </div>
+    <script>
+      __CORE__
+
+      (() => {
+        const data = JSON.parse(document.getElementById("deck").textContent);
+        const look = new Look();
+        look.setBase(document.getElementById("slide-css").textContent);
+        look.set(document.getElementById("deck-css").textContent);
+        const count = document.getElementById("count");
+        const last = data.slides.length - 1;
+        const from = Math.max(0, Math.min(last, (parseInt(location.hash.slice(1), 10) || 1) - 1));
+        const update = () => {
+          count.textContent = show.at + 1 + " / " + data.slides.length;
+          history.replaceState(null, "", "#" + (show.at + 1));
+        };
+        const show = new Show(document.getElementById("stage"), {
+          size: data.size,
+          look,
+          slides: data.slides,
+          at: from,
+          transition: data.transition || "none",
+          onChange: update,
+          onExit: () => document.fullscreenElement && document.exitFullscreen(),
+        });
+        document.getElementById("back").onclick = () => show.previous();
+        document.getElementById("next").onclick = () => show.next();
+        document.getElementById("full").onclick = () =>
+          document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+        // A swipe goes on, or back.
+        let down = null;
+        addEventListener("touchstart", (event) => (down = event.touches[0].clientX), { passive: true });
+        addEventListener("touchend", (event) => {
+          const moved = event.changedTouches[0].clientX - down;
+          if (Math.abs(moved) > 40) moved < 0 ? show.next() : show.previous();
+        });
+        update();
+      })();
+    </script>
+  </body>
+</html>

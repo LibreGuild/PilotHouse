@@ -227,17 +227,15 @@ pub(crate) fn live_cards(workspace: &Workspace, cx: &App) -> Vec<Card> {
 /// The tasks: with `live`, only the chats loaded in this run that are not
 /// marked done; else every stored chat too.
 fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
-    let dark = cx.theme().is_dark();
     let now = jiff::Timestamp::now().as_millisecond();
     let places: Vec<(ProjectId, String, Option<Hsla>, Option<std::path::PathBuf>)> = workspace
         .projects()
         .iter()
         .map(|project| {
-            let color = ph_ui::workspace_color(project.shade(ph_ui::WORKSPACE_COLORS.len()), dark);
             (
                 project.id,
                 project.name.clone(),
-                Some(color),
+                workspace.color_of(project, cx),
                 project.folders().into_iter().next(),
             )
         })
@@ -756,7 +754,6 @@ fn header(
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let theme = cx.theme();
-    let dark = theme.is_dark();
     let chip = |id: SharedString,
                 label: SharedString,
                 color: Option<Hsla>,
@@ -806,10 +803,7 @@ fn header(
         chips.push(chip(
             SharedString::from(format!("bridge-filter-{}", project.id)),
             project.name.clone().into(),
-            Some(ph_ui::workspace_color(
-                project.shade(ph_ui::WORKSPACE_COLORS.len()),
-                dark,
-            )),
+            workspace.color_of(project, cx),
             filter == Some(project.id),
             Some(project.id),
         ));
@@ -1588,7 +1582,10 @@ pub(crate) fn workspace_menu_items(
                 }
             })
     };
-    let colours = {
+    // The workspace for chats that need no folder has no folder to branch
+    // from, takes none, has no colour, and stays: its menu leaves those out.
+    let scratch = crate::AppState::store(cx).is_scratch(id);
+    let colours = (!scratch).then(|| {
         let workspace = workspace.clone();
         PopupMenu::build(window, cx, move |menu, _, _| {
             ph_ui::WORKSPACE_COLORS
@@ -1603,11 +1600,8 @@ pub(crate) fn workspace_menu_items(
                     }))
                 })
         })
-    };
+    });
     let task = crate::tasks::of(crate::AppState::store(cx), id);
-    // The workspace for chats that need no folder has no folder to branch
-    // from, takes none, and stays: its menu leaves those out.
-    let scratch = crate::AppState::store(cx).is_scratch(id);
     let new_chat = workspace.clone();
     let menu = menu
         .item(
@@ -1638,7 +1632,10 @@ pub(crate) fn workspace_menu_items(
         .item(item("Open in a new window", Icons::ExternalLink, || {
             Box::new(OpenInNewWindow)
         }))
-        .item(PopupMenuItem::submenu("Colour", colours));
+        // A colour tells workspaces apart; *Chats* is not one of them.
+        .when_some(colours, |menu, colours| {
+            menu.item(PopupMenuItem::submenu("Colour", colours))
+        });
     if scratch {
         return menu;
     }

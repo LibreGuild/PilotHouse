@@ -1,22 +1,35 @@
-//! Offline developer utilities, each a plain function from text to text, so
-//! the Utilities dialog and agents (the `util_*` tools) run the same code.
+//! Offline developer utilities, and the Utilities dialog that shows them.
 //! Nothing here touches the network.
 //!
+//! Each utility is a function from text to text ([`UTILITIES`]), which
+//! agents run (`util_list`, `util_run`); the modules also give the dialog
+//! what it draws (a token's claims, a certificate's dates, a regex's
+//! matches) rather than the text.
+//!
 //! - [`data`]: JSON, TOML, YAML, XML, CSV.
+//! - [`sqlite`]: read-only queries on a SQLite file.
 //! - [`encode`]: Base64, URL, hex, HTML, JWT.
 //! - [`cert`]: X.509 certificates, QR codes.
-//! - [`hash`]: MD5, SHA-256/512, HMAC, UUID, ULID.
+//! - [`hash`]: hashes, HMAC, UUID, ULID, passwords and keys.
 //! - [`time`]: Unix times and dates, cron.
-//! - [`text`]: regex, diff, colors, Markdown.
-//! - [`sqlite`]: read-only queries on a SQLite file.
+//! - [`text`]: regex, diff, Markdown. [`words`]: cases, counts, lines.
+//! - [`color`]: colors. [`numbers`]: number bases. [`net`]: IP networks.
+//! - [`detect`]: which utility a text is for.
+//! - [`dialog`]: the Utilities dialog.
 
 pub mod cert;
+pub mod color;
 pub mod data;
+pub mod detect;
+pub mod dialog;
 pub mod encode;
 pub mod hash;
+pub mod net;
+pub mod numbers;
 pub mod sqlite;
 pub mod text;
 pub mod time;
+pub mod words;
 
 use anyhow::Result;
 
@@ -62,7 +75,7 @@ pub const UTILITIES: &[Utility] = &[
         keywords: &["format", "pretty", "minify", "validate"],
         input: "JSON",
         second: None,
-        modes: &["Format", "Minify", "To TOML"],
+        modes: &["Format", "Minify", "To TOML", "To YAML", "To CSV"],
         run: data::json,
     },
     Utility {
@@ -72,7 +85,7 @@ pub const UTILITIES: &[Utility] = &[
         keywords: &["format", "validate", "cargo"],
         input: "TOML",
         second: None,
-        modes: &["To JSON", "Format"],
+        modes: &["To JSON", "Format", "To YAML"],
         run: data::toml,
     },
     Utility {
@@ -82,7 +95,7 @@ pub const UTILITIES: &[Utility] = &[
         keywords: &["format", "validate", "kubernetes", "compose", "workflow"],
         input: "YAML (JSON for From JSON)",
         second: None,
-        modes: &["To JSON", "Format", "From JSON"],
+        modes: &["To JSON", "Format", "From JSON", "To TOML"],
         run: data::yaml,
     },
     Utility {
@@ -100,9 +113,9 @@ pub const UTILITIES: &[Utility] = &[
         name: "CSV",
         group: "Data",
         keywords: &["table", "spreadsheet", "tsv"],
-        input: "CSV, first row the header",
+        input: "CSV, first row the header (JSON for From JSON)",
         second: None,
-        modes: &["To JSON", "To table"],
+        modes: &["To JSON", "To table", "From JSON"],
         run: data::csv,
     },
     Utility {
@@ -197,10 +210,12 @@ pub const UTILITIES: &[Utility] = &[
         id: "hash",
         name: "Hash",
         group: "Crypto and ids",
-        keywords: &["md5", "sha256", "sha512", "digest", "checksum"],
+        keywords: &[
+            "md5", "sha1", "sha256", "sha512", "digest", "checksum", "sri",
+        ],
         input: "Text to hash",
         second: None,
-        modes: &["SHA-256", "SHA-512", "MD5"],
+        modes: &["SHA-256", "SHA-512", "MD5", "SHA-1"],
         run: hash::hash,
     },
     Utility {
@@ -217,11 +232,23 @@ pub const UTILITIES: &[Utility] = &[
         id: "ids",
         name: "UUID and ULID",
         group: "Crypto and ids",
-        keywords: &["uuid", "ulid", "guid", "random", "id"],
+        keywords: &["uuid", "ulid", "guid", "random", "id", "v7"],
         input: "How many (default 5)",
         second: None,
-        modes: &["UUID v4", "ULID"],
+        modes: &["UUID v4", "ULID", "UUID v7"],
         run: hash::ids,
+    },
+    Utility {
+        id: "secrets",
+        name: "Passwords and keys",
+        group: "Crypto and ids",
+        keywords: &[
+            "password", "random", "secret", "key", "token", "api", "generate",
+        ],
+        input: "Length: characters for a password (default 24), bytes for a key (default 32)",
+        second: None,
+        modes: &["Password", "Hex key", "Base64 key"],
+        run: hash::secrets,
     },
     Utility {
         id: "time",
@@ -238,7 +265,7 @@ pub const UTILITIES: &[Utility] = &[
         name: "Cron",
         group: "Time",
         keywords: &["schedule", "crontab", "next"],
-        input: "A cron line: minute hour day month weekday (e.g. */15 9-17 * * 1-5)",
+        input: "A cron line: minute hour day month weekday (e.g. */15 9-17 * * 1-5), or @daily",
         second: None,
         modes: &["Next runs"],
         run: time::cron,
@@ -247,7 +274,7 @@ pub const UTILITIES: &[Utility] = &[
         id: "regex",
         name: "Regex",
         group: "Text",
-        keywords: &["regular expression", "match", "test", "pattern"],
+        keywords: &["regular expression", "match", "test", "pattern", "replace"],
         input: "Pattern",
         second: Some("Text to search"),
         modes: &["Matches", "Matches as JSON"],
@@ -264,14 +291,41 @@ pub const UTILITIES: &[Utility] = &[
         run: text::diff,
     },
     Utility {
+        id: "text",
+        name: "Text tools",
+        group: "Text",
+        keywords: &[
+            "case",
+            "camel",
+            "snake",
+            "kebab",
+            "count",
+            "words",
+            "characters",
+            "length",
+            "invisible",
+            "zero-width",
+            "sort",
+            "lines",
+            "unique",
+            "dedupe",
+        ],
+        input: "Text",
+        second: None,
+        modes: &["Cases", "Count", "Sort lines"],
+        run: words::text,
+    },
+    Utility {
         id: "color",
         name: "Color",
         group: "Text",
-        keywords: &["hex", "rgb", "hsl", "colour", "convert"],
-        input: "A color: #3b82f6, rgb(59, 130, 246) or hsl(217, 91%, 60%)",
+        keywords: &[
+            "hex", "rgb", "hsl", "oklch", "colour", "convert", "contrast", "wcag",
+        ],
+        input: "A color: #3b82f6, rgb(59 130 246), hsl(217 91% 60%), a CSS name or 0xFF3B82F6",
         second: None,
         modes: &["Convert"],
-        run: text::color,
+        run: color::color,
     },
     Utility {
         id: "markdown",
@@ -282,6 +336,30 @@ pub const UTILITIES: &[Utility] = &[
         second: None,
         modes: &["To HTML"],
         run: text::markdown,
+    },
+    Utility {
+        id: "numbers",
+        name: "Number bases",
+        group: "Numbers and networks",
+        keywords: &[
+            "hex", "binary", "octal", "decimal", "radix", "bits", "convert", "unicode",
+        ],
+        input: "A number: 255, 0xff, 0o377, 0b11111111 or -12",
+        second: None,
+        modes: &["Convert"],
+        run: numbers::numbers,
+    },
+    Utility {
+        id: "ip",
+        name: "IP network",
+        group: "Numbers and networks",
+        keywords: &[
+            "cidr", "subnet", "mask", "netmask", "ipv4", "ipv6", "range", "address",
+        ],
+        input: "A network (10.0.0.0/24, fd00::/8) or an address",
+        second: Some("An address, to check whether it is in the network (optional)"),
+        modes: &["Describe"],
+        run: net::ip,
     },
 ];
 

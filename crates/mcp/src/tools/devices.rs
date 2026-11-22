@@ -129,12 +129,14 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "device_logcat",
-        description: "Recent logcat lines from the device, oldest first.",
+        description: "Recent logcat lines from the device, oldest first. Pass `package` to read one app's lines only (those of an app that crashed too): the rest of the phone's log is noise.",
         schema: || {
             json!({ "type": "object", "properties": {
                 "lines": { "type": "integer", "description": "Default 100." },
-                "filter": { "type": "string", "description": "Only lines containing this text (a tag, package or message)." },
-                "errors_only": { "type": "boolean" },
+                "package": { "type": "string", "description": "Only this app's lines, by its application id, e.g. com.example.app." },
+                "level": { "type": "string", "description": "The lowest level kept: verbose, debug, info, warn, error or fatal." },
+                "filter": { "type": "string", "description": "Only lines containing this text (a tag or part of a message)." },
+                "errors_only": { "type": "boolean", "description": "The same as level: error." },
                 "serial": serial()
             } })
         },

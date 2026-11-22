@@ -4,8 +4,9 @@
 //! (click for the branch picker), its folder, where its work runs when it
 //! is on a network drive, how CI went for the commit checked out, the ports
 //! its processes listen on, the Android device in use (its menu switches,
-//! connects and opens Logcat). At the right, how close each agent
-//! subscription is to its limits.
+//! connects and opens Logcat). At the right, one small item for the agents'
+//! limits: quiet while all is well, it names the limit that is close, and
+//! opens what every agent has said of its own.
 
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _,
@@ -119,7 +120,7 @@ pub(crate) fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .children(agent_updates_item(cx))
-                .children(limits(cx))
+                .child(usage_item(cx))
                 .when(!stacks.is_empty(), |this| this.child(stacks.join(" · "))),
         )
 }
@@ -279,76 +280,226 @@ fn tasks_item(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyE
     )
 }
 
-/// Each agent's limit windows as small meters ("Claude 5h ▰▰▱ 62%"), amber
-/// when close and red when reached; reset times in the tooltip.
-fn limits(cx: &Context<Workspace>) -> Vec<AnyElement> {
+/// How close the agents are to their limits, as one item. Each agent's
+/// windows used to stand here side by side, which showed one agent most of
+/// the time (Codex writes its limits to its files, so they are always
+/// known; Claude Code says its own only while it works; the others say
+/// none) and would not have fitted five. So: *Usage* while all is well,
+/// the limit that is close or reached when one is, and everything every
+/// agent has said in a pop-up, with the way to the whole of *Usage*.
+fn usage_item(cx: &mut Context<Workspace>) -> AnyElement {
+    use gpui_kit::component::v_flex;
+    use ph_agent::rate_limits::{Limit, LimitState, RateLimits};
+    let limits = RateLimits::all(cx);
     let theme = cx.theme();
-    ph_agent::rate_limits::RateLimits::all(cx)
-        .into_iter()
-        .enumerate()
-        .map(|(ix, (agent, windows))| {
-            let tip = windows
-                .iter()
-                .map(|limit| {
-                    let resets = limit
-                        .resets_at
-                        .and_then(|at| jiff::Timestamp::from_second(at).ok())
-                        .map(|at| {
-                            at.to_zoned(jiff::tz::TimeZone::system())
-                                .strftime(" · resets %a %H:%M")
-                                .to_string()
-                        })
-                        .unwrap_or_default();
-                    let used = limit
-                        .used
-                        .map(|used| format!("{:.0}% used", used * 100.0))
-                        .unwrap_or_else(|| "usage not reported".into());
-                    format!("{agent} {}: {used}{resets}", limit.window)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            h_flex()
-                .id(("status-limits", ix))
-                .gap_1p5()
-                .child(agent)
-                .children(windows.into_iter().map(|limit| {
-                    let color = match limit.state {
-                        ph_agent::rate_limits::LimitState::Reached => theme.danger,
-                        ph_agent::rate_limits::LimitState::Warning => theme.warning,
-                        ph_agent::rate_limits::LimitState::Fine => theme.muted_foreground,
-                    };
-                    h_flex().gap_1().child(limit.window.clone()).when_some(
-                        limit.used,
-                        |this, used| {
-                            this.child(
-                                div()
-                                    .w(ph_ui::rems_from_px(28.))
-                                    .h(ph_ui::rems_from_px(4.))
-                                    .rounded_full()
-                                    .bg(theme.muted)
+    let color_of = |state: LimitState| match state {
+        LimitState::Reached => theme.danger,
+        LimitState::Warning => theme.warning,
+        LimitState::Fine => theme.muted_foreground,
+    };
+    let percent = |limit: &Limit| match (limit.used, limit.state) {
+        (Some(used), _) => format!("{:.0}%", used * 100.0),
+        (None, LimitState::Reached) => "reached".to_string(),
+        (None, _) => "close".to_string(),
+    };
+    // The one that most needs saying: reached before close, then the fullest.
+    let pressing = limits
+        .iter()
+        .flat_map(|(agent, windows)| windows.iter().map(move |limit| (*agent, limit)))
+        .filter(|(_, limit)| limit.state != LimitState::Fine)
+        .max_by(|(_, a), (_, b)| {
+            a.state.cmp(&b.state).then(
+                a.used
+                    .unwrap_or(0.)
+                    .partial_cmp(&b.used.unwrap_or(0.))
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+        });
+    let (label, color) = match pressing {
+        Some((agent, limit)) => (
+            format!("{agent} {} {}", limit.window, percent(limit)),
+            Some(color_of(limit.state)),
+        ),
+        None => ("Usage".to_string(), None),
+    };
+    // On the pointer: everything known, a line an agent.
+    let tip = if limits.is_empty() {
+        "The agents' limits and what they used".to_string()
+    } else {
+        limits
+            .iter()
+            .map(|(agent, windows)| {
+                let windows = windows
+                    .iter()
+                    .map(|limit| format!("{} {}", limit.window, percent(limit)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{agent}: {windows}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    Popover::new("agent-usage")
+        .offset(ph_ui::POPUP_GAP)
+        .anchor(gpui_kit::Anchor::BottomRight)
+        .trigger(
+            Button::new("status-usage")
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(Icons::Gauge).xsmall())
+                .label(label)
+                .when_some(color, |this, color| this.text_color(color))
+                .tooltip(ph_ui::tip(tip)),
+        )
+        .content(move |_, _, cx| {
+            let limits = RateLimits::all(cx);
+            let theme = cx.theme().clone();
+            let color_of = |state: LimitState| match state {
+                LimitState::Reached => theme.danger,
+                LimitState::Warning => theme.warning,
+                LimitState::Fine => theme.muted_foreground,
+            };
+            let agents = limits.iter().map(|(agent, windows)| {
+                let spec = ph_agent::agents::AGENTS
+                    .iter()
+                    .find(|spec| spec.name == *agent);
+                v_flex()
+                    .gap_1p5()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .children(spec.map(|spec| spec.mark(ph_ui::rems_from_px(16.))))
+                            .child(div().text_sm().child(*agent)),
+                    )
+                    .children(windows.iter().map(|limit| {
+                        let color = color_of(limit.state);
+                        v_flex()
+                            .gap_0p5()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .text_xs()
                                     .child(
                                         div()
-                                            .h_full()
+                                            .w(ph_ui::rems_from_px(84.))
+                                            .flex_none()
+                                            .truncate()
+                                            .text_color(theme.muted_foreground)
+                                            .child(limit.window.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .h(ph_ui::rems_from_px(4.))
                                             .rounded_full()
-                                            .w(gpui_kit::relative(used))
-                                            .bg(color),
+                                            .bg(theme.muted)
+                                            .child(
+                                                div()
+                                                    .h_full()
+                                                    .rounded_full()
+                                                    .w(gpui_kit::relative(
+                                                        limit.used.unwrap_or(0.).clamp(0., 1.),
+                                                    ))
+                                                    .bg(if limit.state == LimitState::Fine {
+                                                        theme.primary
+                                                    } else {
+                                                        color
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(ph_ui::rems_from_px(52.))
+                                            .flex_none()
+                                            .text_right()
+                                            .text_color(if limit.state == LimitState::Fine {
+                                                theme.foreground
+                                            } else {
+                                                color
+                                            })
+                                            .child(match (limit.used, limit.state) {
+                                                (Some(used), _) => format!("{:.0}%", used * 100.0),
+                                                (None, LimitState::Reached) => "Reached".into(),
+                                                (None, LimitState::Warning) => "Close".into(),
+                                                (None, LimitState::Fine) => "–".into(),
+                                            }),
                                     ),
                             )
                             .child(
                                 div()
-                                    .text_color(color)
-                                    .child(format!("{:.0}%", used * 100.0)),
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(crate::usage_view::resets(limit.resets_at)),
                             )
-                        },
+                    }))
+            });
+            // The agents that are installed and have said nothing, and why.
+            let silent: Vec<&'static ph_agent::agents::AgentSpec> = ph_agent::agents::installed()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|spec| !limits.iter().any(|(agent, _)| *agent == spec.name))
+                .collect();
+            let mut notes = Vec::new();
+            if let Some(claude) = silent.iter().find(|spec| spec.id == "claude") {
+                notes.push(format!(
+                    "{} says its limits while it works, on a subscription: none yet.",
+                    claude.name
+                ));
+            }
+            let names: Vec<&str> = silent
+                .iter()
+                .filter(|spec| spec.id != "claude")
+                .map(|spec| spec.name)
+                .collect();
+            // "Gemini CLI, Antigravity and Cline do not say…"
+            let listed = match names.as_slice() {
+                [] => None,
+                [one] => Some(format!("{one} does")),
+                [most @ .., last] => Some(format!("{} and {last} do", most.join(", "))),
+            };
+            if let Some(listed) = listed {
+                notes.push(format!("{listed} not say how much is left."));
+            }
+            v_flex()
+                .w(ph_ui::rems_from_px(320.))
+                .gap_3()
+                .p_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child("Agent limits"),
+                )
+                .when(limits.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("No agent has said how close it is to a limit yet."),
                     )
-                }))
-                .tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(ph_ui::tip(tip.clone()))
-                        .build(window, cx)
                 })
-                .into_any_element()
+                .children(agents)
+                .children(notes.into_iter().map(|note| {
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(note)
+                }))
+                .child(
+                    h_flex().justify_end().child(
+                        Button::new("status-usage-all")
+                            .ghost()
+                            .small()
+                            .icon(Icons::ChartPie)
+                            .label("All usage")
+                            .tooltip(ph_ui::tip(
+                                "Tokens and sessions by agent, workspace or model",
+                            ))
+                            .on_click(|_, window, cx| crate::usage_view::open(window, cx)),
+                    ),
+                )
         })
-        .collect()
+        .into_any_element()
 }
 
 /// CI of the commit checked out: a check when all passed, a spinner while

@@ -1,5 +1,5 @@
 //! Studio: a window of its own for editing a media file, by hand or by
-//! asking an agent: pictures, videos and slides.
+//! asking an agent: pictures and videos.
 //!
 //! An edit never touches the file until it is saved: [`ImageEdit`] says
 //! what to do to the original (turn, crop, adjust colors, mark, resize,
@@ -17,7 +17,6 @@ pub mod encode;
 mod history;
 mod icons;
 pub mod render;
-pub mod slides;
 pub mod video;
 
 pub use control::{register_control_methods, set_workspace_folders};

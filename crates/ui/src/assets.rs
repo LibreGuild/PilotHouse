@@ -9,6 +9,10 @@ icon_assets!(
     ExtraIcons,
     [
         MousePointer2,
+        ClipboardPaste,
+        TextWrap,
+        Folders,
+        Usb,
         ShipWheel,
         BellRing,
         MessagesSquare,
@@ -36,6 +40,8 @@ icon_assets!(
         Network,
         Brain,
         GitPullRequest,
+        // GitHub's mark, where what is shown is on GitHub.
+        Github,
         Orbit,
         RotateCcwClock,
         CalendarClock,
@@ -60,6 +66,7 @@ icon_assets!(
         Keyboard,
         FolderOpen,
         LayoutGrid,
+        Shapes,
         FileCode,
         Palette,
         Camera,
@@ -167,6 +174,22 @@ icon_assets!(
         Scan,
         Maximize2,
         MoveHorizontal,
+        // The Utilities dialog's list.
+        CodeXml,
+        Binary,
+        Code,
+        QrCode,
+        FingerprintPattern,
+        Signature,
+        IdCard,
+        Dices,
+        Regex,
+        Calculator,
+        ArrowLeftRight,
+        // Reviews: an issue, a repository's review stats, its learned rules.
+        CircleDot,
+        ChartColumn,
+        BookOpen,
     ]
 );
 
@@ -178,6 +201,17 @@ const CUSTOM_ICONS: &str = "icons/custom/";
 /// `ExtraIcons` above instead.
 pub fn custom_icon(name: &str) -> gpui_kit::component::Icon {
     gpui_kit::component::Icon::empty().path(format!("{CUSTOM_ICONS}{name}.svg"))
+}
+
+/// Where the Android mark is served: the one interface icon that is not
+/// Lucide's, which has no marks of products.
+const ANDROID_ICON: &str = "icons/own/android.svg";
+
+/// The Android mark (the robot's head), drawn in the text's colour: an
+/// Android device, where a phone's outline would say less. Cut from the
+/// Material Icon Theme's `android.svg` (see `NOTICE`).
+pub fn android_icon() -> gpui_kit::component::Icon {
+    gpui_kit::component::Icon::empty().path(ANDROID_ICON)
 }
 
 /// The app's asset source: PilotHouse's extra icons layered over the
@@ -193,6 +227,11 @@ impl AssetSource for PilotHouseAssets {
             && let Some((_, svg)) = ph_brand::icons::CUSTOM.iter().find(|(id, _)| *id == name)
         {
             return Ok(Some(Cow::Borrowed(svg)));
+        }
+        if path == ANDROID_ICON {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/android.svg"
+            ))));
         }
         if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));

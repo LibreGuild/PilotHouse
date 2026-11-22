@@ -41,6 +41,8 @@ const FEATURES: &[&str] = &[
     "chrome_extension",
     "quick_chat",
     "explanations",
+    "artifacts",
+    "tour",
 ];
 
 /// Keys of features that were removed, still read (and ignored) for one

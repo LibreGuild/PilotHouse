@@ -11,12 +11,8 @@ ph-brand.workspace = true
 anyhow.workspace = true
 base64 = "0.23"
 color_quant = "1.1"
-dirs.workspace = true
 # Real paths without Windows' `\\?\` spelling: where an export may be written.
 dunce.workspace = true
-# Slide text layout, on the same font database usvg draws with.
-cosmic-text = "0.19"
-fontdb = "0.23"
 futures.workspace = true
 gpui-kit.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico", "pnm"] }
@@ -29,18 +25,6 @@ png = "0.18"
 # The same resvg GPUI draws SVG icons with, so text and shapes cost nothing more.
 resvg = "0.46"
 serde = { workspace = true, features = ["rc"] }
-# Slides: SVG paths for PowerPoint shapes (usvg's own parser), and the
-# PPTX package.
-svgtypes = "0.16"
-# Reading PowerPoint files (already in the tree through usvg).
-roxmltree = "0.21"
-# PDF: each slide's SVG as a page (svg2pdf works on usvg 0.45, already in
-# the tree through GPUI).
-pdf-writer = "0.12"
-svg2pdf = "0.13"
-zip = { version = "9", default-features = false, features = ["deflate"] }
-# Code on slides, coloured as the editor colours it.
-syntect = { version = "5.3", default-features = false, features = ["parsing", "default-syntaxes", "default-themes", "regex-fancy"] }
 serde_json.workspace = true
 tracing.workspace = true
 

@@ -48,10 +48,16 @@ pub enum Feature {
     /// Changes explained in plain words: Explain in the Git tab and on a
     /// commit, and Why Is This Here? in the editor.
     Explanations,
+    /// Web pages agents make, kept and served from this computer: the
+    /// *Artifacts* place, and the agents' `artifact_` tools.
+    Artifacts,
+    /// The cards that say what the app has: shown once after an install, and
+    /// after an update that added some (the new ones).
+    Tour,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 19] = [
+    pub const ALL: [Feature; 21] = [
         Feature::Files,
         Feature::Changes,
         Feature::Pulls,
@@ -71,6 +77,8 @@ impl Feature {
         Feature::ChromeExtension,
         Feature::QuickChat,
         Feature::Explanations,
+        Feature::Artifacts,
+        Feature::Tour,
     ];
 
     /// Its key in `[features]`.
@@ -95,6 +103,8 @@ impl Feature {
             Feature::ChromeExtension => "chrome_extension",
             Feature::QuickChat => "quick_chat",
             Feature::Explanations => "explanations",
+            Feature::Artifacts => "artifacts",
+            Feature::Tour => "tour",
         }
     }
 }

@@ -188,7 +188,8 @@ fn file_path(uri: &str) -> String {
 pub struct LiveSources {
     pub screenshot: Box<LiveSource>,
     pub logs: Box<LiveSource>,
-    /// The newest UI test results, and the failing step's screen.
+    /// How the tests last went (the project's own, and the UI tests), and
+    /// the failing step's screen.
     pub tests: Box<ManyLiveSource>,
     /// The text of the Chrome tabs the user shared with PilotHouse
     /// (`@tabs`), read when asked (it takes a moment); none without

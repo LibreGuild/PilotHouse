@@ -100,8 +100,8 @@ impl WorkspaceScreen {
                 ph_browser::BrowserHub::browser(self.project.id, cx)
                     .update(cx, |browser, cx| browser.open(&url, cx));
             }
-            FilesPanelEvent::EditMedia(path) if ph_studio::slides::space::is_powerpoint(path) => {
-                crate::presentations::open_powerpoint(path.clone(), window, cx);
+            FilesPanelEvent::EditMedia(path) if crate::slides_window::opens(path, cx) => {
+                crate::slides_window::create_from(path.clone(), window, cx);
             }
             FilesPanelEvent::EditMedia(path) => {
                 let workspace = Some((AppState::store(cx).clone(), self.project.clone()));
@@ -253,32 +253,6 @@ impl WorkspaceScreen {
         })
     }
 
-    /// Hands the architecture map to the chat, asking for an explanation.
-    pub fn explain_architecture(
-        &mut self,
-        map: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.reveal_chat(cx);
-        let attachment = Attachment::Text {
-            label: "Architecture map".into(),
-            text: map,
-        };
-        let prompt = "Using the attached map of this project's parts and the code itself, explain its architecture: \
-                      what each part is for, how they work together (the main flows of data and control), and where a \
-                      new contributor should start. Be concise; use a short list per part."
-            .to_string();
-        self.chat.update(cx, |chat, cx| {
-            chat.ask_about(
-                attachment,
-                Some(("Explain the architecture".into(), prompt)),
-                window,
-                cx,
-            )
-        });
-    }
-
     /// Starts the chats of a parallel run whose worktrees are ready.
     pub fn run_parallel(
         &mut self,
@@ -322,20 +296,79 @@ impl WorkspaceScreen {
     }
 }
 
-/// `@test-run`: how each UI test of the workspace last went, and the screen
-/// of the first failing step.
+/// What the project's own suites last found when run from the Tests tab:
+/// a line per suite, and under it the tests that failed with why.
+fn suite_results(project_id: ph_store::projects::ProjectId, root: &std::path::Path) -> Vec<String> {
+    use ph_uitest::suite::{self, Outcome};
+    /// Failures told per suite at most; the rest are counted.
+    const TOLD: usize = 8;
+    let mut lines = Vec::new();
+    for found in suite::detect(root) {
+        let Some(result) = suite::last_result(project_id, &found.id) else {
+            continue;
+        };
+        if lines.is_empty() {
+            lines.push(
+                "The project's own tests, by their newest run from the Tests tab:".to_string(),
+            );
+        }
+        lines.push(format!(
+            "- {} (`{}`): {}",
+            found.name,
+            found.command,
+            ph_uitest::suite_run::summary(&result)
+        ));
+        let failed: Vec<_> = result
+            .cases
+            .iter()
+            .filter(|case| case.outcome == Outcome::Failed)
+            .collect();
+        for case in failed.iter().take(TOLD) {
+            let place = match (&case.file, case.line) {
+                (Some(file), Some(line)) => format!(" at {file}:{line}"),
+                _ => String::new(),
+            };
+            let why: String = case
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .chars()
+                .take(600)
+                .collect();
+            lines.push(format!("  - {}{place}: {}", case.name, why.trim()));
+        }
+        if failed.len() > TOLD {
+            lines.push(format!("  - and {} more", failed.len() - TOLD));
+        }
+        // It did not get as far as a test: the end of what it printed.
+        if result.broke() {
+            let end: Vec<&str> = result.output.lines().rev().take(20).collect();
+            lines.push(format!(
+                "  It printed last:\n{}",
+                end.into_iter().rev().collect::<Vec<_>>().join("\n")
+            ));
+        }
+    }
+    lines
+}
+
+/// `@test-run`: how each test of the workspace last went (the project's
+/// own suites, then its UI tests), and the screen of the first failing step.
 pub(super) fn test_results(
     project_id: ph_store::projects::ProjectId,
     root: &std::path::Path,
 ) -> Vec<ph_agent::Attachment> {
     let tests = ph_uitest::model::list(root);
-    if tests.is_empty() {
+    let mut lines = suite_results(project_id, root);
+    if tests.is_empty() && lines.is_empty() {
         return vec![ph_agent::Attachment::Text {
-            label: "UI tests".into(),
-            text: "This workspace has no UI tests yet.".into(),
+            label: "Tests".into(),
+            text: "No test of this workspace was run from the Tests tab yet.".into(),
         }];
     }
-    let mut lines = vec!["UI tests in this workspace, by their newest run:".to_string()];
+    if !tests.is_empty() {
+        lines.push("UI tests in this workspace, by their newest run:".to_string());
+    }
     let mut failing_screen = None;
     for (_, test) in &tests {
         let slug = ph_uitest::model::slug(&test.name);
@@ -370,7 +403,7 @@ pub(super) fn test_results(
                     }
                 }
                 None if report.looks_different() > 0 => lines.push(format!(
-                    "- {}{on}: every step worked, but {} look different from the baseline",
+                    "- {}{on}: every step worked, but {} look different from what was accepted",
                     test.name,
                     report.looks_different()
                 )),
@@ -379,7 +412,7 @@ pub(super) fn test_results(
         }
     }
     let mut attachments = vec![ph_agent::Attachment::Text {
-        label: "UI test results".into(),
+        label: "Test results".into(),
         text: lines.join("\n"),
     }];
     attachments.extend(failing_screen);

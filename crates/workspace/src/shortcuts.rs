@@ -31,11 +31,6 @@ enum Keys {
 
 fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
     let action = |action: Box<dyn Action>| Keys::Action(action);
-    let workspace_keys = if cfg!(target_os = "macos") {
-        "⌃1 … ⌃9"
-    } else {
-        "Alt+1 … Alt+9"
-    };
     vec![
         (
             "General",
@@ -61,7 +56,7 @@ fn groups() -> Vec<(&'static str, Vec<(&'static str, Keys)>)> {
                 ("The Bridge", action(Box::new(ShowWorkspacesView))),
                 ("Chats that need no folder", action(Box::new(ShowChatsView))),
                 ("Reviews", action(Box::new(ShowGitHubView))),
-                ("Workspace 1 to 9", Keys::Text(workspace_keys.into())),
+                ("Switch workspace", action(Box::new(SwitchWorkspace))),
                 ("Previous workspace", action(Box::new(PreviousWorkspace))),
                 ("Show or hide the chat", action(Box::new(ToggleSidebar))),
                 (

@@ -46,6 +46,7 @@ Some chats need something made before their agent can start: a review needs the 
 - **Jump to latest.** Scrolled up, a ↓ button brings the newest message back. Within about two lines of the end counts as the end: the button hides, and new text keeps the view on the newest reply, unless you are scrolling (`transcript_scroll.rs`). The transcript keeps some room under the last message.
 - **Who wrote what.** Each reply starts with the agent's mark and name (Claude's orange burst, Codex, Gemini, Antigravity, Cline). The chat's header shows the agent's mark with a dot for its state (the words are in its tooltip), and the picker shows each agent's mark.
 - **The top of the chat.** In a workspace it is the chats' tabs with *Past chats* and *New chat* at their end, and the chat in front: its agent's mark, its title and **Chat | CLI**. In a narrow panel these are two rows; from 760 px one, where the tab in front stands for the title ([workspace](workspace.md)).
+- **A right click on a tab**: *Close tab*, *Close other tabs*, *Close all tabs*, then what can be done with its chat (mark as done, rename, delete).
 - **A tab's cross closes the tab, nothing else.** It shows while the pointer is on the tab. The chat is not marked done and not deleted: it is in *Past chats* and on the Bridge as before, and has its tab again when it is opened again or needs you. Closing the tab in front shows the one beside it (a new chat when it was the last). Which tabs are closed is kept with the workspace's layout (`closed_tabs`). A tab's right-click menu marks the chat done, renames it and deletes it; pinning is the Bridge's, where cards have an order.
 - **Past chats** (the clock) is one list, the last used first, whatever a chat's state: the ten last used, each with its agent's mark and, when something is going on in it, the working mark or a dot (*needs you*, *stopped*, *finished*). A row pointed at shows what can be done without opening the chat: **mark as done** (the tick; *not done* when it is), **rename** and **delete** (which asks first; not offered while the agent works in it). **Show all chats** at its end puts the whole list where the chat is: the transcript and the message box give way to it, with when each chat was last used, the search and *Started elsewhere* (an agent's own sessions in this folder that did not start here). Picking a chat shows it as any past chat; the cross goes back to the chat that was in front (`chat_panel/history.rs`). A panel without tabs (a review's chat, the quick chat) names the place the agent works in before the title: the repository for a GitHub copy, or the workspace with its colour (and the subfolder, `name › sub`, when the chat runs in one).
 - **Restore files** shows under your message, at the right, while the pointer is on it: it puts the project's files back as they were before that message.
@@ -76,7 +77,7 @@ Some chats need something made before their agent can start: a review needs the 
 
 - `@src/main.rs` attaches that file as a resource link the agent can read.
 - `@src/` (a folder, offered with a trailing slash) attaches what the folder holds, folders first, up to 200 entries, so the agent sees its shape and reads what it needs.
-- `@screenshot` and `@log` attach the browser or device screen and recent logs ([live-panes.md](live-panes.md)); `@test-run` (or `@tests`) attaches how each UI test last went, with the first failing step's screen ([tests.md](tests.md)). With PilotHouse's Chrome extension, `@tabs` (picked or typed, or *Tabs you shared in Chrome* in the **+** menu) attaches the text of the Chrome tabs you shared with agents, marked as page text; sending waits until they are read, and a typed `@tabs` sends once they are ([browser.md](browser.md)).
+- `@screenshot` and `@log` attach the browser or device screen and recent logs ([live-panes.md](live-panes.md)); `@test-run` (or `@tests`) attaches how the tests last went (the project's own suites with what failed and why, then each UI test), with the first failing step's screen ([tests.md](tests.md)). With PilotHouse's Chrome extension, `@tabs` (picked or typed, or *Tabs you shared in Chrome* in the **+** menu) attaches the text of the Chrome tabs you shared with agents, marked as page text; sending waits until they are read, and a typed `@tabs` sends once they are ([browser.md](browser.md)).
 - Typing `@` and a name offers definitions (functions, types, classes in Rust, TypeScript/JavaScript, Python, Go, Kotlin/Java/Swift/C#, C/C++; found by reading the files, `ph_files::symbols`); one inserts `@path:line`, which attaches the code from that line to the end of the definition. Any `@path:line` works the same.
 - `@pr:12` attaches a pull request of the workspace's GitHub repository (title, author, branches, description, and how to get its diff); typing `@pr` lists the open ones.
 
@@ -146,10 +147,11 @@ Every agent session gets the PilotHouse MCP server (`pilothouse mcp`, crate `ph-
 | `browser_*` | The built-in browser ([browser.md](browser.md)) |
 | `chrome_*` | The user's own Chrome, through the extension ([browser.md](browser.md)) |
 | `device_*` | Android emulators and phones ([devices.md](devices.md)) |
-| `test_list`, `test_run`, `test_expect` | The workspace's UI tests ([tests.md](tests.md)) |
+| `test_record`, `test_save`, `test_expect`, `test_list`, `test_run` | Making a UI test when asked to in the chat, and the workspace's tests ([tests.md](tests.md)) |
 | `ports_list` | The ports the project's programs listen on ([runs.md](runs.md)) |
+| `run_list`, `run_add`, `run_remove` | The workspace's run configurations: an agent adds one when asked, the user starts it ([runs.md](runs.md)) |
 | `todo_*` | Reminders for the user |
-| `theme_*`, `slides_*`, `studio_*`, `util_*` | Designing a theme, slide decks, pictures and video, and the small utilities |
+| `theme_*`, `deck_*`, `studio_*`, `util_*` | Designing a theme, decks of slides, pictures and video, and the small utilities |
 
 Which browser comes first is the user's choice (*Settings → Agents → Preferred browser*); the server says so in its instructions as a chat starts.
 

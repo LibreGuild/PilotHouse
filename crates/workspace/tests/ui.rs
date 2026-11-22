@@ -88,13 +88,8 @@ fn a_first_start_opens_into_a_chat(cx: &mut TestAppContext) {
                 "it has its place over the workspaces"
             );
             assert!(
-                window
-                    .try_find(gpui_kit::ElementId::from((
-                        "rail-workspace",
-                        scratch.id as u64
-                    )))
-                    .is_none(),
-                "and is not a badge among them"
+                window.try_find("workspace-switcher").is_none(),
+                "and is not one of the list in the title bar"
             );
             scratch.id
         })
@@ -129,10 +124,12 @@ fn a_first_start_opens_into_a_chat(cx: &mut TestAppContext) {
         let id = workspace.read(cx).projects()[0].id;
         assert_ne!(id, scratch);
         assert!(
-            window
-                .try_find(gpui_kit::ElementId::from(("rail-workspace", id as u64)))
-                .is_some(),
-            "its badge is in the column of icons"
+            window.try_find("workspace-switcher").is_some(),
+            "its name in the title bar opens the list of workspaces"
+        );
+        assert!(
+            window.try_find("view-workspaces").is_some(),
+            "and the workspaces have their place in the column of icons"
         );
         // The result pane opens on Files (the tree and the editor), with
         // the review of the changes one name away.
@@ -179,15 +176,7 @@ fn a_window_with_workspaces_opens_on_the_bridge(cx: &mut TestAppContext) {
         );
     })
     .unwrap();
-    press(
-        window,
-        if cfg!(target_os = "macos") {
-            "ctrl-1"
-        } else {
-            "alt-1"
-        },
-        cx,
-    );
+    click(window, "view-workspaces", cx);
     cx.update(|cx| {
         let workspace = workspace.read(cx);
         assert_eq!(workspace.view(), ph_workspace::View::Workspaces);
@@ -245,6 +234,94 @@ fn switching_tabs_and_hiding_the_panel(cx: &mut TestAppContext) {
         assert_eq!(space.context_tab(), ContextTab::Tests);
         assert!(space.is_context_open());
     });
+}
+
+/// The Tests tab lists the project's own suites and its UI tests in one
+/// list; a row shows what it is at its side, and the form for a new UI test
+/// starts where the tests there are start. A project with neither says
+/// what tests are and offers the two ways to have some.
+#[gpui_kit::test]
+fn the_tests_tab_lists_the_projects_tests_and_its_ui_tests(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let empty = temp_project("tests-none");
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.add_project_path(&empty, window, cx)
+        });
+        window.dispatch_action(Box::new(ph_workspace::ShowTests), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("tests-empty-new").is_some());
+        assert!(window.try_find("tests-empty-command").is_some());
+    })
+    .unwrap();
+
+    // A crate with a UI test recorded for it.
+    let folder = temp_project("tests-some");
+    std::fs::write(folder.join("Cargo.toml"), "[package]\nname = \"some\"\n").unwrap();
+    std::fs::create_dir_all(folder.join(".pilothouse/tests")).unwrap();
+    std::fs::write(
+        folder.join(".pilothouse/tests/sign-in.json"),
+        r#"{ "name": "Sign in", "description": "Sign in as Ada",
+             "target": { "kind": "web", "url": "http://localhost:3000" },
+             "steps": [
+               { "do": "click", "role": "button", "name": "Sign in" },
+               { "do": "expect_text", "text": "Welcome" } ] }"#,
+    )
+    .unwrap();
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.add_project_path(&folder, window, cx)
+        });
+        window.dispatch_action(Box::new(ph_workspace::ShowTests), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("tests-empty-new").is_none());
+        assert!(window.try_find("suite-cargo").is_some());
+        assert!(window.try_find("ui-test-sign-in").is_some());
+        assert!(window.try_find("tests-run-all").is_some());
+    })
+    .unwrap();
+    // The suite is picked first: its command shows, with the way to run it.
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("suite-run").is_some());
+    })
+    .unwrap();
+    // The UI test shows its steps, and can be run.
+    click_id(window, gpui_kit::SharedString::from("ui-test-sign-in"), cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("test-run").is_some());
+        assert!(window.try_find(("test-step", 0usize)).is_some());
+        assert!(
+            window.try_find(("test-step", 2usize)).is_some(),
+            "its two steps, after the one that opens the page"
+        );
+        assert!(window.try_find("suite-run").is_none());
+    })
+    .unwrap();
+    // A new UI test: the form, which is left again.
+    click(window, "test-new", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("test-create").is_some());
+        assert!(window.try_find("test-run").is_none());
+    })
+    .unwrap();
+    click(window, "test-cancel", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("test-create").is_none());
+        assert!(window.try_find("test-run").is_some());
+    })
+    .unwrap();
 }
 
 /// ⌘K opens the palette; typing filters it and Enter runs the command.
@@ -513,6 +590,13 @@ fn click_id(window: AnyWindowHandle, id: impl Into<gpui_kit::ElementId>, cx: &mu
     cx.run_until_parked();
 }
 
+/// Goes to workspace `id` as a person does: the name of the one in front
+/// in the title bar, then its row in the list that opens.
+fn switch_workspace(window: AnyWindowHandle, id: i64, cx: &mut TestAppContext) {
+    click(window, "workspace-switcher", cx);
+    click_id(window, ("switch-workspace", id as u64), cx);
+}
+
 fn press(window: AnyWindowHandle, key: &str, cx: &mut TestAppContext) {
     cx.update_window(window, |_, window, cx| window.press(key, cx))
         .unwrap();
@@ -523,7 +607,7 @@ fn press(window: AnyWindowHandle, key: &str, cx: &mut TestAppContext) {
 /// click opens one. The Bridge lists every workspace's tasks, and a card
 /// opens its workspace at that chat (whichever was in front).
 #[gpui_kit::test]
-fn badges_open_workspaces_and_cards_open_their_chats(cx: &mut TestAppContext) {
+fn the_list_opens_workspaces_and_cards_open_their_chats(cx: &mut TestAppContext) {
     let (window, workspace) = open_workspace(cx);
     let (alpha, beta) = two_workspaces("sidebar", window, &workspace, cx);
     cx.update(|cx| {
@@ -534,19 +618,7 @@ fn badges_open_workspaces_and_cards_open_their_chats(cx: &mut TestAppContext) {
         assert_eq!(order[..2], [beta, alpha], "newest first, and it stays so");
     });
 
-    // ⌃1 (Alt+1 off macOS) is the first badge: beta.
-    press(
-        window,
-        if cfg!(target_os = "macos") {
-            "ctrl-1"
-        } else {
-            "alt-1"
-        },
-        cx,
-    );
-    cx.update(|cx| assert_eq!(workspace.read(cx).active_project_id(), Some(beta)));
-
-    click_id(window, ("rail-workspace", alpha as u64), cx);
+    switch_workspace(window, alpha, cx);
     cx.update(|cx| {
         let workspace = workspace.read(cx);
         assert_eq!(workspace.active_project_id(), Some(alpha));
@@ -557,6 +629,19 @@ fn badges_open_workspaces_and_cards_open_their_chats(cx: &mut TestAppContext) {
             "opening does not reorder"
         );
     });
+
+    // The list by its key: it opens on the workspace before, so Enter
+    // goes back to it. Ctrl+Tab does the same without the list.
+    let list = if cfg!(target_os = "macos") {
+        "cmd-e"
+    } else {
+        "ctrl-e"
+    };
+    press(window, list, cx);
+    press(window, "enter", cx);
+    cx.update(|cx| assert_eq!(workspace.read(cx).active_project_id(), Some(beta)));
+    press(window, "ctrl-tab", cx);
+    cx.update(|cx| assert_eq!(workspace.read(cx).active_project_id(), Some(alpha)));
 
     // A chat of beta's, made while alpha is in front.
     let session = cx.update(|cx| {
@@ -823,6 +908,106 @@ fn open_chats_are_tabs_over_the_chat(cx: &mut TestAppContext) {
         );
     })
     .unwrap();
+}
+
+/// With no workspace of the user's, *Workspaces* says what one is and
+/// offers the two ways to make one; the first one made takes its place.
+#[gpui_kit::test]
+fn workspaces_without_any_say_what_they_are(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    click(window, "view-workspaces", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(workspace.read(cx).view(), ph_workspace::View::NoWorkspaces);
+        assert!(window.try_find("no-workspaces-open").is_some());
+        assert!(window.try_find("no-workspaces-new").is_some());
+        assert!(
+            window.try_find("workspace-switcher").is_none(),
+            "there is none to switch between"
+        );
+    })
+    .unwrap();
+
+    let (_alpha, beta) = two_workspaces("first-ones", window, &workspace, cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.view(), ph_workspace::View::Workspaces);
+        assert_eq!(workspace.active_project_id(), Some(beta));
+        assert!(window.try_find("no-workspaces-open").is_none());
+        assert!(window.try_find("workspace-switcher").is_some());
+    })
+    .unwrap();
+}
+
+/// A tab's menu closes the others, or all of them: the chats stay, only
+/// their tabs go.
+#[gpui_kit::test]
+fn a_tabs_menu_closes_the_others_or_all(cx: &mut TestAppContext) {
+    let (window, workspace) = open_workspace(cx);
+    let (alpha, _beta) = two_workspaces("tab-menu", window, &workspace, cx);
+    let [first, second, third] = cx.update(|cx| {
+        let store = AppState::store(cx);
+        ["Sort the arrivals", "Name the berths", "Paint the buoys"]
+            .map(|title| store.create_session(alpha, title, "claude").unwrap().id)
+    });
+    workspace.update(cx, |workspace, cx| {
+        workspace.unload_idle(std::time::Duration::ZERO, cx)
+    });
+    cx.update_window(window, |_, window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_chat(alpha, first, window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let front = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let space = workspace.read(cx).active_space().unwrap().clone();
+            space.read(cx).active_session()
+        })
+    };
+    // What the tab's menu does (its items have no ids to click by).
+    let close = |keep: Option<i64>, cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            let space = workspace.read(cx).active_space().unwrap().clone();
+            space.update(cx, |space, cx| space.close_tabs(keep, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    let tabs = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            [first, second, third]
+                .map(|session| window.try_find(("chat-tab", session as u64)).is_some())
+        })
+        .unwrap()
+    };
+    assert_eq!(tabs(cx), [true, true, true]);
+    assert_eq!(front(cx), Some(first));
+
+    // The others close, and the tab asked from is in front.
+    close(Some(third), cx);
+    assert_eq!(tabs(cx), [false, false, true]);
+    assert_eq!(front(cx), Some(third));
+    cx.update(|cx| {
+        let store = AppState::store(cx);
+        for session in [first, second] {
+            assert!(
+                store.session(session).unwrap().is_some(),
+                "the chats are kept"
+            );
+        }
+        let mut closed = store.project_ui_state(alpha).unwrap().closed_tabs;
+        closed.sort();
+        assert_eq!(closed, vec![first, second], "kept for the next start");
+    });
+
+    // All close: a new chat is in front.
+    close(None, cx);
+    assert_eq!(tabs(cx), [false, false, false]);
+    assert_eq!(front(cx), None);
 }
 
 /// Closing the tab in front shows the one beside it; a closed tab is back
@@ -1100,7 +1285,7 @@ fn a_new_cli_session_asks_which_agent(cx: &mut TestAppContext) {
         profiles.open_as = ph_agent::profiles::OpenAs::Cli;
         profiles.save(store).unwrap();
     });
-    click_id(window, ("rail-workspace", alpha as u64), cx);
+    switch_workspace(window, alpha, cx);
     click(window, "chat-new", cx);
     cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
@@ -1506,7 +1691,7 @@ fn removing_a_workspace_with_chats_asks_first(cx: &mut TestAppContext) {
     workspace.update(cx, |workspace, cx| {
         workspace.unload_idle(std::time::Duration::ZERO, cx)
     });
-    click_id(window, ("rail-workspace", alpha as u64), cx);
+    switch_workspace(window, alpha, cx);
     cx.update_window(window, |_, window, cx| {
         window.dispatch_action(Box::new(ph_workspace::RemoveWorkspace), cx);
     })
@@ -1753,4 +1938,64 @@ fn rendered_markdown_copies_as_the_text_read(cx: &mut TestAppContext) {
         .and_then(|item| item.text())
         .unwrap_or_default();
     assert_eq!(copied, "Notes\n\nSome bold text.\n\nName\tCount\na\t1");
+}
+
+#[gpui_kit::test]
+fn utilities_open_from_the_rail_and_every_one_draws(cx: &mut TestAppContext) {
+    use gpui_kit::component::WindowExt as _;
+    let (window, _) = open_workspace(cx);
+    click(window, "open-utilities", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("utilities").is_some(),
+            "the rail opens the dialog"
+        );
+    })
+    .unwrap();
+    // Enter in the search takes the first found, and leaves the dialog open
+    // (it used to close it).
+    click(window, "utilities-search", cx);
+    cx.update_window(window, |_, window, cx| {
+        window.input("cron", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("utilities").is_some(),
+            "Enter does not close it"
+        );
+        assert!(
+            window.try_find("cron-preset-Hourly").is_some(),
+            "Cron is in front"
+        );
+    })
+    .unwrap();
+    // Every utility's own view is made and drawn.
+    for utility in ph_utils::UTILITIES {
+        let store = cx.update(|cx| AppState::store(cx).clone());
+        cx.update_window(window, |_, window, cx| {
+            window.close_dialog(cx);
+            ph_utils::dialog::open(Some(utility.id), store, window, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .try_find(gpui_kit::SharedString::from(format!(
+                        "utility-{}",
+                        utility.id
+                    )))
+                    .is_some(),
+                "{} is listed",
+                utility.id
+            );
+        })
+        .unwrap();
+    }
 }

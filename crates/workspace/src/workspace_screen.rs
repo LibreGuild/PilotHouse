@@ -54,6 +54,7 @@ pub(crate) mod explain;
 mod layout;
 mod panels;
 mod render;
+mod source_lookup;
 mod tabs;
 mod to_chat;
 
@@ -243,13 +244,19 @@ impl WorkspaceScreen {
                 ChatPanelEvent::SelectSession(Some(id)) => this.select_session(*id, cx),
                 ChatPanelEvent::SelectSession(None) => this.new_session_asked(window, cx),
                 ChatPanelEvent::TurnEnded => {
-                    this.refresh_evidence(cx);
                     // A UI test being recorded ends with its agent's turn,
                     // not another chat's.
                     let chat = this.chat.read(cx).active_session_id(cx);
-                    let ours = ph_uitest::record::current(cx)
-                        .is_some_and(|recording| recording.chat.is_none_or(|id| Some(id) == chat));
-                    if ours && let Some(tests) = this.tests.clone() {
+                    let project = this.project.id;
+                    let ours = ph_uitest::record::current(cx).is_some_and(|recording| {
+                        recording.project_id == project
+                            && recording.chat.is_none_or(|id| Some(id) == chat)
+                    });
+                    // Also one an agent started from its chat (`test_record`)
+                    // without the Tests tab ever having been opened: the tab
+                    // is what writes a recording down.
+                    if ours {
+                        let tests = this.tests(window, cx);
                         tests.update(cx, |tests, cx| tests.finish_recording(cx));
                     }
                 }
@@ -852,7 +859,10 @@ impl WorkspaceScreen {
             devices.update(cx, |devices, cx| devices.set_active(devices_shown, cx));
         }
         if let Some(logcat) = &self.logcat {
-            logcat.update(cx, |logcat, cx| logcat.set_active(logcat_shown, cx));
+            // Once shown it keeps running: see `LogcatPanel`.
+            if logcat_shown {
+                logcat.update(cx, |logcat, cx| logcat.start(cx));
+            }
         }
         let runs_shown = shown(ContextTab::Runs);
         if let Some(runs) = &self.runs {
@@ -1184,7 +1194,6 @@ impl WorkspaceScreen {
         self.closed_tabs.remove(&id);
         self.chat
             .update(cx, |chat, cx| chat.set_session(session, cx));
-        self.refresh_evidence(cx);
         self.save_layout(cx);
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();
@@ -1195,25 +1204,19 @@ impl WorkspaceScreen {
     /// opened again or needs the user. The one in front gives way to the
     /// tab beside it, or to a new chat.
     pub(crate) fn close_tab(&mut self, id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
-        let beside = self.shell.upgrade().and_then(|shell| {
-            let open = crate::bridge::open_chats(
-                shell.read(cx),
-                self.project.id,
-                &self.sessions,
-                self.active_session,
-                cx,
-            );
-            let shown: Vec<SessionId> = open
-                .iter()
-                .map(|chat| chat.session.id)
+        let beside = {
+            let shown: Vec<SessionId> = self
+                .open_chat_ids(cx)
+                .into_iter()
                 .filter(|open| *open == id || !self.closed_tabs.contains(open))
                 .collect();
-            let at = shown.iter().position(|open| *open == id)?;
-            shown
-                .get(at + 1)
-                .or_else(|| at.checked_sub(1).and_then(|at| shown.get(at)))
-                .copied()
-        });
+            shown.iter().position(|open| *open == id).and_then(|at| {
+                shown
+                    .get(at + 1)
+                    .or_else(|| at.checked_sub(1).and_then(|at| shown.get(at)))
+                    .copied()
+            })
+        };
         self.closed_tabs.insert(id);
         if self.active_session == Some(id) {
             match beside {
@@ -1223,6 +1226,47 @@ impl WorkspaceScreen {
         }
         self.save_layout(cx);
         cx.notify();
+    }
+
+    /// Closes every tab over the chat but `keep`'s, which comes in front;
+    /// with `None`, all of them, and a new chat is in front. As with one
+    /// tab, the chats stay as they are, and one that needs the user keeps
+    /// its tab.
+    pub fn close_tabs(
+        &mut self,
+        keep: Option<SessionId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self.open_chat_ids(cx);
+        self.closed_tabs
+            .extend(open.into_iter().filter(|id| Some(*id) != keep));
+        match keep {
+            // (Which also saves the layout.)
+            Some(keep) if self.active_session != Some(keep) => self.select_session(keep, cx),
+            None if self.active_session.is_some() => self.new_session(window, cx),
+            _ => {}
+        }
+        self.save_layout(cx);
+        cx.notify();
+    }
+
+    /// The workspace's open chats, as the row of tabs orders them (closed
+    /// tabs among them).
+    fn open_chat_ids(&self, cx: &App) -> Vec<SessionId> {
+        let Some(shell) = self.shell.upgrade() else {
+            return Vec::new();
+        };
+        crate::bridge::open_chats(
+            shell.read(cx),
+            self.project.id,
+            &self.sessions,
+            self.active_session,
+            cx,
+        )
+        .iter()
+        .map(|chat| chat.session.id)
+        .collect()
     }
 
     /// Whether chat `id`'s tab was closed.
@@ -1241,7 +1285,6 @@ impl WorkspaceScreen {
             chat.set_session(None, cx);
             chat.focus_composer(window, cx);
         });
-        self.refresh_evidence(cx);
         self.save_layout(cx);
         cx.emit(WorkspaceScreenEvent::SessionsChanged);
         cx.notify();

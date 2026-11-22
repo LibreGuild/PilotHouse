@@ -58,6 +58,46 @@ pub fn allows(kind: Option<ToolKind>, raw_input: Option<&Value>, root: &Path) ->
     }
 }
 
+/// Whether a tool call reads or changes files inside `folder` and nothing
+/// else, and runs nothing: what an agent does to a deck in the chat beside
+/// it, where each change shows at once and can be undone.
+///
+/// `cwd` is the folder the agent runs in: a file it names without a root
+/// is there, not in `folder`. (A workspace's chat runs in the workspace,
+/// so its `src/main.rs` is the project's file however many decks the
+/// workspace has, and asks like any other change.)
+pub fn changes_within(
+    kind: Option<ToolKind>,
+    raw_input: Option<&Value>,
+    folder: &Path,
+    cwd: &Path,
+) -> bool {
+    match kind {
+        Some(ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move) => {
+            let mut paths = paths_of(raw_input);
+            // Where a moved file goes counts as much as where it was.
+            if let Some(input) = raw_input {
+                for key in ["destination", "new_path", "to", "target_path"] {
+                    if let Some(path) = input.get(key).and_then(Value::as_str) {
+                        paths.push(path.to_string());
+                    }
+                }
+            }
+            // The folder as it is written, and as it really is: an agent
+            // names files by either (`/private/tmp/x` for `/tmp/x`).
+            let real = std::fs::canonicalize(folder)
+                .ok()
+                .filter(|real| real != folder);
+            let within = |path: &String| {
+                inside(folder, cwd, path)
+                    || real.as_deref().is_some_and(|real| inside(real, cwd, path))
+            };
+            !paths.is_empty() && paths.iter().all(within)
+        }
+        _ => false,
+    }
+}
+
 /// The folders a command's input says to run it from (Codex `workdir`,
 /// Gemini `dir_path` or `directory`, Antigravity `Cwd`); one left empty
 /// is the agent's own.
@@ -498,33 +538,41 @@ fn single_command(words: &[String], root: &Path, cwd: &Path) -> bool {
 }
 
 /// Whether a permission request is for one of PilotHouse's own app tools
-/// (browser, device, UI test checks). Only the tool's own name counts, as
+/// (browser, device, UI tests). Only the tool's own name counts, as
 /// agents show it (`mcp__pilothouse__browser_open`, `pilothouse.browser_open`,
 /// `browser_open (pilothouse)`) or as structured arguments name it; never
 /// words inside a command, which a web page could have put there.
 pub fn is_app_tool(kind: Option<ToolKind>, title: &str, raw_input: Option<&Value>) -> bool {
-    if matches!(
-        kind,
-        Some(ToolKind::Execute | ToolKind::Edit | ToolKind::Delete | ToolKind::Move)
-    ) {
-        return false;
-    }
-    let app_tool = |name: &str| {
+    names_own_tool(kind, title, raw_input, |name: &str| {
         [
             "browser_",
             "device_",
+            // A check while recording, how the tests last went, and a
+            // replay of recorded steps (which does what `browser_` and
+            // `device_` do).
             "test_expect",
+            "test_list",
+            "test_run",
+            // A new test of the user's asking, written to the project's
+            // own tests folder.
+            "test_record",
+            "test_save",
             "ports_list",
+            // Only reads. Adding a configuration (a command the user will
+            // start with a click) asks, like any change of the user's setup.
+            "run_list",
             // Studio: looking at and changing the picture; saving asks.
             "studio_get",
             "studio_edit",
             "studio_undo",
             "studio_list",
-            // Slides: looking at and changing the presentation; exporting asks.
-            "slides_get",
-            "slides_edit",
-            "slides_undo",
-            "slides_themes",
+            // A deck: its guide, how it looks as drawn, its comments, and a
+            // PowerPoint file made slides of it (each undone in the deck);
+            // exporting asks.
+            "deck_guide",
+            "deck_look",
+            "deck_comments",
+            "deck_import",
         ]
         .iter()
         .any(|prefix| name.starts_with(prefix))
@@ -533,8 +581,42 @@ pub fn is_app_tool(kind: Option<ToolKind>, title: &str, raw_input: Option<&Value
             && !["browser_evaluate", "device_install", "device_start_emulator", "device_shell"]
                 .iter()
                 .any(|asks| name.starts_with(asks))
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    };
+    })
+}
+
+/// Whether a permission request is for one of the tools that read a deck
+/// or answer its comments: what a workspace's chat uses on a deck made
+/// from it, as the deck's own chat does. Making a deck and exporting one
+/// are not among them.
+pub fn is_deck_tool(kind: Option<ToolKind>, title: &str, raw_input: Option<&Value>) -> bool {
+    names_own_tool(kind, title, raw_input, |name: &str| {
+        [
+            "deck_guide",
+            "deck_look",
+            "deck_comments",
+            "deck_import",
+            "deck_list",
+        ]
+        .contains(&name)
+    })
+}
+
+/// Whether a permission request names one of PilotHouse's own tools that
+/// `listed` lists (see [`is_app_tool`] for what counts as naming one).
+fn names_own_tool(
+    kind: Option<ToolKind>,
+    title: &str,
+    raw_input: Option<&Value>,
+    listed: impl Fn(&str) -> bool,
+) -> bool {
+    if matches!(
+        kind,
+        Some(ToolKind::Execute | ToolKind::Edit | ToolKind::Delete | ToolKind::Move)
+    ) {
+        return false;
+    }
+    let app_tool =
+        |name: &str| listed(name) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     let title = title.trim().to_lowercase();
     let named = [
         title.strip_prefix("mcp__pilothouse__"),
@@ -799,19 +881,144 @@ mod tests {
     }
 
     #[test]
+    fn a_decks_own_files_are_changed_without_asking_and_nothing_else() {
+        let base = std::env::temp_dir().join(format!("ph-own-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let site = base.join("deck/site");
+        std::fs::create_dir_all(site.join("slides")).unwrap();
+        std::fs::write(base.join("deck/artifact.json"), "{}").unwrap();
+        let site = std::fs::canonicalize(&site).unwrap();
+        let within = |kind: ToolKind, input: serde_json::Value| {
+            changes_within(Some(kind), Some(&input), &site, &site)
+        };
+        let file = |name: &str| site.join(name).to_string_lossy().into_owned();
+        assert!(within(
+            ToolKind::Edit,
+            serde_json::json!({ "file_path": file("slides/a.html") })
+        ));
+        assert!(within(
+            ToolKind::Read,
+            serde_json::json!({ "path": file("deck.json") })
+        ));
+        assert!(within(
+            ToolKind::Delete,
+            serde_json::json!({ "path": file("slides/old.html") })
+        ));
+        assert!(within(
+            ToolKind::Move,
+            serde_json::json!({ "path": file("slides/a.html"), "destination": file("slides/b.html") })
+        ));
+        // Out of the deck's files: the artifact's own, a way up, a move out.
+        assert!(!within(
+            ToolKind::Edit,
+            serde_json::json!({ "file_path": file("../artifact.json") })
+        ));
+        assert!(!within(
+            ToolKind::Edit,
+            serde_json::json!({ "file_path": "/etc/hosts" })
+        ));
+        assert!(!within(
+            ToolKind::Move,
+            serde_json::json!({ "path": file("slides/a.html"), "destination": "/tmp/a.html" })
+        ));
+        // Nothing is run, and a change that names no file asks.
+        assert!(!within(
+            ToolKind::Execute,
+            serde_json::json!({ "command": "rm -rf ." })
+        ));
+        assert!(!within(ToolKind::Edit, serde_json::json!({})));
+        assert!(!changes_within(None, None, &site, &site));
+        // A file named without a root is in the folder the agent runs in:
+        // in the deck's own chat that is the deck, in a workspace's chat it
+        // is the workspace, whose files ask.
+        let relative = serde_json::json!({ "file_path": "slides/a.html" });
+        assert!(changes_within(
+            Some(ToolKind::Edit),
+            Some(&relative),
+            &site,
+            &site
+        ));
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        assert!(!changes_within(
+            Some(ToolKind::Edit),
+            Some(&relative),
+            &site,
+            &workspace
+        ));
+        let named_in_full = serde_json::json!({ "file_path": file("slides/a.html") });
+        assert!(changes_within(
+            Some(ToolKind::Edit),
+            Some(&named_in_full),
+            &site,
+            &workspace
+        ));
+        // The folder named through a link, the file as it really is (and
+        // the other way round): the same files.
+        #[cfg(unix)]
+        {
+            let link = base.join("link");
+            std::os::unix::fs::symlink(base.join("deck"), &link).unwrap();
+            let linked = link.join("site");
+            let real = serde_json::json!({ "file_path": file("slides/a.html") });
+            assert!(changes_within(
+                Some(ToolKind::Edit),
+                Some(&real),
+                &linked,
+                &linked
+            ));
+            let through = serde_json::json!({
+                "file_path": linked.join("slides/a.html").to_string_lossy()
+            });
+            assert!(changes_within(
+                Some(ToolKind::Edit),
+                Some(&through),
+                &linked,
+                &linked
+            ));
+            let out = serde_json::json!({ "file_path": file("../artifact.json") });
+            assert!(!changes_within(
+                Some(ToolKind::Edit),
+                Some(&out),
+                &linked,
+                &linked
+            ));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn app_tools_are_recognised_by_name() {
         let tool = |title: &str| is_app_tool(None, title, None);
         assert!(tool("mcp__pilothouse__browser_click"));
         assert!(tool("pilothouse.device_tap"));
         assert!(tool("browser open · pilothouse"));
         assert!(tool("test expect · pilothouse"));
+        assert!(tool("test list · pilothouse"));
+        assert!(tool("mcp__pilothouse__test_run"));
+        assert!(tool("mcp__pilothouse__test_record"));
+        assert!(tool("mcp__pilothouse__run_list"));
+        assert!(
+            !tool("mcp__pilothouse__run_add"),
+            "a command the user will start asks"
+        );
+        assert!(tool("test save · pilothouse"));
         assert!(is_app_tool(
             None,
             "Tool",
             Some(&serde_json::json!({ "server": "pilothouse", "tool": "device_tap" }))
         ));
-        assert!(tool("mcp__pilothouse__slides_edit"));
-        assert!(!tool("mcp__pilothouse__slides_export"), "exporting asks");
+        assert!(tool("mcp__pilothouse__deck_look"));
+        assert!(tool("mcp__pilothouse__deck_comments"));
+        assert!(!tool("mcp__pilothouse__deck_export"), "exporting asks");
+        // In a workspace with a deck: the deck's tools, and no other.
+        let deck = |title: &str| is_deck_tool(None, title, None);
+        assert!(deck("mcp__pilothouse__deck_look"));
+        assert!(deck("deck_comments (pilothouse)"));
+        assert!(!deck("mcp__pilothouse__deck_create"), "making a deck asks");
+        assert!(!deck("mcp__pilothouse__deck_export"), "exporting asks");
+        assert!(!deck("mcp__pilothouse__browser_open"));
+        assert!(!deck("mcp__other__deck_look"));
         assert!(!tool("mcp__other__browser_click"));
         assert!(
             !tool("mcp__pilothouse__browser_evaluate"),

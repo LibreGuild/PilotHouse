@@ -107,6 +107,55 @@ impl Client {
         Ok(items)
     }
 
+    /// The text GitHub keeps elsewhere and answers for with a redirect (a
+    /// job's log, in storage): that address is signed for this one read, so
+    /// it is fetched without the token. Up to `limit` bytes.
+    pub fn download_text(&self, path: &str, limit: u64) -> Result<String> {
+        let url = self.url(path);
+        if !self.same_host(&url) {
+            bail!("refusing to send the token to another host: {url}");
+        }
+        let accept = "application/vnd.github+json";
+        let mut response = self.send_once("GET", &url, accept, None)?;
+        if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308)
+            && let Some(next) = response
+                .headers()
+                .get("location")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|location| redirect_target(&url, location))
+        {
+            response = if self.same_host(&next) {
+                self.send_once("GET", &next, accept, None)?
+            } else if next.starts_with("https://") || self.base.starts_with("http://") {
+                self.agent
+                    .get(&next)
+                    .call()
+                    .map_err(|err| anyhow!("could not reach {}: {err}", host_of(&next)))?
+            } else {
+                bail!("GitHub sent the download to an address that is not https");
+            };
+        }
+        let mut response = check(response)?;
+        response
+            .body_mut()
+            .with_config()
+            .limit(limit)
+            .read_to_string()
+            .context("the download is too large or not text")
+    }
+
+    /// A request that only has to succeed (run a job again): its reply is
+    /// not read.
+    pub fn act(&self, method: &str, path: &str) -> Result<()> {
+        let response = self.request(
+            method,
+            path,
+            "application/vnd.github+json",
+            Some(&serde_json::json!({})),
+        )?;
+        check(response).map(|_| ())
+    }
+
     pub fn post<T: DeserializeOwned>(&self, path: &str, body: &Value) -> Result<T> {
         self.send("POST", path, body)
     }

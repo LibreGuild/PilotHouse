@@ -1,13 +1,22 @@
-//! The Tests tab: the project's UI tests, their last results, and the ways
-//! to make, run and fix them.
+//! The Tests tab: the project's own tests and its UI tests in one list,
+//! how each last went, and the ways to run, make and fix them.
+//!
+//! One list at the left (the project's suites with their tests under them,
+//! then the UI tests), what is picked at the right. In a narrow pane the
+//! list is all there is, and picking a row goes into it.
 
-use std::collections::HashMap;
+mod check;
+mod create;
+mod list;
+mod suites;
+
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::PopupMenuItem,
@@ -15,16 +24,21 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ObjectFit, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledImage as _, Task, Window, div, img,
+    AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Task,
+    UniformListScrollHandle, Window, div,
 };
-use ph_ui::Icons;
-use ph_ui::MenuButton as _;
+use ph_ui::{Icons, MenuButton as _};
 
-use crate::model::{self, Step, Target, TestCase};
+use crate::model::{self, Step, TestCase};
 use crate::record;
 use crate::run::{self, Report};
+use crate::runner::{Job, TestRunHub, WorkspaceTestRuns};
+use crate::suite::{self, Case, Outcome, Suite, SuiteResult};
+
+/// Below this width (at the default interface size) the tab is its list
+/// alone, and a picked row takes its place.
+const TWO_COLUMNS: f32 = 560.;
 
 /// What the panel needs the workspace for.
 #[derive(Debug, Clone)]
@@ -33,38 +47,120 @@ pub enum TestsPanelEvent {
     /// meanwhile); stop recording with [`TestsPanel::finish_recording`]
     /// when its turn ends.
     Agent { title: String, prompt: String },
-    /// Open the test's file.
-    OpenFile(PathBuf),
+    /// Open a file, at a 1-based line when one is known.
+    Open { path: PathBuf, line: Option<u32> },
+    /// Show the Run tab: the app a test opens is not running.
+    ShowRun,
+    /// Show where a UI test runs: the phone, else the browser.
+    ShowPreview { phone: bool },
 }
 
 impl EventEmitter<TestsPanelEvent> for TestsPanel {}
+
+/// What is picked in the list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Picked {
+    /// A UI test, by its file.
+    Check(PathBuf),
+    /// A suite of the project, by its id.
+    Suite(String),
+    /// One test of a suite.
+    Case {
+        suite: String,
+        group: String,
+        name: String,
+    },
+}
+
+/// Which picture of a look check is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Picture {
+    Now,
+    Accepted,
+    Changes,
+}
+
+/// What the tab shows, read from the project and the data folder.
+#[derive(Default)]
+struct Loaded {
+    tests: Vec<(PathBuf, TestCase)>,
+    reports: HashMap<PathBuf, Vec<(PathBuf, Report)>>,
+    suites: Vec<Suite>,
+    results: HashMap<String, SuiteResult>,
+}
+
+/// Reads everything the tab shows. Blocks: call it off the UI thread.
+fn load(project_id: i64, root: &std::path::Path, own: &[String]) -> Loaded {
+    let tests = model::list(root);
+    let reports = tests
+        .iter()
+        .filter_map(|(path, test)| {
+            let reports = run::last_reports(project_id, &model::slug(&test.name));
+            (!reports.is_empty()).then(|| (path.clone(), reports))
+        })
+        .collect();
+    let mut suites = suite::detect(root);
+    suites.extend(own.iter().map(|command| Suite::custom(command, root)));
+    let results = suites
+        .iter()
+        .filter_map(|suite| Some((suite.id.clone(), suite::last_result(project_id, &suite.id)?)))
+        .collect();
+    Loaded {
+        tests,
+        reports,
+        suites,
+        results,
+    }
+}
 
 pub struct TestsPanel {
     project_id: i64,
     root: PathBuf,
     tests: Vec<(PathBuf, TestCase)>,
-    /// Each test's newest run: one report, or one per variant of a matrix
-    /// run, each with its folder.
+    /// Each UI test's newest run: one report, or one per variant of a
+    /// matrix run, each with its folder.
     reports: HashMap<PathBuf, Vec<(PathBuf, Report)>>,
-    selected: Option<PathBuf>,
+    suites: Vec<Suite>,
+    /// Each suite's newest result, by its id.
+    results: HashMap<String, SuiteResult>,
+    /// Nothing was read yet.
+    loading: bool,
+    picked: Option<Picked>,
+    /// In a narrow pane: what is picked is shown, in place of the list.
+    inside: bool,
+    /// The list as drawn: sections, suites, groups, tests.
+    rows: Vec<list::Row>,
+    /// The suites and groups shown open, by [`list::open_key`].
+    open: HashSet<String>,
+    only_failed: bool,
+    search: Entity<InputState>,
+    list_scroll: UniformListScrollHandle,
+    focus: FocusHandle,
     /// Which variant of a matrix run is shown.
     shown: usize,
+    /// The step whose screen is shown; `None` follows the run (the step
+    /// that failed, else the last).
+    step: Option<usize>,
+    picture: Picture,
     /// The workspace's runs, which outlive this panel.
-    runs: Entity<crate::runner::WorkspaceTestRuns>,
+    runs: Entity<WorkspaceTestRuns>,
+    /// How many runs had ended when the results were last read.
+    seen_ended: usize,
     /// Steps an agent proposed for a failing test, to keep or throw away.
     proposal: Option<(PathBuf, Vec<Step>)>,
     /// Recording a repair (its steps become a proposal) rather than a new
     /// recording (saved at once).
     repairing: bool,
-    /// The step whose screenshot (and changes) are shown large.
-    zoomed: Option<usize>,
-    name: Entity<InputState>,
-    description: Entity<InputState>,
-    target: Entity<InputState>,
-    creating: bool,
+    /// The form for a new UI test, while it is open.
+    creating: Option<create::NewTest>,
+    /// A test command of the user's own being typed.
+    command: Option<Entity<InputState>>,
+    /// A saved password being entered: its name, and the field.
+    secret: Option<(String, Entity<InputState>)>,
     message: Option<(SharedString, bool)>,
     _tick: Option<Task<()>>,
-    _runs: gpui_kit::Subscription,
+    _load: Option<Task<()>>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl TestsPanel {
@@ -74,943 +170,773 @@ impl TestsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
-            cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
-        };
-        let runs = crate::runner::TestRunHub::runs(project_id, cx);
-        let _runs = cx.observe(&runs, |this, runs, cx| {
-            // A run ended: show how it went, with its reports.
-            if let Some(outcome) = runs.update(cx, |runs, _| runs.take_outcome()) {
-                this.shown = 0;
-                this.message = Some(outcome);
-                this.reload();
-            }
-            cx.notify();
-        });
+        let runs = TestRunHub::runs(project_id, cx);
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find a test…"));
+        let subscriptions = vec![
+            cx.observe(&runs, |this, runs, cx| {
+                // A run ended: show how it went, with its results.
+                if let Some(outcome) = runs.update(cx, |runs, _| runs.take_outcome()) {
+                    this.message = Some(outcome);
+                }
+                let ended = runs.read(cx).ended();
+                if ended != this.seen_ended {
+                    this.seen_ended = ended;
+                    this.shown = 0;
+                    this.step = None;
+                    this.picture = Picture::Now;
+                    this.reload(cx);
+                }
+                this.watch(cx);
+                cx.notify();
+            }),
+            cx.subscribe(&search, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.rebuild_rows(cx);
+                    cx.notify();
+                }
+            }),
+        ];
+        let seen_ended = runs.read(cx).ended();
         let mut panel = Self {
             project_id,
             root,
             tests: Vec::new(),
             reports: HashMap::new(),
-            selected: None,
+            suites: Vec::new(),
+            results: HashMap::new(),
+            loading: true,
+            picked: None,
+            inside: false,
+            rows: Vec::new(),
+            open: HashSet::new(),
+            only_failed: false,
+            search,
+            list_scroll: UniformListScrollHandle::new(),
+            focus: cx.focus_handle(),
             shown: 0,
+            step: None,
+            picture: Picture::Now,
             runs,
+            seen_ended,
             proposal: None,
             repairing: false,
-            zoomed: None,
-            name: input("Name, e.g. Sign in works", window, cx),
-            description: input("What to do and check, in plain words", window, cx),
-            target: input(
-                "Start at: a URL (http://localhost:3000) or an Android package (com.acme.app)",
-                window,
-                cx,
-            ),
-            creating: false,
+            creating: None,
+            command: None,
+            secret: None,
             message: None,
             _tick: None,
-            _runs,
+            _load: None,
+            _subscriptions: subscriptions,
         };
-        panel.reload();
+        panel.reload(cx);
+        panel.watch(cx);
         panel
     }
 
-    fn reload(&mut self) {
-        self.tests = model::list(&self.root);
-        self.reports = self
-            .tests
-            .iter()
-            .filter_map(|(path, test)| {
-                let reports = run::last_reports(self.project_id, &model::slug(&test.name));
-                (!reports.is_empty()).then(|| (path.clone(), reports))
-            })
-            .collect();
-        if self
-            .selected
-            .as_ref()
-            .is_none_or(|selected| !self.tests.iter().any(|(path, _)| path == selected))
-        {
-            self.selected = self.tests.first().map(|(path, _)| path.clone());
-        }
+    /// The setting a workspace's own test commands are kept in.
+    fn commands_key(&self) -> String {
+        format!("tests.commands.{}", self.project_id)
     }
 
-    /// The report shown for `path`: the chosen variant of its newest run.
-    fn shown_report(&self, path: &PathBuf) -> Option<&(PathBuf, Report)> {
-        let reports = self.reports.get(path)?;
-        reports.get(self.shown).or_else(|| reports.first())
+    /// The test commands the user added for this workspace.
+    fn own_commands(&self, cx: &gpui_kit::App) -> Vec<String> {
+        TestRunHub::store(cx)
+            .map(|store| store.setting(&self.commands_key()))
+            .unwrap_or_default()
     }
 
-    fn selected_test(&self) -> Option<&(PathBuf, TestCase)> {
-        let selected = self.selected.as_ref()?;
-        self.tests.iter().find(|(path, _)| path == selected)
-    }
-
-    fn create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.name.read(cx).value().trim().to_string();
-        let description = self.description.read(cx).value().trim().to_string();
-        let start = self.target.read(cx).value().trim().to_string();
-        let target = if start.contains("://") || start.starts_with("localhost") {
-            Target::Web {
-                url: if start.contains("://") {
-                    start
-                } else {
-                    format!("http://{start}")
-                },
-            }
-        } else if !start.is_empty() && start.contains('.') && !start.contains(' ') {
-            Target::Android { package: start }
-        } else {
-            self.message = Some((
-                "Start at a URL, or an Android package like com.acme.app.".into(),
-                true,
-            ));
-            cx.notify();
-            return;
-        };
-        let test = TestCase {
-            name,
-            description,
-            target,
-            steps: Vec::new(),
-        };
-        match model::create(&self.root, &test) {
-            Ok(path) => {
-                for input in [&self.name, &self.description, &self.target] {
-                    input.update(cx, |input, cx| input.set_value("", window, cx));
+    /// Reads the tests and their results again, off the UI thread.
+    pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+        let (project_id, root) = (self.project_id, self.root.clone());
+        let own = self.own_commands(cx);
+        self._load = Some(cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_spawn(async move { load(project_id, &root, &own) })
+                .await;
+            _ = this.update(cx, |this, cx| {
+                // A suite that just ran opens at what failed in it.
+                let ran: Vec<String> = loaded
+                    .results
+                    .iter()
+                    .filter(|(id, result)| {
+                        this.results
+                            .get(*id)
+                            .is_none_or(|old| old.started_at != result.started_at)
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                this.tests = loaded.tests;
+                this.reports = loaded.reports;
+                this.suites = loaded.suites;
+                this.results = loaded.results;
+                this.loading = false;
+                for id in ran {
+                    this.open_failed(&id);
                 }
-                self.creating = false;
-                self.message = None;
-                self.reload();
-                self.selected = Some(path.clone());
-                self.record(path, cx);
-            }
-            Err(err) => self.message = Some((err.to_string().into(), true)),
-        }
-        cx.notify();
-    }
-
-    /// Has an agent work through the test's scenario while its steps are
-    /// recorded.
-    fn record(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let Some(test) = self
-            .tests
-            .iter()
-            .find(|(p, _)| *p == path)
-            .map(|(_, test)| test.clone())
-        else {
-            return;
-        };
-        if let Err(err) = record::start(self.project_id, path, Vec::new(), cx) {
-            self.message = Some((err.to_string().into(), true));
-            cx.notify();
-            return;
-        }
-        self.repairing = false;
-        self.watch_recording(cx);
-        let (start, tools) = match &test.target {
-            Target::Web { url } => (format!("Open {url} with browser_open."), "browser_*"),
-            Target::Android { package } => {
-                (format!("Launch {package} with device_launch."), "device_*")
-            }
-        };
-        let prompt = format!(
-            "Record a UI test in PilotHouse named “{}”.\n\nScenario: {}\n\n{start} Then do the scenario step by step with the \
-             {tools} tools, using the selectors from browser_snapshot (or the UI tree) rather than coordinates when you can. \
-             After each result the user should see, call test_expect (kind text with words on screen, or kind url). PilotHouse \
-             saves every successful action and check as a step, so avoid detours you would undo. When done, reply with a \
-             one-line summary.",
-            test.name,
-            if test.description.is_empty() {
-                "(none given: explore the main flow)"
-            } else {
-                &test.description
-            },
-        );
-        cx.emit(TestsPanelEvent::Agent {
-            title: format!("Record test: {}", test.name),
-            prompt,
-        });
-        cx.notify();
-    }
-
-    /// Has an agent redo a failing test from the step that broke; what it
-    /// records is offered as a fix.
-    fn repair(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let (Some((_, test)), Some((_, report))) = (
-            self.tests.iter().find(|(p, _)| *p == path).cloned(),
-            self.shown_report(&path).cloned(),
-        ) else {
-            return;
-        };
-        let Some((failed, result)) = report.failure() else {
-            return;
-        };
-        let plan = run::plan(&test);
-        // The report can be of an older, longer version of the test.
-        if failed >= plan.len() {
-            self.message = Some((
-                "That failure is from an older version of the test: run it again first.".into(),
-                true,
-            ));
-            cx.notify();
-            return;
-        }
-        let kept = plan[..failed].to_vec();
-        let remaining: Vec<String> = plan[failed..].iter().map(Step::describe).collect();
-        if let Err(err) = record::start(self.project_id, path, kept, cx) {
-            self.message = Some((err.to_string().into(), true));
-            cx.notify();
-            return;
-        }
-        self.repairing = true;
-        self.watch_recording(cx);
-        let prompt = format!(
-            "The UI test “{}” broke at step {} (“{}”): {}\n\nThe steps before it still work and the {} is in the state they \
-             left. Continue the scenario from here, adapting to how the app looks now: {}\n\nScenario: {}\n\nUse the tools as \
-             when recording (selectors from the snapshot; test_expect for the checks). PilotHouse records what you do as a \
-             proposed fix. Reply with what changed in one line.",
-            test.name,
-            failed + 1,
-            result.step.describe(),
-            result.error.clone().unwrap_or_default(),
-            if test.is_android() {
-                "device"
-            } else {
-                "browser"
-            },
-            remaining.join("; "),
-            test.description
-        );
-        cx.emit(TestsPanelEvent::Agent {
-            title: format!("Repair test: {}", test.name),
-            prompt,
-        });
-        cx.notify();
-    }
-
-    /// Redraws while recording, so the step count keeps up.
-    fn watch_recording(&mut self, cx: &mut Context<Self>) {
-        self._tick = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(700))
-                    .await;
-                let recording = this.update(cx, |_, cx| {
-                    cx.notify();
-                    record::current(cx).is_some()
-                });
-                if !matches!(recording, Ok(true)) {
-                    break;
-                }
-            }
+                this.keep_picked();
+                this.rebuild_rows(cx);
+                cx.notify();
+            });
         }));
     }
 
-    /// Ends the recording: a new one is saved, a repair becomes a proposal.
-    pub fn finish_recording(&mut self, cx: &mut Context<Self>) {
-        // Another workspace's recording is its panel's to end.
-        if !record::current(cx).is_some_and(|recording| recording.project_id == self.project_id) {
-            return;
-        }
-        let Some(recording) = record::stop(cx) else {
-            return;
-        };
-        self._tick = None;
-        let count = recording.steps.len();
-        if self.repairing {
-            self.proposal = Some((recording.path, recording.steps));
-            self.message = Some((
-                format!("The agent proposes {count} steps: keep or discard them below.").into(),
-                false,
-            ));
-        } else if let Some((path, mut test)) = self
-            .tests
-            .iter()
-            .find(|(p, _)| *p == recording.path)
-            .cloned()
-        {
-            test.steps = recording.steps;
-            self.message = Some(match model::save(&path, &test) {
-                Ok(()) => (format!("Recorded {count} steps.").into(), false),
-                Err(err) => (err.to_string().into(), true),
-            });
-        }
-        self.repairing = false;
-        self.reload();
-        cx.notify();
-    }
-
-    fn keep_proposal(&mut self, cx: &mut Context<Self>) {
-        let Some((path, steps)) = self.proposal.take() else {
-            return;
-        };
-        if let Some((_, mut test)) = self.tests.iter().find(|(p, _)| *p == path).cloned() {
-            test.steps = steps;
-            if let Err(err) = model::save(&path, &test) {
-                self.message = Some((err.to_string().into(), true));
-            } else {
-                self.message = Some(("Kept the fix. Run the test to check it.".into(), false));
+    /// What is picked still exists; else the first thing that failed, or
+    /// the first there is, is picked.
+    fn keep_picked(&mut self) {
+        let exists = match &self.picked {
+            Some(Picked::Check(path)) => self.tests.iter().any(|(test, _)| test == path),
+            Some(Picked::Suite(id)) => self.suites.iter().any(|suite| &suite.id == id),
+            Some(Picked::Case { suite, group, name }) => {
+                self.results.get(suite).is_some_and(|result| {
+                    result
+                        .cases
+                        .iter()
+                        .any(|case| &case.group == group && &case.name == name)
+                })
             }
+            None => false,
+        };
+        if exists {
+            return;
         }
-        self.reload();
+        let failed_suite = self.suites.iter().find(|suite| {
+            self.results
+                .get(&suite.id)
+                .is_some_and(|result| !result.passed())
+        });
+        let failed_check = self.tests.iter().find(|(path, _)| {
+            self.reports
+                .get(path)
+                .is_some_and(|reports| reports.iter().any(|(_, report)| !report.passed()))
+        });
+        self.picked = failed_suite
+            .map(|suite| Picked::Suite(suite.id.clone()))
+            .or_else(|| failed_check.map(|(path, _)| Picked::Check(path.clone())))
+            .or_else(|| {
+                self.suites
+                    .first()
+                    .map(|suite| Picked::Suite(suite.id.clone()))
+            })
+            .or_else(|| {
+                self.tests
+                    .first()
+                    .map(|(path, _)| Picked::Check(path.clone()))
+            });
+        self.inside = false;
+    }
+
+    /// Redraws while something runs or is recorded, so that what it shows
+    /// (steps, output, time) keeps up.
+    fn watch(&mut self, cx: &mut Context<Self>) {
+        let busy = |this: &Self, cx: &gpui_kit::App| {
+            this.runs.read(cx).is_running() || record::current(cx).is_some()
+        };
+        if self._tick.is_some() || !busy(self, cx) {
+            return;
+        }
+        self._tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(600))
+                    .await;
+                let going = this.update(cx, |this, cx| {
+                    cx.notify();
+                    busy(this, cx)
+                });
+                if !matches!(going, Ok(true)) {
+                    break;
+                }
+            }
+            _ = this.update(cx, |this, _| this._tick = None);
+        }));
+    }
+
+    pub(crate) fn pick(&mut self, picked: Picked, cx: &mut Context<Self>) {
+        if self.picked.as_ref() != Some(&picked) {
+            self.shown = 0;
+            self.step = None;
+            self.picture = Picture::Now;
+            self.secret = None;
+        }
+        self.picked = Some(picked);
+        self.inside = true;
+        self.creating = None;
+        self.command = None;
         cx.notify();
     }
 
-    /// Replays the test: a web test at the desktop size (so its screens
-    /// compare from run to run), an Android one on the device in view. With
-    /// `matrix`, at every screen size or on every connected device.
-    fn run(&mut self, path: PathBuf, matrix: bool, cx: &mut Context<Self>) {
-        let Some((_, test)) = self.tests.iter().find(|(p, _)| *p == path).cloned() else {
+    fn test(&self, path: &PathBuf) -> Option<&TestCase> {
+        self.tests
+            .iter()
+            .find(|(test, _)| test == path)
+            .map(|(_, test)| test)
+    }
+
+    fn suite(&self, id: &str) -> Option<&Suite> {
+        self.suites.iter().find(|suite| suite.id == id)
+    }
+
+    /// Changes test `path` and writes it down.
+    fn change_test(
+        &mut self,
+        path: &PathBuf,
+        change: impl FnOnce(&mut TestCase),
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, test)) = self.tests.iter_mut().find(|(test, _)| test == path) else {
             return;
         };
-        if test.steps.is_empty() {
-            self.message = Some(("Record the test first.".into(), true));
-            cx.notify();
+        // As the file has it now: it may have been edited (by hand, by an
+        // agent) since it was read, and that must not be undone. A few
+        // lines of JSON, read and written here so that the next thing asked
+        // of the test finds it changed.
+        if let Ok(now) = model::load(path) {
+            *test = now;
+        }
+        change(test);
+        if let Err(err) = model::save(path, test) {
+            self.message = Some((format!("{err:#}").into(), true));
+        }
+        self.rebuild_rows(cx);
+        cx.notify();
+    }
+
+    // ---- Running ----
+
+    fn check_job(&self, path: &PathBuf, matrix: bool) -> Option<Job> {
+        let test = self.test(path)?.clone();
+        (!test.steps.is_empty()).then(|| Job::Check {
+            path: path.clone(),
+            test,
+            matrix,
+        })
+    }
+
+    fn start(&mut self, jobs: Vec<Job>, cx: &mut Context<Self>) {
+        if jobs.is_empty() {
             return;
         }
         self.message = None;
-        self.zoomed = None;
-        self.runs
-            .update(cx, |runs, cx| runs.start(path, test, matrix, cx));
+        self.step = None;
+        self.picture = Picture::Now;
+        self.runs.update(cx, |runs, cx| runs.start(jobs, cx));
+        self.watch(cx);
         cx.notify();
     }
 
-    /// Makes the newest run's screens the baseline for each of its variants
-    /// whose steps worked.
-    fn accept_look(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
-        let Some(reports) = self.reports.get(path) else {
-            return;
-        };
-        let mut saved = 0;
-        for (dir, report) in reports.iter().filter(|(_, report)| report.steps_passed()) {
-            match run::accept_look(self.project_id, dir, report) {
-                Ok(()) => saved += 1,
-                Err(err) => {
-                    self.message = Some((format!("Could not save the look: {err:#}").into(), true));
-                    cx.notify();
-                    return;
+    /// Everything: the project's suites, then the UI tests that have steps.
+    fn run_all(&mut self, cx: &mut Context<Self>) {
+        let mut jobs: Vec<Job> = self
+            .suites
+            .iter()
+            .map(|suite| Job::Suite {
+                suite: suite.clone(),
+                only: Vec::new(),
+            })
+            .collect();
+        jobs.extend(
+            self.tests
+                .iter()
+                .filter_map(|(path, _)| self.check_job(path, false)),
+        );
+        self.start(jobs, cx);
+    }
+
+    pub(crate) fn run_check(&mut self, path: &PathBuf, matrix: bool, cx: &mut Context<Self>) {
+        match self.check_job(path, matrix) {
+            Some(job) => self.start(vec![job], cx),
+            None => {
+                self.message = Some(("Record the test first.".into(), true));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Runs suite `id`: all of it, or only `only` of its tests.
+    pub(crate) fn run_suite(&mut self, id: &str, only: Vec<Case>, cx: &mut Context<Self>) {
+        if let Some(suite) = self.suite(id).cloned() {
+            self.start(vec![Job::Suite { suite, only }], cx);
+        }
+    }
+
+    fn stop(&mut self, cx: &mut Context<Self>) {
+        self.runs.update(cx, |runs, cx| runs.stop(cx));
+        cx.notify();
+    }
+
+    /// Whether anything runs, waits or is recorded: no second run is
+    /// started beside it.
+    fn busy(&self, cx: &gpui_kit::App) -> bool {
+        self.runs.read(cx).is_running() || record::current(cx).is_some()
+    }
+
+    // ---- Counting ----
+
+    /// How many tests passed, failed and never ran: a suite's tests each
+    /// count, a suite that never ran (or says nothing of its tests) and a
+    /// UI test count as one.
+    fn counts(&self) -> (usize, usize, usize) {
+        let (mut passed, mut failed, mut never) = (0, 0, 0);
+        for suite in &self.suites {
+            match self.results.get(&suite.id) {
+                None => never += 1,
+                Some(result) if result.cases.is_empty() => {
+                    if result.passed() {
+                        passed += 1;
+                    } else {
+                        failed += 1;
+                    }
+                }
+                Some(result) => {
+                    passed += result.count(Outcome::Passed);
+                    failed += result.count(Outcome::Failed) + usize::from(result.broke());
                 }
             }
         }
-        self.message = Some((
-            match saved {
-                1 => "Saved as the baseline. Later runs compare their screens with it.".into(),
-                n => format!("Saved {n} baselines. Later runs compare their screens with them.")
-                    .into(),
-            },
-            false,
-        ));
+        for (path, _) in &self.tests {
+            match self.reports.get(path) {
+                None => never += 1,
+                Some(reports) if reports.iter().all(|(_, report)| report.passed()) => passed += 1,
+                Some(_) => failed += 1,
+            }
+        }
+        (passed, failed, never)
+    }
+
+    // ---- Own commands ----
+
+    fn add_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.command.take() else {
+            return;
+        };
+        let command = input.read(cx).value().trim().to_string();
+        if command.is_empty() {
+            cx.notify();
+            return;
+        }
+        let mut own = self.own_commands(cx);
+        if !own.contains(&command) {
+            own.push(command.clone());
+        }
+        if let Some(store) = TestRunHub::store(cx)
+            && let Err(err) = store.set_setting(&self.commands_key(), &own)
+        {
+            self.message = Some((format!("{err:#}").into(), true));
+        }
+        self.picked = Some(Picked::Suite(Suite::custom(&command, &self.root).id));
+        self.inside = true;
+        let _ = window;
+        self.reload(cx);
         cx.notify();
     }
 
-    fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // A third of a narrow pane, at most 220 px, so the details keep room.
-        v_flex()
-            .id("tests-list")
-            .w(gpui_kit::relative(0.34))
-            .max_w(ph_ui::rems_from_px(220.))
-            .min_w(ph_ui::rems_from_px(120.))
-            .flex_none()
-            .h_full()
-            .overflow_y_scroll()
-            .border_r_1()
-            .border_color(cx.theme().border)
-            .p_1()
-            .gap_0p5()
-            .children(self.tests.iter().map(|(path, test)| {
-                let selected = self.selected.as_ref() == Some(path);
-                let passed = self
-                    .reports
-                    .get(path)
-                    .map(|reports| reports.iter().all(|(_, report)| report.passed()));
-                let (icon, color) = match passed {
-                    Some(true) => (IconName::CircleCheck, cx.theme().success),
-                    Some(false) => (IconName::CircleX, cx.theme().danger),
-                    None => (IconName::Minus, cx.theme().muted_foreground),
-                };
-                let pick = path.clone();
-                h_flex()
-                    .id(SharedString::from(format!("test-{}", path.display())))
-                    .gap_2()
-                    .px_2()
-                    .py_1p5()
-                    .rounded(cx.theme().radius)
-                    .cursor_pointer()
-                    .when(selected, |this| this.bg(cx.theme().list_active))
-                    .hover(|style| style.bg(cx.theme().list_hover))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected = Some(pick.clone());
-                        this.zoomed = None;
-                        this.shown = 0;
-                        cx.notify();
-                    }))
-                    .child(Icon::new(icon).xsmall().text_color(color))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().text_sm().truncate().child(test.name.clone()))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!(
-                                        "{} steps{}",
-                                        test.steps.len(),
-                                        if test.is_android() { " · Android" } else { "" }
-                                    )),
-                            ),
-                    )
-            }))
-            .when(self.tests.is_empty(), |this| {
-                this.child(
-                    div()
-                        .p_2()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(
-                            "No tests yet. Make one: describe it, and an agent records the steps.",
-                        ),
-                )
-            })
+    fn remove_command(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(command) = self
+            .suite(id)
+            .filter(|suite| suite.custom)
+            .map(|suite| suite.command.clone())
+        else {
+            return;
+        };
+        let mut own = self.own_commands(cx);
+        own.retain(|known| *known != command);
+        if let Some(store) = TestRunHub::store(cx) {
+            let _ = store.set_setting(&self.commands_key(), &own);
+        }
+        self.picked = None;
+        self.reload(cx);
+        cx.notify();
     }
 
-    fn render_new(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
+    // ---- The header ----
+
+    fn render_header(&self, tight: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (passed, failed, never) = self.counts();
+        let runs = self.runs.read(cx);
+        let running = runs.now().map(|(name, at, of)| {
+            if of > 1 {
+                format!("Running {name} · {at} of {of}")
+            } else {
+                format!("Running {name}")
+            }
+        });
+        let recording = record::current(cx).is_some();
+        let nothing = self.suites.is_empty() && self.tests.is_empty();
+        let part = |count: usize, word: &str, color: gpui_kit::Hsla| {
+            (count > 0).then(|| {
+                div()
+                    .flex_none()
+                    .text_color(color)
+                    .child(format!("{count} {word}"))
+            })
+        };
+        let summary = h_flex()
+            .flex_1()
+            .min_w_0()
             .gap_2()
-            .p_3()
-            .child(div().text_sm().font_weight(gpui_kit::FontWeight::SEMIBOLD).child("New UI test"))
-            .child(Input::new(&self.name).small())
-            .child(Input::new(&self.description).small())
-            .child(Input::new(&self.target).small())
-            .child(div().text_xs().text_color(cx.theme().muted_foreground).child(
-                "An agent works through it once with the browser or device tools; its actions become the steps, replayed after that without AI.",
-            ))
+            .overflow_hidden()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .map(|this| match running {
+                Some(running) => this
+                    .child(ph_ui::Loader::new().xsmall())
+                    .child(div().min_w_0().truncate().child(running)),
+                None if self.loading => this.child("Looking for tests…"),
+                None if nothing => this.child("No tests yet"),
+                None => this
+                    .children(part(failed, "failed", theme.danger))
+                    .children(part(passed, "passed", theme.success))
+                    .children(part(never, "not run", theme.muted_foreground)),
+            });
+        let failed_filter = (failed > 0 || self.only_failed).then(|| {
+            Button::new("tests-only-failed")
+                .xsmall()
+                .ghost()
+                .selected(self.only_failed)
+                .icon(IconName::CircleX)
+                .when(!tight, |this| this.label("Failed"))
+                .tooltip(if self.only_failed {
+                    "Show every test"
+                } else {
+                    "Show only what failed"
+                })
+                .accessibility_label("Show only what failed")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.only_failed = !this.only_failed;
+                    this.rebuild_rows(cx);
+                    cx.notify();
+                }))
+        });
+        let run = if runs.is_running() {
+            Button::new("tests-stop")
+                .xsmall()
+                .outline()
+                .icon(Icons::Square)
+                .when(!tight, |this| this.label("Stop"))
+                .tooltip("Stop what runs, and what waits")
+                .accessibility_label("Stop the tests")
+                .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
+        } else {
+            Button::new("tests-run-all")
+                .xsmall()
+                .primary()
+                .icon(IconName::Play)
+                .when(!tight, |this| this.label("Run all"))
+                .tooltip("Run the project's tests, then the UI tests")
+                .accessibility_label("Run all tests")
+                .disabled(nothing || recording)
+                .on_click(cx.listener(|this, _, _, cx| this.run_all(cx)))
+        };
+        let panel = cx.weak_entity();
+        h_flex()
+            .flex_none()
+            .h_9()
+            .px_2()
+            .gap_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(div().w_1())
+            .child(summary)
+            .children(failed_filter)
+            .child(run)
+            .child(
+                Button::new("test-new")
+                    .xsmall()
+                    .ghost()
+                    .icon(IconName::Plus)
+                    .tooltip("New UI test")
+                    .accessibility_label("New UI test")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_new_test(window, cx))),
+            )
+            .child(
+                Button::new("tests-more")
+                    .xsmall()
+                    .ghost()
+                    .icon(IconName::Ellipsis)
+                    .tooltip("More")
+                    .accessibility_label("More about tests")
+                    .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                        let (add, again) = (panel.clone(), panel.clone());
+                        menu.item(
+                            PopupMenuItem::new("Add a test command…")
+                                .icon(Icon::new(Icons::Terminal))
+                                .on_click(move |_, window, cx| {
+                                    _ = add.update(cx, |this, cx| this.open_command(window, cx));
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Look for tests again")
+                                .icon(Icon::new(Icons::RotateCw))
+                                .on_click(move |_, _, cx| {
+                                    _ = again.update(cx, |this, cx| this.reload(cx));
+                                }),
+                        )
+                    }),
+            )
+    }
+
+    fn open_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("A command that runs tests, like make check")
+        });
+        self._subscriptions.push(cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.add_command(window, cx);
+                }
+            },
+        ));
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.command = Some(input);
+        self.creating = None;
+        self.inside = true;
+        cx.notify();
+    }
+
+    /// The form for a test command of the user's own.
+    fn render_command(
+        &self,
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use gpui_kit::component::input::Input;
+        v_flex()
+            .p_4()
+            .gap_3()
+            .child(
+                div()
+                    .text_base()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child("Add a test command"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        "For tests that were not found here. It runs in the project folder, and passes when it ends without an error.",
+                    ),
+            )
+            .child(Input::new(input).small())
             .child(
                 h_flex()
                     .gap_2()
                     .justify_end()
                     .child(
-                        Button::new("test-cancel")
+                        Button::new("test-command-cancel")
                             .small()
                             .ghost()
                             .label("Cancel")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.creating = false;
+                                this.command = None;
                                 cx.notify();
                             })),
                     )
                     .child(
-                        Button::new("test-create")
+                        Button::new("test-command-add")
                             .small()
                             .primary()
-                            .label("Create and record")
-                            .on_click(cx.listener(|this, _, window, cx| this.create(window, cx))),
+                            .label("Add")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_command(window, cx)
+                            })),
                     ),
             )
     }
 
-    fn render_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some((path, test)) = self.selected_test() else {
-            return div().into_any_element();
-        };
-        let runs = self
-            .reports
-            .get(path)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let report = self.shown_report(path);
-        let recording = record::current(cx).filter(|recording| &recording.path == path);
-        let busy = recording.is_some() || self.runs.read(cx).running().is_some();
-        let broken = report.is_some_and(|(_, report)| report.failure().is_some());
-        // Saving the look only makes sense for runs whose steps worked.
-        let usable: Vec<&Report> = runs
-            .iter()
-            .map(|(_, report)| report)
-            .filter(|report| report.steps_passed())
-            .collect();
-        let look = if usable.iter().any(|report| report.looks_different() > 0) {
-            Some("Accept new look")
-        } else if usable
-            .iter()
-            .any(|report| !run::has_baseline(self.project_id, report))
-        {
-            Some("Save as baseline")
-        } else {
-            None
-        };
-        let (matrix_path, look_path) = (path.clone(), path.clone());
-        let muted = cx.theme().muted_foreground;
-        let (run_path, record_path, repair_path, open_path) =
-            (path.clone(), path.clone(), path.clone(), path.clone());
-        let proposal = self
-            .proposal
-            .as_ref()
-            .filter(|(p, _)| p == path)
-            .map(|(_, steps)| steps.clone());
-
-        let toolbar = h_flex()
-            .gap_1()
-            .flex_wrap()
-            .child(
-                Button::new("test-run")
-                    .small()
-                    .primary()
-                    .icon(IconName::Play)
-                    .label(if self.runs.read(cx).running() == Some(path) { "Running…" } else { "Run" })
-                    .disabled(busy || test.steps.is_empty())
-                    .on_click(cx.listener(move |this, _, _, cx| this.run(run_path.clone(), false, cx))),
-            )
-            .child(
-                Button::new("test-run-matrix")
-                    .small()
-                    .ghost()
-                    .label(if test.is_android() { "Run on every device" } else { "Run on every size" })
-                    .tooltip(if test.is_android() {
-                        "One run on each connected device"
-                    } else {
-                        "Desktop 1280×800, tablet 820×1180 and phone 390×844"
-                    })
-                    .disabled(busy || test.steps.is_empty())
-                    .on_click(cx.listener(move |this, _, _, cx| this.run(matrix_path.clone(), true, cx))),
-            )
-            .when_some(look, |this, label| {
-                this.child(
-                    Button::new("test-look")
-                        .small()
-                        .ghost()
-                        .label(label)
-                        .tooltip(ph_ui::tip("Later runs compare each step's screen with this run's"))
-                        .disabled(busy)
-                        .on_click(cx.listener(move |this, _, _, cx| this.accept_look(&look_path, cx))),
-                )
-            })
-            // A new test needs recording; a recorded one keeps it in More.
-            .when(test.steps.is_empty(), |this| {
-                let record_path = record_path.clone();
-                this.child(
-                    Button::new("test-record")
-                        .small()
-                        .ghost()
-                        .label("Record with agent")
-                        .disabled(busy)
-                        .on_click(cx.listener(move |this, _, _, cx| this.record(record_path.clone(), cx))),
-                )
-            })
-            .when(broken, |this| {
-                this.child(
-                    Button::new("test-repair")
-                        .small()
-                        .ghost()
-                        .label("Repair with agent")
-                        .disabled(busy)
-                        .tooltip(ph_ui::tip("The agent redoes the scenario from the broken step; you keep or discard what it records"))
-                        .on_click(cx.listener(move |this, _, _, cx| this.repair(repair_path.clone(), cx))),
-                )
-            })
-            .child({
-                let panel = cx.weak_entity();
-                let recorded = !test.steps.is_empty();
-                Button::new("test-more")
-                    .small()
-                    .ghost()
-                    .icon(IconName::Ellipsis)
-                    .tooltip("More")
-                    .accessibility_label("More test actions")
-                    .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-                        let (record, open) = (panel.clone(), panel.clone());
-                        let (record_path, open_path) = (record_path.clone(), open_path.clone());
-                        menu.when(recorded, |menu| {
-                            menu.item(PopupMenuItem::new("Record again with agent").disabled(busy).on_click(
-                                move |_, _, cx| {
-                                    _ = record.update(cx, |this, cx| this.record(record_path.clone(), cx));
-                                },
-                            ))
-                        })
-                        .item(PopupMenuItem::new("Edit steps (JSON)").on_click(move |_, _, cx| {
-                            _ = open.update(cx, |_, cx| cx.emit(TestsPanelEvent::OpenFile(open_path.clone())));
-                        }))
-                    })
-            });
-
-        let steps: Vec<(String, Option<&run::StepResult>)> = match report {
-            Some((_, report)) => report
-                .steps
-                .iter()
-                .map(|step| (step.step.describe(), Some(step)))
-                .collect(),
-            None => test
-                .steps
-                .iter()
-                .map(|step| (step.describe(), None))
-                .collect(),
-        };
-        let variants = (runs.len() > 1).then(|| {
-            h_flex()
-                .gap_1()
-                .flex_wrap()
-                .children(runs.iter().enumerate().map(|(ix, (_, run))| {
-                    let label = run
-                        .variant
-                        .as_ref()
-                        .map_or_else(|| "This device".to_string(), |variant| variant.label());
-                    Button::new(("test-variant", ix))
-                        .xsmall()
-                        .when(ix == self.shown, |this| this.primary())
-                        .when(ix != self.shown, |this| this.outline())
-                        .icon(if run.passed() {
-                            IconName::CircleCheck
-                        } else {
-                            IconName::CircleX
-                        })
-                        .label(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.shown = ix;
-                            this.zoomed = None;
-                            cx.notify();
-                        }))
-                }))
-        });
-        let rows = steps.into_iter().enumerate().map(|(ix, (text, result))| {
-            let looks_different = result
-                .and_then(|result| result.visual.as_ref())
-                .filter(|visual| visual.differs())
-                .map(|visual| visual.changed);
-            let (icon, color) = match result.map(|result| result.outcome.as_str()) {
-                Some("passed") if looks_different.is_some() => {
-                    (IconName::TriangleAlert, cx.theme().warning)
-                }
-                Some("passed") => (IconName::Check, cx.theme().success),
-                Some("failed") => (IconName::CircleX, cx.theme().danger),
-                Some(_) => (IconName::Minus, muted),
-                None => (IconName::Minus, muted),
-            };
-            let has_shot = result.is_some_and(|result| result.screenshot.is_some());
-            v_flex()
-                .gap_0p5()
-                .child(
-                    h_flex()
-                        .id(("test-step", ix))
-                        .gap_2()
-                        .text_sm()
-                        .when(has_shot, |this| {
-                            this.cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.zoomed = if this.zoomed == Some(ix) {
-                                        None
-                                    } else {
-                                        Some(ix)
-                                    };
-                                    cx.notify();
-                                }))
-                        })
-                        .child(Icon::new(icon).xsmall().text_color(color))
-                        .child(
-                            div()
-                                .text_color(muted)
-                                .w(ph_ui::rems_from_px(22.))
-                                .child(format!("{}", ix + 1)),
-                        )
-                        .child(div().flex_1().min_w_0().truncate().child(text))
-                        .when_some(result.map(|result| result.millis), |this, millis| {
-                            this.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child(format!("{:.1}s", millis as f64 / 1000.0)),
-                            )
-                        })
-                        .when(has_shot, |this| {
-                            this.child(Icon::new(Icons::Image).xsmall().text_color(muted))
-                        }),
-                )
-                .when_some(looks_different, |this, changed| {
-                    this.child(
-                        div()
-                            .pl(ph_ui::rems_from_px(44.))
-                            .text_xs()
-                            .text_color(cx.theme().warning)
-                            .child(format!(
-                                "Looks different from the baseline: {:.1}% of the screen changed",
-                                changed * 100.0
-                            )),
-                    )
-                })
-                .when_some(
-                    result.and_then(|result| result.error.clone()),
-                    |this, error| {
-                        this.child(
-                            div()
-                                .pl(ph_ui::rems_from_px(44.))
-                                .text_xs()
-                                .text_color(cx.theme().danger)
-                                .child(error),
-                        )
-                    },
-                )
-        });
-
-        // The zoomed step's screenshot, and its changes from the baseline.
-        let zoom = self.zoomed.and_then(|ix| {
-            let (dir, report) = report?;
-            let step = report.steps.get(ix)?;
-            let shot = dir.join(step.screenshot.as_ref()?);
-            let diff = step
-                .visual
-                .as_ref()
-                .and_then(|visual| visual.diff.as_ref())
-                .map(|diff| dir.join(diff));
-            Some((shot, diff))
-        });
-        v_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .overflow_hidden()
-            .p_3()
-            .gap_3()
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_base()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(test.name.clone()),
-                    )
-                    .child(div().text_sm().text_color(muted).child(match &test.target {
-                        Target::Web { url } => format!("In the browser, from {url}"),
-                        Target::Android { package } => format!("On Android, in {package}"),
-                    }))
-                    .when(!test.description.is_empty(), |this| {
-                        this.child(div().text_sm().child(test.description.clone()))
-                    }),
-            )
-            .child(toolbar)
-            .children(variants)
-            .when_some(
-                recording.map(|recording| recording.steps.len()),
-                |this, count| {
-                    this.child(
-                        v_flex()
-                            .gap_1p5()
-                            .px_3()
-                            .py_2()
-                            .rounded(cx.theme().radius)
-                            .bg(cx.theme().danger.opacity(0.12))
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        Icon::new(Icons::Circle)
-                                            .small()
-                                            .text_color(cx.theme().danger),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_sm()
-                                            .child(format!("Recording: {count} steps so far")),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child("It stops when the agent finishes."),
-                            )
-                            .child(
-                                Button::new("test-stop")
-                                    .xsmall()
-                                    .label("Stop and save")
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.finish_recording(cx)),
-                                    ),
-                            ),
-                    )
-                },
-            )
-            .when_some(proposal, |this, steps| {
-                this.child(
-                    v_flex()
-                        .gap_1()
-                        .p_3()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().info.opacity(0.1))
-                        .child(
-                            div()
-                                .text_sm()
-                                .child(format!("Proposed fix: {} steps", steps.len())),
-                        )
-                        .children(steps.iter().enumerate().map(|(ix, step)| {
-                            div()
-                                .text_xs()
-                                .child(format!("{}. {}", ix + 1, step.describe()))
-                        }))
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .justify_end()
-                                .child(
-                                    Button::new("proposal-discard")
-                                        .xsmall()
-                                        .ghost()
-                                        .label("Discard")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.proposal = None;
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    Button::new("proposal-keep")
-                                        .xsmall()
-                                        .primary()
-                                        .label("Keep")
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.keep_proposal(cx)),
-                                        ),
-                                ),
-                        ),
-                )
-            })
-            .when_some(self.message.clone(), |this, (message, is_error)| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(if is_error {
-                            cx.theme().danger
-                        } else {
-                            cx.theme().success
-                        })
-                        .child(message),
-                )
-            })
-            .child(
-                v_flex()
-                    .id("test-steps")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .gap_1()
-                    .children(rows)
-                    .when_some(zoom, |this, (shot, diff)| {
-                        let picture = |path: PathBuf| {
-                            // A fixed height: in the scrolling list an image
-                            // without one shrinks to nothing.
-                            img(path)
-                                .flex_none()
-                                .w_full()
-                                .h(ph_ui::rems_from_px(360.))
-                                .object_fit(ObjectFit::Contain)
-                                .rounded(cx.theme().radius)
-                        };
-                        this.child(picture(shot)).when_some(diff, |this, diff| {
-                            this.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .child("What changed since the baseline (red):"),
-                            )
-                            .child(picture(diff))
-                        })
-                    }),
-            )
-            .into_any_element()
+    /// What is picked, or the form that is open.
+    fn render_detail(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        if self.creating.is_some() {
+            return self.render_new_test(cx).into_any_element();
+        }
+        if let Some(input) = self.command.clone() {
+            return self.render_command(&input, cx).into_any_element();
+        }
+        match self.picked.clone() {
+            Some(Picked::Check(path)) => self.render_check(&path, window, cx),
+            Some(Picked::Suite(id)) => self.render_suite(&id, cx),
+            Some(Picked::Case { suite, group, name }) => {
+                self.render_case(&suite, &group, &name, cx)
+            }
+            None => div().into_any_element(),
+        }
     }
+
+    /// What says nothing is here yet, and the two ways to change that.
+    fn render_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        ph_ui::EmptyState::new("No tests yet")
+            .icon(Icons::FlaskConical)
+            .description(
+                "The project's own tests (cargo test, pytest, Vitest, Gradle…) show here once it has some. A UI test checks a flow in the browser or on a phone: say what to check, and an agent records the steps, which run again without AI.",
+            )
+            .action(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .justify_center()
+                    .child(
+                        Button::new("tests-empty-new")
+                            .small()
+                            .primary()
+                            .icon(IconName::Plus)
+                            .label("New UI test")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_new_test(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("tests-empty-command")
+                            .small()
+                            .outline()
+                            .label("Add a test command")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_command(window, cx)
+                            })),
+                    ),
+            )
+    }
+}
+
+/// The row that leads back to the list, in a narrow pane.
+fn back_row(cx: &mut Context<TestsPanel>) -> impl IntoElement {
+    h_flex().flex_none().px_2().pt_2().child(
+        Button::new("tests-back")
+            .xsmall()
+            .ghost()
+            .icon(IconName::ChevronLeft)
+            .label("Tests")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inside = false;
+                this.creating = None;
+                this.command = None;
+                cx.notify();
+            })),
+    )
 }
 
 impl Render for TestsPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .size_full()
-            .child(
-                h_flex()
-                    .flex_none()
-                    .px_3()
-                    .py_1p5()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (width, probe) = ph_ui::measure::width_of("tests-room", window, cx);
+        let width = width.map(|width| ph_ui::measure::design_px(width, window));
+        let narrow = width.is_some_and(|width| width < TWO_COLUMNS);
+        let tight = width.is_some_and(|width| width < 400.);
+        let nothing = !self.loading && self.suites.is_empty() && self.tests.is_empty();
+        let form = self.creating.is_some() || self.command.is_some();
+        let body = if nothing && !form {
+            self.render_empty(cx).into_any_element()
+        } else if narrow {
+            if self.inside || form {
+                v_flex()
+                    .size_full()
+                    .child(back_row(cx))
                     .child(
                         div()
                             .flex_1()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("{} tests in {}", self.tests.len(), model::FOLDER)),
+                            .min_h_0()
+                            .child(self.render_detail(window, cx)),
                     )
-                    .child(
-                        Button::new("test-new")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::Plus)
-                            .label("New test")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.creating = true;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("tests-refresh")
-                            .xsmall()
-                            .ghost()
-                            .icon(Icons::RotateCw)
-                            .tooltip("Read the tests again")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.reload();
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(if self.creating {
-                self.render_new(cx).into_any_element()
-            } else {
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(self.render_list(cx))
-                    .child(self.render_detail(cx))
                     .into_any_element()
-            })
+            } else {
+                self.render_list(true, cx).into_any_element()
+            }
+        } else {
+            h_flex()
+                .size_full()
+                .child(self.render_list(false, cx))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(self.render_detail(window, cx)),
+                )
+                .into_any_element()
+        };
+        v_flex()
+            .id("tests-panel")
+            .relative()
+            .size_full()
+            .child(probe)
+            .child(self.render_header(tight, cx))
+            .child(div().flex_1().min_h_0().overflow_hidden().child(body))
     }
 }
 
-/// A run's outcome in a line: passed, where it failed, or how many steps
-/// look different.
-pub(crate) fn summary(reports: &[Report]) -> (SharedString, bool) {
-    let on = |report: &Report| {
-        report
-            .variant
-            .as_ref()
-            .map(|variant| format!(" on {}", variant.label()))
-            .unwrap_or_default()
-    };
-    if let Some(report) = reports.iter().find(|report| report.failure().is_some()) {
-        let step = report.failure().map_or(0, |(ix, _)| ix + 1);
-        return (format!("Failed at step {step}{}.", on(report)).into(), true);
-    }
-    let different: usize = reports.iter().map(Report::looks_different).sum();
-    if different > 0 {
-        let report = reports.iter().find(|report| report.looks_different() > 0);
-        return (
-            format!(
-                "The steps worked, but {different} look different from the baseline{}. Check them, then accept the new look or fix the app.",
-                report.map(on).unwrap_or_default()
+/// A name as an element id: its letters and digits.
+pub(crate) fn id_of(prefix: &str, name: &str) -> SharedString {
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("{prefix}-{name}").into()
+}
+
+/// Text as a block of fixed-width lines that wrap, its last `lines` when it
+/// has more: a failure, or what a command printed.
+pub(crate) fn mono(text: &str, lines: usize, cx: &gpui_kit::App) -> impl IntoElement {
+    let all: Vec<&str> = text.lines().collect();
+    let skipped = all.len().saturating_sub(lines);
+    v_flex()
+        .w_full()
+        .font_family(cx.theme().mono_font_family.clone())
+        .text_xs()
+        .when(skipped > 0, |this| {
+            this.child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("… {skipped} lines before")),
             )
-            .into(),
-            true,
+        })
+        .children(all[skipped..].iter().map(|line| {
+            // An empty line still takes a line's height.
+            div()
+                .min_h(ph_ui::rems_from_px(16.))
+                .child(line.to_string())
+        }))
+}
+
+/// How long something took: `0.4 s`, `12 s`, `2 min 5 s`.
+pub(crate) fn took(millis: u64) -> String {
+    match millis {
+        0..=9_949 => format!("{:.1} s", millis as f64 / 1000.0),
+        9_950..=59_499 => format!("{:.0} s", millis as f64 / 1000.0),
+        _ => {
+            let seconds = (millis + 500) / 1000;
+            format!("{} min {} s", seconds / 60, seconds % 60)
+        }
+    }
+}
+
+/// The text area a new test's scenario is typed in.
+pub(crate) fn area(
+    placeholder: &'static str,
+    window: &mut Window,
+    cx: &mut Context<TestsPanel>,
+) -> Entity<TextareaState> {
+    cx.new(|cx| TextareaState::new(window, cx).placeholder(placeholder))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_time_reads_at_its_own_scale() {
+        assert_eq!(took(0), "0.0 s");
+        assert_eq!(took(430), "0.4 s");
+        assert_eq!(took(9_949), "9.9 s");
+        assert_eq!(took(12_400), "12 s");
+        assert_eq!(took(125_000), "2 min 5 s");
+        assert_eq!(
+            id_of("suite", "web/vitest"),
+            SharedString::from("suite-web-vitest")
         );
     }
-    let compared = reports.iter().any(Report::compared);
-    let text = match (reports.len(), compared) {
-        (1, true) => "Passed, and every screen matches the baseline.".to_string(),
-        (1, false) => {
-            "Passed. Save it as the baseline to check how screens look next time.".to_string()
-        }
-        (n, true) => format!("Passed on all {n}, and every screen matches the baseline."),
-        (n, false) => format!(
-            "Passed on all {n}. Save them as the baseline to check how screens look next time."
-        ),
-    };
-    (text.into(), false)
 }

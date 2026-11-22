@@ -37,6 +37,9 @@ mod watcher;
 pub use file_index::{FileList, index_files};
 pub use file_view::{Ask, AskIntent, FileView, FileViewEvent, set_explains};
 pub use files_panel::{FileTree, FilesPanel, FilesPanelEvent};
+/// The syntax colouring the file editor uses, for other code editors (the
+/// Utilities dialog's): one line of work per keystroke.
+pub use highlight::factory as highlighter;
 pub use tree_drag::DraggedFiles;
 pub use watcher::{
     FilesChanged, Follower, IgnoredChanged, ProjectWatcher, WatchLimitReached, WatcherHub,

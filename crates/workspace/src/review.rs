@@ -79,6 +79,8 @@ pub fn prepare(
         rules: ph_pulls::clones::team_rules(&clone, &pull.base.name),
         learned: learned_rules(store, &pull_ref),
         notes: ph_pulls::clones::agent_notes(&clone, &pull.base.name),
+        more_rules: ph_pulls::clones::more_rules(&clone, &pull.base.name, &sha),
+        issues: linked_issues(hosting, &pull),
     };
     // Ticks in the summary comment count only for the round they were
     // printed for (see `ph_review::github::sync`): read them before this
@@ -134,6 +136,13 @@ pub fn prepare(
             ph_review::templates::TEAM_RULES
         ));
     }
+    notes.extend(guidance.more_rules.iter().map(|(file, _)| file.clone()));
+    notes.extend(
+        guidance
+            .issues
+            .iter()
+            .map(|(number, ..)| format!("issue #{number}")),
+    );
     if !guidance.learned.is_empty() {
         notes.push(match guidance.learned.len() {
             1 => "1 learned rule".to_string(),
@@ -175,6 +184,26 @@ pub fn prepare(
         display,
         prompt,
     })
+}
+
+/// The issues `pull` says it closes (the first two), read from GitHub:
+/// number, title, text. One that cannot be read is left out.
+fn linked_issues(hosting: &Hosting, pull: &PullRequest) -> Vec<(u64, String, String)> {
+    ph_github::issues::linked(pull.body.as_deref().unwrap_or_default())
+        .into_iter()
+        .take(2)
+        .filter_map(|number| {
+            let issue = ph_github::issues::get(&hosting.client, &hosting.repo, number).ok()?;
+            // A pull request named the same way is not what the change is for.
+            issue.pull_request.is_none().then(|| {
+                (
+                    number,
+                    issue.title,
+                    issue.body.unwrap_or_default().chars().take(6_000).collect(),
+                )
+            })
+        })
+        .collect()
 }
 
 /// Gets a review of the user's own changes in checkout `root` ready, before
@@ -239,7 +268,7 @@ pub fn prepare_self(
     let guidance = Guidance {
         rules,
         learned,
-        notes: Vec::new(),
+        ..Guidance::default()
     };
     let prompt =
         ph_review::prompt::self_review_prompt(&what, &diff, &template.instructions, &guidance);

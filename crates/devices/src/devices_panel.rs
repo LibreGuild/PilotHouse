@@ -1,14 +1,16 @@
 //! The Devices pane: pick a device or start an emulator, see and use its
-//! screen, mark it up, and read logcat, the UI hierarchy and files.
+//! screen, mark it up, and read its log, UI hierarchy and files in a drawer
+//! under it.
 
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{PopupMenu, PopupMenuItem},
+    notification::Notification,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -25,7 +27,7 @@ use ph_ui::{EmptyState, Icons};
 
 use crate::adb::{Adb, RemoteFile};
 use crate::manager::{DeviceManager, DevicesChanged};
-use crate::screen::{DeviceScreen, ScreenEvent, StreamQuality, SystemKey};
+use crate::screen::{DeviceScreen, ScreenEvent, StreamMode, StreamQuality, SystemKey};
 use crate::ui_tree::{self, UiNode};
 
 /// Rows shown in the UI and Files drawers.
@@ -35,6 +37,10 @@ const DRAWER_HEIGHT: f32 = 280.0;
 const DRAWER_MIN: f32 = 120.0;
 /// Room always left for the screen above the drawer.
 const SCREEN_MIN: f32 = 160.0;
+/// How long a mirrored screen keeps streaming after the pane is hidden:
+/// coming back within it (from a look at a file, the terminal, the log)
+/// finds the picture there, not a new connection being made.
+const LINGER: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// What is dragged when the drawer is resized.
 struct ResizeDrawer;
@@ -50,6 +56,7 @@ impl Render for NoGhost {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Drawer {
+    Logcat,
     Ui,
     Files,
 }
@@ -63,12 +70,17 @@ pub struct DevicesPanel {
     /// apps), mirrored or not.
     session: Option<String>,
     /// Whether to mirror each device's screen, as the user chose (Settings
-    /// key `devices.mirror`); a device not in it: emulators yes, phones no.
+    /// key `devices.mirror`), by what tells the device apart (so a phone's
+    /// choice holds on a cable and over Wi-Fi); a device not in it:
+    /// emulators yes, phones no.
     mirror: std::collections::HashMap<String, bool>,
     surface: Entity<SurfaceView>,
     tools: Entity<LiveTools>,
     drawer: Option<Drawer>,
     drawer_height: Pixels,
+    /// The workspace's Logcat, shown in the drawer under the screen (none
+    /// in a build that leaves Logcat out).
+    logcat: Option<Entity<crate::LogcatPanel>>,
     ui_nodes: Rc<[UiNode]>,
     /// Which of `ui_nodes` the Layout drawer lists (those with something
     /// to tell them by), sorted out once per layout: the pane draws again
@@ -87,6 +99,9 @@ pub struct DevicesPanel {
     status: Option<SharedString>,
     screen_error: Option<SharedString>,
     active: bool,
+    /// Hidden a moment ago, the screen still streaming (see [`LINGER`]).
+    lingering: bool,
+    _linger: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     _screen_subscription: Option<Subscription>,
 }
@@ -98,13 +113,15 @@ pub struct StreamQualityChanged(pub StreamQuality);
 
 impl EventEmitter<StreamQualityChanged> for DevicesPanel {}
 
-/// The user asked for the device's log (Logcat is a tool of its own).
+/// The user asked for the device's log with the pane to itself (Logcat is
+/// a tool of its own too).
 pub struct OpenLogcat;
 
 impl EventEmitter<OpenLogcat> for DevicesPanel {}
 
 /// The user chose to mirror a device's screen, or not; the app keeps it.
 pub struct MirrorChanged {
+    /// What tells the device apart ([`crate::adb::DeviceInfo::identity`]).
     pub serial: String,
     pub mirror: bool,
 }
@@ -125,6 +142,14 @@ impl DevicesPanel {
             }),
             cx.subscribe(&tools, |_, _, event: &ToChat, cx| cx.emit(event.clone())),
             cx.observe(&manager, |_, _, cx| cx.notify()),
+            // The outline was taken off the screen (cleared, or the screen
+            // pressed): the Layout row is no longer the one outlined.
+            cx.observe(&surface, |this, surface, cx| {
+                if this.outlined.is_some() && !surface.read(cx).has_highlight() {
+                    this.outlined = None;
+                    cx.notify();
+                }
+            }),
         ];
         Self {
             manager,
@@ -136,6 +161,7 @@ impl DevicesPanel {
             tools,
             drawer: None,
             drawer_height: px(DRAWER_HEIGHT),
+            logcat: None,
             ui_nodes: Rc::default(),
             ui_listed: Rc::default(),
             outlined: None,
@@ -146,9 +172,17 @@ impl DevicesPanel {
             status: None,
             screen_error: None,
             active: false,
+            lingering: false,
+            _linger: None,
             _subscriptions: subscriptions,
             _screen_subscription: None,
         }
+    }
+
+    /// The workspace's Logcat, for the drawer under the screen.
+    pub fn set_logcat(&mut self, logcat: Entity<crate::LogcatPanel>, cx: &mut Context<Self>) {
+        self.logcat = Some(logcat);
+        cx.notify();
     }
 
     /// Streams phones this sharp, the open one again at once.
@@ -178,14 +212,22 @@ impl DevicesPanel {
     /// may be plugged in only for its log or its files).
     fn wants_mirror(&self, device: &crate::adb::DeviceInfo) -> bool {
         self.mirror
-            .get(&device.serial)
+            .get(device.identity())
+            // A choice kept before devices were told by their own serial.
+            .or_else(|| self.mirror.get(&device.serial))
             .copied()
             .unwrap_or(device.emulator)
     }
 
     /// Mirrors the device's screen, or stops; remembered for the device.
     fn set_mirroring(&mut self, mirror: bool, cx: &mut Context<Self>) {
-        let Some(serial) = self.session.clone() else {
+        let Some(serial) = self
+            .manager
+            .read(cx)
+            .selected()
+            .filter(|device| Some(&device.serial) == self.session.as_ref())
+            .map(|device| device.identity().to_string())
+        else {
             return;
         };
         self.mirror.insert(serial.clone(), mirror);
@@ -195,15 +237,27 @@ impl DevicesPanel {
         self.sync_session(cx);
     }
 
-    /// Shown or hidden: the screen streams only while shown.
+    /// Shown or hidden: the screen streams while shown, and a little
+    /// longer.
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.active == active {
             return;
         }
         self.active = active;
+        self._linger = None;
+        self.lingering = !active && self.screen.is_some();
         if active {
             self.manager
                 .update(cx, |manager, cx| manager.ensure_tracking(cx));
+        } else if self.lingering {
+            self._linger = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(LINGER).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.lingering = false;
+                    this.sync_session(cx);
+                });
+            }));
+            return;
         }
         self.sync_session(cx);
     }
@@ -238,7 +292,15 @@ impl DevicesPanel {
     /// too, when it is mirrored); lets go of it otherwise or when the device
     /// changes.
     fn sync_session(&mut self, cx: &mut Context<Self>) {
-        let wanted = self.active.then(|| self.selected_serial(cx)).flatten();
+        // A screen held while hidden is that of the device it was: another
+        // one chosen meanwhile is not mirrored unseen.
+        if self.lingering && self.selected_serial(cx) != self.session {
+            self.lingering = false;
+            self._linger = None;
+        }
+        let wanted = (self.active || self.lingering)
+            .then(|| self.selected_serial(cx))
+            .flatten();
         let mirror = self
             .manager
             .read(cx)
@@ -281,7 +343,8 @@ impl DevicesPanel {
             match self.drawer {
                 Some(Drawer::Files) => self.open_dir(self.files_dir.clone(), cx),
                 Some(Drawer::Ui) => self.refresh_ui(cx),
-                None => {}
+                // The log follows the device by itself.
+                Some(Drawer::Logcat) | None => {}
             }
         }
         if !mirror {
@@ -309,6 +372,9 @@ impl DevicesPanel {
                 ScreenEvent::Failed(message) => {
                     this.screen_error = Some(message.clone().into());
                     cx.notify();
+                }
+                ScreenEvent::Clipboard(text) => {
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text.clone()));
                 }
             },
         ));
@@ -344,10 +410,16 @@ impl DevicesPanel {
                 screen.update(cx, |screen, _| screen.pointer(*pointer))
             }
             SurfaceEvent::Key(keystroke) if ph_media::editing_shortcut(keystroke, cx) => {
-                if keystroke.key == "v"
-                    && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
-                {
-                    screen.update(cx, |screen, _| screen.type_text(&text));
+                match keystroke.key.as_str() {
+                    "v" => {
+                        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                            screen.update(cx, |screen, _| screen.paste(&text));
+                        }
+                    }
+                    // The phone's selection, to this computer's clipboard.
+                    "c" => screen.update(cx, |screen, _| screen.copy(false)),
+                    "x" => screen.update(cx, |screen, _| screen.copy(true)),
+                    _ => {}
                 }
             }
             SurfaceEvent::Key(keystroke) => screen.update(cx, |screen, _| screen.key(keystroke)),
@@ -654,6 +726,11 @@ impl DevicesPanel {
             Some(Drawer::Files) if self.files.is_empty() => {
                 self.open_dir(self.files_dir.clone(), cx)
             }
+            Some(Drawer::Logcat) => {
+                if let Some(logcat) = &self.logcat {
+                    logcat.update(cx, |logcat, cx| logcat.start(cx));
+                }
+            }
             _ => {}
         }
         cx.notify();
@@ -667,15 +744,57 @@ impl DevicesPanel {
 
     // ---- Rendering ----
 
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mirroring = self.screen.is_some();
+        // The row in a narrow pane: the device's name gives way first (to
+        // an ellipsis), then the live tools go into the ⋯ menu, leaving in
+        // the row only what is going on. Nothing is cut off at the edge.
+        // What the row has beside the tools: its padding and gaps, the
+        // least of the device's name, Back, Home and Recents, the dividers,
+        // ⋯ and the button that stops mirroring.
+        const BESIDE_TOOLS: f32 = 16. + 104. + 3. * 28. + 18. + 2. * 28. + 12.;
+        let (width, probe) = ph_ui::measure::width_of("device-toolbar", window, cx);
+        let slow = self
+            .screen
+            .as_ref()
+            .and_then(|screen| slow_stream_note(screen.read(cx).mode()));
+        let needed = BESIDE_TOOLS
+            + self.tools.read(cx).width(false, cx)
+            + if slow.is_some() { 28. } else { 0. };
+        let fold = mirroring
+            && width.is_some_and(|width| ph_ui::measure::design_px(width, window) < needed);
+        self.tools
+            .update(cx, |tools, cx| tools.set_folded(fold, cx));
+        // Folded and idle, the tools show nothing: no divider for them.
+        let tools_width = self.tools.read(cx).width(fold, cx);
+        let tools_shown = tools_width > 0.;
         let manager = self.manager.read(cx);
         let selected = manager.selected().cloned();
-        let mirroring = self.screen.is_some();
         let has_device = self.session.is_some();
-        let label: SharedString = match &selected {
+        let name: SharedString = match &selected {
             Some(device) => device.display_name().into(),
             None if manager.devices().is_empty() => "No device".into(),
             None => "Choose a device".into(),
+        };
+        // The room the row has left for the name, after its padding and
+        // gaps and everything else in it.
+        let others = 16.
+            + 40.
+            + if mirroring { 3. * 24. + 9. } else { 0. }
+            + if slow.is_some() { 24. } else { 0. }
+            + if mirroring && tools_shown {
+                tools_width + 9.
+            } else {
+                0.
+            }
+            + match (has_device, mirroring) {
+                (false, _) => 0.,
+                (true, true) => 2. * 24.,
+                (true, false) => 24. + 84.,
+            };
+        let (label, cut) = match width {
+            Some(width) => fit_name(&name, ph_ui::measure::design_px(width, window) - others),
+            None => (name.clone(), false),
         };
         let icon_button = |id: &'static str, icon: Icon, label: &'static str| {
             Button::new(id)
@@ -687,23 +806,25 @@ impl DevicesPanel {
         };
         let panel = cx.entity().downgrade();
         let manager_entity = self.manager.clone();
+        let tools = self.tools.clone();
         h_flex()
+            .relative()
             .flex_none()
             .h_11()
             .px_2()
             .gap_1()
             .border_b_1()
             .border_color(cx.theme().border)
+            .child(probe)
             .child(
                 Button::new("device-picker")
                     .ghost()
                     .small()
+                    .when(cut, |this| this.tooltip(ph_ui::tip(name.clone())))
                     .icon(
-                        if selected.as_ref().is_some_and(|device| !device.emulator) {
-                            Icons::Smartphone
-                        } else {
-                            Icons::TabletSmartphone
-                        },
+                        selected
+                            .as_ref()
+                            .map_or(Icons::TabletSmartphone, |device| link_icon(device.link())),
                     )
                     .label(label)
                     .dropdown_caret(true)
@@ -729,92 +850,108 @@ impl DevicesPanel {
                             cx.listener(|this, _, _, cx| this.system_key(SystemKey::Recents, cx)),
                         ),
                 )
-                .child(div().w_px().h_4().mx_1().bg(cx.theme().border))
+                .child(div().flex_none().w_px().h_4().mx_1().bg(cx.theme().border))
+                // Said only when it is not video: why the picture is slow.
+                .when_some(slow, |this, note| {
+                    this.child(
+                        Button::new("device-slow-stream")
+                            .ghost()
+                            .small()
+                            .icon(Icon::new(IconName::TriangleAlert).text_color(cx.theme().warning))
+                            .tooltip(ph_ui::tip(note))
+                            .accessibility_label(note),
+                    )
+                })
+                // Pick, mark, capture, record: here, where they hide nothing
+                // of the screen.
+                .when(tools_shown, |this| {
+                    this.child(self.tools.clone())
+                        .child(div().flex_none().w_px().h_4().mx_1().bg(cx.theme().border))
+                })
+            })
+            .when(has_device, |this| {
                 // An emulator streams over its own channel at one size.
-                .when(
-                    !self
+                let quality = (mirroring
+                    && !self
                         .screen
                         .as_ref()
-                        .is_some_and(|screen| screen.read(cx).is_emulator_stream()),
-                    |this| {
-                        let current = self.quality;
-                        let panel = panel.clone();
-                        this.child(
-                            icon_button(
-                                "device-quality",
-                                Icon::new(Icons::Gauge),
-                                "Stream quality",
-                            )
-                            .menu(
-                                gpui_kit::Anchor::TopLeft,
-                                move |menu, _, _| {
-                                    StreamQuality::ALL.into_iter().fold(
-                                        menu.label(
-                                            "Stream quality: lower is smoother on a slow phone",
-                                        ),
-                                        |menu, quality| {
-                                            let panel = panel.clone();
-                                            menu.item(
-                                                PopupMenuItem::new(quality.label())
-                                                    .checked(quality == current)
-                                                    .on_click(move |_, _, cx| {
-                                                        _ = panel.update(cx, |this, cx| {
-                                                            this.set_stream_quality(quality, cx);
-                                                            cx.emit(StreamQualityChanged(quality));
-                                                        });
-                                                    }),
-                                            )
+                        .is_some_and(|screen| screen.read(cx).is_emulator_stream()))
+                .then_some(self.quality);
+                let packages = self.packages.clone();
+                this.child(
+                    // What is done once in a while, in one menu.
+                    icon_button("device-more", Icon::new(IconName::Ellipsis), "More").menu(
+                        gpui_kit::Anchor::TopRight,
+                        move |menu, window, cx| {
+                            // The live tools, while the row has no room
+                            // for them.
+                            let menu = if fold {
+                                LiveTools::menu(&tools, menu, window, cx)
+                            } else {
+                                menu
+                            };
+                            let install = panel.clone();
+                            let menu = menu.item(
+                                PopupMenuItem::new("Install an APK…")
+                                    .icon(Icons::Package)
+                                    .on_click(move |_, _, cx| {
+                                        _ = install.update(cx, |this, cx| this.install_apk(cx));
+                                    }),
+                            );
+                            let (launcher, apps) = (panel.clone(), packages.clone());
+                            let menu = menu.submenu(
+                                "Launch an app",
+                                window,
+                                cx,
+                                move |menu, window, _| {
+                                    if apps.is_empty() {
+                                        return menu.label("No apps installed");
+                                    }
+                                    apps.iter().fold(
+                                        menu.scrollable(true).max_h(ph_ui::scaled_px(360., window)),
+                                        |menu, package| {
+                                            let (panel, package) =
+                                                (launcher.clone(), package.clone());
+                                            menu.item(PopupMenuItem::new(package.clone()).on_click(
+                                                move |_, _, cx| {
+                                                    let package = package.clone();
+                                                    _ = panel.update(cx, |this, cx| {
+                                                        this.launch(package, cx)
+                                                    });
+                                                },
+                                            ))
                                         },
                                     )
                                 },
-                            ),
-                        )
-                    },
-                )
-            })
-            .when(has_device, |this| {
-                this.child(
-                    icon_button(
-                        "device-install",
-                        Icon::new(Icons::Package),
-                        "Install an APK",
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.install_apk(cx))),
-                )
-                .child(
-                    icon_button("device-launch", Icon::new(Icons::Play), "Launch an app").menu(
-                        gpui_kit::Anchor::TopLeft,
-                        {
-                            let packages = self.packages.clone();
-                            move |menu, window, _| {
-                                if packages.is_empty() {
-                                    return menu.label("No apps installed");
-                                }
-                                packages.iter().fold(
-                                    menu.scrollable(true).max_h(ph_ui::scaled_px(360., window)),
-                                    |menu, package| {
-                                        let panel = panel.clone();
-                                        let package = package.clone();
-                                        menu.item(PopupMenuItem::new(package.clone()).on_click(
-                                            move |_, _, cx| {
-                                                let package = package.clone();
-                                                _ = panel.update(cx, |this, cx| {
-                                                    this.launch(package, cx)
-                                                });
-                                            },
-                                        ))
+                            );
+                            let Some(current) = quality else {
+                                return menu;
+                            };
+                            let sharper = panel.clone();
+                            menu.submenu("Stream quality", window, cx, move |menu, _, _| {
+                                StreamQuality::ALL.into_iter().fold(
+                                    menu.label("Lower is smoother on a slow phone"),
+                                    |menu, quality| {
+                                        let panel = sharper.clone();
+                                        menu.item(
+                                            PopupMenuItem::new(quality.label())
+                                                .checked(quality == current)
+                                                .on_click(move |_, _, cx| {
+                                                    _ = panel.update(cx, |this, cx| {
+                                                        this.set_stream_quality(quality, cx);
+                                                        cx.emit(StreamQualityChanged(quality));
+                                                    });
+                                                }),
+                                        )
                                     },
                                 )
-                            }
+                            })
                         },
                     ),
                 )
                 .child(
-                    icon_button("device-logcat", Icon::new(Icons::ScrollText), "Logcat")
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenLogcat))),
-                )
-                .child(div().w_px().h_4().mx_1().bg(cx.theme().border))
-                .child(
+                    // Named while it is the thing to do; a mirrored screen
+                    // has the row for its own controls.
                     Button::new("device-mirror")
                         .ghost()
                         .small()
@@ -823,15 +960,16 @@ impl DevicesPanel {
                         } else {
                             Icons::Smartphone
                         })
-                        .label(if mirroring {
+                        .when(!mirroring, |this| this.label("Mirror"))
+                        .tooltip(if mirroring {
+                            "Stop mirroring: the device's screen is no longer shown here"
+                        } else {
+                            "Show the device's screen here, live"
+                        })
+                        .accessibility_label(if mirroring {
                             "Stop mirroring"
                         } else {
                             "Mirror"
-                        })
-                        .tooltip(if mirroring {
-                            "Stop showing the device's screen here"
-                        } else {
-                            "Show the device's screen here, live"
                         })
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.set_mirroring(!mirroring, cx)),
@@ -893,14 +1031,20 @@ impl DevicesPanel {
                                 .label("Mirror screen")
                                 .on_click(cx.listener(|this, _, _, cx| this.set_mirroring(true, cx))),
                         )
-                        .child(
-                            Button::new("card-logcat")
-                                .small()
-                                .outline()
-                                .icon(Icons::ScrollText)
-                                .label("Logcat")
-                                .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenLogcat))),
-                        )
+                        .when(self.logcat.is_some(), |this| {
+                            this.child(
+                                Button::new("card-logcat")
+                                    .small()
+                                    .outline()
+                                    .icon(Icons::ScrollText)
+                                    .label("Logcat")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if this.drawer != Some(Drawer::Logcat) {
+                                            this.set_drawer(Drawer::Logcat, cx)
+                                        }
+                                    })),
+                            )
+                        })
                         .child(
                             Button::new("card-files")
                                 .small()
@@ -1015,6 +1159,16 @@ impl DevicesPanel {
                         .on_drag(ResizeDrawer, |_, _, _, cx| cx.new(|_| NoGhost)),
                 )
             })
+            .when(self.logcat.is_some(), |this| {
+                this.child(tab(
+                    "drawer-logcat",
+                    "Logcat",
+                    Icons::ScrollText,
+                    Drawer::Logcat,
+                    self,
+                    cx,
+                ))
+            })
             .child(tab(
                 "drawer-ui",
                 "Layout",
@@ -1041,6 +1195,17 @@ impl DevicesPanel {
                     .text_color(cx.theme().muted_foreground)
                     .children(self.status.clone()),
             )
+            .when(self.drawer == Some(Drawer::Logcat), |this| {
+                this.child(
+                    Button::new("drawer-logcat-tool")
+                        .ghost()
+                        .xsmall()
+                        .icon(Icons::Maximize2)
+                        .tooltip("Give Logcat the whole pane")
+                        .accessibility_label("Give Logcat the whole pane")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenLogcat))),
+                )
+            })
             .when(open, |this| {
                 this.child(
                     Button::new("drawer-close")
@@ -1058,6 +1223,10 @@ impl DevicesPanel {
             });
         let body = match self.drawer {
             None => None,
+            Some(Drawer::Logcat) => self
+                .logcat
+                .as_ref()
+                .map(|logcat| logcat.read(cx).view().clone().into_any_element()),
             Some(Drawer::Ui) => Some(self.render_ui_tree(cx)),
             Some(Drawer::Files) => Some(self.render_files(cx)),
         };
@@ -1357,10 +1526,50 @@ impl DevicesPanel {
     }
 }
 
-/// The device picker: connected devices, emulators to start or stop, and
-/// making, wiping and deleting emulators.
-/// The device menu: connected devices to choose from, emulators to start,
-/// connecting and disconnecting.
+/// A device as the menu names it: its model, its Android version, and for
+/// one on the network where it is (two of a model, or one phone on a cable
+/// and over Wi-Fi, are then told apart).
+fn device_label(device: &crate::adb::DeviceInfo) -> String {
+    let mut label = if device.is_ready() {
+        device.display_name()
+    } else {
+        format!("{} ({})", device.display_name(), device.state)
+    };
+    if let Some(about) = device
+        .about
+        .as_ref()
+        .filter(|about| !about.android.is_empty())
+    {
+        label.push_str(&format!(" · Android {}", about.android));
+    }
+    if device.link() == crate::adb::Link::Network {
+        let host = device
+            .serial
+            .rsplit_once(':')
+            .map_or("Wi-Fi", |(host, _)| host);
+        // A phone adb found by itself has a long name, not an address.
+        let host = if crate::adb::is_wireless(host) {
+            "Wi-Fi"
+        } else {
+            host
+        };
+        label.push_str(&format!(" · {host}"));
+    }
+    label
+}
+
+fn link_icon(link: crate::adb::Link) -> Icons {
+    match link {
+        crate::adb::Link::Usb => Icons::Smartphone,
+        crate::adb::Link::Network => Icons::Wifi,
+        crate::adb::Link::Emulator => Icons::TabletSmartphone,
+    }
+}
+
+/// The device menu: connected devices to choose from, saved ones to
+/// connect again, emulators to start, connecting and disconnecting; what
+/// is done to emulators once in a while (new, wipe, delete) is one step
+/// further in.
 pub fn device_menu(
     menu: PopupMenu,
     manager: &Entity<DeviceManager>,
@@ -1368,18 +1577,21 @@ pub fn device_menu(
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let state = manager.read(cx);
-    let selected = state.selected().map(|device| device.serial.clone());
+    let selected = state.selected().cloned();
     let devices = state.devices().to_vec();
+    let saved: Vec<crate::SavedDevice> = state
+        .saved()
+        .iter()
+        .filter(|saved| !state.is_connected(saved))
+        .take(8)
+        .cloned()
+        .collect();
     let stopped: Vec<String> = state
         .avds()
         .iter()
         .filter(|avd| !state.is_running(avd))
         .cloned()
         .collect();
-    let running_emulator = state
-        .selected()
-        .filter(|device| device.emulator)
-        .map(|device| (device.serial.clone(), device.name.clone()));
 
     let mut menu = menu.label("Connected");
     if devices.is_empty() {
@@ -1388,23 +1600,32 @@ pub fn device_menu(
     for device in devices {
         let serial = device.serial.clone();
         let picker = manager.clone();
-        let label = if device.is_ready() {
-            device.display_name()
-        } else {
-            format!("{} ({})", device.name, device.state)
-        };
         menu = menu.item(
-            PopupMenuItem::new(label)
-                .icon(if device.emulator {
-                    Icons::TabletSmartphone
-                } else {
-                    Icons::Smartphone
-                })
-                .checked(selected.as_deref() == Some(serial.as_str()))
+            PopupMenuItem::new(device_label(&device))
+                .icon(link_icon(device.link()))
+                .checked(
+                    selected
+                        .as_ref()
+                        .is_some_and(|chosen| chosen.serial == serial),
+                )
                 .on_click(move |_, _, cx| {
                     picker.update(cx, |manager, cx| manager.select(&serial, cx))
                 }),
         );
+    }
+    if !saved.is_empty() {
+        menu = menu.separator().label("Connect again");
+        for device in saved {
+            let connector = manager.clone();
+            let address = device.address.clone();
+            menu = menu.item(
+                PopupMenuItem::new(format!("{} · {}", device.title(), device.address))
+                    .icon(Icons::Wifi)
+                    .on_click(move |_, window, cx| {
+                        connect_saved(&connector, address.clone(), window, cx)
+                    }),
+            );
+        }
     }
     if !stopped.is_empty() {
         menu = menu.separator().label("Start an emulator");
@@ -1421,69 +1642,143 @@ pub fn device_menu(
             );
         }
     }
-    if let Some((serial, name)) = running_emulator {
-        let stopper = manager.clone();
-        menu = menu.separator().item(
-            PopupMenuItem::new(format!("Stop {}", name.replace('_', " ")))
-                .icon(Icons::Power)
-                .on_click(move |_, _, cx| {
-                    stopper.read(cx).stop_emulator(&serial, cx);
-                }),
-        );
-    }
     let connector = manager.clone();
     menu = menu.separator().item(
-        PopupMenuItem::new("Connect a device")
-            .icon(Icons::Smartphone)
+        PopupMenuItem::new("Connect a device…")
+            .icon(Icons::Plug)
             .on_click(move |_, window, cx| {
                 crate::connect_dialog::open(connector.clone(), window, cx)
             }),
     );
-    if let Some(serial) = selected
-        .clone()
-        .filter(|serial| crate::adb::is_wireless(serial))
-    {
-        let disconnector = manager.clone();
-        menu = menu.item(
-            PopupMenuItem::new("Disconnect this device")
-                .icon(Icons::WifiOff)
-                .on_click(move |_, _, cx| {
-                    disconnector.read(cx).disconnect(&serial, cx);
-                }),
-        );
+    // What ends the chosen device's connection, or the device itself.
+    match selected.as_ref().map(|device| (device.link(), device)) {
+        Some((crate::adb::Link::Network, device)) => {
+            let (disconnector, serial) = (manager.clone(), device.serial.clone());
+            menu = menu.item(
+                PopupMenuItem::new(format!("Disconnect {}", device.display_name()))
+                    .icon(Icons::WifiOff)
+                    .on_click(move |_, _, cx| {
+                        disconnector.read(cx).disconnect(&serial, cx);
+                    }),
+            );
+        }
+        Some((crate::adb::Link::Emulator, device)) => {
+            let (stopper, serial) = (manager.clone(), device.serial.clone());
+            menu = menu.item(
+                PopupMenuItem::new(format!("Stop {}", device.display_name()))
+                    .icon(Icons::Power)
+                    .on_click(move |_, _, cx| {
+                        stopper.read(cx).stop_emulator(&serial, cx);
+                    }),
+            );
+        }
+        _ => {}
     }
-    let maker = manager.clone();
-    menu = menu.item(
-        PopupMenuItem::new("New emulator")
-            .icon(Icons::Plus)
-            .on_click(move |_, window, cx| crate::avd_dialog::open_new(maker.clone(), window, cx)),
-    );
-    // Wiping and deleting need the emulator stopped, so only those are listed.
-    if !stopped.is_empty() {
-        let (wipe_list, wiper) = (stopped.clone(), manager.clone());
-        menu = menu.submenu("Wipe data", window, cx, move |menu, _, _| {
-            wipe_list.iter().fold(menu, |menu, avd| {
-                let (manager, avd) = (wiper.clone(), avd.clone());
-                menu.item(PopupMenuItem::new(avd.replace('_', " ")).on_click(
-                    move |_, window, cx| {
-                        crate::avd_dialog::confirm_wipe(manager.clone(), avd.clone(), window, cx)
-                    },
-                ))
-            })
-        });
-        let deleter = manager.clone();
-        menu = menu.submenu("Delete emulator", window, cx, move |menu, _, _| {
-            stopped.iter().fold(menu, |menu, avd| {
-                let (manager, avd) = (deleter.clone(), avd.clone());
-                menu.item(PopupMenuItem::new(avd.replace('_', " ")).on_click(
-                    move |_, window, cx| {
-                        crate::avd_dialog::confirm_delete(manager.clone(), avd.clone(), window, cx)
-                    },
-                ))
-            })
-        });
+    let manager = manager.clone();
+    menu.separator()
+        .submenu("Emulators", window, cx, move |menu, window, cx| {
+            let maker = manager.clone();
+            let menu = menu.item(
+                PopupMenuItem::new("New emulator…")
+                    .icon(Icons::Plus)
+                    .on_click(move |_, window, cx| {
+                        crate::avd_dialog::open_new(maker.clone(), window, cx)
+                    }),
+            );
+            // Wiping and deleting need the emulator stopped, so only those
+            // are listed.
+            if stopped.is_empty() {
+                return menu;
+            }
+            let (wipe_list, wiper) = (stopped.clone(), manager.clone());
+            let (delete_list, deleter) = (stopped.clone(), manager.clone());
+            menu.separator()
+                .submenu("Wipe data", window, cx, move |menu, _, _| {
+                    wipe_list.iter().fold(menu, |menu, avd| {
+                        let (manager, avd) = (wiper.clone(), avd.clone());
+                        menu.item(PopupMenuItem::new(avd.replace('_', " ")).on_click(
+                            move |_, window, cx| {
+                                crate::avd_dialog::confirm_wipe(
+                                    manager.clone(),
+                                    avd.clone(),
+                                    window,
+                                    cx,
+                                )
+                            },
+                        ))
+                    })
+                })
+                .submenu("Delete", window, cx, move |menu, _, _| {
+                    delete_list.iter().fold(menu, |menu, avd| {
+                        let (manager, avd) = (deleter.clone(), avd.clone());
+                        menu.item(PopupMenuItem::new(avd.replace('_', " ")).on_click(
+                            move |_, window, cx| {
+                                crate::avd_dialog::confirm_delete(
+                                    manager.clone(),
+                                    avd.clone(),
+                                    window,
+                                    cx,
+                                )
+                            },
+                        ))
+                    })
+                })
+        })
+}
+
+/// Connects to a saved device from the menu: there is no dialog to say how
+/// it went, so a notice does.
+fn connect_saved(
+    manager: &Entity<DeviceManager>,
+    address: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window.push_notification(Notification::info(format!("Connecting to {address}…")), cx);
+    let connecting = manager.update(cx, |manager, cx| manager.connect(&address, cx));
+    window
+        .spawn(cx, async move |cx| {
+            let connected = connecting.await;
+            let _ = cx.update(|window, cx| {
+                let notice = match connected {
+                    Ok(serial) => Notification::success(format!("Connected to {serial}.")),
+                    Err(err) => Notification::error(crate::connect_dialog::explain(
+                        &address,
+                        &format!("{err:#}"),
+                    )),
+                };
+                window.push_notification(notice, cx);
+            });
+        })
+        .detach();
+}
+
+/// What to say of a screen that does not come as video.
+/// `name` as the toolbar's device picker has room to say it in `room`
+/// pixels (at the default interface size), and whether it was cut: a long
+/// name ends in an ellipsis before anything in the row is pushed out of it.
+fn fit_name(name: &SharedString, room: f32) -> (SharedString, bool) {
+    // The picker's icon, caret and padding; then about this much a letter.
+    const AROUND: f32 = 48.;
+    const LETTER: f32 = 7.6;
+    let letters = (((room - AROUND) / LETTER).floor().max(4.)) as usize;
+    if name.chars().count() <= letters {
+        return (name.clone(), false);
     }
-    menu
+    let kept: String = name.chars().take(letters - 1).collect();
+    (format!("{}…", kept.trim_end()).into(), true)
+}
+
+fn slow_stream_note(mode: StreamMode) -> Option<&'static str> {
+    match mode {
+        StreamMode::Connecting | StreamMode::Video => None,
+        StreamMode::RawFrames => Some(
+            "This computer has no H.264 decoder, so the phone sends whole frames: it is slower to use while mirrored.",
+        ),
+        StreamMode::Snapshots => {
+            Some("This device streams no video: its screen is shown in snapshots, a few a second.")
+        }
+    }
 }
 
 fn loading(text: String, cx: &App) -> AnyElement {
@@ -1522,9 +1817,8 @@ pub(crate) fn human_size(bytes: u64) -> String {
 }
 
 impl Render for DevicesPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let overlay = self.render_overlay(cx);
-        let show_tools = overlay.is_none();
         v_flex()
             .size_full()
             .on_drag_move(
@@ -1532,7 +1826,7 @@ impl Render for DevicesPanel {
                     this.resize_drawer(event, cx)
                 }),
             )
-            .child(self.render_toolbar(cx))
+            .child(self.render_toolbar(window, cx))
             .child(
                 div()
                     .relative()
@@ -1540,11 +1834,22 @@ impl Render for DevicesPanel {
                     .min_h_0()
                     .overflow_hidden()
                     .child(div().absolute().inset_0().child(self.surface.clone()))
-                    .children(overlay)
-                    .when(show_tools, |this| {
-                        this.child(div().absolute().inset_0().child(self.tools.clone()))
-                    }),
+                    .children(overlay),
             )
             .child(self.render_drawer(cx))
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn a_long_device_name_is_cut_to_the_room_there_is() {
+        let name: SharedString = "Galaxy S20 FE 5G".into();
+        assert_eq!(fit_name(&name, 400.), (name.clone(), false));
+        assert_eq!(fit_name(&name, 110.), ("Galaxy…".into(), true));
+        // Never to nothing: a few letters tell the devices apart.
+        assert_eq!(fit_name(&name, 0.), ("Gal…".into(), true));
     }
 }

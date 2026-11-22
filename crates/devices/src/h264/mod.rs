@@ -1,14 +1,16 @@
-//! A phone's screen as H.264 video: `screenrecord --output-format=h264`
-//! has the phone's hardware encoder compress what changes on screen, as
-//! Android Studio's mirroring does, so the phone does little work and the
-//! cable carries kilobytes, not megabytes, per frame. The computer decodes
-//! it with the system's own decoder (VideoToolbox on macOS, Media
-//! Foundation on Windows). Elsewhere, or if the decoder cannot start, the
-//! screen falls back to raw frames (see `screen.rs`).
+//! A phone's screen as H.264 video: the phone's hardware encoder compresses
+//! what changes on screen, as Android Studio's mirroring does, so the phone
+//! does little work and the cable carries kilobytes, not megabytes, per
+//! frame. The computer decodes it with the system's own decoder
+//! (VideoToolbox on macOS, Media Foundation on Windows). Elsewhere, or if
+//! the decoder cannot start, the screen falls back to raw frames (see
+//! `screen.rs`).
 //!
-//! The stream is Annex B: NAL units after `00 00 01` start codes, with no
-//! framing between pictures. [`Assembler`] cuts it into access units (the
-//! NAL units of one picture) as bytes arrive.
+//! The video is Annex B: NAL units after `00 00 01` start codes. scrcpy's
+//! server sends it a picture at a time ([`split_nals`]);
+//! `screenrecord --output-format=h264` sends it with no framing between
+//! pictures, and [`Assembler`] cuts that into access units (the NAL units
+//! of one picture) as bytes arrive.
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -102,6 +104,22 @@ impl Assembler {
         }
         self.unit.push(nal);
     }
+}
+
+/// The NAL units of one whole picture (or of the parameter sets before
+/// one) as Annex B bytes: a stream that says where each picture ends, as
+/// scrcpy's does, needs no [`Assembler`].
+pub fn split_nals(packet: &[u8]) -> Vec<Vec<u8>> {
+    let starts = start_codes(packet);
+    starts
+        .iter()
+        .enumerate()
+        .map(|(ix, &(_, begin))| {
+            let end = starts.get(ix + 1).map_or(packet.len(), |next| next.0);
+            trim_zeros(&packet[begin..end]).to_vec()
+        })
+        .filter(|nal| !nal.is_empty())
+        .collect()
 }
 
 /// Each start code's position and where its NAL unit begins.
@@ -200,6 +218,18 @@ mod tests {
             frame.bgra().chunks(4).any(|pixel| pixel[..3] != [0, 0, 0]),
             "not all black"
         );
+    }
+
+    #[test]
+    fn a_whole_packet_is_cut_at_its_start_codes() {
+        let packet = stream(&[&SPS_NAL, &PPS_NAL, &IDR_NAL]);
+        assert_eq!(
+            split_nals(&packet),
+            vec![SPS_NAL.to_vec(), PPS_NAL.to_vec(), IDR_NAL.to_vec()]
+        );
+        // Three-byte start codes too, and nothing from nothing.
+        assert_eq!(split_nals(&[0, 0, 1, 0x41, 0x9a]), vec![vec![0x41, 0x9a]]);
+        assert!(split_nals(&[]).is_empty());
     }
 
     #[test]
