@@ -8,13 +8,15 @@
 // on the slide shifts; things added by hand sit at a place of their own
 // (`position: absolute`), as on a slide in any presentation program.
 
-import { chartSpec, dress, linkOf, parseSlide } from "./core.js";
+import { carried, chartSpec, dress, elementFrom, linkOf } from "./core.js";
 import { h, button, menu, popover, dialog, toast, colourPicker, hex, closeFloats, icon, keys as keyHint } from "./ui.js";
 import * as store from "./store.js";
 import { state, emit } from "./store.js";
 
 // Before the HTML of something copied from a slide, on the clipboard.
-const CLIP_MARK = "<!--deck-element-->";
+// How an element is told on the clipboard among the markup other programs
+// read: an attribute that carries it (`carried` in core.js).
+const CLIP = "data-deck-element";
 
 export const SHAPES = [
   { id: "rect", name: "Rectangle", icon: "rect", key: "R", code: "R" },
@@ -96,6 +98,7 @@ export class Editing {
     this.hovered = null;
     this.drag = null;
     this.clip = null;
+    this.carry = "";
     this.cropping = false;
     const frame = env.el.frame;
     frame.addEventListener("pointerdown", (event) => this.pointerDown(event));
@@ -595,6 +598,7 @@ export class Editing {
     const copy = this.selected.cloneNode(true);
     for (const drawn of copy.querySelectorAll("svg.chart-drawn")) drawn.remove();
     this.clip = copy.outerHTML;
+    this.carry = carried(copy);
   }
 
   // Whether a copy, cut or paste is of the slide's things (not of words
@@ -611,7 +615,7 @@ export class Editing {
     event.preventDefault();
     this.copy();
     event.clipboardData.setData("text/plain", this.selected.textContent.trim());
-    event.clipboardData.setData("text/html", CLIP_MARK + this.clip);
+    event.clipboardData.setData("text/html", `<div ${CLIP}="${this.carry}">${this.clip}</div>`);
     if (cut) this.remove();
   }
 
@@ -942,8 +946,8 @@ export class Editing {
     // Something copied from a slide (this deck's or another's), cleaned as
     // a slide's file is when it is read.
     const html = event.clipboardData?.getData("text/html") || "";
-    const marked = html.indexOf(CLIP_MARK);
-    const copied = marked < 0 ? null : parseSlide(`<section>${html.slice(marked + CLIP_MARK.length)}</section>`).firstElementChild;
+    const found = new RegExp(CLIP + "=\"([A-Za-z0-9%._~!*'()-]+)\"").exec(html);
+    const copied = found ? elementFrom(found[1]) : null;
     if (copied && this.slide) {
       event.preventDefault();
       this.clip = copied.outerHTML;

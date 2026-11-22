@@ -164,14 +164,19 @@ function safeSource(value) {
 // it. So "example.com" leads to https://example.com (without a scheme it
 // would lead into the deck's own files), and `javascript:…` to a site
 // that does not exist.
-const LINK_STARTS = ["https://", "http://", "mailto:", "tel:", "#"];
-
 export function linkOf(typed) {
-  const text = String(typed).trim();
+  // What an address may not hold as it is, written as an address writes
+  // it: a space as %20, a quote as %22, a bracket as %3C.
+  const text = String(typed)
+    .trim()
+    .replace(/[<>"'` \t\r\n]/g, (found) => "%" + found.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"));
   if (!text) return "";
   const lower = text.toLowerCase();
-  const start = LINK_STARTS.find((start) => lower.startsWith(start));
-  if (start) return start + text.slice(start.length);
+  if (lower.startsWith("https://")) return "https://" + text.slice(8);
+  if (lower.startsWith("http://")) return "http://" + text.slice(7);
+  if (lower.startsWith("mailto:")) return "mailto:" + text.slice(7);
+  if (lower.startsWith("tel:")) return "tel:" + text.slice(4);
+  if (text.startsWith("#")) return "#" + text.slice(1);
   if (/^[^\s@/:?#]+@[^\s@/:?#]+\.[^\s@/:?#]+$/.test(text)) return "mailto:" + text;
   return "https://" + text;
 }
@@ -202,10 +207,73 @@ function clean(made) {
   }
 }
 
+// An element of a slide as it is carried on the clipboard, to another deck
+// or back to this one: its tags, attributes and words as a tree, not as
+// markup. What comes back from a clipboard is anything at all, and markup
+// has to be read by a parser to become elements; a tree is built again
+// from its parts (`elementFrom`), so only elements and attributes are ever
+// made of it, and `clean` then looks at each.
+export function carried(element) {
+  const tree = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) return node.nodeValue;
+    if (node.nodeType !== Node.ELEMENT_NODE) return null;
+    const attrs = {};
+    for (const attribute of node.attributes) attrs[attribute.name] = attribute.value;
+    return { tag: node.localName, attrs, children: [...node.childNodes].map(tree).filter((child) => child !== null) };
+  };
+  return encodeURIComponent(JSON.stringify(tree(element)));
+}
+
+const SVG = "http://www.w3.org/2000/svg";
+const XLINK = "http://www.w3.org/1999/xlink";
+// As deep as anything on a slide goes, and far less than would trouble
+// the page.
+const DEPTH = 80;
+
+function build(node, doc, svg, depth) {
+  if (typeof node === "string") return doc.createTextNode(node);
+  if (!node || typeof node.tag !== "string" || !/^[a-z][a-z0-9-]*$/i.test(node.tag) || depth > DEPTH) return null;
+  const drawn = svg || node.tag === "svg";
+  const element = drawn ? doc.createElementNS(SVG, node.tag) : doc.createElement(node.tag);
+  for (const [name, value] of Object.entries(node.attrs && typeof node.attrs === "object" ? node.attrs : {})) {
+    try {
+      if (name === "xlink:href") element.setAttributeNS(XLINK, name, String(value));
+      else element.setAttribute(name, String(value));
+    } catch {
+      // A name no attribute can have: left out.
+    }
+  }
+  for (const child of Array.isArray(node.children) ? node.children : []) {
+    const made = build(child, doc, drawn && node.tag !== "foreignObject", depth + 1);
+    if (made) element.append(made);
+  }
+  return element;
+}
+
+// The element `text` carries (see `carried`), cleaned as a slide's file is,
+// or nothing when it is not one. It is built in a document of its own,
+// where no picture is fetched and nothing runs, and moves into the page
+// when it has been cleaned.
+export function elementFrom(text, doc = document) {
+  let tree;
+  try {
+    tree = JSON.parse(decodeURIComponent(text));
+  } catch {
+    return null;
+  }
+  const apart = doc.implementation.createHTMLDocument("");
+  const made = build(tree, apart, false, 0);
+  if (!made || made.nodeType !== Node.ELEMENT_NODE) return null;
+  const holder = apart.createElement("section");
+  holder.append(made);
+  clean(holder);
+  return holder.firstElementChild ? doc.adoptNode(holder.firstElementChild) : null;
+}
+
 // A slide's file as an element. What a slide has no use for and could do
 // harm (scripts, frames, handlers, addresses that run something) is left
-// out: a deck is shown to guests, may have started from a file of someone
-// else's, and takes what is pasted into it.
+// out: a deck is shown to guests and may have started from a file of
+// someone else's.
 //
 // The text is read as a document of its own, where nothing runs and
 // nothing is loaded, and cleaned there; what is left then moves into the

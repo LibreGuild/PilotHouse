@@ -616,16 +616,19 @@ mod tests {
 
     #[test]
     fn decodes_and_checks_a_jwt() {
-        // {"alg":"HS256","typ":"JWT"}.{"sub":"1","exp":1}, signed with "secret".
+        // {"alg":"HS256","typ":"JWT"}.{"sub":"1","exp":1}, signed with a
+        // secret made for the run (as the utility makes keys): any secret
+        // will do, so none is written here.
+        let secret = crate::hash::random_key(16, false).unwrap();
         let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjoxfQ.";
-        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret").unwrap();
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(token.trim_end_matches('.').as_bytes());
         let signed = format!(
             "{token}{}",
             URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
         );
         let out = jwt(&Input {
-            second: "secret".into(),
+            second: secret.clone(),
             ..Input::new(format!("Bearer {signed}"))
         })
         .unwrap();
@@ -643,7 +646,10 @@ mod tests {
         // The same secret given as Base64.
         let read = jwt_read(&signed).unwrap();
         assert_eq!(read.algorithm(), "HS256");
-        assert_eq!(jwt_verify(&read, "c2VjcmV0", true), Signature::Valid);
+        assert_eq!(
+            jwt_verify(&read, &STANDARD.encode(secret.as_bytes()), true),
+            Signature::Valid
+        );
         assert!(jwt(&with("a.b", 0)).is_err());
         assert!(
             jwt_read("a.b.c.d.e")

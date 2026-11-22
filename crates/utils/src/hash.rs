@@ -552,7 +552,10 @@ mod tests {
 
     #[test]
     fn webhook_signatures_are_checked_as_sent() {
-        let mac = hmac_of(MacAlgorithm::Sha256, b"key", b"body");
+        // Any key signs: one is made for the run, as the utility makes
+        // them, so that none is written here.
+        let key = random_key(16, false).unwrap();
+        let mac = hmac_of(MacAlgorithm::Sha256, key.as_bytes(), b"body");
         assert!(signature_matches(
             &format!("sha256={}", ::hex::encode(&mac)),
             &mac
@@ -563,7 +566,10 @@ mod tests {
             &mac
         ));
         assert!(!signature_matches("sha256=00", &mac));
-        assert_eq!(hmac_of(MacAlgorithm::Sha1, b"key", b"body").len(), 20);
+        assert_eq!(
+            hmac_of(MacAlgorithm::Sha1, key.as_bytes(), b"body").len(),
+            20
+        );
     }
 
     #[test]
