@@ -4,7 +4,7 @@
 // box and its styles, each picture with its place, and each fill as a
 // shape; a table and a chart go as a table and a chart.
 
-import { mountSlide, chartSpec } from "./core.js";
+import { mountSlide, chartSpec, safeLink } from "./core.js";
 
 // `deck` is deck.json as read; `textOf(file)` a slide's file.
 export async function measureDeck({ look, deck, textOf, title = "" }) {
@@ -352,7 +352,7 @@ function runStyle(node) {
     color: ink.hex || "#000000",
     alpha: ink.alpha,
     spacing: styles.letterSpacing === "normal" ? 0 : round(parseFloat(styles.letterSpacing)),
-    link: /^\s*javascript:/i.test(link) ? "" : link,
+    link: safeLink(link) ? link : "",
     upper: styles.textTransform === "uppercase",
     mono: /mono|courier|consol|menlo/i.test(family),
   };

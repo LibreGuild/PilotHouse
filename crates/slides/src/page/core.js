@@ -125,11 +125,91 @@ export class Look {
   }
 }
 
-const DROPPED = "script, iframe, object, embed, link, meta, base, form";
+// What a slide has no use for and could do harm with: what runs, what
+// loads a page into the page, what sends somewhere, and an SVG animation,
+// which can write an attribute after the file was read (an `href` set to
+// a script).
+const DROPPED =
+  "script, iframe, frame, frameset, object, embed, applet, portal, link, meta, base, form, " +
+  "animate, set, animateTransform, animateMotion";
+
+// The scheme a browser reads in an address. It drops the spaces around
+// one and the tabs and line ends inside it, so they are dropped before
+// looking: `java\tscript:` is a script to it.
+function schemeOf(value) {
+  const bare = String(value).replace(/[\u0000- \u007f- ]/g, "");
+  const found = /^([a-z][a-z0-9+.-]*):/i.exec(bare);
+  return found ? found[1].toLowerCase() : "";
+}
+
+// Where a link may lead, and what a picture, a video or a sound may be
+// read from. Lists of what is let through, not of what is refused: a
+// scheme nobody thought of is then left out, and so is a new way to write
+// an old one. (No scheme at all is a file of the deck's.)
+const LINK_SCHEMES = new Set(["", "http", "https", "mailto", "tel"]);
+const SOURCE_SCHEMES = new Set(["", "http", "https", "blob"]);
+const PICTURE = /^data:image\/(png|jpe?g|gif|webp|avif|bmp|svg\+xml)[;,]/i;
+
+export function safeLink(value) {
+  return LINK_SCHEMES.has(schemeOf(value));
+}
+
+function safeSource(value) {
+  return SOURCE_SCHEMES.has(schemeOf(value)) || PICTURE.test(String(value).trim());
+}
+
+// What a typed address becomes: a link to the web, a mail address, a phone
+// number or a place in the page, and nothing else. The start of the link
+// is always one of these, as written here, and what was typed only follows
+// it. So "example.com" leads to https://example.com (without a scheme it
+// would lead into the deck's own files), and `javascript:…` to a site
+// that does not exist.
+const LINK_STARTS = ["https://", "http://", "mailto:", "tel:", "#"];
+
+export function linkOf(typed) {
+  const text = String(typed).trim();
+  if (!text) return "";
+  const lower = text.toLowerCase();
+  const start = LINK_STARTS.find((start) => lower.startsWith(start));
+  if (start) return start + text.slice(start.length);
+  if (/^[^\s@/:?#]+@[^\s@/:?#]+\.[^\s@/:?#]+$/.test(text)) return "mailto:" + text;
+  return "https://" + text;
+}
+
+const ADDRESSES = new Set(["href", "xlink:href", "src", "poster", "data", "background", "action", "formaction", "ping"]);
+
+// Takes out of `made` what a slide may not hold (see `DROPPED`), every
+// handler, and every address that is not one of the kinds above.
+function clean(made) {
+  for (const element of made.querySelectorAll(DROPPED)) element.remove();
+  for (const element of [made, ...made.querySelectorAll("*")]) {
+    const tag = element.localName.toLowerCase();
+    for (const attribute of [...element.attributes]) {
+      const name = attribute.name.toLowerCase();
+      if (name.startsWith("on") || name === "srcdoc") {
+        element.removeAttribute(attribute.name);
+        continue;
+      }
+      if (!ADDRESSES.has(name)) continue;
+      const value = attribute.value;
+      const leads =
+        name === "action" || name === "formaction" || name === "ping" || ((name === "href" || name === "xlink:href") && (tag === "a" || tag === "area"));
+      // What `<use>` draws is in this slide: from anywhere else it is a
+      // file read into the page.
+      const kept = tag === "use" ? value.trim().startsWith("#") : leads ? safeLink(value) : safeSource(value);
+      if (!kept) element.removeAttribute(attribute.name);
+    }
+  }
+}
 
 // A slide's file as an element. What a slide has no use for and could do
-// harm (scripts, frames, handlers) is left out: a deck is shown to guests,
-// and may have started from a file of someone else's.
+// harm (scripts, frames, handlers, addresses that run something) is left
+// out: a deck is shown to guests, may have started from a file of someone
+// else's, and takes what is pasted into it.
+//
+// The text is read as a document of its own, where nothing runs and
+// nothing is loaded, and cleaned there; what is left then moves into the
+// page.
 export function parseSlide(html, doc = document) {
   const slide = doc.createElement("section");
   if (html === null || html === undefined) {
@@ -137,28 +217,17 @@ export function parseSlide(html, doc = document) {
     slide.textContent = "This slide's file is missing.";
     return slide;
   }
-  const template = doc.createElement("template");
-  template.innerHTML = html;
-  const found = template.content.querySelector("section.slide, section");
-  const made = found || slide;
+  const read = new DOMParser().parseFromString(String(html), "text/html");
+  const found = read.querySelector("section.slide, section");
+  const made = found || read.createElement("section");
   if (!found) {
-    slide.className = "slide";
-    slide.append(template.content);
+    made.className = "slide";
+    made.append(...read.head.childNodes, ...read.body.childNodes);
   } else if (!found.classList.contains("slide")) {
     found.classList.add("slide");
   }
-  for (const element of made.querySelectorAll(DROPPED)) element.remove();
-  for (const element of [made, ...made.querySelectorAll("*")]) {
-    for (const attribute of [...element.attributes]) {
-      const name = attribute.name.toLowerCase();
-      const value = attribute.value.trim().toLowerCase();
-      if (name.startsWith("on")) element.removeAttribute(attribute.name);
-      else if ((name === "href" || name === "src" || name === "xlink:href") && value.startsWith("javascript:")) {
-        element.removeAttribute(attribute.name);
-      }
-    }
-  }
-  return made;
+  clean(made);
+  return doc.adoptNode(made);
 }
 
 // Draws slide `html` in `host` (an element kept for it). The element drawn

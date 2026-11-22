@@ -8,7 +8,7 @@
 // on the slide shifts; things added by hand sit at a place of their own
 // (`position: absolute`), as on a slide in any presentation program.
 
-import { chartSpec, dress, parseSlide } from "./core.js";
+import { chartSpec, dress, linkOf, parseSlide } from "./core.js";
 import { h, button, menu, popover, dialog, toast, colourPicker, hex, closeFloats, icon, keys as keyHint } from "./ui.js";
 import * as store from "./store.js";
 import { state, emit } from "./store.js";
@@ -1251,9 +1251,9 @@ export class Editing {
     const input = h("input", { type: "url", class: "input", placeholder: "https://…", value: existing?.getAttribute("href") || "", style: { width: "260px" } });
     const range = this.typing && hasRange(this.typing) ? rangeOf(this.typing).cloneRange() : null;
     const apply = () => {
-      const url = input.value.trim();
+      // The link's start is one of a few kinds, never what was typed.
+      const url = linkOf(input.value);
       float.close();
-      if (/^\s*javascript:/i.test(url)) return;
       if (range) {
         this.typing.focus({ preventScroll: true });
         setRange(this.typing, range);
