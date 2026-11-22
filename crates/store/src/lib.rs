@@ -20,6 +20,7 @@ pub mod projects;
 pub mod reviews;
 pub mod schedules;
 pub mod search;
+pub mod secrets;
 pub mod sessions;
 pub mod settings;
 mod time;

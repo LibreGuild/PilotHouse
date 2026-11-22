@@ -6,18 +6,21 @@
 //!   company CAs installed on the machine).
 //! - [`pulls`]: pull requests, files, diffs, conversation, line comments,
 //!   reviews, checks; commenting, reviewing, merging, creating.
-//! - [`search`]: pull requests across repositories (review requested, the
-//!   user's own, assigned).
+//! - [`search`]: pull requests across repositories (needing the user's
+//!   review, waiting for their author, the user's own).
+//! - [`issues`]: a repository's issues, and opening one.
 //!
 //! Every call blocks on the network: use a background thread. Requests go
 //! only to the hosts the user added.
 
 pub mod accounts;
 pub mod client;
+pub mod issues;
 pub mod models;
 pub mod pulls;
 pub mod search;
-pub mod secrets;
+// Where tokens are kept: the store's, under this crate's old name for it.
+pub use ph_store::secrets;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 

@@ -370,14 +370,21 @@ fn drag(params: Value, window: &mut Window, cx: &mut App) -> Result<Value> {
 fn scroll(params: Value, window: &mut Window, cx: &mut App) -> Result<Value> {
     use gpui_kit::InputEvent as _;
     let at = point_param(&params, "at").context("missing `at: [x, y]`")?;
-    let dy = params.get("dy").and_then(Value::as_f64).unwrap_or(300.0) as f32;
+    // Sideways only when asked: `dx` alone leaves the page where it is
+    // up and down.
+    let dx = params.get("dx").and_then(Value::as_f64).map(|dx| dx as f32);
+    let dy = params
+        .get("dy")
+        .and_then(Value::as_f64)
+        .map_or(if dx.is_some() { 0.0 } else { 300.0 }, |dy| dy as f32);
+    let dx = dx.unwrap_or(0.0);
     window.pointer_move(at, None, cx);
     window.dispatch_event(
         gpui_kit::ScrollEvent {
             position: at,
-            // A positive wheel delta scrolls up, as on a trackpad.
+            // A positive wheel delta scrolls up (and left), as on a trackpad.
             delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
-                gpui_kit::px(0.),
+                gpui_kit::px(-dx),
                 gpui_kit::px(-dy),
             )),
             ..Default::default()
@@ -385,7 +392,7 @@ fn scroll(params: Value, window: &mut Window, cx: &mut App) -> Result<Value> {
         .to_platform_input(),
         cx,
     );
-    Ok(json!({ "scrolled": dy }))
+    Ok(json!({ "scrolled": dy, "sideways": dx }))
 }
 
 /// A trackpad pinch at `at`: `delta` 0.1 zooms in by a tenth, negative

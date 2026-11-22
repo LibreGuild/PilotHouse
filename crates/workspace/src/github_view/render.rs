@@ -13,8 +13,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    AnyElement, App, AppContext as _, Context, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    div, px,
 };
 use ph_github::search::Inbox;
 use ph_theme::layout;
@@ -25,13 +26,14 @@ use super::{GithubView, Page};
 impl GithubView {
     fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let inbox = Inbox::ALL.into_iter().map(|kind| {
-            let count = self.inbox.get(&kind).map(|list| list.items.len());
+            // The number is of what waits for the user, not of the list.
+            let count = self.needs_you(kind);
             let selected = self.page == Page::Inbox(kind);
             row(
                 SharedString::from(format!("github-inbox-{}", inbox_key(kind))),
                 inbox_icon(kind),
                 kind.label().to_string(),
-                count
+                Some(count)
                     .filter(|count| *count > 0)
                     .map(|count| count.to_string()),
                 selected,
@@ -220,6 +222,20 @@ impl GithubView {
 
 impl Render for GithubView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.search.is_none() {
+            let search = cx.new(|cx| {
+                gpui_kit::component::input::InputState::new(window, cx).placeholder("Find")
+            });
+            let changed = cx.subscribe(
+                &search,
+                |_, _, event: &gpui_kit::component::input::InputEvent, cx| {
+                    if matches!(event, gpui_kit::component::input::InputEvent::Change) {
+                        cx.notify();
+                    }
+                },
+            );
+            self.search = Some((search, changed));
+        }
         let sidebar = if self.sidebar_shown {
             crate::sidebar::width(cx)
         } else {
@@ -232,8 +248,9 @@ impl Render for GithubView {
         let chat_width = (available * 0.45).max(layout::CHAT_MIN);
         let page = crate::frame::island(window, cx).child(self.render_page(cx));
         let gap = crate::frame::gap();
-        // The chat is the pull request's: it shows while one is open.
-        let body = match self.current_chat().cloned() {
+        // The chat is the pull request's: it shows while one is open,
+        // unless it was folded away.
+        let body = match self.current_chat().cloned().filter(|_| self.chat_shown) {
             Some(chat) => h_resizable("github-split")
                 .child(
                     resizable_panel()
@@ -267,8 +284,15 @@ impl Render for GithubView {
     }
 }
 
-/// An inbox pull request's triage, as small chips.
-pub(super) fn triage_chips(triage: &ph_review::triage::Triage, cx: &App) -> Vec<AnyElement> {
+/// What is worth knowing of a listed pull request at a glance, as small
+/// chips: that it is a draft or a bot's, who was asked, its size, its
+/// checks, what it touches that deserves care.
+pub(super) fn pull_chips(
+    kind: Inbox,
+    pull: &ph_github::search::FoundPull,
+    triage: Option<&ph_review::triage::Triage>,
+    cx: &App,
+) -> Vec<AnyElement> {
     use ph_review::triage::Ci;
     let chip = |text: String, color: gpui_kit::Hsla| {
         div()
@@ -279,24 +303,46 @@ pub(super) fn triage_chips(triage: &ph_review::triage::Triage, cx: &App) -> Vec<
             .child(text)
             .into_any_element()
     };
+    let muted = cx.theme().muted_foreground;
     let mut chips = Vec::new();
-    if triage.behind {
-        chips.push(chip("pushed since your review".into(), cx.theme().info));
-    } else if triage.reviewed {
-        chips.push(chip("reviewed".into(), cx.theme().muted_foreground));
+    if pull.draft {
+        chips.push(chip("draft".into(), muted));
+    }
+    if pull.user.is_bot() {
+        chips.push(chip("bot".into(), muted));
+    }
+    // Asked of a team the user is on, not of them by name.
+    if kind == Inbox::NeedsReview
+        && let Some(detail) = &pull.detail
+        && !detail.asked_directly
+        && let Some(team) = detail.teams.first()
+    {
+        chips.push(chip(format!("team {team}"), muted));
+    }
+    let Some(triage) = triage else {
+        return chips;
+    };
+    if kind != Inbox::Mine {
+        if triage.behind {
+            chips.push(chip("pushed since your review".into(), cx.theme().info));
+        } else if triage.reviewed {
+            chips.push(chip("reviewed".into(), muted));
+        }
     }
     chips.push(chip(
         format!("{} · {} lines", triage.size.label(), triage.lines),
-        cx.theme().muted_foreground,
+        muted,
     ));
     match triage.ci {
-        Ci::Failing => chips.push(chip("CI failing".into(), cx.theme().danger)),
-        Ci::Running => chips.push(chip("CI running".into(), cx.theme().warning)),
-        Ci::Passing => chips.push(chip("CI green".into(), cx.theme().success)),
+        Ci::Failing => chips.push(chip("checks failing".into(), cx.theme().danger)),
+        Ci::Running => chips.push(chip("checks running".into(), cx.theme().warning)),
+        Ci::Passing => chips.push(chip("checks passed".into(), cx.theme().success)),
         Ci::None => {}
     }
-    for risk in &triage.risks {
-        chips.push(chip((*risk).to_string(), cx.theme().warning));
+    if kind != Inbox::Mine {
+        for risk in &triage.risks {
+            chips.push(chip((*risk).to_string(), cx.theme().warning));
+        }
     }
     chips
 }
@@ -362,16 +408,16 @@ fn row(
 
 pub(super) fn inbox_icon(kind: Inbox) -> Icons {
     match kind {
-        Inbox::ReviewRequested => Icons::Eye,
+        Inbox::NeedsReview => Icons::Eye,
+        Inbox::Waiting => Icons::Clock,
         Inbox::Mine => Icons::GitPullRequest,
-        Inbox::Assigned => Icons::User,
     }
 }
 
 fn inbox_key(kind: Inbox) -> &'static str {
     match kind {
-        Inbox::ReviewRequested => "review",
+        Inbox::NeedsReview => "review",
+        Inbox::Waiting => "waiting",
         Inbox::Mine => "mine",
-        Inbox::Assigned => "assigned",
     }
 }

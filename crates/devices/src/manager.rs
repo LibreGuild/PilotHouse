@@ -13,13 +13,93 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 
-use crate::adb::{Adb, DeviceInfo};
+use crate::adb::{About, Adb, DeviceInfo, Link};
 use crate::sdk::Sdk;
 
 /// How long an emulator may take to boot.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(240);
+/// Settings: the devices connected over the network before, and the
+/// device chosen last (by what tells it apart, see [`DeviceInfo::identity`]).
+const SAVED: &str = "devices.known";
+const CHOSEN: &str = "devices.selected";
+/// Devices kept at most: the ones used longest ago go first.
+const SAVED_MAX: usize = 30;
 
 pub struct DevicesChanged;
+
+/// A device connected over the network before, kept so that it connects
+/// again in one click: an office's test devices on fixed addresses are not
+/// typed in each morning.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SavedDevice {
+    /// Where it was reached last: `192.168.1.20:5555`.
+    pub address: String,
+    /// The device's model.
+    pub name: String,
+    /// The name the user gave it, which tells devices of one model apart.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// The device's own serial number: at another address it is still
+    /// this entry.
+    #[serde(default)]
+    pub hardware: String,
+    /// When it was last connected, in seconds since 1970.
+    #[serde(default)]
+    pub last_used: u64,
+}
+
+impl SavedDevice {
+    /// The name to show: the user's, else the model.
+    pub fn title(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.name)
+    }
+}
+
+/// Where the manager keeps its memory, given by the app at start.
+struct Memory(ph_store::Store);
+
+impl Global for Memory {}
+
+pub(crate) fn remember_in(store: ph_store::Store, cx: &mut App) {
+    cx.set_global(Memory(store));
+}
+
+/// Adds `device`, connected now at `address`, to `saved`, or brings its
+/// entry up to date: the same device (by its own serial number, else by
+/// its address) keeps its entry and the name the user gave it.
+fn save_device(saved: &mut Vec<SavedDevice>, address: &str, device: &DeviceInfo, now: u64) {
+    let hardware = device
+        .about
+        .as_ref()
+        .map(|about| about.hardware.clone())
+        .unwrap_or_default();
+    let known = saved.iter().position(|entry| {
+        (!hardware.is_empty() && entry.hardware == hardware) || entry.address == address
+    });
+    let label = known.and_then(|at| saved.remove(at).label);
+    // Another entry at this address is of a device that has left it.
+    saved.retain(|entry| entry.address != address);
+    saved.insert(
+        0,
+        SavedDevice {
+            address: address.to_string(),
+            name: device.display_name(),
+            label,
+            hardware,
+            last_used: now,
+        },
+    );
+    saved.truncate(SAVED_MAX);
+}
+
+/// Whether `serial` is an address one can connect to again (`host:port`),
+/// not the name of a device adb found by itself on the network.
+fn is_address(serial: &str) -> bool {
+    !serial.contains("._adb-tls-connect.")
+        && serial
+            .rsplit_once(':')
+            .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+}
 
 pub struct DeviceManager {
     sdk: Sdk,
@@ -36,6 +116,16 @@ pub struct DeviceManager {
     avds: Vec<String>,
     /// The device shown in the pane; agents default to it too.
     selected: Option<String>,
+    /// The device the user chose last, by what tells it apart: it is the
+    /// one chosen again when it comes back, also after a restart.
+    chosen: Option<String>,
+    /// A serial the user chose that the list does not show yet (it is
+    /// connecting): once it does, it is the chosen device.
+    choosing: Option<String>,
+    /// What each connected device says of itself, by serial.
+    about: std::collections::HashMap<String, About>,
+    /// Devices connected over the network before, the latest first.
+    saved: Vec<SavedDevice>,
     /// AVDs being started.
     booting: Vec<String>,
     tracking: bool,
@@ -94,6 +184,16 @@ impl DeviceManager {
                 devices: Vec::new(),
                 avds: Vec::new(),
                 selected: None,
+                chosen: cx
+                    .try_global::<Memory>()
+                    .map(|memory| memory.0.setting::<String>(CHOSEN))
+                    .filter(|chosen| !chosen.is_empty()),
+                choosing: None,
+                about: Default::default(),
+                saved: cx
+                    .try_global::<Memory>()
+                    .map(|memory| memory.0.setting(SAVED))
+                    .unwrap_or_default(),
                 booting: Vec::new(),
                 tracking: false,
                 _track: None,
@@ -233,8 +333,160 @@ impl DeviceManager {
         self.devices.iter().find(|device| device.serial == serial)
     }
 
+    /// The user chose the device `serial`.
     pub fn select(&mut self, serial: &str, cx: &mut Context<Self>) {
         self.selected = Some(serial.to_string());
+        self.choosing = Some(serial.to_string());
+        self.remember_choice(cx);
+        cx.emit(DevicesChanged);
+        cx.notify();
+    }
+
+    /// Keeps the device the user chose, once the list shows it (what tells
+    /// it apart is asked of the device).
+    fn remember_choice(&mut self, cx: &App) {
+        let Some(device) = self
+            .choosing
+            .as_deref()
+            .and_then(|serial| self.devices.iter().find(|device| device.serial == serial))
+            .filter(|device| device.emulator || device.about.is_some())
+        else {
+            return;
+        };
+        let identity = device.identity().to_string();
+        self.choosing = None;
+        if self.chosen.as_deref() != Some(identity.as_str()) {
+            if let Some(memory) = cx.try_global::<Memory>() {
+                let _ = memory.0.set_setting(CHOSEN, &identity);
+            }
+            self.chosen = Some(identity);
+        }
+    }
+
+    /// Devices connected over the network before, the latest first.
+    pub fn saved(&self) -> &[SavedDevice] {
+        &self.saved
+    }
+
+    /// Whether the saved device is connected now.
+    pub fn is_connected(&self, saved: &SavedDevice) -> bool {
+        self.devices.iter().any(|device| {
+            device.is_ready()
+                && (device.serial == saved.address
+                    || (!saved.hardware.is_empty()
+                        && device.link() == Link::Network
+                        && device.identity() == saved.hardware))
+        })
+    }
+
+    fn store_saved(&self, cx: &App) {
+        if let Some(memory) = cx.try_global::<Memory>() {
+            let _ = memory.0.set_setting(SAVED, &self.saved);
+        }
+    }
+
+    /// Forgets a saved device.
+    pub fn forget(&mut self, address: &str, cx: &mut Context<Self>) {
+        self.saved.retain(|saved| saved.address != address);
+        self.store_saved(cx);
+        cx.notify();
+    }
+
+    /// Names a saved device (no name: its model again).
+    pub fn rename(&mut self, address: &str, label: &str, cx: &mut Context<Self>) {
+        if let Some(saved) = self.saved.iter_mut().find(|saved| saved.address == address) {
+            let label = label.trim();
+            saved.label = (!label.is_empty() && label != saved.name).then(|| label.to_string());
+            self.store_saved(cx);
+            cx.notify();
+        }
+    }
+
+    /// Connects to the device at `address` (`adb connect`) and chooses it;
+    /// the serial it has, or why it could not be reached.
+    pub fn connect(&mut self, address: &str, cx: &mut Context<Self>) -> Task<Result<String>> {
+        let Some(adb) = self.adb.clone() else {
+            return Task::ready(Err(anyhow!(Sdk::missing_message())));
+        };
+        self.ensure_tracking(cx);
+        let address = address.to_string();
+        cx.spawn(async move |this, cx| {
+            let target = address.clone();
+            let said = cx
+                .background_spawn(async move { adb.connect(&target) })
+                .await?;
+            // "connected to 192.168.1.20:5555": the serial it has now.
+            let serial = said
+                .strip_prefix("already connected to ")
+                .or_else(|| said.strip_prefix("connected to "))
+                .map_or(address, |serial| serial.trim().to_string());
+            this.update(cx, |manager, cx| manager.select(&serial, cx))?;
+            Ok(serial)
+        })
+    }
+
+    /// The device list changed: `devices` is what adb lists now and
+    /// `learned` what newly connected ones said of themselves.
+    fn devices_listed(
+        &mut self,
+        devices: Vec<DeviceInfo>,
+        learned: Vec<(String, About)>,
+        cx: &mut Context<Self>,
+    ) {
+        let was_ready: std::collections::HashSet<String> = self
+            .devices
+            .iter()
+            .filter(|device| device.is_ready())
+            .map(|device| device.serial.clone())
+            .collect();
+        self.about.extend(learned);
+        // A serial that went away may come back as another device (an
+        // address handed to the next phone): it is asked again then.
+        self.about.retain(|serial, _| {
+            devices
+                .iter()
+                .any(|device| device.serial == *serial && device.is_ready())
+        });
+        self.devices = devices;
+        for device in &mut self.devices {
+            device.about = self.about.get(&device.serial).cloned();
+        }
+        // Devices that came over the network are kept, to connect again.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        let mut saved = self.saved.clone();
+        for device in &self.devices {
+            let known = saved.iter().any(|entry| entry.address == device.serial);
+            if device.is_ready()
+                && device.about.is_some()
+                && is_address(&device.serial)
+                && device.link() == Link::Network
+                && (!was_ready.contains(&device.serial) || !known)
+            {
+                save_device(&mut saved, &device.serial, device, now);
+            }
+        }
+        if saved != self.saved {
+            self.saved = saved;
+            self.store_saved(cx);
+        }
+        let ready = |serial: &str| {
+            self.devices
+                .iter()
+                .any(|device| device.serial == serial && device.is_ready())
+        };
+        if !self.selected.as_deref().is_some_and(ready) {
+            // The device chosen last when it is here, else the first.
+            let chosen = self.chosen.as_deref();
+            self.selected = self
+                .devices
+                .iter()
+                .filter(|device| device.is_ready())
+                .min_by_key(|device| Some(device.identity()) != chosen)
+                .map(|device| device.serial.clone());
+        }
+        self.remember_choice(cx);
         cx.emit(DevicesChanged);
         cx.notify();
     }
@@ -282,26 +534,31 @@ impl DeviceManager {
             });
             while receiver.recv().await.is_ok() {
                 let devices_adb = adb.clone();
-                let devices = cx
-                    .background_spawn(async move { devices_adb.devices() })
+                let Ok(asked) = this.read_with(cx, |manager, _| {
+                    manager
+                        .about
+                        .keys()
+                        .cloned()
+                        .collect::<std::collections::HashSet<String>>()
+                }) else {
+                    return;
+                };
+                let (devices, learned) = cx
+                    .background_spawn(async move {
+                        let devices = devices_adb.devices().unwrap_or_default();
+                        // Each device is asked about itself once.
+                        let learned: Vec<(String, About)> = devices
+                            .iter()
+                            .filter(|device| device.is_ready() && !asked.contains(&device.serial))
+                            .filter_map(|device| {
+                                Some((device.serial.clone(), devices_adb.about(&device.serial)?))
+                            })
+                            .collect();
+                        (devices, learned)
+                    })
                     .await;
                 let updated = this.update(cx, |manager, cx| {
-                    manager.devices = devices.unwrap_or_default();
-                    let ready = |serial: &str| {
-                        manager
-                            .devices
-                            .iter()
-                            .any(|d| d.serial == serial && d.is_ready())
-                    };
-                    if !manager.selected.as_deref().is_some_and(ready) {
-                        manager.selected = manager
-                            .devices
-                            .iter()
-                            .find(|device| device.is_ready())
-                            .map(|device| device.serial.clone());
-                    }
-                    cx.emit(DevicesChanged);
-                    cx.notify();
+                    manager.devices_listed(devices, learned, cx)
                 });
                 if updated.is_err() {
                     return;
@@ -627,6 +884,75 @@ fn track_devices(adb: &Adb, changes: &smol::channel::Sender<()>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn phone(serial: &str, hardware: &str) -> DeviceInfo {
+        DeviceInfo {
+            serial: serial.into(),
+            state: "device".into(),
+            name: "Pixel_7".into(),
+            emulator: false,
+            about: Some(About {
+                hardware: hardware.into(),
+                android: "14".into(),
+                api: Some(34),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_device_keeps_one_entry_and_its_name_at_a_new_address() {
+        let mut saved = Vec::new();
+        save_device(
+            &mut saved,
+            "192.168.1.5:5555",
+            &phone("192.168.1.5:5555", "AAA"),
+            10,
+        );
+        save_device(
+            &mut saved,
+            "192.168.1.9:5555",
+            &phone("192.168.1.9:5555", "BBB"),
+            20,
+        );
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].hardware, "BBB", "the latest first");
+        assert_eq!(saved[0].title(), "Pixel 7");
+        saved[1].label = Some("Kiosk 3".into());
+        // The first device again, at another address: its entry, its name.
+        save_device(
+            &mut saved,
+            "192.168.1.7:5555",
+            &phone("192.168.1.7:5555", "AAA"),
+            30,
+        );
+        assert_eq!(saved.len(), 2);
+        assert_eq!(
+            (
+                saved[0].address.as_str(),
+                saved[0].title(),
+                saved[0].last_used
+            ),
+            ("192.168.1.7:5555", "Kiosk 3", 30)
+        );
+        // Another device at an address one had: that one's entry goes.
+        save_device(
+            &mut saved,
+            "192.168.1.9:5555",
+            &phone("192.168.1.9:5555", "CCC"),
+            40,
+        );
+        assert_eq!(saved.len(), 2);
+        assert!(saved.iter().all(|entry| entry.hardware != "BBB"));
+    }
+
+    #[test]
+    fn only_addresses_are_kept_to_connect_again() {
+        assert!(is_address("192.168.1.20:5555"));
+        assert!(is_address("[fe80::1]:5555"));
+        assert!(!is_address("adb-R5CT1234-x7Yz._adb-tls-connect._tcp"));
+        assert!(!is_address("R5CT1234ABC"));
+        assert!(!is_address("emulator-5554x"));
+    }
 
     #[test]
     fn an_emulator_that_gave_up_says_why() {

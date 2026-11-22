@@ -35,11 +35,15 @@ keychain = "PilotHouse"
 # Elsewhere:
 #   github (the GitHub view beside the workspaces), schedules, utilities,
 #   usage (the usage dashboard), network_drives, parallel_runs (one prompt to
-#   several agents), presentations (slides in Studio), chrome_extension
+#   several agents), presentations (Slides; needs artifacts), chrome_extension
 #   (agents in the user's own Chrome), quick_chat (a small chat window over
-#   every app, opened with a global shortcut), explanations (changes
-#   explained in plain words: Explain in the Git tab, Why Is This Here? in
-#   the editor)
+#   every app, opened with a global shortcut), tour (the cards that say what
+#   the app has, at a first start), explanations (changes explained in plain
+#   words: Explain in the Git tab, Why Is This Here? in the editor),
+#   artifacts (web pages agents make, kept in the Documents
+#   folder and served from this computer, which their owner can share with
+#   people on the same network: the Artifacts place, and the agents'
+#   artifact_ tools)
 
 [links]
 # The project's page (Settings → About).

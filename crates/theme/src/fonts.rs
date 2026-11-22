@@ -35,6 +35,54 @@ const FILES: [&[u8]; 10] = [
     include_bytes!("../fonts/jetbrains-mono/JetBrainsMonoNL-BoldItalic.ttf"),
 ];
 
+/// A bundled face for a web page of the app's own (a deck's): what CSS
+/// calls its family, its weight and style, and its file.
+pub struct WebFace {
+    pub file: &'static str,
+    pub family: &'static str,
+    pub weight: u16,
+    pub italic: bool,
+    pub bytes: &'static [u8],
+}
+
+/// The bundled faces, for pages the app serves: such a page then reads the
+/// same on every system, as the app's own text does.
+pub const WEB_FACES: [WebFace; 10] = {
+    const fn face(
+        file: &'static str,
+        family: &'static str,
+        weight: u16,
+        italic: bool,
+        index: usize,
+    ) -> WebFace {
+        WebFace {
+            file,
+            family,
+            weight,
+            italic,
+            bytes: FILES[index],
+        }
+    }
+    [
+        face("Inter-Regular.ttf", "Inter", 400, false, 0),
+        face("Inter-Italic.ttf", "Inter", 400, true, 1),
+        face("Inter-Medium.ttf", "Inter", 500, false, 2),
+        face("Inter-SemiBold.ttf", "Inter", 600, false, 3),
+        face("Inter-Bold.ttf", "Inter", 700, false, 4),
+        face("Inter-BoldItalic.ttf", "Inter", 700, true, 5),
+        face("JetBrainsMono-Regular.ttf", "JetBrains Mono", 400, false, 6),
+        face("JetBrainsMono-Italic.ttf", "JetBrains Mono", 400, true, 7),
+        face("JetBrainsMono-Bold.ttf", "JetBrains Mono", 700, false, 8),
+        face(
+            "JetBrainsMono-BoldItalic.ttf",
+            "JetBrains Mono",
+            700,
+            true,
+            9,
+        ),
+    ]
+};
+
 /// Whether this app's text system took the bundled families (set once, by
 /// [`register`]). Per app, not per process: each test has an app of its own.
 struct Registered(bool);

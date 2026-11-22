@@ -2,13 +2,18 @@
 //! rounds, and what became of each (fixed, not a problem, won't fix: by
 //! whom, and why).
 //!
-//! For the reviewer: post them to GitHub (on the code and in one summary
-//! comment), read back the author's ticks and replies, ask an agent whether
-//! the author is right, check the fixes, get a second opinion or a
-//! double-check, fix them in a task, open issues, and remember why a
-//! finding was not a problem. For the author, whose PilotHouse has no
-//! review of its own: the findings from the summary comment, answered with
-//! a reply each, or fixed in a task.
+//! Each finding is a card that reads top to bottom for someone who has not
+//! read the code: what goes wrong (its title), what happens, why it
+//! matters, an example, the code and the change that fixes it
+//! ([`ph_review::writing`]). What a reviewer does most is in sight (it is
+//! not a problem, fix it in a task); the rest is behind one menu.
+//!
+//! Sending the findings is not done here: the pull request's page finishes
+//! the review ([`crate::finish_view`]), with the findings picked, the
+//! reviewer's own comments and how it ends, in one post.
+//!
+//! For the author, whose copy has no review of its own: the findings from
+//! the summary comment, answered with a reply each, or fixed in a task.
 
 use std::collections::{HashMap, HashSet};
 
@@ -17,7 +22,8 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Textarea, TextareaState},
+    input::{Input, InputState, Textarea, TextareaState},
+    menu::PopupMenuItem,
     notification::Notification,
     text::{TextView, TextViewState},
     v_flex,
@@ -26,7 +32,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Task, Window, div,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
 };
 use ph_github::models::PullRequest;
 use ph_review::comment::{SharedReview, status_label};
@@ -35,10 +41,11 @@ use ph_review::post::PostMode;
 use ph_review::stats::Stats;
 use ph_store::Store;
 use ph_store::reviews::{Finding, PrReview, PullRef};
-use ph_ui::Icons;
+use ph_ui::{Icons, MenuButton as _};
 
 use crate::AgentRequest;
 use crate::hosting::Hosting;
+use crate::issue_form::{IssueForm, IssueFormEvent};
 
 #[derive(Debug, Clone)]
 pub enum FindingsEvent {
@@ -50,6 +57,8 @@ pub enum FindingsEvent {
     },
     /// The findings were read again (their counts may have changed).
     Changed,
+    /// Show the chat a review ran in.
+    OpenSession(i64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +77,14 @@ enum Ask {
     Reply { label: String },
     /// A rule for later reviews of the repository.
     Rule { label: String },
+    /// The finding's own wording, before it is posted.
+    Edit { label: String },
+}
+
+/// A finding's text as it is drawn: its parts, and the fix in words.
+struct Texts {
+    sections: Vec<(Option<&'static str>, Entity<TextViewState>)>,
+    fix: Option<Entity<TextViewState>>,
 }
 
 pub struct FindingsView {
@@ -82,21 +99,30 @@ pub struct FindingsView {
     /// (the author's PilotHouse).
     shared: Option<SharedReview>,
     filter: Filter,
-    expanded: HashSet<String>,
-    bodies: HashMap<String, Entity<TextViewState>>,
+    /// Open findings read in full unless folded; done ones the other way.
+    folded: HashSet<String>,
+    unfolded: HashSet<String>,
+    texts: HashMap<String, Texts>,
     ask: Option<Ask>,
     input: Entity<TextareaState>,
+    /// The title, while a finding's wording is edited.
+    title_input: Entity<InputState>,
+    /// The tab scrolls itself, so a finding can be brought into sight.
+    scroll: gpui_kit::ScrollHandle,
+    /// The finding the keyboard is on (j and k move it), by label.
+    cursor: Option<String>,
+    /// How many things the tab draws above its first finding.
+    above: usize,
+    /// The issue being written for a finding (in a dialog), by its label.
+    issue_form: Option<(Entity<IssueForm>, Subscription)>,
     busy: Option<&'static str>,
     rules: Vec<String>,
     show_rules: bool,
     stats: Option<Stats>,
-    /// A security finding about to become a public issue: its label.
-    confirm_public: Option<String>,
     /// The pull request's summary comment, once a round was posted.
     summary_comment: Option<u64>,
     _task: Option<Task<()>>,
     _shared: Option<Task<()>>,
-    _check: Option<Task<()>>,
 }
 
 impl EventEmitter<FindingsEvent> for FindingsView {}
@@ -109,7 +135,8 @@ impl FindingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| TextareaState::new(window, cx).rows(2));
+        let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 14));
+        let title_input = cx.new(|cx| InputState::new(window, cx).placeholder("Title"));
         let mut view = Self {
             store,
             hosting,
@@ -119,19 +146,23 @@ impl FindingsView {
             findings: Vec::new(),
             shared: None,
             filter: Filter::Open,
-            expanded: HashSet::new(),
-            bodies: HashMap::new(),
+            folded: HashSet::new(),
+            unfolded: HashSet::new(),
+            texts: HashMap::new(),
             ask: None,
             input,
+            title_input,
+            scroll: gpui_kit::ScrollHandle::default(),
+            cursor: None,
+            above: 0,
+            issue_form: None,
             busy: None,
             rules: Vec::new(),
             show_rules: false,
             stats: None,
-            confirm_public: None,
             summary_comment: None,
             _task: None,
             _shared: None,
-            _check: None,
         };
         view.reload(cx);
         view
@@ -169,6 +200,97 @@ impl FindingsView {
         self.review.is_some() || self.shared.is_some()
     }
 
+    /// The findings that can be sent now: open, their code found, not on
+    /// GitHub yet (this computer's review only).
+    pub fn sendable(&self) -> Vec<Finding> {
+        if self.review.is_none() {
+            return Vec::new();
+        }
+        self.findings
+            .iter()
+            .filter(|f| f.status == "open" && f.verified && f.comment_kind.is_none())
+            .cloned()
+            .collect()
+    }
+
+    /// Whether this computer's review has something on GitHub already.
+    pub fn posted(&self) -> bool {
+        self.summary_comment.is_some() || self.findings.iter().any(|f| f.comment_kind.is_some())
+    }
+
+    /// The commit this computer's newest round read.
+    pub fn reviewed_at(&self) -> Option<String> {
+        self.review.as_ref().map(|review| review.head_sha.clone())
+    }
+
+    /// The open findings on `path`, for the Files tab: each with the last
+    /// line it is about.
+    pub fn on_file(&self, path: &str) -> Vec<Finding> {
+        self.findings()
+            .into_iter()
+            .filter(|f| f.status == "open" && f.path == path && f.line.is_some())
+            .collect()
+    }
+
+    /// Unfolds finding `label` and brings it into sight (the Files tab
+    /// leads here).
+    pub fn show(&mut self, label: &str, cx: &mut Context<Self>) {
+        self.filter = Filter::All;
+        self.go_to(label, cx);
+    }
+
+    /// The findings the filter shows, in order.
+    fn listed(&self) -> Vec<Finding> {
+        self.findings()
+            .into_iter()
+            .filter(|f| match self.filter {
+                Filter::Open => f.status == "open",
+                Filter::Done => f.status != "open",
+                Filter::All => true,
+            })
+            .collect()
+    }
+
+    fn go_to(&mut self, label: &str, cx: &mut Context<Self>) {
+        self.folded.remove(label);
+        self.unfolded.insert(label.to_string());
+        self.cursor = Some(label.to_string());
+        if let Some(ix) = self.listed().iter().position(|f| f.label == label) {
+            self.scroll.scroll_to_item(self.above + ix);
+        }
+        cx.notify();
+    }
+
+    /// Moves to the next finding (or the one before), unfolded and in sight.
+    pub fn step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let listed = self.listed();
+        if listed.is_empty() {
+            return;
+        }
+        let at = self
+            .cursor
+            .as_ref()
+            .and_then(|cursor| listed.iter().position(|f| f.label == *cursor));
+        let next = match (at, forward) {
+            (None, _) => 0,
+            (Some(at), true) => (at + 1).min(listed.len() - 1),
+            (Some(at), false) => at.saturating_sub(1),
+        };
+        let label = listed[next].label.clone();
+        self.go_to(&label, cx);
+    }
+
+    /// Whether the keyboard is in one of the tab's boxes.
+    pub fn typing(&self, window: &Window, cx: &App) -> bool {
+        use gpui_kit::Focusable as _;
+        self.input.read(cx).focus_handle(cx).is_focused(window)
+            || self
+                .title_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+    }
+
     /// The findings shown: this computer's, else the summary comment's.
     fn findings(&self) -> Vec<Finding> {
         match (&self.review, &self.shared) {
@@ -193,17 +315,23 @@ impl FindingsView {
         }
         self.rules = github::learned_rules(&self.store, &pull);
         self.summary_comment = self.store.summary_comment_of(&pull).ok().flatten();
-        let texts: Vec<(String, String)> = self
+        let markdown = |text: &str, cx: &mut Context<Self>| {
+            // (Text nested too deeply to parse is shown plain.)
+            let text = ph_ui::markdown::guarded(text);
+            cx.new(|cx| TextViewState::markdown(&text, cx))
+        };
+        self.texts = self
             .findings()
             .iter()
-            .map(|f| (f.label.clone(), finding_text(f)))
-            .collect();
-        self.bodies = texts
-            .into_iter()
-            .map(|(label, text)| {
-                // (Text nested too deeply to parse is shown plain.)
-                let text = ph_ui::markdown::guarded(&text);
-                (label, cx.new(|cx| TextViewState::markdown(&text, cx)))
+            .map(|finding| {
+                let sections = ph_review::writing::sections(&finding.body)
+                    .into_iter()
+                    .map(|section| (section.label, markdown(&section.text, cx)))
+                    .collect();
+                let fix = Some(finding.suggestion.trim())
+                    .filter(|fix| !fix.is_empty())
+                    .map(|fix| markdown(fix, cx));
+                (finding.label.clone(), Texts { sections, fix })
             })
             .collect();
         cx.emit(FindingsEvent::Changed);
@@ -293,10 +421,11 @@ impl FindingsView {
         );
     }
 
-    fn publish(&mut self, mode: PostMode, window: &mut Window, cx: &mut Context<Self>) {
+    /// Brings GitHub up to date with what became of the findings there.
+    fn update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.run(
-            "Posting",
-            move |store, pull| github::publish(store, pull, mode),
+            "Updating",
+            |store, pull| github::publish(store, pull, PostMode::Inline),
             window,
             cx,
         );
@@ -405,49 +534,69 @@ impl FindingsView {
                 }
                 self.reload(cx);
             }
+            Ask::Edit { label } => {
+                let title = self.title_input.read(cx).value().trim().to_string();
+                let Some(finding) = self.finding(&label) else {
+                    return;
+                };
+                if title.is_empty() || finding.id == 0 {
+                    return;
+                }
+                self.ask = None;
+                if let Err(err) = self.store.set_finding_text(finding.id, &title, &text) {
+                    window.push_notification(Notification::error(format!("{err:#}")), cx);
+                }
+                self.reload(cx);
+            }
         }
     }
 
-    /// Opens an issue for finding `label`: a security finding in a public
-    /// repository asks first (an issue would disclose it).
+    /// Writes an issue for finding `label` in a dialog: its title and text
+    /// (drafted from the finding) and who it is assigned to. A security
+    /// finding in a public repository is warned about there.
     fn open_issue(&mut self, label: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(finding) = self.finding(&label) else {
+        let (Some(finding), Some(review)) = (self.finding(&label), self.review.clone()) else {
             return;
         };
-        let Some(review) = self.review.clone() else {
-            return;
-        };
-        let security = finding.impact == "security";
-        if security && self.confirm_public.as_deref() != Some(label.as_str()) {
-            let (store, pull) = (self.store.clone(), self.pull_ref());
-            let check = cx.background_spawn(async move { github::is_public(&store, &pull) });
-            let label = label.clone();
-            self._check = Some(cx.spawn_in(window, async move |this, cx| {
-                let public = check.await.unwrap_or(true);
-                _ = this.update_in(cx, |this, window, cx| {
-                    if public {
-                        this.confirm_public = Some(label);
-                        cx.notify();
-                    } else {
-                        this.confirm_public = Some(label.clone());
-                        this.open_issue(label, window, cx);
-                    }
-                });
-            }));
-            return;
-        }
-        self.confirm_public = None;
         let (title, body) = github::issue_draft(&finding, &review);
+        let advisory = (finding.impact == "security").then(|| {
+            format!(
+                "https://{}/{}/{}/security/advisories/new",
+                self.hosting.account.host, self.hosting.repo.owner, self.hosting.repo.name
+            )
+        });
+        let hosting = self.hosting.clone();
+        let form = cx.new(|cx| IssueForm::new(&hosting, &title, &body, advisory, window, cx));
         let id = finding.id;
-        self.run(
-            "Opening an issue",
-            move |store, _| {
-                let number = github::create_issue(store, id, &title, &body)?;
-                Ok(format!("Opened issue #{number}"))
-            },
+        let submitted = cx.subscribe_in(
+            &form,
             window,
-            cx,
+            move |this, _, event: &IssueFormEvent, window, cx| {
+                let IssueFormEvent::Submit {
+                    title,
+                    body,
+                    assignees,
+                } = event.clone();
+                window.close_dialog(cx);
+                this.issue_form = None;
+                this.run(
+                    "Opening an issue",
+                    move |store, _| {
+                        let number = github::create_issue(store, id, &title, &body, &assignees)?;
+                        Ok(match assignees.as_slice() {
+                            [] => format!("Opened issue #{number}"),
+                            people => {
+                                format!("Opened issue #{number}, assigned to {}", people.join(", "))
+                            }
+                        })
+                    },
+                    window,
+                    cx,
+                );
+            },
         );
+        IssueForm::open(&form, "Open an issue", window, cx);
+        self.issue_form = Some((form, submitted));
     }
 
     fn copy_markdown(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -476,98 +625,50 @@ impl FindingsView {
         cx.notify();
     }
 
+    /// What the reviewer does next, in one row: the fixes checked when the
+    /// author pushed, the open findings fixed in a task; the rest in a menu.
     fn render_toolbar(&self, findings: &[Finding], cx: &mut Context<Self>) -> AnyElement {
-        let busy = self.busy.is_some();
         let open = findings.iter().filter(|f| f.status == "open").count();
         let local = self.review.is_some();
-        let posted = self.summary_comment.is_some();
+        let posted = self.posted();
         let open_findings: Vec<Finding> = findings
             .iter()
             .filter(|f| f.status == "open")
             .cloned()
             .collect();
+        // The author pushed since the newest round read the change.
+        let behind = match (&self.review, &self.pull) {
+            (Some(review), Some(pull)) => review.head_sha != pull.head.sha,
+            _ => false,
+        };
+        let session = self.review.as_ref().and_then(|review| review.session_id);
+        let (view, rules) = (cx.weak_entity(), self.rules.len());
         h_flex()
             .gap_1p5()
             .flex_wrap()
-            .when(local, |this| {
-                this.child(
-                    Button::new("findings-post")
-                        .small()
-                        .primary()
-                        .icon(IconName::ArrowUp)
-                        .label(if posted { "Update on GitHub" } else { "Post to GitHub" })
-                        .tooltip(ph_ui::tip("Open findings on their lines, and one summary comment the author can tick"))
-                        .disabled(busy)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.publish(PostMode::Inline, window, cx)
-                        })),
-                )
-                .child(
-                    Button::new("findings-post-summary")
-                        .small()
-                        .ghost()
-                        .label("Summary only")
-                        .tooltip("Only the summary comment, nothing on the lines")
-                        .disabled(busy)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.publish(PostMode::Conversation, window, cx)
-                        })),
-                )
-            })
-            .child(
-                Button::new("findings-sync")
-                    .small()
-                    .ghost()
-                    .icon(IconName::RefreshCw)
-                    .label(if local { "Read replies" } else { "Refresh" })
-                    .tooltip(ph_ui::tip("Read ticks in the summary comment and replies on the findings"))
-                    .disabled(busy || (local && !posted))
-                    .on_click(cx.listener(|this, _, window, cx| this.sync(window, cx))),
-            )
-            .when(local, |this| {
+            .when(local && behind, |this| {
                 this.child(
                     Button::new("findings-check-fixes")
                         .small()
                         .outline()
+                        .icon(IconName::RefreshCw)
                         .label("Check the fixes")
-                        .tooltip(ph_ui::tip("A new round on the latest commit: each open finding, and what changed"))
+                        .tooltip(ph_ui::tip("The author pushed since this review. A new round on the latest commit says which findings still stand, and looks at what changed."))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.agent(|pull| AgentRequest::Review { pull, kind: "followup" }, cx)
                         })),
                 )
-                .child(
-                    Button::new("findings-second")
-                        .small()
-                        .ghost()
-                        .label("Second opinion")
-                        .tooltip(ph_ui::tip("Another agent reviews it; findings both make are marked"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.agent(|pull| AgentRequest::Review { pull, kind: "second" }, cx)
-                        })),
-                )
-                .when(open > 0, |this| {
-                    this.child(
-                        Button::new("findings-double-check")
-                            .small()
-                            .ghost()
-                            .label("Double-check")
-                            .tooltip("An agent tries to disprove each open finding")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.agent(
-                                    |pull| AgentRequest::Review { pull, kind: "double_check" },
-                                    cx,
-                                )
-                            })),
-                    )
-                })
             })
             .when(open > 0, |this| {
                 this.child(
                     Button::new("findings-fix-all")
                         .small()
-                        .ghost()
+                        .outline()
                         .icon(Icons::GitBranch)
-                        .label(format!("Fix {open} in a task"))
+                        .label(match open {
+                            1 => "Fix it in a task".to_string(),
+                            open => format!("Fix {open} in a task"),
+                        })
                         .tooltip(ph_ui::tip("A task on the pull request's branch, its chat given the open findings"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let findings = open_findings.clone();
@@ -575,23 +676,6 @@ impl FindingsView {
                         })),
                 )
             })
-            .child(
-                Button::new("findings-copy")
-                    .small()
-                    .ghost()
-                    .icon(IconName::Copy)
-                    .accessibility_label("Copy as Markdown")
-                    .tooltip("Copy as Markdown")
-                    .on_click(cx.listener(|this, _, window, cx| this.copy_markdown(window, cx))),
-            )
-            .child(
-                Button::new("findings-stats")
-                    .small()
-                    .ghost()
-                    .label("Stats")
-                    .tooltip("How reviews of this repository went")
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_stats(cx))),
-            )
             .when_some(self.busy, |this, busy| {
                 this.child(
                     h_flex()
@@ -601,11 +685,125 @@ impl FindingsView {
                         .child(busy),
                 )
             })
+            .child(div().flex_1())
+            .child(
+                Button::new("findings-more")
+                    .small()
+                    .ghost()
+                    .icon(IconName::Ellipsis)
+                    .accessibility_label("More for these findings")
+                    .tooltip("Second opinion, double-check, replies, copy, stats")
+                    .menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
+                        let mut menu = menu;
+                        let agent = |kind: &'static str| {
+                            let view = view.clone();
+                            move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
+                                _ = view.update(cx, |this, cx| {
+                                    this.agent(|pull| AgentRequest::Review { pull, kind }, cx)
+                                });
+                            }
+                        };
+                        if local {
+                            if !behind {
+                                menu = menu.item(
+                                    PopupMenuItem::new("Check the fixes")
+                                        .icon(IconName::RefreshCw)
+                                        .on_click(agent("followup")),
+                                );
+                            }
+                            menu = menu.item(
+                                PopupMenuItem::new("Second opinion from another agent")
+                                    .icon(Icons::Bot)
+                                    .on_click(agent("second")),
+                            );
+                            if open > 0 {
+                                menu = menu.item(
+                                    PopupMenuItem::new("Double-check: try to disprove each finding")
+                                        .icon(Icons::ShieldCheck)
+                                        .on_click(agent("double_check")),
+                                );
+                            }
+                            menu = menu.separator();
+                        }
+                        if posted || !local {
+                            let sync = view.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(if local {
+                                    "Read the author's replies"
+                                } else {
+                                    "Read again"
+                                })
+                                .icon(IconName::RefreshCw)
+                                .on_click(move |_, window, cx| {
+                                    _ = sync.update(cx, |this, cx| this.sync(window, cx));
+                                }),
+                            );
+                        }
+                        if posted && local {
+                            let update = view.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new("Update on GitHub")
+                                    .icon(IconName::ArrowUp)
+                                    .on_click(move |_, window, cx| {
+                                        _ = update.update(cx, |this, cx| this.update(window, cx));
+                                    }),
+                            );
+                        }
+                        let copy = view.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new("Copy as Markdown")
+                                .icon(IconName::Copy)
+                                .on_click(move |_, window, cx| {
+                                    _ = copy.update(cx, |this, cx| this.copy_markdown(window, cx));
+                                }),
+                        );
+                        if let Some(session) = session {
+                            let chat = view.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new("Open the review's chat")
+                                    .icon(Icons::MessagesSquare)
+                                    .on_click(move |_, _, cx| {
+                                        _ = chat.update(cx, |_, cx| {
+                                            cx.emit(FindingsEvent::OpenSession(session))
+                                        });
+                                    }),
+                            );
+                        }
+                        menu = menu.separator();
+                        let stats = view.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new("How reviews of this repository went")
+                                .icon(Icons::ChartColumn)
+                                .on_click(move |_, _, cx| {
+                                    _ = stats.update(cx, |this, cx| this.toggle_stats(cx));
+                                }),
+                        );
+                        if rules > 0 {
+                            let show = view.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(match rules {
+                                    1 => "1 rule remembered for this repository".to_string(),
+                                    rules => format!("{rules} rules remembered for this repository"),
+                                })
+                                .icon(Icons::BookOpen)
+                                .on_click(move |_, _, cx| {
+                                    _ = show.update(cx, |this, cx| {
+                                        this.show_rules = !this.show_rules;
+                                        cx.notify();
+                                    });
+                                }),
+                            );
+                        }
+                        menu
+                    }),
+            )
             .into_any_element()
     }
 
+    /// The verdict, how much is open, and the review in two or three
+    /// sentences; which round it was, small, under it.
     fn render_summary(&self, findings: &[Finding], cx: &mut Context<Self>) -> AnyElement {
-        let (round, kind, sha, verdict, summary, who) = match (&self.review, &self.shared) {
+        let (round, kind, sha, verdict, summary, who, agent) = match (&self.review, &self.shared) {
             (Some(review), _) => (
                 review.round,
                 review.kind.as_str(),
@@ -613,6 +811,7 @@ impl FindingsView {
                 review.verdict.clone(),
                 review.summary.clone(),
                 String::new(),
+                review.agent.clone(),
             ),
             (None, Some(shared)) => (
                 shared.round,
@@ -621,6 +820,7 @@ impl FindingsView {
                 shared.verdict.clone(),
                 shared.summary.clone(),
                 shared.reviewer.clone(),
+                String::new(),
             ),
             _ => return div().into_any_element(),
         };
@@ -636,24 +836,21 @@ impl FindingsView {
             "request_changes" => ("Changes needed", cx.theme().danger),
             _ => ("Comments", cx.theme().info),
         };
+        let mut about = format!("Round {round} · {kind}");
+        if !agent.is_empty() {
+            about.push_str(&format!(" by {agent}"));
+        }
+        about.push_str(&format!(" · at {}", &sha[..sha.len().min(8)]));
+        if !who.is_empty() {
+            about.push_str(&format!(" · posted by {who}"));
+        }
         v_flex()
-            .gap_1()
+            .gap_1p5()
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap_1p5()
                     .flex_wrap()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
                     .child(tag(verdict_text, verdict_color))
-                    .child(format!(
-                        "Round {round} · {kind} · at {}{}",
-                        &sha[..sha.len().min(8)],
-                        if who.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" · by {who} (from the summary comment)")
-                        }
-                    ))
                     .children(ph_review::SEVERITIES.iter().filter_map(|severity| {
                         let n = findings
                             .iter()
@@ -668,23 +865,17 @@ impl FindingsView {
                             format!("{} fixed", count("fixed")),
                             cx.theme().success,
                         ))
-                    })
-                    .when(count("not_problem") > 0, |this| {
-                        this.child(tag_owned(
-                            format!("{} not a problem", count("not_problem")),
-                            cx.theme().muted_foreground,
-                        ))
-                    })
-                    .when(count("wont_fix") > 0, |this| {
-                        this.child(tag_owned(
-                            format!("{} won't fix", count("wont_fix")),
-                            cx.theme().muted_foreground,
-                        ))
                     }),
             )
             .when(!summary.trim().is_empty(), |this| {
                 this.child(div().text_sm().child(summary))
             })
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(about),
+            )
             .into_any_element()
     }
 
@@ -727,9 +918,31 @@ impl FindingsView {
             .into_any_element()
     }
 
+    /// Whether finding `finding` is read in full: an open one unless
+    /// folded, a done one only when asked for.
+    fn unfolded(&self, finding: &Finding) -> bool {
+        if finding.status == "open" {
+            !self.folded.contains(&finding.label)
+        } else {
+            self.unfolded.contains(&finding.label)
+        }
+    }
+
+    fn toggle_fold(&mut self, label: &str, open: bool, cx: &mut Context<Self>) {
+        let set = if open {
+            &mut self.folded
+        } else {
+            &mut self.unfolded
+        };
+        if !set.remove(label) {
+            set.insert(label.to_string());
+        }
+        cx.notify();
+    }
+
     fn render_finding(&self, finding: &Finding, cx: &mut Context<Self>) -> AnyElement {
         let label = finding.label.clone();
-        let expanded = self.expanded.contains(&label);
+        let unfolded = self.unfolded(finding);
         let open = finding.status == "open";
         let local = self.review.is_some();
         let round = self
@@ -738,10 +951,16 @@ impl FindingsView {
             .map(|r| r.round)
             .or_else(|| self.shared.as_ref().map(|s| s.round))
             .unwrap_or(1);
-        let color = severity_color(&finding.severity, cx);
+        let color = if open {
+            severity_color(&finding.severity, cx)
+        } else {
+            cx.theme().muted_foreground
+        };
         let (path, line) = (finding.path.clone(), finding.line);
         let reasoning = ph_review::severity::reasoning(finding);
         let both = finding.agents.contains(", ");
+        // Sent already, while this one waits on this computer.
+        let held = local && open && finding.comment_kind.is_none() && self.posted();
         let status_line = (!open).then(|| {
             let who = match finding.status_source.as_str() {
                 "me" => "you".to_string(),
@@ -750,7 +969,7 @@ impl FindingsView {
                 "double_check" => "the double-check".to_string(),
                 _ => "the agent's check".to_string(),
             };
-            let mut text = format!("{} · by {who}", status_label(&finding.status));
+            let mut text = format!("{} by {who}", status_label(&finding.status));
             if !finding.reason.trim().is_empty() {
                 text.push_str(&format!(": {}", finding.reason.trim()));
             }
@@ -758,92 +977,86 @@ impl FindingsView {
         });
         v_flex()
             .id(SharedString::from(format!("finding-{label}")))
-            .gap_1()
-            .p_2()
-            .rounded(cx.theme().radius)
+            .gap_1p5()
+            .p_3()
+            .rounded(cx.theme().radius_lg)
             .border_1()
-            .border_color(if open {
-                color.opacity(0.4)
+            .border_color(if self.cursor.as_deref() == Some(label.as_str()) {
+                cx.theme().primary.opacity(0.6)
             } else {
                 cx.theme().border
             })
-            .bg(color.opacity(if open { 0.04 } else { 0.0 }))
             .child(
-                h_flex()
+                v_flex()
                     .id(SharedString::from(format!("finding-head-{label}")))
                     .role(gpui_kit::accesskit::Role::Button)
                     .aria_label(SharedString::from(format!(
                         "{} {}: {}",
                         finding.label, finding.severity, finding.title
                     )))
-                    .gap_2()
-                    .min_w_0()
+                    .gap_1()
                     .cursor_pointer()
                     .on_click(cx.listener({
                         let label = label.clone();
-                        move |this, _, _, cx| {
-                            if !this.expanded.remove(&label) {
-                                this.expanded.insert(label.clone());
-                            }
-                            cx.notify();
-                        }
+                        move |this, _, _, cx| this.toggle_fold(&label, open, cx)
                     }))
                     .child(
-                        Icon::new(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .xsmall()
-                        .text_color(cx.theme().muted_foreground),
+                        h_flex()
+                            .gap_1p5()
+                            .flex_wrap()
+                            .child(tag_owned(capitalized(&finding.severity), color))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(finding.label.clone()),
+                            )
+                            .when(finding.first_round == round && round > 1 && open, |this| {
+                                this.child(tag("new", cx.theme().info))
+                            })
+                            .when(finding.found_late, |this| {
+                                this.child(tag("missed earlier", cx.theme().muted_foreground))
+                            })
+                            .when(both, |this| {
+                                this.child(tag("both agents", cx.theme().success))
+                            })
+                            .when(!finding.verified, |this| {
+                                this.child(tag("code not found", cx.theme().warning))
+                            })
+                            .when(held, |this| {
+                                this.child(tag("not sent", cx.theme().muted_foreground))
+                            })
+                            .when(finding.status_source == "author" && open, |this| {
+                                this.child(tag("author replied", cx.theme().info))
+                            })
+                            .when_some(finding.issue_number, |this, issue| {
+                                this.child(tag_owned(format!("issue #{issue}"), cx.theme().info))
+                            })
+                            .child(div().flex_1())
+                            .child(
+                                Icon::new(if unfolded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .xsmall()
+                                .text_color(cx.theme().muted_foreground),
+                            ),
                     )
+                    // The whole title: it is the finding in one sentence.
                     .child(
                         div()
-                            .flex_none()
-                            .text_xs()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .text_color(color)
-                            .child(format!("{} {}", finding.label, finding.severity)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
                             .text_sm()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
                             .when(!open, |this| this.text_color(cx.theme().muted_foreground))
                             .child(finding.title.clone()),
                     )
-                    .test_support()
-                    .when(finding.first_round == round && round > 1 && open, |this| {
-                        this.child(tag("new", cx.theme().info))
-                    })
-                    .when(finding.found_late, |this| {
-                        this.child(tag("missed earlier", cx.theme().muted_foreground))
-                    })
-                    .when(both, |this| {
-                        this.child(tag("both agents", cx.theme().success))
-                    })
-                    .when(!finding.verified, |this| {
-                        this.child(tag("code not found", cx.theme().warning))
-                    })
-                    .when(!open, |this| {
-                        this.child(tag(
-                            status_label(&finding.status),
-                            cx.theme().muted_foreground,
-                        ))
-                    })
-                    .when(finding.status_source == "author" && open, |this| {
-                        this.child(tag("author replied", cx.theme().info))
-                    })
-                    .when_some(finding.issue_number, |this, issue| {
-                        this.child(tag_owned(format!("issue #{issue}"), cx.theme().info))
-                    }),
+                    .test_support(),
             )
             .child(
                 h_flex()
                     .gap_2()
-                    .pl_5()
+                    .flex_wrap()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .when(!path.is_empty(), |this| {
@@ -865,16 +1078,69 @@ impl FindingsView {
                                         path: path.clone(),
                                         line,
                                     })
-                                })),
+                                }))
+                                .test_support(),
                         )
                     })
                     .when(!reasoning.is_empty(), |this| this.child(reasoning))
                     .when_some(status_line, |this, status| this.child(status)),
             )
-            .when(expanded, |this| {
+            .when(unfolded, |this| {
                 this.child(self.render_details(finding, local, cx))
             })
             .into_any_element()
+    }
+
+    /// One part of a finding's text under its small label.
+    fn part(label: &'static str, body: AnyElement, cx: &App) -> AnyElement {
+        v_flex()
+            .gap_0p5()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(label),
+            )
+            .child(body)
+            .into_any_element()
+    }
+
+    /// The code a finding is about and the change that fixes it, as a diff
+    /// (the quoted lines alone when no replacement was given).
+    fn render_code(&self, finding: &Finding, cx: &App) -> Option<AnyElement> {
+        let before = finding.evidence.trim_end();
+        if before.trim().is_empty() {
+            return None;
+        }
+        let after = ph_review::comment::unfenced(&finding.suggested_code).trim_end();
+        let lines: Vec<String> = if after.trim().is_empty() {
+            before.lines().map(|line| format!(" {line}")).collect()
+        } else {
+            before
+                .lines()
+                .map(|line| format!("-{line}"))
+                .chain(after.lines().map(|line| format!("+{line}")))
+                .collect()
+        };
+        let rows = ph_preview::diff::unnumbered_lines(&lines)
+            .iter()
+            .map(|line| ph_preview::diff::line_row(line, 0, cx).into_any_element())
+            .collect();
+        Some(
+            div()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(cx.theme().border)
+                .overflow_hidden()
+                .text_xs()
+                .py_1()
+                .child(ph_preview::diff::scroller(
+                    SharedString::from(format!("finding-code-{}", finding.label)),
+                    rows,
+                ))
+                .into_any_element(),
+        )
     }
 
     fn render_details(&self, finding: &Finding, local: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -882,18 +1148,49 @@ impl FindingsView {
         let open = finding.status == "open";
         let busy = self.busy.is_some();
         let asking = self.ask.as_ref().filter(|ask| match ask {
-            Ask::Status { label: l, .. } | Ask::Reply { label: l } | Ask::Rule { label: l } => {
-                *l == label
-            }
+            Ask::Status { label: l, .. }
+            | Ask::Reply { label: l }
+            | Ask::Rule { label: l }
+            | Ask::Edit { label: l } => *l == label,
         });
         let answered = local && finding.status_source == "author" && finding.claim.is_empty();
+        let texts = self.texts.get(&label);
+        let has_change = !finding.suggested_code.trim().is_empty();
         v_flex()
-            .gap_1p5()
-            .pl_5()
-            .children(self.bodies.get(&label).map(|body| {
-                TextView::new(body)
-                    .text_sm()
-                    .image_source(ph_ui::images_safe::web_only)
+            .gap_2p5()
+            .pt_1()
+            .children(texts.into_iter().flat_map(|texts| {
+                texts.sections.iter().map(|(part, view)| {
+                    let body = TextView::new(view)
+                        .text_sm()
+                        .image_source(ph_ui::images_safe::web_only)
+                        .into_any_element();
+                    match part {
+                        Some(part) => Self::part(part, body, cx),
+                        None => body,
+                    }
+                })
+            }))
+            .children(self.render_code(finding, cx).map(|code| {
+                Self::part(
+                    if has_change {
+                        "The change that fixes it"
+                    } else {
+                        "The code"
+                    },
+                    code,
+                    cx,
+                )
+            }))
+            .children(texts.and_then(|texts| texts.fix.as_ref()).map(|fix| {
+                Self::part(
+                    "Fix",
+                    TextView::new(fix)
+                        .text_sm()
+                        .image_source(ph_ui::images_safe::web_only)
+                        .into_any_element(),
+                    cx,
+                )
             }))
             .when(!finding.note.trim().is_empty(), |this| {
                 this.child(
@@ -911,13 +1208,16 @@ impl FindingsView {
                         .p_2()
                         .rounded(cx.theme().radius)
                         .bg(cx.theme().secondary)
-                        .child(div().text_xs().font_weight(gpui_kit::FontWeight::SEMIBOLD).child(
-                            if agree {
-                                "The agent thinks the author is right. Drafted reply:"
-                            } else {
-                                "The agent thinks the finding still stands. Drafted reply:"
-                            },
-                        ))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(if agree {
+                                    "The agent thinks the author is right. Drafted reply:"
+                                } else {
+                                    "The agent thinks the finding still stands. Drafted reply:"
+                                }),
+                        )
                         .child(div().text_sm().child(finding.draft_reply.clone()))
                         .child(
                             h_flex()
@@ -932,7 +1232,9 @@ impl FindingsView {
                                             let (label, text) =
                                                 (label.clone(), finding.draft_reply.clone());
                                             move |this, _, window, cx| {
-                                                this.ask = Some(Ask::Reply { label: label.clone() });
+                                                this.ask = Some(Ask::Reply {
+                                                    label: label.clone(),
+                                                });
                                                 this.input.update(cx, |input, cx| {
                                                     input.set_value(text.clone(), window, cx)
                                                 });
@@ -950,7 +1252,9 @@ impl FindingsView {
                                                 (label.clone(), finding.draft_reply.clone());
                                             move |this, _, window, cx| {
                                                 this.open_ask(
-                                                    Ask::Reply { label: label.clone() },
+                                                    Ask::Reply {
+                                                        label: label.clone(),
+                                                    },
                                                     text.clone(),
                                                     window,
                                                     cx,
@@ -965,57 +1269,11 @@ impl FindingsView {
                 Some(ask) => this.child(self.render_ask(ask, cx)),
                 None => this.child(self.render_actions(finding, local, open, answered, cx)),
             })
-            .when(self.confirm_public.as_deref() == Some(label.as_str()), |this| {
-                let advisory = format!(
-                    "https://{}/{}/{}/security/advisories/new",
-                    self.hosting.account.host, self.hosting.repo.owner, self.hosting.repo.name
-                );
-                this.child(
-                    v_flex()
-                        .gap_1()
-                        .p_2()
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().warning.opacity(0.1))
-                        .text_sm()
-                        .child("This is a security problem and the repository is public: an issue would tell everyone. A private security advisory is safer.")
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(
-                                    Button::new(SharedString::from(format!("advisory-{label}")))
-                                        .xsmall()
-                                        .primary()
-                                        .label("Open an advisory")
-                                        .on_click(move |_, _, cx| cx.open_url(&advisory)),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!("public-issue-{label}")))
-                                        .xsmall()
-                                        .danger()
-                                        .label("Open a public issue anyway")
-                                        .on_click(cx.listener({
-                                            let label = label.clone();
-                                            move |this, _, window, cx| {
-                                                this.open_issue(label.clone(), window, cx)
-                                            }
-                                        })),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!("issue-cancel-{label}")))
-                                        .xsmall()
-                                        .ghost()
-                                        .label("Cancel")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.confirm_public = None;
-                                            cx.notify();
-                                        })),
-                                ),
-                        ),
-                )
-            })
             .into_any_element()
     }
 
+    /// What can be done with a finding: the two things a reviewer does most
+    /// in sight, the rest in its menu.
     fn render_actions(
         &self,
         finding: &Finding,
@@ -1027,71 +1285,44 @@ impl FindingsView {
         let label = finding.label.clone();
         let busy = self.busy.is_some();
         let id = |what: &str| SharedString::from(format!("finding-{what}-{label}"));
-        let status_button = |what: &'static str, text: &'static str, cx: &mut Context<Self>| {
-            let label = label.clone();
-            Button::new(id(what))
-                .xsmall()
-                .outline()
-                .label(text)
-                .disabled(busy)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if what == "fixed" {
-                        this.set_status(&label, "fixed", String::new(), window, cx)
-                    } else {
-                        this.open_ask(
-                            Ask::Status {
-                                label: label.clone(),
-                                status: what,
-                            },
-                            String::new(),
-                            window,
-                            cx,
-                        )
-                    }
-                }))
-        };
         let single = finding.clone();
+        let view = cx.weak_entity();
+        // On GitHub (its line, or the text): a reply has somewhere to go.
+        let on_github = finding.comment_kind.is_some() || !local;
+        let editable = local && open && finding.comment_kind.is_none();
+        let can_issue = local && finding.issue_number.is_none() && finding.status != "fixed";
+        let (title, body) = (finding.title.clone(), finding.body.clone());
+        let (more_id, menu_label) = (id("more"), label.clone());
         h_flex()
             .gap_1()
             .flex_wrap()
             .when(open, |this| {
-                this.child(status_button("fixed", "Fixed", cx))
-                    .child(status_button("not_problem", "Not a problem", cx))
-                    .child(status_button("wont_fix", "Won't fix", cx))
-            })
-            .when(!open && local, |this| {
                 this.child(
-                    Button::new(id("reopen"))
+                    Button::new(id("not_problem"))
                         .xsmall()
-                        .ghost()
-                        .label("Reopen")
+                        .outline()
+                        .label("Not a problem")
+                        .tooltip(ph_ui::tip("It is wrong, or does not matter here. Say why, and later reviews can be told."))
+                        .disabled(busy)
                         .on_click(cx.listener({
                             let label = label.clone();
                             move |this, _, window, cx| {
-                                this.set_status(&label, "open", String::new(), window, cx)
+                                this.open_ask(
+                                    Ask::Status {
+                                        label: label.clone(),
+                                        status: "not_problem",
+                                    },
+                                    String::new(),
+                                    window,
+                                    cx,
+                                )
                             }
                         })),
                 )
-            })
-            .when(answered, |this| {
-                let finding_id = finding.id;
-                this.child(
-                    Button::new(id("claim"))
-                        .xsmall()
-                        .ghost()
-                        .icon(Icons::Sparkles)
-                        .label("Is the author right?")
-                        .tooltip(ph_ui::tip("An agent reads the code again and drafts a reply for you to post"))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(FindingsEvent::Agent(AgentRequest::Claim { finding_id }))
-                        })),
-                )
-            })
-            .when(open, |this| {
-                this.child(
+                .child(
                     Button::new(id("fix"))
                         .xsmall()
-                        .ghost()
+                        .outline()
                         .icon(Icons::GitBranch)
                         .label("Fix in a task")
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1100,31 +1331,31 @@ impl FindingsView {
                         })),
                 )
             })
-            .when(finding.comment_id.is_some() || local, |this| {
+            .when(answered, |this| {
+                let finding_id = finding.id;
                 this.child(
-                    Button::new(id("reply"))
+                    Button::new(id("claim"))
                         .xsmall()
-                        .ghost()
-                        .label("Reply")
-                        .on_click(cx.listener({
-                            let label = label.clone();
-                            move |this, _, window, cx| {
-                                this.open_ask(Ask::Reply { label: label.clone() }, String::new(), window, cx)
-                            }
+                        .outline()
+                        .icon(Icons::Sparkles)
+                        .label("Is the author right?")
+                        .tooltip(ph_ui::tip("An agent reads the code again and drafts a reply for you to post"))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(FindingsEvent::Agent(AgentRequest::Claim { finding_id }))
                         })),
                 )
             })
-            .when(local && finding.issue_number.is_none() && finding.status != "fixed", |this| {
+            .when(!open && local, |this| {
                 this.child(
-                    Button::new(id("issue"))
+                    Button::new(id("reopen"))
                         .xsmall()
-                        .ghost()
-                        .label("Open issue")
-                        .tooltip(ph_ui::tip("Track it in an issue (labelled pilothouse) with its place and the fix"))
-                        .disabled(busy)
+                        .outline()
+                        .label("Reopen")
                         .on_click(cx.listener({
                             let label = label.clone();
-                            move |this, _, window, cx| this.open_issue(label.clone(), window, cx)
+                            move |this, _, window, cx| {
+                                this.set_status(&label, "open", String::new(), window, cx)
+                            }
                         })),
                 )
             })
@@ -1148,6 +1379,100 @@ impl FindingsView {
                         })),
                 )
             })
+            .when(open || can_issue, |this| {
+                this.child(
+                    Button::new(more_id.clone())
+                        .xsmall()
+                        .ghost()
+                        .icon(IconName::Ellipsis)
+                        .accessibility_label("More for this finding")
+                        .menu(gpui_kit::Anchor::TopLeft, move |menu, _, _| {
+                            let mut menu = menu;
+                            let ask = |ask: Ask, text: String| {
+                                let view = view.clone();
+                                move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut App| {
+                                    _ = view.update(cx, |this, cx| {
+                                        this.open_ask(ask.clone(), text.clone(), window, cx)
+                                    });
+                                }
+                            };
+                            if open {
+                                let fixed = view.clone();
+                                let fixed_label = menu_label.clone();
+                                menu = menu
+                                    .item(
+                                        PopupMenuItem::new("Mark as fixed")
+                                            .icon(IconName::Check)
+                                            .on_click(move |_, window, cx| {
+                                                _ = fixed.update(cx, |this, cx| {
+                                                    this.set_status(
+                                                        &fixed_label,
+                                                        "fixed",
+                                                        String::new(),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                });
+                                            }),
+                                    )
+                                    .item(
+                                        PopupMenuItem::new("Won't fix…")
+                                            .icon(IconName::Minus)
+                                            .on_click(ask(
+                                                Ask::Status {
+                                                    label: menu_label.clone(),
+                                                    status: "wont_fix",
+                                                },
+                                                String::new(),
+                                            )),
+                                    );
+                            }
+                            if on_github {
+                                menu = menu.item(
+                                    PopupMenuItem::new("Reply on GitHub…")
+                                        .icon(Icons::MessagesSquare)
+                                        .on_click(ask(Ask::Reply { label: menu_label.clone() }, String::new())),
+                                );
+                            }
+                            if editable {
+                                let edit = view.clone();
+                                let (label, title, body) =
+                                    (menu_label.clone(), title.clone(), body.clone());
+                                menu = menu.item(
+                                    PopupMenuItem::new("Edit the wording…")
+                                        .icon(Icons::Pencil)
+                                        .on_click(move |_, window, cx| {
+                                            _ = edit.update(cx, |this, cx| {
+                                                this.title_input.update(cx, |input, cx| {
+                                                    input.set_value(title.clone(), window, cx)
+                                                });
+                                                this.open_ask(
+                                                    Ask::Edit { label: label.clone() },
+                                                    body.clone(),
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        }),
+                                );
+                            }
+                            if can_issue {
+                                let issue = view.clone();
+                                let label = menu_label.clone();
+                                menu = menu.separator().item(
+                                    PopupMenuItem::new("Open an issue…")
+                                        .icon(Icons::CircleDot)
+                                        .on_click(move |_, window, cx| {
+                                            _ = issue.update(cx, |this, cx| {
+                                                this.open_issue(label.clone(), window, cx)
+                                            });
+                                        }),
+                                );
+                            }
+                            menu
+                        }),
+                )
+            })
             .into_any_element()
     }
 
@@ -1167,11 +1492,19 @@ impl FindingsView {
                 "The rule later reviews are told (edit it to be general)",
                 "Remember",
             ),
+            Ask::Edit { .. } => (
+                "The finding as it will be posted under your name (Markdown)",
+                "Save",
+            ),
         };
         let propose = matches!(ask, Ask::Rule { .. });
+        let editing = matches!(ask, Ask::Edit { .. });
         v_flex()
             .gap_1()
             .child(div().text_xs().text_color(cx.theme().muted_foreground).child(hint))
+            .when(editing, |this| {
+                this.child(Input::new(&self.title_input).small())
+            })
             .child(Textarea::new(&self.input).small())
             .child(
                 h_flex()
@@ -1224,43 +1557,33 @@ impl FindingsView {
     }
 
     fn render_rules(&self, cx: &mut Context<Self>) -> AnyElement {
-        let count = self.rules.len();
         v_flex()
             .gap_1()
+            .p_2()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().secondary)
             .child(
                 div()
-                    .id("findings-rules")
                     .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_rules = !this.show_rules;
-                        cx.notify();
-                    }))
-                    .child(format!(
-                        "{count} rule{} remembered for this repository {}",
-                        if count == 1 { "" } else { "s" },
-                        if self.show_rules { "▾" } else { "▸" }
-                    )),
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child("Later reviews of this repository are told"),
             )
-            .when(self.show_rules, |this| {
-                this.children(self.rules.iter().enumerate().map(|(ix, rule)| {
-                    h_flex()
-                        .gap_2()
-                        .text_xs()
-                        .child(div().flex_1().min_w_0().child(rule.clone()))
-                        .child(
-                            Button::new(("forget-rule", ix))
-                                .xsmall()
-                                .ghost()
-                                .label("Forget")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let _ = github::forget(&this.store, &this.pull_ref(), ix);
-                                    this.reload(cx);
-                                })),
-                        )
-                }))
-            })
+            .children(self.rules.iter().enumerate().map(|(ix, rule)| {
+                h_flex()
+                    .gap_2()
+                    .text_xs()
+                    .child(div().flex_1().min_w_0().child(rule.clone()))
+                    .child(
+                        Button::new(("forget-rule", ix))
+                            .xsmall()
+                            .ghost()
+                            .label("Forget")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let _ = github::forget(&this.store, &this.pull_ref(), ix);
+                                this.reload(cx);
+                            })),
+                    )
+            }))
             .into_any_element()
     }
 
@@ -1309,10 +1632,11 @@ impl Render for FindingsView {
                 .gap_2()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child("No agent review of this pull request yet.")
-                .child(concat!("Review with agent (above) finds problems you can post, track across rounds and fix; if someone reviewed it with ", ph_brand::name!(), ", its findings show here from their summary comment."))
+                .child("No agent has reviewed this pull request yet.")
+                .child("Review with agent (above) reads the change against the whole codebase. What it finds is listed here, each with what happens, why it matters, an example and a fix. Nothing is sent to GitHub until you finish the review.")
                 .into_any_element();
         }
+        let done = findings.iter().filter(|f| f.status != "open").count();
         let shown: Vec<&Finding> = findings
             .iter()
             .filter(|f| match self.filter {
@@ -1321,25 +1645,41 @@ impl Render for FindingsView {
                 Filter::All => true,
             })
             .collect();
+        // What is drawn above the first finding, so one can be scrolled to.
+        self.above = 2
+            + usize::from(self.stats.is_some())
+            + usize::from(self.show_rules && !self.rules.is_empty())
+            + usize::from(done > 0)
+            + usize::from(shown.is_empty());
         v_flex()
+            .id("findings-scroll")
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .p_3()
-            .gap_2()
+            .gap_3()
             .child(self.render_summary(&findings, cx))
             .child(self.render_toolbar(&findings, cx))
             .when_some(self.stats.clone(), |this, stats| {
                 this.child(self.render_stats(&stats, cx))
             })
-            .when(!self.rules.is_empty(), |this| {
+            .when(self.show_rules && !self.rules.is_empty(), |this| {
                 this.child(self.render_rules(cx))
             })
-            .child(self.render_filters(&findings, cx))
+            // Open and done are told apart only once something is done.
+            .when(done > 0, |this| {
+                this.child(self.render_filters(&findings, cx))
+            })
             .when(shown.is_empty(), |this| {
                 this.child(
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(match self.filter {
-                            Filter::Open => "Nothing open.",
+                            Filter::Open if findings.is_empty() => {
+                                "The agent found nothing worth raising."
+                            }
+                            Filter::Open => "Nothing open: every finding is dealt with.",
                             _ => "Nothing here.",
                         }),
                 )
@@ -1353,26 +1693,16 @@ impl Render for FindingsView {
     }
 }
 
-/// A finding's text in full, as Markdown.
-fn finding_text(finding: &Finding) -> String {
-    let mut text = finding.body.trim().to_string();
-    if !finding.evidence.trim().is_empty() {
-        text.push_str(&format!("\n\n```\n{}\n```", finding.evidence.trim()));
-    }
-    if !finding.suggestion.trim().is_empty() {
-        text.push_str(&format!("\n\n**Fix:** {}", finding.suggestion.trim()));
-    }
-    if !finding.suggested_code.trim().is_empty() {
-        text.push_str(&format!(
-            "\n\n```\n{}\n```",
-            finding.suggested_code.trim_end()
-        ));
-    }
-    text
+fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// The colour of a severity.
-fn severity_color(severity: &str, cx: &App) -> Hsla {
+pub(crate) fn severity_color(severity: &str, cx: &App) -> Hsla {
     match severity {
         "critical" => cx.theme().danger,
         "major" => cx.theme().warning,
@@ -1381,11 +1711,11 @@ fn severity_color(severity: &str, cx: &App) -> Hsla {
     }
 }
 
-fn tag(text: &'static str, color: Hsla) -> AnyElement {
+pub(crate) fn tag(text: &'static str, color: Hsla) -> AnyElement {
     tag_owned(text.to_string(), color)
 }
 
-fn tag_owned(text: String, color: Hsla) -> AnyElement {
+pub(crate) fn tag_owned(text: String, color: Hsla) -> AnyElement {
     div()
         .flex_none()
         .px_1p5()

@@ -2,7 +2,6 @@
 //! command palette and buttons all run the same handler on [`crate::Workspace`].
 
 use gpui_kit::{Action, App, KeyBinding, actions};
-use serde::Deserialize;
 
 use crate::AppState;
 
@@ -36,12 +35,14 @@ actions!(
         /// A small chat window over every app (also from anywhere, with its
         /// shortcut in Settings → Chat).
         QuickChat,
-        /// A new presentation in Studio (title, size, theme).
-        NewPresentation,
-        /// A presentation from the presentations folder, in Studio.
-        OpenPresentation,
+        /// A new deck of slides, in a window of its own beside a chat (it
+        /// is kept with the artifacts).
+        NewSlides,
         /// The keyboard shortcuts sheet.
         ShowShortcuts,
+        /// The cards that say what the app has, again (they show by
+        /// themselves at the first start).
+        ShowTour,
         /// Network drives whose work runs on a server over SSH.
         ShowNetworkDrives,
         /// Agent prompts and test runs at set times.
@@ -52,8 +53,6 @@ actions!(
         ShowInstructions,
         /// Compare and keep the work of agents run side by side.
         ShowParallelRuns,
-        /// The project's parts and how they depend on each other.
-        ShowArchitecture,
         /// Fold the chat away or bring it back (⌘B); in Reviews, its list.
         /// (Named for the list of workspaces and chats it showed and hid.)
         ToggleSidebar,
@@ -96,6 +95,9 @@ actions!(
         FinishTask,
         /// Back to the workspace shown before this one (Ctrl+Tab).
         PreviousWorkspace,
+        /// The list of workspaces, to go to another (the workspace's name
+        /// in the title bar; *Workspaces* in the column of icons).
+        SwitchWorkspace,
         /// The Bridge: every task of every workspace (⌘⇧E, ⌘⇧A). (Named
         /// for the list of workspaces that was in its place.)
         ShowWorkspacesView,
@@ -105,6 +107,9 @@ actions!(
         ShowChatsView,
         /// The GitHub view: pull requests across repositories, reviews (⌘⇧G).
         ShowGitHubView,
+        /// Artifacts: the pages agents made, kept and served from this
+        /// computer.
+        ShowArtifacts,
         /// Move the workspace in front to a window of its own.
         OpenInNewWindow,
         Quit,
@@ -121,14 +126,6 @@ actions!(
         ChatWidthFull,
     ]
 );
-
-/// Show the workspace at `index` in the column of icons (⌃1…⌃9 on macOS, Alt+1…9
-/// elsewhere).
-#[derive(Action, Clone, PartialEq, Deserialize)]
-#[action(namespace = workspace, no_json)]
-pub struct SwitchToWorkspace {
-    pub index: usize,
-}
 
 /// The workspace's key context less a terminal's (`ph_terminal`'s
 /// "Terminal"), for keys a terminal keeps.
@@ -188,7 +185,7 @@ fn bind<A: Action>(
 /// The keys of the workspace's commands, on a Mac when `mac`.
 pub(crate) fn bindings(mac: bool) -> Vec<KeyBinding> {
     let context = Some(WORKSPACE_CONTEXT);
-    let mut bindings = vec![
+    let bindings = vec![
         // The last binding for an action is the one menus and hints display.
         bind("secondary-shift-p", ToggleCommandPalette, context, mac),
         bind("secondary-k", ToggleCommandPalette, context, mac),
@@ -222,6 +219,11 @@ pub(crate) fn bindings(mac: bool) -> Vec<KeyBinding> {
         bind("secondary-shift-=", ZoomIn, None, mac),
         bind("secondary--", ZoomOut, None, mac),
         bind("secondary-0", ResetZoom, None, mac),
+        // Between workspaces: the list of them (the one used last on top),
+        // and straight back to the one before. Each of them had a number
+        // too (⌃1…⌃9) while each was a badge in the column of icons; in a
+        // list by last use a number would say nothing one can see.
+        bind("secondary-e", SwitchWorkspace, context, mac),
         bind("ctrl-tab", PreviousWorkspace, context, mac),
         // ⌘⇧A was the Agents pop-up's key; ⌘⇧E last, the one hints show.
         bind("secondary-shift-a", ShowWorkspacesView, context, mac),
@@ -229,22 +231,6 @@ pub(crate) fn bindings(mac: bool) -> Vec<KeyBinding> {
         bind("secondary-shift-d", ShowChatsView, context, mac),
         bind("secondary-shift-g", ShowGitHubView, context, mac),
     ];
-    // ⌘/Ctrl+digits show tools, so workspaces take the other modifier.
-    let keys: [&'static str; 9] = if mac {
-        [
-            "ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4", "ctrl-5", "ctrl-6", "ctrl-7", "ctrl-8",
-            "ctrl-9",
-        ]
-    } else {
-        [
-            "alt-1", "alt-2", "alt-3", "alt-4", "alt-5", "alt-6", "alt-7", "alt-8", "alt-9",
-        ]
-    };
-    bindings.extend(
-        keys.into_iter()
-            .enumerate()
-            .map(|(index, keys)| bind(keys, SwitchToWorkspace { index }, context, mac)),
-    );
     bindings
 }
 
@@ -316,6 +302,7 @@ mod tests {
             ("ctrl-n", &NewSession),
             ("ctrl-o", &AddProject),
             ("ctrl-1", &ShowFiles),
+            ("ctrl-e", &SwitchWorkspace),
             ("ctrl--", &ZoomOut),
         ] {
             assert!(acts(&bindings, keys, action, &workspace), "{keys}");
@@ -333,12 +320,6 @@ mod tests {
             &ToggleCommandPalette,
             &terminal
         ));
-        assert!(acts(
-            &bindings,
-            "alt-2",
-            &SwitchToWorkspace { index: 1 },
-            &terminal
-        ));
     }
 
     #[test]
@@ -348,12 +329,7 @@ mod tests {
         assert!(acts(&bindings, "cmd-k", &ToggleCommandPalette, &terminal));
         assert!(acts(&bindings, "cmd-q", &Quit, &terminal));
         assert!(acts(&bindings, "cmd-j", &ToggleTerminal, &terminal));
-        assert!(acts(
-            &bindings,
-            "ctrl-2",
-            &SwitchToWorkspace { index: 1 },
-            &terminal
-        ));
+        assert!(acts(&bindings, "cmd-e", &SwitchWorkspace, &terminal));
         assert_eq!(context_for("cmd-w", None, true), None);
         assert_eq!(context_for("ctrl-w", None, false), Some(OUTSIDE_TERMINAL));
         assert_eq!(context_for("ctrl-shift-w", None, false), None);

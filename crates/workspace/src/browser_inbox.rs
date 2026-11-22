@@ -130,7 +130,7 @@ fn frontmost_or_open(cx: &mut App) -> Result<(AnyWindowHandle, Entity<Workspace>
 /// An agent started using workspace `project`'s built-in browser: its
 /// Browser tab comes into view in the window showing the workspace (the
 /// keyboard stays where it is). Says whether it did.
-fn show_browser(project: ph_store::projects::ProjectId, cx: &mut App) -> bool {
+pub(crate) fn show_browser(project: ph_store::projects::ProjectId, cx: &mut App) -> bool {
     let Some((handle, workspace)) = crate::windows::window_showing(project, cx)
         .and_then(|handle| Some((handle, crate::windows::workspace_of(handle, cx)?)))
         .or_else(|| crate::main_workspace(cx))

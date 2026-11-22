@@ -7,7 +7,9 @@ This product bundles third-party works under their own licences:
 
 - File and folder icons, crates/ui/assets/file-icons/: from the Material Icon
   Theme by Material Extensions, MIT licence (crates/ui/assets/file-icons/LICENSE).
-  The default folder icon is recoloured from its "folder-base" icon.
+  The default folder icon is recoloured from its "folder-base" icon. The
+  Android mark in crates/ui/assets/icons/android.svg is the head of its
+  "android" icon, in one colour.
 
 - Agent marks, crates/ui/assets/agents/: from Lobe Icons by LobeHub, MIT
   licence (crates/ui/assets/agents/LICENSE). The marks are trademarks of their
@@ -24,6 +26,12 @@ This product bundles third-party works under their own licences:
 
 - crates/ui/src/menu.rs is adapted from gpui-component's
   menu/dropdown_menu.rs, Apache License 2.0.
+
+- crates/devices/assets/scrcpy-server-v5.0.1: the server of scrcpy 5.0.1,
+  Copyright (C) 2018 Genymobile and Copyright (C) 2018-2026 Romain Vimont,
+  Apache License 2.0 (https://github.com/Genymobile/scrcpy). The file is the
+  one of scrcpy's release, unchanged; it is sent to an Android device and
+  run there to mirror its screen.
 
 The PilotHouse app icon and title bar mark (brand/icons/) were drawn for this
 project as vector art (brand/icons/app.svg and app-tile.svg are the sources)

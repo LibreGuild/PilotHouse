@@ -159,7 +159,7 @@ pub fn suggestions(typing: &Typing, files: &[impl AsRef<str>], extra: &Extra) ->
                 ("log", "Recent console, network or logcat lines"),
                 (
                     "test-run",
-                    "The newest UI test results, with the failing screen",
+                    "How the tests last went, with the failing screen",
                 ),
                 ("pr:", "A pull request of this workspace"),
                 ("tabs", "The text of the Chrome tabs you shared with agents"),

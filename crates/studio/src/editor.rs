@@ -70,7 +70,6 @@ pub fn bind_keys(cx: &mut App) {
         gpui_kit::KeyBinding::new(ph_ui::keys("secondary-s"), SaveCopy, context),
         gpui_kit::KeyBinding::new(ph_ui::keys("secondary-shift-c"), CopyImage, context),
     ]);
-    crate::slides::editor::bind_keys(cx);
 }
 
 /// What the pointer does on the picture, and what the bar under it shows.

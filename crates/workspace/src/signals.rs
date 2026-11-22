@@ -210,6 +210,7 @@ mod tests {
             name: name.into(),
             outcome: outcome.into(),
             url: format!("https://ci/{name}"),
+            ..Check::default()
         }
     }
 

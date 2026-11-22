@@ -94,7 +94,7 @@ The window is a frame with islands in it (`crates/workspace/src/frame.rs`; the [
 
 - **The frame** is the title bar, the column of icons and the status bar. It is painted once, behind them all; none of them has a fill or a border of its own, and nothing draws a line across it. Its paint is the theme's `sidebar` colour, a little lighter at the top than at the bottom, and over it the colour of the workspace in front, faint, fading downwards.
 - **An island** is `frame::island(window, cx)`: a `ph_ui::Surface` (rounded by `radius_lg`, hairline border, the theme's `background`) that knows what is behind its corners. Whatever a view shows between the frame's parts goes in one; islands are `frame::gap()` apart and end the same distance over the status bar. Do not round or fill the corners of what is inside: the island does it.
-- A workspace's colour belongs to the frame, its badge in the column of icons and its dot. Do not use it for fills, buttons or text inside an island.
+- A workspace's colour belongs to the frame, its badge (beside its name in the title bar, and in the list of workspaces) and its dot. Do not use it for fills, buttons or text inside an island.
 
 ## 10. Room
 

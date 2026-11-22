@@ -256,6 +256,7 @@ mod tests {
             name: "ci".into(),
             outcome: outcome.into(),
             url: String::new(),
+            ..Check::default()
         }
     }
 

@@ -8,6 +8,8 @@ use super::*;
 const STREAM_QUALITY: &str = "devices.stream_quality";
 /// Whether to mirror each device's screen, by serial, as the user chose.
 const MIRROR: &str = "devices.mirror";
+/// Whether Logcat wraps long messages.
+const LOGCAT_WRAP: &str = "logcat.wrap";
 
 impl WorkspaceScreen {
     /// The changes panel, created on first use.
@@ -72,21 +74,7 @@ impl WorkspaceScreen {
         self.changes.insert(self.git_folder, changes.clone());
         self.attach_explanation(&changes, window, cx);
         self.update_live_panes(cx);
-        self.refresh_evidence(cx);
         changes
-    }
-
-    /// Says over the changes what the chat in front did to check its work
-    /// (tests, commands, screenshots): after its turn, and when another
-    /// chat comes in front.
-    pub(super) fn refresh_evidence(&mut self, cx: &mut Context<Self>) {
-        if self.changes.is_empty() {
-            return;
-        }
-        let evidence = evidence_chips(&self.chat.read(cx).evidence(cx));
-        for changes in self.changes.values() {
-            changes.update(cx, |changes, cx| changes.set_evidence(evidence.clone(), cx));
-        }
     }
 
     /// The browser pane, created on first use (Chrome starts when it is shown).
@@ -112,10 +100,15 @@ impl WorkspaceScreen {
         }
         let quality: String = AppState::store(cx).setting(STREAM_QUALITY);
         let mirror: std::collections::HashMap<String, bool> = AppState::store(cx).setting(MIRROR);
+        // The log shows under the screen too, where the build has Logcat.
+        let logcat = ph_brand::enabled(ph_brand::Feature::Logcat).then(|| self.logcat(window, cx));
         let devices = cx.new(|cx| {
             let mut devices = DevicesPanel::new(cx);
             devices.set_stream_quality(ph_devices::StreamQuality::from_key(&quality), cx);
             devices.set_mirror_choices(mirror, cx);
+            if let Some(logcat) = logcat {
+                devices.set_logcat(logcat, cx);
+            }
             devices
         });
         self._subscriptions.push(cx.subscribe_in(
@@ -159,14 +152,101 @@ impl WorkspaceScreen {
         if let Some(logcat) = &self.logcat {
             return logcat.clone();
         }
-        let logcat = cx.new(|cx| ph_devices::LogcatPanel::new(window, cx));
+        // Wrapping unless switched off: an unset choice reads as `false`.
+        let unwrapped: bool = AppState::store(cx).setting(LOGCAT_WRAP);
+        let folders = self.project.folders();
+        let logcat = cx.new(|cx| {
+            let mut logcat = ph_devices::LogcatPanel::new(window, cx);
+            logcat.set_wrap(!unwrapped, cx);
+            logcat.set_project_folders(folders, window, cx);
+            logcat
+        });
         self._subscriptions.push(cx.subscribe_in(
             &logcat,
             window,
             |this, _, event: &ToChat, window, cx| this.receive_to_chat(event, window, cx),
         ));
+        self._subscriptions.push(cx.subscribe_in(
+            &logcat,
+            window,
+            |this, _, event: &ph_devices::LogcatPanelEvent, window, cx| match event {
+                ph_devices::LogcatPanelEvent::OpenSource(source) => {
+                    this.open_source(source.clone(), window, cx)
+                }
+                ph_devices::LogcatPanelEvent::WrapChanged(wrap) => {
+                    let _ = AppState::store(cx).set_setting(LOGCAT_WRAP, &!wrap);
+                }
+                ph_devices::LogcatPanelEvent::Crashed(crash) => this.app_crashed(crash, window, cx),
+            },
+        ));
         self.logcat = Some(logcat.clone());
         logcat
+    }
+
+    /// Shows the file a stack frame names, at its line: the one in this
+    /// workspace's folders whose place fits the frame's class best.
+    fn open_source(
+        &mut self,
+        source: ph_devices::SourceRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let folders = self.project.folders();
+        cx.spawn_in(window, async move |this, cx| {
+            let wanted = source.clone();
+            let found = cx
+                .background_spawn(
+                    async move { super::source_lookup::find_source(&folders, &wanted) },
+                )
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match found {
+                Some(path) => this.open_path(&path, Some(u64::from(source.line)), window, cx),
+                // A frame of Android's own or of a library.
+                None => window.push_notification(
+                    Notification::info(format!("{} is not in this workspace.", source.file)),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    /// An app of this workspace crashed on the device: says so, with the
+    /// exception, and offers its stack to the chat.
+    fn app_crashed(
+        &mut self,
+        crash: &ph_devices::Crash,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(runs) = &self.runs {
+            runs.update(cx, |runs, cx| runs.app_crashed(crash, cx));
+        }
+        let name = crash.process.clone().unwrap_or_else(|| "The app".into());
+        let report = ToChat::Text {
+            label: "crash".into(),
+            text: crash.report(),
+        };
+        let this = cx.entity().downgrade();
+        window.push_notification(
+            Notification::error(crash.summary())
+                .title(format!("{name} crashed"))
+                .action(move |_, _, cx| {
+                    let (this, report) = (this.clone(), report.clone());
+                    Button::new("crash-to-chat")
+                        .small()
+                        .label("Send to chat")
+                        .on_click(cx.listener(move |notification, _, window, cx| {
+                            _ = this
+                                .update(cx, |this, cx| this.receive_to_chat(&report, window, cx));
+                            notification.dismiss(window, cx);
+                        }))
+                })
+                // It goes by itself like any notice: the crash stays on
+                // the Run tab's card and in the log.
+                .autohide(true),
+            cx,
+        );
     }
 
     /// The Run tab, created on first use.
@@ -197,12 +277,25 @@ impl WorkspaceScreen {
                         ph_uitest::record::set_chat(chat, cx);
                     }
                 }
-                ph_uitest::TestsPanelEvent::OpenFile(path) => {
+                // A test's file, or where a test of the project failed (the
+                // editor counts lines from 0).
+                ph_uitest::TestsPanelEvent::Open { path, line } => {
                     if let Ok(relative) = path.strip_prefix(&this.project.path) {
                         let relative = relative.to_string_lossy().replace('\\', "/");
-                        this.open_file(&relative, None, window, cx);
+                        let line = line.map(|line| line.saturating_sub(1));
+                        this.open_file(&relative, line, window, cx);
                     }
                 }
+                ph_uitest::TestsPanelEvent::ShowRun => this.show_tab(ContextTab::Runs, window, cx),
+                ph_uitest::TestsPanelEvent::ShowPreview { phone } => this.show_tab(
+                    if *phone {
+                        ContextTab::Devices
+                    } else {
+                        ContextTab::Browser
+                    },
+                    window,
+                    cx,
+                ),
             },
         ));
         self.tests = Some(tests.clone());
@@ -389,7 +482,22 @@ impl WorkspaceScreen {
                         terminal.run_in(name, command, cwd.clone(), window, cx)
                     });
                 }
-                RunsPanelEvent::ShowDevices => this.show_tab(ContextTab::Devices, window, cx),
+                // The log runs from the start of a run, so that what the
+                // app writes as it starts (and a crash then) is in it.
+                RunsPanelEvent::AppStarting => {
+                    if ph_brand::enabled(ph_brand::Feature::Logcat) {
+                        let logcat = this.logcat(window, cx);
+                        logcat.update(cx, |logcat, cx| logcat.start(cx));
+                    }
+                }
+                RunsPanelEvent::AppLaunched { package } => {
+                    if ph_brand::enabled(ph_brand::Feature::Logcat) {
+                        let logcat = this.logcat(window, cx);
+                        logcat.update(cx, |logcat, cx| logcat.add_project_app(package, window, cx));
+                    }
+                    this.show_tab(ContextTab::Devices, window, cx)
+                }
+                RunsPanelEvent::ToChat(message) => this.receive_to_chat(message, window, cx),
                 RunsPanelEvent::OpenUrl(url) => {
                     this.show_tab(ContextTab::Browser, window, cx);
                     let browser = ph_browser::BrowserHub::browser(this.project.id, cx);
@@ -786,62 +894,6 @@ pub(crate) fn briefs(pulls: &[ph_github::models::PullRequest]) -> Vec<ph_agent::
             body: pull.body.clone().unwrap_or_default(),
         })
         .collect()
-}
-
-/// What a chat did to check its work, as the Git tool says it over the
-/// changes.
-fn evidence_chips(evidence: &ph_agent::evidence::Evidence) -> Vec<ph_changes::Evidence> {
-    use ph_changes::{Evidence, EvidenceKind};
-    let plural = |count: usize, one: &str| {
-        if count == 1 {
-            format!("1 {one}")
-        } else {
-            format!("{count} {one}s")
-        }
-    };
-    let mut chips = Vec::new();
-    for run in &evidence.tests {
-        let label = match (run.ok, run.passed, run.failed) {
-            (true, Some(passed), _) => format!("{} passed", plural(passed, "test")),
-            (true, None, _) => "Tests passed".to_string(),
-            (false, _, Some(failed)) if failed > 0 => {
-                format!("{} failed", plural(failed, "test"))
-            }
-            (false, ..) => "Tests failed".to_string(),
-        };
-        chips.push(Evidence {
-            kind: EvidenceKind::Tests,
-            label: label.into(),
-            detail: Some(run.command.clone().into()),
-            ok: Some(run.ok),
-        });
-    }
-    if evidence.commands > 0 {
-        let failed = evidence.failed_commands;
-        chips.push(Evidence {
-            kind: EvidenceKind::Commands,
-            label: if failed > 0 {
-                format!(
-                    "{} run, {failed} failed",
-                    plural(evidence.commands, "command")
-                )
-                .into()
-            } else {
-                format!("{} run", plural(evidence.commands, "command")).into()
-            },
-            detail: Some("Commands the agent ran in this chat, besides tests".into()),
-            ok: (failed > 0).then_some(false),
-        });
-    }
-    if evidence.screenshots > 0 {
-        chips.push(Evidence {
-            kind: EvidenceKind::Screenshots,
-            label: plural(evidence.screenshots, "screenshot").into(),
-            detail: Some("Screenshots the agent took to look at its work".into()),
-            ok: None,
-        });
-    }
-    chips
 }
 
 #[cfg(test)]

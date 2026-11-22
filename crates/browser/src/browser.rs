@@ -888,22 +888,68 @@ impl Browser {
         })
     }
 
-    /// Clicks an element (by selector) or a CSS-pixel point.
-    pub fn click(&mut self, target: ClickTarget, cx: &mut Context<Self>) -> Task<Result<Value>> {
+    /// A picture of the page as it shows now (PNG), for the app itself:
+    /// the Artifacts list keeps one of each page.
+    pub fn capture_png(&mut self, cx: &mut Context<Self>) -> Task<Result<Vec<u8>>> {
+        let connection = self.connection(cx);
+        cx.spawn(async move |_, _| {
+            let cdp = connection.await?;
+            let shot = cdp
+                .call("Page.captureScreenshot", json!({ "format": "png" }))
+                .await?;
+            let data = shot["data"]
+                .as_str()
+                .context("the browser gave no picture")?;
+            Ok(base64::engine::general_purpose::STANDARD.decode(data)?)
+        })
+    }
+
+    /// Clicks an element (by selector, or as a test names it) or a
+    /// CSS-pixel point. An element is waited for up to `wait`: until it
+    /// shows, is switched on, has come to rest and nothing covers it.
+    ///
+    /// The result's `element` says what was clicked (its role, name and
+    /// selector), which is what a recording keeps.
+    pub fn click(
+        &mut self,
+        target: ClickTarget,
+        wait: Duration,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Value>> {
         let connection = self.connection(cx);
         cx.spawn(async move |this, cx| {
             let cdp = connection.await?;
-            let (x, y) = match target {
-                ClickTarget::Point(x, y) => (x, y),
+            let (x, y, element) = match target {
+                ClickTarget::Point(x, y) => {
+                    let element = evaluate(&cdp, &scripts::describe_click(None, x, y)).await;
+                    (x, y, element.unwrap_or_default())
+                }
                 ClickTarget::Selector(selector) => {
-                    let point = evaluate(&cdp, &scripts::locate(&selector)).await?;
-                    if point.is_null() {
-                        bail!("no element matches `{selector}`");
-                    }
-                    (
-                        point["x"].as_f64().unwrap_or(0.0) as f32,
-                        point["y"].as_f64().unwrap_or(0.0) as f32,
-                    )
+                    let element =
+                        evaluate(&cdp, &scripts::describe_click(Some(&selector), 0., 0.)).await;
+                    let (x, y) = if wait.is_zero() {
+                        // An agent's click: where the selector points now,
+                        // shown or not, so that it learns at once.
+                        let point = evaluate(&cdp, &scripts::locate(&selector)).await?;
+                        if point.is_null() {
+                            bail!("no element matches `{selector}`");
+                        }
+                        (
+                            point["x"].as_f64().unwrap_or(0.0) as f32,
+                            point["y"].as_f64().unwrap_or(0.0) as f32,
+                        )
+                    } else {
+                        locate(&cdp, &json!({ "selector": selector }), false, wait, cx)
+                            .await?
+                            .context("the element has no place on the page")?
+                    };
+                    (x, y, element.unwrap_or_default())
+                }
+                ClickTarget::Element(spec) => {
+                    let (x, y) = locate(&cdp, &spec, false, wait, cx)
+                        .await?
+                        .context("the element has no place on the page")?;
+                    (x, y, spec)
                 }
             };
             for kind in ["mousePressed", "mouseReleased"] {
@@ -914,29 +960,48 @@ impl Browser {
                 .await?;
             }
             settle(cx).await;
-            page_summary(&this, cx)
+            let mut summary = page_summary(&this, cx)?;
+            if !element.is_null() {
+                summary["element"] = element;
+            }
+            Ok(summary)
         })
     }
 
-    /// Types text, optionally into `selector` first and pressing Enter after.
+    /// Types text, optionally into a field first (by `selector`, or
+    /// `element` as a test names it; waited for up to `wait`) and pressing
+    /// Enter after.
     pub fn type_text(
         &mut self,
         text: String,
-        selector: Option<String>,
+        field: Option<ClickTarget>,
         submit: bool,
+        wait: Duration,
         cx: &mut Context<Self>,
     ) -> Task<Result<Value>> {
         let connection = self.connection(cx);
         cx.spawn(async move |this, cx| {
             let cdp = connection.await?;
-            if let Some(selector) = selector {
-                let found = evaluate(&cdp, &scripts::focus(&selector)).await?;
-                if found != Value::Bool(true) {
-                    bail!("no element matches `{selector}`");
+            match field {
+                Some(ClickTarget::Selector(selector)) if wait.is_zero() => {
+                    let found = evaluate(&cdp, &scripts::focus(&selector)).await?;
+                    if found != Value::Bool(true) {
+                        bail!("no element matches `{selector}`");
+                    }
                 }
+                Some(ClickTarget::Selector(selector)) => {
+                    locate(&cdp, &json!({ "selector": selector }), true, wait, cx).await?;
+                }
+                Some(ClickTarget::Element(spec)) => {
+                    locate(&cdp, &spec, true, wait, cx).await?;
+                }
+                Some(ClickTarget::Point(..)) | None => {}
             }
             // Said in the result, so a recording never keeps a password.
             let secret = evaluate(&cdp, scripts::FOCUSED_IS_PASSWORD).await? == Value::Bool(true);
+            let element = evaluate(&cdp, &scripts::describe_focused())
+                .await
+                .unwrap_or_default();
             cdp.call("Input.insertText", json!({ "text": text }))
                 .await?;
             if submit {
@@ -948,6 +1013,9 @@ impl Browser {
             let mut summary = page_summary(&this, cx)?;
             if secret {
                 summary["secret"] = json!(true);
+            }
+            if !element.is_null() {
+                summary["element"] = element;
             }
             Ok(summary)
         })
@@ -1009,15 +1077,117 @@ impl Browser {
         })
     }
 
+    /// Forgets what the sites of `urls` keep in this browser (cookies and
+    /// sign-ins, storage, service workers), and cached pages: a UI test
+    /// starts from there, so that it does the same every time. Other sites
+    /// keep theirs.
+    pub fn clear_sites(
+        &mut self,
+        urls: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Value>> {
+        let connection = self.connection(cx);
+        cx.background_spawn(async move {
+            let cdp = connection.await?;
+            let mut origins: Vec<String> = urls.iter().filter_map(|url| origin_of(url)).collect();
+            origins.sort();
+            origins.dedup();
+            for origin in &origins {
+                cdp.call(
+                    "Storage.clearDataForOrigin",
+                    json!({ "origin": origin, "storageTypes": "all" }),
+                )
+                .await?;
+            }
+            cdp.call("Network.clearBrowserCache", json!({})).await?;
+            Ok(json!({ "cleared": origins }))
+        })
+    }
+
     pub fn snapshot(&mut self, cx: &mut Context<Self>) -> Task<Result<Value>> {
         let connection = self.connection(cx);
         cx.background_spawn(async move { evaluate(&connection.await?, &scripts::snapshot()).await })
+    }
+
+    /// Everything the page says, and its address: what a test's checks read.
+    pub fn text(&mut self, cx: &mut Context<Self>) -> Task<Result<Value>> {
+        let connection = self.connection(cx);
+        cx.background_spawn(async move { evaluate(&connection.await?, scripts::PAGE_TEXT).await })
     }
 }
 
 pub enum ClickTarget {
     Selector(String),
     Point(f32, f32),
+    /// An element as a UI test names it: `role`, `name`, `within`, `nth`,
+    /// `selector` (see `scripts::resolve`).
+    Element(Value),
+}
+
+/// How often an element that is not ready yet is looked for again.
+const LOOK_AGAIN: Duration = Duration::from_millis(150);
+
+/// Waits (up to `wait`) until the element `spec` names can be used, and
+/// gives its middle; with `focus`, focuses it instead (and gives nothing).
+/// A page that is loading, or going to another, is waited out too.
+async fn locate(
+    cdp: &Cdp,
+    spec: &Value,
+    focus: bool,
+    wait: Duration,
+    cx: &mut AsyncApp,
+) -> Result<Option<(f32, f32)>> {
+    let script = scripts::resolve(spec, focus);
+    let deadline = Instant::now() + wait;
+    loop {
+        // A page on its way elsewhere answers with an error: not ready.
+        let found = evaluate(cdp, &script).await;
+        let reason = match &found {
+            Ok(found) if found["ok"] == true => {
+                return Ok(match (found["x"].as_f64(), found["y"].as_f64()) {
+                    (Some(x), Some(y)) => Some((x as f32, y as f32)),
+                    _ => None,
+                });
+            }
+            Ok(found) => {
+                let mut reason = found["reason"]
+                    .as_str()
+                    .unwrap_or("the element was not found")
+                    .to_string();
+                let others: Vec<&str> = found["others"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                if !others.is_empty() {
+                    reason.push_str(&format!(" (there: {})", others.join(", ")));
+                }
+                reason
+            }
+            Err(err) => format!("{err:#}"),
+        };
+        if Instant::now() >= deadline {
+            if wait.is_zero() {
+                bail!("{reason}");
+            }
+            bail!("{reason}, after waiting {} s", wait.as_secs().max(1));
+        }
+        cx.background_executor().timer(LOOK_AGAIN).await;
+    }
+}
+
+/// `https://app.example:8443/path` → `https://app.example:8443`.
+fn origin_of(url: &str) -> Option<String> {
+    let url = normalize_url(url);
+    let (scheme, rest) = url.split_once("://")?;
+    if !matches!(scheme, "http" | "https") {
+        return None;
+    }
+    let host = rest.split(['/', '?', '#']).next()?;
+    // Never the name and password of an address that carries them.
+    let host = host.rsplit('@').next()?;
+    (!host.is_empty()).then(|| format!("{scheme}://{host}"))
 }
 
 /// Finds (or opens) the page, attaches to it, enables the domains PilotHouse

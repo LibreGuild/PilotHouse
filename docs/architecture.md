@@ -11,15 +11,15 @@ crates/
   app/        pilothouse binary: startup, menus, CLI subcommands, control methods
   workspace/  window shell: the Bridge (every task by state), Reviews, a workspace's screen
               (chat | result pane), palette, settings, schedules and triggers, inbox and
-              to-dos, utilities dialog
+              to-dos
   agent/      chat with coding agents over ACP, approval inbox
   files/      file tree and its menu (file operations), editor, ⌘P, search, project watcher
   preview/    viewers: rich Markdown editor, Mermaid, images, data trees, tables, notebooks,
               audio, video (the system's media framework), PDF, SQLite, spreadsheets, archives,
               fonts, hex
   changes/    Git tab, branch picker, blame data: commit, history, stashes, conflicts, review
-  github/     GitHub REST client, accounts, secrets in the OS keychain
-  pulls/      PR list and view, Settings → GitHub, the Reviews view's managed clones
+  github/     GitHub client (REST, GraphQL search), accounts, pull requests, issues
+  pulls/      PR and issue lists and pages, finishing a review, Settings → GitHub, the Reviews view's managed clones
   review/     agent PR reviews: template, parsing, re-review merge, posting; explanations of
               changes: the prompt, the shared file, finding one by the content it explains
   explain/    explanations of changes where they are read: beside the changes in the Git tab,
@@ -33,9 +33,18 @@ crates/
   runs/       run configurations, the ports panel, tunnels to a server's ports
   remote/     network drives: Git, shells and runs on the server over SSH (mappings, routing,
               host keys, checks)
-  uitest/     UI tests: recorded from agents' tool calls, replayed on sizes/devices, visual
-              baselines, the Done-needs-tests gate, repair
-  utils/      offline utilities (formats, encodings, hashes, ids, times, regex, SQLite)
+  artifacts/  web pages agents make: their folder, a loopback address each, what a page
+              stores, the list, and the agents' control methods
+  slides/     decks of slides, an artifact of a kind: the deck's files and their undo, its
+              page (editor, viewer), comments, exports, PowerPoint files in and out, and the
+              agents' control methods
+  webview/    the system's web view inside a window (WKWebView, WebView2): placing it, the
+              keyboard, a picture or a PDF of the page
+  uitest/     The Tests tab: the project's own suites (run and read back per test), and UI
+              tests recorded from agents' tool calls, replayed from a clean start on sizes
+              and devices, with look checks, repair and export
+  utils/      offline utilities (formats, encodings, certificates, hashes, ids, times,
+              regex, colors, numbers, networks, SQLite) and the Utilities dialog
   lsp/        language servers: transport, client, diagnostics, providers
   mcp/        `pilothouse mcp`: stdio MCP server for agents
   agy/        `pilothouse agy-acp`: Google Antigravity (`agy`) as an ACP agent
@@ -58,6 +67,8 @@ app ──► workspace ──► agent, files, changes, terminal, browser, devi
  │                                        browser, devices ──► media
  │                                         files, changes ──► preview
  │                          browser, devices, runs ──► control
+ │        workspace ──► artifacts ──► control, ui
+ │        workspace ──► slides ──► artifacts, webview, control, ui, theme
  ├──► mcp ──► control
  └──► agy ──► env
 ```
@@ -113,7 +124,7 @@ Nothing is on by default except what the project needs:
 
 1. Features cost nothing until opened (lazy panels).
 2. **Detection**: `workspace/src/detect.rs` reads root markers (`Cargo.toml`, `build.gradle`, `*.xcodeproj`, …) and shows the stack in the status bar (with a workspace in front). `runs/src/detect.rs` finds run configurations.
-3. **Heavy helpers start on use**: Chrome when the Browser tab or a browser tool is first used, the device screen and logcat only while the Devices tab is visible, and an emulator only when asked.
+3. **Heavy helpers start on use**: Chrome when the Browser tab or a browser tool is first used, the device screen only while the Devices tab is visible (and 20 seconds after), logcat once it is opened or an app is run, and an emulator only when asked.
 4. **Settings → Features** hides tools the user does not want.
 
 ## Decisions

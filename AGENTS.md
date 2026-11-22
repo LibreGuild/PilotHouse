@@ -51,5 +51,6 @@ These are read by other programs, written into users' repositories or stored in 
 - the `refs/pilothouse/*` Git refs and checkpoint commits (author `PilotHouse`, `PilotHouse-Untracked:` trailer)
 - the `<!-- pilothouse-…` markers in pull request comments and in shared explanations (`.pilothouse/explanations/*.md`), and the `(Workspace note from PilotHouse` prefix in transcripts
 - `PILOTHOUSE_*` environment variables and `TERM_PROGRAM=PilotHouse`
-- the slide deck schema and parts inside `.pptx` files
+- a deck's files (`deck.json`, `deck.css`, `slides/*.html`), the `data-id`, `data-chart` and `data-shape` attributes slides carry, and the `/_artifact/slides/` paths the deck's page calls
+- artifacts' `artifact.json`, the `window.artifact` object and the `/_artifact/` paths their pages call
 - the Chrome extension's name, id, native host and `PilotHouse.*` messages

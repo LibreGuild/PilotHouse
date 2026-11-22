@@ -1,5 +1,5 @@
 //! A repository's open PRs (all, mine, waiting for my review) with CI
-//! state, and the PR view. In a workspace's PRs tool it reads the
+//! state, and the PR view; beside them, its issues ([`crate::issues_view`]). In a workspace's PRs tool it reads the
 //! repository from the folder's remote and offers a form to open a PR for
 //! the current branch; in the GitHub view it shows a repository by name.
 
@@ -30,6 +30,7 @@ use ph_ui::{EmptyState, Icons};
 
 use crate::clones::RepoId;
 use crate::hosting::{self, Hosting, Missing};
+use crate::issues_view::{IssuesEvent, IssuesView};
 use crate::pull_view::{self, PullView, PullViewEvent};
 
 /// CI is read for this many PRs at the top of the list.
@@ -51,6 +52,13 @@ enum Filter {
     All,
     Mine,
     ToReview,
+}
+
+/// What of the repository the panel lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Pulls,
+    Issues,
 }
 
 enum State {
@@ -78,6 +86,9 @@ pub struct PullsPanel {
     pulls: Vec<PullRequest>,
     checks: HashMap<u64, Vec<Check>>,
     filter: Filter,
+    section: Section,
+    /// The repository's issues, made when first shown.
+    issues: Option<(Entity<IssuesView>, Subscription)>,
     loading: bool,
     error: Option<SharedString>,
     open: Option<(Entity<PullView>, Subscription)>,
@@ -124,6 +135,8 @@ impl PullsPanel {
             pulls: Vec::new(),
             checks: HashMap::new(),
             filter: Filter::All,
+            section: Section::Pulls,
+            issues: None,
             loading: false,
             error: None,
             open: None,
@@ -151,6 +164,7 @@ impl PullsPanel {
         self.loading = true;
         cx.notify();
         let load = cx.background_spawn(async move {
+            let place_id = place.clone();
             let hosting = match place {
                 Ok(root) => hosting::resolve(&root, &store)?,
                 Err(id) => hosting::for_repo(&store, &id)?,
@@ -180,6 +194,14 @@ impl PullsPanel {
                 let me = crate::joined(me).ok().map(|user| user.login);
                 (me, list, checks)
             });
+            // Reviews' own checkouts of pull requests since merged or
+            // closed are let go (only when every open one was listed).
+            if let (Err(id), Ok(open)) = (&place_id, &list)
+                && open.len() < ph_github::client::MAX_ITEMS
+            {
+                let open: Vec<u64> = open.iter().map(|pull| pull.number).collect();
+                crate::clones::prune_closed(id, &open);
+            }
             Ok((hosting, me, list, checks))
         });
         self._load = Some(cx.spawn(async move |this, cx| {
@@ -625,7 +647,7 @@ impl PullsPanel {
         )
     }
 
-    fn render_list(&self, hosting: &Hosting, cx: &mut Context<Self>) -> AnyElement {
+    fn render_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let me = self.me.clone().unwrap_or_default();
         let visible: Vec<&PullRequest> = self
             .pulls
@@ -671,7 +693,6 @@ impl PullsPanel {
             .iter()
             .filter(|pull| pull.requested_reviewers.iter().any(|u| u.login == me))
             .count();
-        let web = hosting.web_url();
         v_flex()
             .size_full()
             .child(
@@ -713,18 +734,6 @@ impl PullsPanel {
                                     })),
                             )
                         },
-                    )
-                    .child(
-                        Button::new("pulls-web")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::ExternalLink)
-                            .tooltip(ph_ui::tip(format!(
-                                "{}/{} on GitHub",
-                                hosting.repo.owner, hosting.repo.name
-                            )))
-                            .accessibility_label("Open the repository on GitHub")
-                            .on_click(move |_, _, cx| cx.open_url(&format!("{web}/pulls"))),
                     )
                     .child(
                         Button::new("pulls-refresh")
@@ -855,6 +864,103 @@ impl PullsPanel {
     }
 }
 
+impl PullsPanel {
+    /// The strip over the lists: the repository's pull requests or its
+    /// issues, and its page on GitHub.
+    fn render_sections(&self, hosting: &Hosting, cx: &mut Context<Self>) -> AnyElement {
+        let section = |value: Section, label: String, cx: &mut Context<Self>| {
+            let selected = self.section == value;
+            div()
+                .id(match value {
+                    Section::Pulls => "repo-section-pulls",
+                    Section::Issues => "repo-section-issues",
+                })
+                .role(gpui_kit::accesskit::Role::Tab)
+                .aria_label(SharedString::from(label.clone()))
+                .px_1()
+                .pb_1p5()
+                .text_sm()
+                .cursor_pointer()
+                .border_b_2()
+                .map(|this| {
+                    if selected {
+                        this.border_color(cx.theme().primary)
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    } else {
+                        this.border_color(gpui_kit::transparent_black())
+                            .text_color(cx.theme().muted_foreground)
+                    }
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.section = value;
+                    cx.notify();
+                }))
+                .child(label)
+                .test_support()
+        };
+        let web = hosting.web_url();
+        let issues = self.section == Section::Issues;
+        h_flex()
+            .flex_none()
+            .px_3()
+            .pt_2()
+            .gap_3()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(section(
+                Section::Pulls,
+                format!("Pull requests {}", self.pulls.len()),
+                cx,
+            ))
+            .child(section(Section::Issues, "Issues".into(), cx))
+            .child(div().flex_1())
+            .child(
+                div().pb_1().child(
+                    Button::new("repo-web")
+                        .xsmall()
+                        .ghost()
+                        .icon(IconName::ExternalLink)
+                        .tooltip(ph_ui::tip(format!(
+                            "{}/{} on GitHub",
+                            hosting.repo.owner, hosting.repo.name
+                        )))
+                        .accessibility_label("Open the repository on GitHub")
+                        .on_click(move |_, _, cx| {
+                            cx.open_url(&format!(
+                                "{web}/{}",
+                                if issues { "issues" } else { "pulls" }
+                            ))
+                        }),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// The repository's issues, made the first time they are shown.
+    fn issues_view(
+        &mut self,
+        hosting: &Hosting,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<IssuesView> {
+        if let Some((view, _)) = &self.issues {
+            return view.clone();
+        }
+        let view = cx.new(|cx| IssuesView::new(hosting.clone(), window, cx));
+        let events = cx.subscribe(&view, |this, _, event: &IssuesEvent, cx| {
+            let IssuesEvent::Agent(request) = event;
+            if let Some(hosting) = this.hosting().cloned() {
+                cx.emit(PullsPanelEvent::Agent {
+                    hosting: Box::new(hosting),
+                    request: request.clone(),
+                });
+            }
+        });
+        self.issues = Some((view.clone(), events));
+        view
+    }
+}
+
 /// `main` unless the remote's default branch says otherwise.
 /// The branch a pull request goes into: the repository's default (the same
 /// one the Git tab's Branch view compares with), by its name on GitHub.
@@ -903,7 +1009,19 @@ impl Render for PullsPanel {
             }
             State::Ready(hosting) => {
                 let hosting = hosting.clone();
-                self.render_list(&hosting, cx)
+                let body = match self.section {
+                    Section::Pulls => self.render_list(cx),
+                    Section::Issues => {
+                        let issues = self.issues_view(&hosting, window, cx);
+                        issues.update(cx, |issues, cx| issues.shown(cx));
+                        issues.into_any_element()
+                    }
+                };
+                v_flex()
+                    .size_full()
+                    .child(self.render_sections(&hosting, cx))
+                    .child(div().flex_1().min_h_0().child(body))
+                    .into_any_element()
             }
         }
     }

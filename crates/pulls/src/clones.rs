@@ -446,6 +446,39 @@ pub fn check_out_pull(hosting: &Hosting, number: u64) -> Result<(PathBuf, String
     Ok((folder, sha, removed))
 }
 
+/// Removes the checkouts of pull requests of `id` that are no longer open
+/// (`open`: the numbers of those that are), so merged and closed ones stop
+/// taking room; returns the numbers removed. The clone itself stays, and so
+/// do the commits reviewed (the next round of a reopened one needs them).
+pub fn prune_closed(id: &RepoId, open: &[u64]) -> Vec<u64> {
+    // Never waits for a clone or a fetch under way (the list that asked is
+    // being read): the next read tidies up.
+    let Ok(_one) = GIT_LOCK.try_lock() else {
+        return Vec::new();
+    };
+    let clone = id.clone_dir();
+    if !clone.join(".git").exists() {
+        return Vec::new();
+    }
+    let closed: Vec<u64> = names_like(&id.folder(), |name| name.starts_with("pr-"))
+        .iter()
+        .filter_map(|name| name.strip_prefix("pr-")?.parse::<u64>().ok())
+        .filter(|number| !open.contains(number))
+        .collect();
+    closed
+        .into_iter()
+        .filter(|number| {
+            let folder = id.pull_dir(*number);
+            // The copy is ours and read-only for agents: nothing in it is
+            // anyone's work, so it goes whatever state it is in.
+            let removed = ph_git::worktree::remove(&clone, &folder, true)
+                .map_err(|err| tracing::info!("removing the checkout of #{number}: {err:#}"))
+                .is_ok();
+            removed && !folder.exists()
+        })
+        .collect()
+}
+
 /// The repository's notes for agents on branch `base` of the clone
 /// (`AGENTS.md`, `CLAUDE.md`, GitHub Copilot's instructions), by file:
 /// context for reviews, from the base, never the pull request's head.
@@ -476,6 +509,59 @@ pub fn team_rules(clone: &Path, base: &str) -> Option<String> {
     let spec = format!("origin/{base}:{}", ph_review::templates::TEAM_RULES);
     let text = ph_git::git(clone, &["show", "--no-textconv", &spec]).ok()?;
     (!text.trim().is_empty()).then(|| text.chars().take(20_000).collect())
+}
+
+/// Other rule files on branch `base` of the clone, by file: `REVIEW.md`,
+/// and GitHub's path instructions that apply to what `sha` changes against
+/// the base ([`ph_review::rules`]). From the base, never the pull
+/// request's head.
+pub fn more_rules(clone: &Path, base: &str, sha: &str) -> Vec<(String, String)> {
+    if ph_git::check_ref(base).is_err() {
+        return Vec::new();
+    }
+    let show = |file: &str| {
+        ph_git::git(
+            clone,
+            &["show", "--no-textconv", &format!("origin/{base}:{file}")],
+        )
+        .ok()
+        .filter(|text| !text.trim().is_empty())
+    };
+    let mut rules = Vec::new();
+    if let Some(text) = show("REVIEW.md") {
+        rules.push(("REVIEW.md".to_string(), text.chars().take(12_000).collect()));
+    }
+    let folder = format!("{}/", ph_review::rules::FOLDER);
+    let listed = ph_git::git(
+        clone,
+        &["ls-tree", "--name-only", &format!("origin/{base}"), &folder],
+    )
+    .unwrap_or_default();
+    let files: Vec<&str> = listed
+        .lines()
+        .filter(|file| file.ends_with(ph_review::rules::SUFFIX))
+        .take(20)
+        .collect();
+    if files.is_empty() {
+        return rules;
+    }
+    let changed: Vec<String> = ph_git::git(
+        clone,
+        &["diff", "--name-only", &format!("origin/{base}...{sha}")],
+    )
+    .unwrap_or_default()
+    .lines()
+    .map(str::to_string)
+    .collect();
+    for file in files {
+        let Some((globs, body)) = show(file).and_then(|text| ph_review::rules::read(&text)) else {
+            continue;
+        };
+        if !body.is_empty() && ph_review::rules::applies(&globs, &changed) {
+            rules.push((file.to_string(), body.chars().take(8_000).collect()));
+        }
+    }
+    rules
 }
 
 /// Whether `path` is an existing file or folder inside the clones (links

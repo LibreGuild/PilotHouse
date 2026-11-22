@@ -1,6 +1,6 @@
 [package]
 name = "ph-utils"
-description = "Offline developer utilities: formats, encodings, certificates, QR codes, hashes, ids, times, text, SQLite."
+description = "Offline developer utilities (formats, encodings, certificates, QR codes, hashes, ids, times, text, numbers, networks, SQLite) and the Utilities dialog that shows each in a view of its own."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,22 +9,36 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 base64 = "0.23"
+dirs.workspace = true
 dunce.workspace = true
+fancy-regex = "0.16"
 getrandom = "0.4"
+gpui-kit.workspace = true
 hex = "0.4"
 hmac = "0.13"
+image = { version = "0.25", default-features = false, features = ["png"] }
 jiff.workspace = true
 markdown = "1"
 md-5 = "0.11"
+ph-brand.workspace = true
+ph-files.workspace = true
+ph-store.workspace = true
+ph-ui.workspace = true
 qrcode = { version = "0.14", default-features = false }
 quick-xml = "0.42"
 regex = "1"
 roxmltree = "0.21"
 rusqlite.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha1 = "0.11"
 sha2 = "0.11"
 similar.workspace = true
 toml.workspace = true
+tracing.workspace = true
 url.workspace = true
 x509-parser = { version = "0.18", default-features = false }
 yaml-rust2 = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }

@@ -4,7 +4,7 @@ members = ["crates/*"]
 default-members = ["crates/app"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/LibreGuild/PilotHouse"
@@ -25,7 +25,7 @@ jiff = "0.2"
 memchr = "2"
 similar = "3"
 notify = "8"
-rusqlite = { version = "0.40", features = ["bundled", "limits"] }
+rusqlite = { version = "0.40", features = ["bundled", "limits", "column_decltype"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smol = "2"
@@ -58,12 +58,15 @@ ph-agy = { path = "crates/agy" }
 ph-git = { path = "crates/git" }
 ph-lsp = { path = "crates/lsp" }
 ph-github = { path = "crates/github" }
+ph-slides = { path = "crates/slides" }
+ph-webview = { path = "crates/webview" }
 ph-explain = { path = "crates/explain" }
 ph-pulls = { path = "crates/pulls" }
 ph-review = { path = "crates/review" }
 ph-remote = { path = "crates/remote" }
 ph-preview = { path = "crates/preview" }
 ph-studio = { path = "crates/studio" }
+ph-artifacts = { path = "crates/artifacts" }
 
 # Debug info is the largest part of a debug build. Keep line tables for our own
 # crates (readable backtraces) and drop it for dependencies to save disk space.

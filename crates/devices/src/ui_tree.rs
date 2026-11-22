@@ -10,6 +10,10 @@ pub struct UiNode {
     pub text: String,
     pub description: String,
     pub clickable: bool,
+    /// Typing goes here.
+    pub focused: bool,
+    /// A field that hides what is typed.
+    pub password: bool,
     /// Device pixels: left, top, right, bottom.
     pub bounds: (i32, i32, i32, i32),
 }
@@ -75,6 +79,8 @@ pub fn parse(xml: &str) -> Vec<UiNode> {
                 text: attr("text"),
                 description: attr("content-desc"),
                 clickable: attr("clickable") == "true",
+                focused: attr("focused") == "true",
+                password: attr("password") == "true",
                 bounds,
             });
         }
@@ -100,6 +106,141 @@ pub fn node_at(nodes: &[UiNode], x: i32, y: i32) -> Option<&UiNode> {
         .filter(|node| node.is_interesting())
         .min_by_key(|node| node.area())
         .or_else(|| containing().min_by_key(|node| node.area()))
+}
+
+/// What the screen says: each element's text and description, a line each
+/// (no ids or class names, which are not words a user sees).
+pub fn texts(nodes: &[UiNode]) -> String {
+    nodes
+        .iter()
+        .flat_map(|node| [&node.text, &node.description])
+        .filter(|text| !text.is_empty())
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The screen's size in device pixels: the far corner of what is on it.
+pub fn screen(nodes: &[UiNode]) -> Option<(i32, i32)> {
+    let width = nodes.iter().map(|node| node.bounds.2).max()?;
+    let height = nodes.iter().map(|node| node.bounds.3).max()?;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// An element as a recorded tap names it: by its id, the words on it or its
+/// description, whichever it has. Its place on the screen is not part of
+/// it: that differs from phone to phone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Mark {
+    pub id: String,
+    pub text: String,
+    pub description: String,
+}
+
+impl Mark {
+    pub fn of(node: &UiNode) -> Self {
+        Self {
+            id: node.resource_id.clone(),
+            text: node.text.clone(),
+            description: node.description.clone(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.id.is_empty() && self.text.is_empty() && self.description.is_empty()
+    }
+
+    fn says(&self) -> String {
+        if !self.text.is_empty() {
+            format!("“{}”", self.text)
+        } else if !self.description.is_empty() {
+            format!("“{}”", self.description)
+        } else {
+            self.id.clone()
+        }
+    }
+}
+
+/// An id without its app: `com.app.debug:id/save` and `com.app:id/save` are
+/// the same element in two builds of one app.
+fn bare_id(id: &str) -> &str {
+    id.rsplit_once(":id/").map_or(id, |(_, name)| name)
+}
+
+/// The node `mark` names. With an id and words: the node that has both;
+/// else the only node of that id (its words changed); else, where the id
+/// is one many rows share, the node that says the words. Never another row
+/// of the same id: a tap there would be a tap on something else. With only
+/// an id, or only words, the nodes that have it.
+///
+/// Of several, the one nearest `near` (where it was tapped when recorded,
+/// on this screen's scale).
+pub fn find<'a>(
+    nodes: &'a [UiNode],
+    mark: &Mark,
+    near: Option<(i32, i32)>,
+) -> Result<&'a UiNode, String> {
+    let by = |keep: &dyn Fn(&UiNode) -> bool| -> Vec<&'a UiNode> {
+        nodes.iter().filter(|node| keep(node)).collect()
+    };
+    let has_words = !mark.text.is_empty() || !mark.description.is_empty();
+    let says = |node: &UiNode| {
+        (!mark.text.is_empty() && node.text.trim() == mark.text.trim())
+            || (!mark.description.is_empty() && node.description.trim() == mark.description.trim())
+    };
+    let of_id = |node: &UiNode| {
+        !node.resource_id.is_empty() && bare_id(&node.resource_id) == bare_id(&mark.id)
+    };
+    let mut found = if mark.id.is_empty() {
+        by(&says)
+    } else if !has_words {
+        by(&of_id)
+    } else {
+        let both = by(&|node| of_id(node) && says(node));
+        let same_id = by(&of_id);
+        if !both.is_empty() {
+            both
+        } else if same_id.len() == 1 {
+            same_id
+        } else {
+            by(&says)
+        }
+    };
+    if let Some((x, y)) = near {
+        found.sort_by_key(|node| {
+            let (cx, cy) = node.center();
+            (cx - x).abs() as i64 + (cy - y).abs() as i64
+        });
+    }
+    found.first().copied().ok_or_else(|| {
+        let there: Vec<&str> = nodes
+            .iter()
+            .flat_map(|node| [&node.text, &node.description])
+            .filter(|text| !text.is_empty())
+            .map(String::as_str)
+            .take(8)
+            .collect();
+        format!(
+            "nothing on the screen is {}{}",
+            mark.says(),
+            if there.is_empty() {
+                String::new()
+            } else {
+                format!(" (there: {})", there.join(", "))
+            }
+        )
+    })
+}
+
+/// A point recorded on a screen of size `from`, on one of size `to`.
+pub fn scale(point: (i32, i32), from: (i32, i32), to: (i32, i32)) -> (i32, i32) {
+    if from.0 <= 0 || from.1 <= 0 || from == to {
+        return point;
+    }
+    (
+        (point.0 as i64 * to.0 as i64 / from.0 as i64) as i32,
+        (point.1 as i64 * to.1 as i64 / from.1 as i64) as i32,
+    )
 }
 
 fn attribute(tag: &str, name: &str) -> Option<String> {
@@ -149,5 +290,67 @@ mod tests {
             node_at(&nodes, 900, 2000).unwrap().class,
             "android.widget.FrameLayout"
         );
+    }
+
+    #[test]
+    fn a_recorded_tap_finds_its_element_on_another_screen() {
+        let node = |id: &str, text: &str, bounds| UiNode {
+            class: "android.widget.Button".into(),
+            resource_id: id.into(),
+            text: text.into(),
+            description: String::new(),
+            clickable: true,
+            focused: false,
+            password: false,
+            bounds,
+        };
+        let nodes = vec![
+            node("", "", (0, 0, 720, 1600)),
+            node("com.app.debug:id/row", "Tea", (0, 100, 720, 200)),
+            node("com.app.debug:id/row", "Coffee", (0, 200, 720, 300)),
+            node("", "Coffee", (0, 900, 720, 1000)),
+        ];
+        assert_eq!(screen(&nodes), Some((720, 1600)));
+        assert_eq!(texts(&nodes), "Tea\nCoffee\nCoffee");
+        // By id, whichever build's; of rows sharing it, the one saying so.
+        let row = Mark {
+            id: "com.app:id/row".into(),
+            text: "Coffee".into(),
+            ..Mark::default()
+        };
+        assert_eq!(find(&nodes, &row, None).unwrap().bounds.1, 200);
+        // Rows share the id and none says it: not another row, however near.
+        let other = Mark {
+            id: "com.app:id/row".into(),
+            text: "Cocoa".into(),
+            ..Mark::default()
+        };
+        assert!(find(&nodes, &other, Some((360, 150))).is_err());
+        // An id of its own finds it when its words changed.
+        let renamed = [node("com.app:id/save", "Save all", (0, 0, 100, 50))];
+        let save = Mark {
+            id: "com.app:id/save".into(),
+            text: "Save".into(),
+            ..Mark::default()
+        };
+        assert_eq!(find(&renamed, &save, None).unwrap().text, "Save all");
+        // By words alone: the one nearest where it was tapped.
+        let words = Mark {
+            text: "Coffee".into(),
+            ..Mark::default()
+        };
+        assert_eq!(
+            find(&nodes, &words, Some((360, 950))).unwrap().bounds.1,
+            900
+        );
+        let gone = Mark {
+            text: "Cocoa".into(),
+            ..Mark::default()
+        };
+        let err = find(&nodes, &gone, None).unwrap_err();
+        assert!(err.contains("“Cocoa”") && err.contains("Tea"), "{err}");
+        // A point recorded on a 1080×2400 screen, on this one.
+        assert_eq!(scale((540, 1200), (1080, 2400), (720, 1600)), (360, 800));
+        assert_eq!(scale((5, 5), (0, 0), (720, 1600)), (5, 5));
     }
 }

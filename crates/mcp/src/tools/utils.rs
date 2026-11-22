@@ -11,7 +11,7 @@ pub const TOOLS: &[Tool] = &[
         description: concat!(
             "List ",
             ph_brand::name!(),
-            "'s offline utilities: JSON/TOML/XML/CSV, Base64/URL/hex/HTML encoding, JWT decoding, hashes and HMAC, UUIDs and ULIDs, Unix times, cron lines, regex, text diff, colors, Markdown to HTML, read-only SQLite queries. Each has an id and modes for util_run."
+            "'s offline utilities: JSON/YAML/TOML/XML/CSV conversion, Base64/URL/hex/HTML encoding, JWT decoding and HS256/384/512 checks, X.509 certificates, QR codes, hashes and HMAC, UUIDs (v4, v7) and ULIDs, passwords and keys, Unix times, cron lines in words, regex (with look-around), text diff, text cases and hidden characters, colors with contrast, Markdown to HTML, number bases, IP networks (CIDR), read-only SQLite queries. Each has an id and modes for util_run."
         ),
         schema: || json!({ "type": "object", "properties": {} }),
         build: |arguments, _, _| Ok(("util.list", arguments)),

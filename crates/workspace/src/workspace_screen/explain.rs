@@ -182,7 +182,7 @@ impl WorkspaceScreen {
     }
 
     /// Shows a file given by its full path, at a 1-based line.
-    fn open_path(
+    pub(super) fn open_path(
         &mut self,
         path: &Path,
         line: Option<u64>,

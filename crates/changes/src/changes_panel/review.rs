@@ -47,37 +47,6 @@ enum Mark {
     Hunk { file: usize, hunk: usize },
 }
 
-/// What kind of check a piece of [`Evidence`] is, for its icon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EvidenceKind {
-    Tests,
-    Commands,
-    Screenshots,
-}
-
-impl EvidenceKind {
-    pub(super) fn icon(self) -> Icons {
-        match self {
-            EvidenceKind::Tests => Icons::FlaskConical,
-            EvidenceKind::Commands => Icons::Terminal,
-            EvidenceKind::Screenshots => Icons::Camera,
-        }
-    }
-}
-
-/// Something the task's chat did to check its work (tests run, commands,
-/// screenshots), said over the changes it made. Whoever shows the panel
-/// beside a chat supplies them.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Evidence {
-    pub kind: EvidenceKind,
-    pub label: SharedString,
-    /// More about it, on hover.
-    pub detail: Option<SharedString>,
-    /// It went well (or not); `None` when there is nothing to judge.
-    pub ok: Option<bool>,
-}
-
 pub(super) struct Review {
     pub state: Entity<DiffState>,
     /// The patch the diff shows.
@@ -336,15 +305,6 @@ impl ChangesPanel {
     /// there are.
     pub fn viewed_count(&self) -> (usize, usize) {
         (self.review.viewed.len(), self.change_count())
-    }
-
-    /// Says what the task's chat did to check its work, over the changes.
-    pub fn set_evidence(&mut self, evidence: Vec<Evidence>, cx: &mut Context<Self>) {
-        if self.evidence != evidence {
-            self.evidence = evidence;
-            self.list.remeasure_items(0..1);
-            cx.notify();
-        }
     }
 
     /// Changed file `path`'s place in the list of changes.

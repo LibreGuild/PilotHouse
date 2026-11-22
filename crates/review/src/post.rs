@@ -1,11 +1,13 @@
 //! Putting a review on GitHub, and reading back what people did there.
 //!
-//! - **Publish**: open findings not yet on the code become line comments
-//!   (one GitHub review, neither approving nor requesting changes), each on
-//!   the part of its lines the diff shows, with a one-click suggestion when
-//!   the agent's replacement covers exactly those lines; then the pull
-//!   request's one summary comment is written, or rewritten in place; then
-//!   the threads of findings no longer open are resolved.
+//! - **Publish**: the findings picked (open, not yet on the code) become
+//!   line comments, each on the part of its lines the diff shows, with a
+//!   one-click suggestion when the agent's replacement covers exactly those
+//!   lines. They go out in **one GitHub review** with the reviewer's own
+//!   line comments, their note and how the review ends (a comment, an
+//!   approval, a request for changes), so the author is told once. Then the
+//!   pull request's one summary comment is written, or rewritten in place;
+//!   then the threads of findings no longer open are resolved.
 //! - **Read back**: ticks in the summary comment, and replies on findings'
 //!   lines or naming them in the conversation (see [`crate::replies`]).
 
@@ -23,6 +25,38 @@ pub enum PostMode {
     Inline,
     /// The summary comment only.
     Conversation,
+}
+
+/// What one post sends, beyond bringing GitHub up to date with what became
+/// of the findings.
+#[derive(Debug, Clone)]
+pub struct Plan<'a> {
+    pub mode: PostMode,
+    /// The findings to put on GitHub now, by label; `None`: every open,
+    /// checked one not there yet. The others stay on this computer.
+    pub picked: Option<&'a [String]>,
+    /// The reviewer's own line comments, sent in the same review.
+    pub own: &'a [DraftComment],
+    /// How the review ends.
+    pub event: ReviewEvent,
+    /// The review's own text.
+    pub note: &'a str,
+    /// Whether a summary comment is written when the pull request has none
+    /// (one that exists is always brought up to date).
+    pub summary: bool,
+}
+
+impl Default for Plan<'_> {
+    fn default() -> Self {
+        Self {
+            mode: PostMode::Inline,
+            picked: None,
+            own: &[],
+            event: ReviewEvent::Comment,
+            note: "",
+            summary: true,
+        }
+    }
 }
 
 /// For each file, the lines of the new version the diff shows: GitHub only
@@ -133,24 +167,26 @@ pub struct Target<'a> {
 pub struct Published {
     /// Findings (by label) now on the code, with their comment ids.
     pub on_code: Vec<(String, u64)>,
-    /// The summary comment.
-    pub summary_comment: u64,
+    /// The summary comment, when the pull request has one.
+    pub summary_comment: Option<u64>,
     /// Findings (by label) whose threads were resolved.
     pub resolved: Vec<String>,
-    /// Findings that could not go on the code (their lines are not in the
-    /// diff); they are in full in the summary.
+    /// Findings picked that could not go on the code (their lines are not
+    /// in the diff); they are in full in the summary, or the review's text.
     pub off_code: Vec<String>,
+    /// How many of the reviewer's own comments went out.
+    pub own: usize,
 }
 
-/// Publishes the review: line comments for `findings` open and not yet on
-/// the code (when `mode` is inline), the summary comment `summary` (a
-/// rewrite of `existing` when given), and resolved threads for findings no
-/// longer open.
+/// Publishes the review as `plan` says: line comments for the findings
+/// picked and the reviewer's own, in one review that ends as chosen; the
+/// summary comment `summary` of what is on GitHub (a rewrite of `existing`
+/// when given); and resolved threads for findings no longer open.
 pub fn publish(
     target: &Target,
     findings: &[Finding],
     files: &[PullFile],
-    mode: PostMode,
+    plan: &Plan,
     summary: &dyn Fn(&[Finding]) -> String,
     existing: Option<u64>,
 ) -> Result<Published> {
@@ -162,79 +198,132 @@ pub fn publish(
     } = *target;
     let mut published = Published::default();
     let mut findings = findings.to_vec();
+    let writes_summary = plan.summary || existing.is_some();
 
-    if mode == PostMode::Inline {
-        let lines = commentable_lines(files);
-        let mut drafts: Vec<(String, DraftComment)> = Vec::new();
-        for finding in findings.iter().filter(|f| {
-            f.status == "open" && f.comment_kind.as_deref() != Some("line") && f.verified
-        }) {
-            match place(finding, &lines) {
-                Some((first, last, exact)) => drafts.push((
-                    finding.label.clone(),
-                    DraftComment {
-                        path: finding.path.clone(),
-                        line: last,
-                        side: "RIGHT".into(),
-                        body: finding_markdown(finding, exact),
-                        start_line: (last > first).then_some(first),
-                        start_side: (last > first).then(|| "RIGHT".into()),
-                    },
-                )),
-                None => published.off_code.push(finding.label.clone()),
+    let wanted = |finding: &Finding| {
+        finding.status == "open"
+            && finding.comment_kind.is_none()
+            && finding.verified
+            && plan
+                .picked
+                .is_none_or(|picked| picked.contains(&finding.label))
+    };
+    let lines = commentable_lines(files);
+    let mut drafts: Vec<(String, DraftComment)> = Vec::new();
+    for finding in findings.iter().filter(|finding| wanted(finding)) {
+        match place(finding, &lines).filter(|_| plan.mode == PostMode::Inline) {
+            Some((first, last, exact)) => drafts.push((
+                finding.label.clone(),
+                DraftComment {
+                    path: finding.path.clone(),
+                    line: last,
+                    side: "RIGHT".into(),
+                    body: finding_markdown(finding, exact),
+                    start_line: (last > first).then_some(first),
+                    start_side: (last > first).then(|| "RIGHT".into()),
+                },
+            )),
+            None => published.off_code.push(finding.label.clone()),
+        }
+    }
+    let mut body = plan.note.trim().to_string();
+    // Without a summary comment, a finding with no line to sit on is said
+    // in the review itself: nothing picked is dropped.
+    if !writes_summary {
+        for finding in findings
+            .iter()
+            .filter(|finding| published.off_code.contains(&finding.label))
+        {
+            if !body.is_empty() {
+                body.push_str("\n\n");
+            }
+            body.push_str(&finding_markdown(finding, false));
+        }
+    }
+    // GitHub takes a request for changes only with words.
+    if body.is_empty() && plan.event == ReviewEvent::RequestChanges {
+        body = match drafts.len() + plan.own.len() {
+            0 => "Changes needed.".to_string(),
+            1 => "Changes needed: see the comment on the code.".to_string(),
+            n => format!("Changes needed: see the {n} comments on the code."),
+        };
+    }
+    let mut comments: Vec<DraftComment> = drafts.iter().map(|(_, draft)| draft.clone()).collect();
+    comments.extend(plan.own.iter().cloned());
+    if !comments.is_empty() || !body.is_empty() || plan.event != ReviewEvent::Comment {
+        let created: Vec<ReviewComment> =
+            match pulls::submit_review(client, repo, number, head, plan.event, &body, &comments) {
+                Ok(_) if comments.is_empty() => Vec::new(),
+                Ok(review) => pulls::review_comments(client, repo, number, review.id)?,
+                Err(err) if comments.is_empty() => return Err(err),
+                // One line GitHub refuses sinks the whole review: post them
+                // one by one, keeping the ones it takes, then the review's
+                // own words and how it ends.
+                Err(_) => {
+                    let created: Vec<ReviewComment> = comments
+                        .iter()
+                        .filter_map(|draft| {
+                            pulls::line_comment(client, repo, number, head, draft)
+                                .map_err(|err| {
+                                    tracing::info!(
+                                        "a comment on {}:{} was not posted: {err:#}",
+                                        draft.path,
+                                        draft.line
+                                    )
+                                })
+                                .ok()
+                        })
+                        .collect();
+                    if !body.is_empty() || plan.event != ReviewEvent::Comment {
+                        pulls::submit_review(client, repo, number, head, plan.event, &body, &[])?;
+                    }
+                    created
+                }
+            };
+        for comment in &created {
+            match finding_of(&comment.body) {
+                Some(label) => published.on_code.push((label.to_string(), comment.id)),
+                None => published.own += 1,
             }
         }
-        if !drafts.is_empty() {
-            let comments: Vec<DraftComment> = drafts.iter().map(|(_, d)| d.clone()).collect();
-            let created: Vec<ReviewComment> = match pulls::submit_review(
-                client,
-                repo,
-                number,
-                head,
-                ReviewEvent::Comment,
-                "",
-                &comments,
-            ) {
-                Ok(review) => pulls::review_comments(client, repo, number, review.id)?,
-                // One line GitHub refuses sinks the whole review: post them
-                // one by one, keeping the ones it takes.
-                Err(_) => drafts
-                    .iter()
-                    .filter_map(|(label, draft)| {
-                        pulls::line_comment(client, repo, number, head, draft)
-                            .map_err(|err| {
-                                tracing::info!("finding {label} not posted on the code: {err:#}")
-                            })
-                            .ok()
-                    })
-                    .collect(),
-            };
-            for comment in &created {
-                if let Some(label) = finding_of(&comment.body) {
-                    published.on_code.push((label.to_string(), comment.id));
-                }
-            }
-            for (label, _) in &drafts {
-                if !published.on_code.iter().any(|(done, _)| done == label) {
-                    published.off_code.push(label.clone());
-                }
-            }
-            for finding in &mut findings {
-                if let Some((_, id)) = published.on_code.iter().find(|(l, _)| *l == finding.label) {
-                    finding.comment_id = Some(*id);
-                    finding.comment_kind = Some("line".into());
-                }
+        for (label, _) in &drafts {
+            if !published.on_code.iter().any(|(done, _)| done == label) {
+                published.off_code.push(label.clone());
             }
         }
     }
+    for finding in &mut findings {
+        if let Some((_, id)) = published.on_code.iter().find(|(l, _)| *l == finding.label) {
+            finding.comment_id = Some(*id);
+            finding.comment_kind = Some("line".into());
+        } else if published.off_code.contains(&finding.label) {
+            finding.comment_kind = Some(OFF_CODE.into());
+        }
+    }
 
-    let body = summary(&findings);
-    let rewritten = existing.and_then(|id| pulls::edit_comment(client, repo, id, &body).ok());
-    let comment = match rewritten {
-        Some(comment) => comment,
-        None => pulls::comment(client, repo, number, &body)?,
-    };
-    published.summary_comment = comment.id;
+    if writes_summary {
+        // The summary says what is on GitHub: a finding the reviewer held
+        // back stays on this computer. (Every finding when none was picked
+        // by name, and for a summary written before findings could be held
+        // back, when none carries a mark of where it went.)
+        let unmarked = findings.iter().all(|f| f.comment_kind.is_none());
+        let shared: Vec<Finding> = if plan.picked.is_none() || (existing.is_some() && unmarked) {
+            findings.clone()
+        } else {
+            findings
+                .iter()
+                .filter(|f| f.comment_kind.is_some())
+                .cloned()
+                .collect()
+        };
+        let text = summary(&shared);
+        let rewritten = existing.and_then(|id| pulls::edit_comment(client, repo, id, &text).ok());
+        let comment = match rewritten {
+            Some(comment) => comment,
+            None => pulls::comment(client, repo, number, &text)?,
+        };
+        published.summary_comment = Some(comment.id);
+    }
 
     // Threads of findings dealt with are resolved (once).
     let done: Vec<&Finding> = findings
@@ -259,6 +348,10 @@ pub fn publish(
     }
     Ok(published)
 }
+
+/// How a finding without a line in the diff is marked once it is on GitHub
+/// (in the summary comment, or the review's text).
+pub const OFF_CODE: &str = "summary";
 
 /// The summary comment, if it is still there.
 pub fn read_summary(target: &Target, comment: u64) -> Option<IssueComment> {

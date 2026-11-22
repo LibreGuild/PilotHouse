@@ -1,31 +1,43 @@
-//! The floating toolbar on a live pane: annotate, capture, record, compare.
+//! The tools of a live pane: pick an element, mark the picture, capture it,
+//! record it. Shared by the browser and device panes, which put them in
+//! their own toolbar, beside what else they have there.
 //!
-//! Shared by the browser and device panes, which lay it over the whole live
-//! area: it sits at the bottom centre until dragged by its grip somewhere
-//! that hides less (double-click the grip to put it back), and folds to a
-//! single button. It owns the recording and the
-//! "before" frame; captures are saved to the data directory and handed to the
-//! owner as [`LiveToolsEvent::Captured`], which the project forwards to chat.
+//! They used to float over the picture, at its bottom until dragged away,
+//! and so always hid a part of what one was looking at (a phone's
+//! navigation bar, a page's footer). In the pane's toolbar they hide
+//! nothing and need no placing.
+//!
+//! In a pane too narrow for them beside what else its toolbar has, they
+//! fold ([`LiveTools::set_folded`]): the pane lists them in its own menu
+//! ([`LiveTools::menu`]), and what stays in the row is only what is going
+//! on (a mode to leave, marks to clear, a recording to stop).
+//!
+//! The four kinds of mark (box, arrow, freehand, numbered pin) are one
+//! button, which draws the kind used last, with a menu beside it for
+//! another. A mode is left by its button again or by Escape; a pick ends
+//! itself, and so does marking once the picture is captured. This owns the
+//! recording; captures are saved to the data directory and handed to the
+//! owner as [`ToChat::Captured`], which the project forwards to chat.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    menu::{PopupMenu, PopupMenuItem},
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AppContext as _, Context, DragMoveEvent, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Point, Render, StatefulInteractiveElement as _,
-    Styled as _, Task, Window, div, point, px, relative,
+    App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Styled as _, Task, Window,
 };
 use ph_ui::Icons;
+use ph_ui::MenuButton as _;
 
 use crate::annotate::Tool;
 use crate::capture;
-use crate::compare::compare;
 use crate::frame::Frame;
 use crate::recorder::Recorder;
 use crate::surface::{SurfaceMode, SurfaceView};
@@ -43,7 +55,7 @@ pub struct CapturedImage {
 /// this; the project adds it to the composer.
 #[derive(Debug, Clone)]
 pub enum ToChat {
-    /// Screenshots, recording frames or a before/after set, with a note.
+    /// Screenshots or recording frames, with a note.
     Captured {
         images: Vec<CapturedImage>,
         note: Option<String>,
@@ -59,17 +71,12 @@ pub struct LiveTools {
     /// The pane supports the element picker.
     can_pick: bool,
     recorder: Option<Recorder>,
-    baseline: Option<Frame>,
     busy: bool,
-    /// Where the user dragged the bar, as fractions of the live area (top
-    /// left corner); `None` for the bottom centre.
-    placed: Option<(f32, f32)>,
-    /// Where on the grip the drag started.
-    grab: Point<Pixels>,
-    /// Folded to one button.
+    /// The kind of mark the Mark button draws: the one used last.
+    mark: Tool,
+    /// The pane has no room for the tools in its row: they are in its
+    /// menu, and the row shows only what is going on.
     folded: bool,
-    /// The bar's size as last drawn, to keep it whole inside the area.
-    bar_size: gpui_kit::Size<Pixels>,
     /// Redraws the recording timer once a second while recording.
     _tick: Option<Task<()>>,
 }
@@ -89,18 +96,119 @@ impl LiveTools {
             source: source.into(),
             can_pick,
             recorder: None,
-            baseline: None,
             busy: false,
-            placed: None,
-            grab: Point::default(),
+            mark: Tool::Rect,
             folded: false,
-            bar_size: gpui_kit::size(px(96.), px(44.)),
             _tick: None,
         }
     }
 
     pub fn set_source(&mut self, source: impl Into<String>) {
         self.source = source.into();
+    }
+
+    /// Whether the tools are in the pane's menu instead of its row.
+    pub fn set_folded(&mut self, folded: bool, cx: &mut Context<Self>) {
+        if self.folded != folded {
+            self.folded = folded;
+            cx.notify();
+        }
+    }
+
+    /// About how wide the tools are in a row, in pixels at the default
+    /// interface size: what a pane asks before it gives them the room.
+    pub fn width(&self, folded: bool, cx: &App) -> f32 {
+        const BUTTON: f32 = 26.;
+        let surface = self.surface.read(cx);
+        let mode = surface.mode();
+        let clear = surface.has_annotations() || surface.has_highlight();
+        let undo = surface.has_annotations();
+        let recording = if self.recorder.is_some() { 36. } else { 0. };
+        if folded {
+            let shown = [
+                mode != SurfaceMode::Interact,
+                clear,
+                self.recorder.is_some(),
+            ];
+            return shown.into_iter().filter(|shown| *shown).count() as f32 * BUTTON + recording;
+        }
+        let buttons = usize::from(self.can_pick) + 3 + usize::from(undo) + usize::from(clear);
+        // The chooser of the kind of mark is a narrower button.
+        buttons as f32 * BUTTON + 20. + recording
+    }
+
+    /// The tools as the items of a pane's menu, for when they are folded.
+    pub fn menu(
+        this: &Entity<Self>,
+        menu: PopupMenu,
+        window: &mut Window,
+        cx: &mut Context<PopupMenu>,
+    ) -> PopupMenu {
+        let tools = this.read(cx);
+        let surface = tools.surface.read(cx);
+        let idle = surface.frame().is_none() || tools.busy;
+        let recording = tools.recorder.is_some();
+        let (can_pick, current) = (tools.can_pick, tools.mark);
+        let pick = this.downgrade();
+        let menu = menu.when(can_pick, |menu| {
+            menu.item(
+                PopupMenuItem::new("Pick an element")
+                    .icon(Icons::Crosshair)
+                    .on_click(move |_, _, cx| {
+                        _ = pick.update(cx, |this, cx| this.set_mode(SurfaceMode::Pick, cx));
+                    }),
+            )
+        });
+        let marks = this.downgrade();
+        let kind = gpui_kit::component::Icon::new(mark_kind(current).0);
+        let menu = menu.submenu_with_icon(
+            Some(kind),
+            "Mark the picture",
+            window,
+            cx,
+            move |menu, _, _| {
+                [Tool::Rect, Tool::Arrow, Tool::Pen, Tool::Pin]
+                    .into_iter()
+                    .fold(menu, |menu, tool| {
+                        let this = marks.clone();
+                        let (icon, name) = mark_kind(tool);
+                        menu.item(
+                            PopupMenuItem::new(name)
+                                .icon(icon)
+                                .checked(tool == current)
+                                .on_click(move |_, _, cx| {
+                                    _ = this.update(cx, |this, cx| this.mark_with(tool, cx));
+                                }),
+                        )
+                    })
+            },
+        );
+        let (capture, record) = (this.downgrade(), this.downgrade());
+        menu.item(
+            PopupMenuItem::new("Send a screenshot to chat")
+                .icon(Icons::Camera)
+                .disabled(idle)
+                .on_click(move |_, _, cx| {
+                    _ = capture.update(cx, |this, cx| this.capture(cx));
+                }),
+        )
+        .item(
+            PopupMenuItem::new(if recording {
+                "Stop and send the recording"
+            } else {
+                "Record the screen"
+            })
+            .icon(if recording {
+                Icons::CircleStop
+            } else {
+                Icons::Video
+            })
+            .disabled(idle)
+            .on_click(move |_, _, cx| {
+                _ = record.update(cx, |this, cx| this.toggle_recording(cx));
+            }),
+        )
+        .separator()
     }
 
     /// Feeds the recorder; call for every frame the pane shows.
@@ -120,8 +228,12 @@ impl LiveTools {
         let annotated = !marks.is_empty();
         let stem = file_stem(&self.source);
         let label = format!("{} screenshot", self.source);
-        self.surface
-            .update(cx, |surface, cx| surface.clear_annotations(cx));
+        // The marks were for this picture: with it taken they go, and the
+        // pointer is the app's again.
+        self.surface.update(cx, |surface, cx| {
+            surface.clear_annotations(cx);
+            surface.set_mode(SurfaceMode::Interact, cx);
+        });
         self.save(cx, move || {
             // Burning the marks in copies the whole picture: done here, off
             // the UI thread, with the encoding.
@@ -184,39 +296,6 @@ impl LiveTools {
         });
     }
 
-    /// First press keeps the current frame as "before"; the second compares
-    /// it with the current frame and sends before, after and a diff.
-    pub fn compare(&mut self, cx: &mut Context<Self>) {
-        let Some(after) = self.surface.read(cx).frame().cloned() else {
-            return;
-        };
-        let Some(before) = self.baseline.take() else {
-            self.baseline = Some(after);
-            cx.notify();
-            return;
-        };
-        let stem = file_stem(&self.source);
-        let source = self.source.clone();
-        self.save(cx, move || {
-            let result = compare(&before, &after);
-            let note = match result.region {
-                None => "Before and after look the same.".to_string(),
-                Some((x, y, w, h)) => format!(
-                    "Before/after of the {source}: {:.1}% of pixels changed, mostly in the area at x {x}, y {y}, {w}×{h} px. The third image shows the changes in red.",
-                    result.changed * 100.0
-                ),
-            };
-            Ok((
-                vec![
-                    CapturedImage { label: format!("{source} before"), path: capture::save_png(&before, &format!("{stem}-before"))? },
-                    CapturedImage { label: format!("{source} after"), path: capture::save_png(&after, &format!("{stem}-after"))? },
-                    CapturedImage { label: format!("{source} changes"), path: capture::save_png(&result.highlight, &format!("{stem}-diff"))? },
-                ],
-                Some(note),
-            ))
-        });
-    }
-
     /// Runs `work` off the UI thread and emits its images.
     fn save(
         &mut self,
@@ -251,75 +330,24 @@ impl LiveTools {
     }
 }
 
-/// What is dragged when the bar moves: whose bar (every live area hears
-/// every drag of this kind).
-struct MoveBar(gpui_kit::EntityId);
-
-/// Nothing follows the pointer: the bar itself moves.
-struct NoGhost;
-
-impl Render for NoGhost {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
+impl LiveTools {
+    /// Marks with `tool`, which the Mark button then draws.
+    fn mark_with(&mut self, tool: Tool, cx: &mut Context<Self>) {
+        self.mark = tool;
+        self.surface.update(cx, |surface, cx| {
+            surface.set_mode(SurfaceMode::Annotate(tool), cx)
+        });
+        cx.notify();
     }
 }
 
-/// How far in from the bar's corner the grip is (the bar's padding and
-/// border).
-const EDGE: f32 = 5.0;
-
-impl LiveTools {
-    fn move_bar(&mut self, event: &DragMoveEvent<MoveBar>, cx: &mut Context<Self>) {
-        if event.drag(cx).0 != cx.entity_id() {
-            return;
-        }
-        let area = event.bounds;
-        let (width, height) = (f32::from(area.size.width), f32::from(area.size.height));
-        if width <= 0.0 || height <= 0.0 {
-            return;
-        }
-        // The grip sits just inside the bar's left edge.
-        let corner = event.event.position - area.origin - self.grab - point(px(EDGE), px(EDGE));
-        // The whole bar stays inside, as wide as it is drawn.
-        let (bar_width, bar_height) = (
-            f32::from(self.bar_size.width),
-            f32::from(self.bar_size.height),
-        );
-        let x = f32::from(corner.x).clamp(0.0, (width - bar_width).max(0.0));
-        let y = f32::from(corner.y).clamp(0.0, (height - bar_height).max(0.0));
-        self.placed = Some((x / width, y / height));
-        cx.notify();
-    }
-
-    fn grip(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let this = cx.entity().downgrade();
-        let owner = cx.entity_id();
-        div()
-            .id("tool-grip")
-            .flex()
-            .items_center()
-            .justify_center()
-            .w_4()
-            .h_6()
-            .rounded_full()
-            .cursor_grab()
-            .text_color(cx.theme().muted_foreground)
-            .hover(|style| style.bg(cx.theme().secondary_hover))
-            .child(gpui_kit::component::Icon::new(Icons::GripVertical).xsmall())
-            .tooltip(|window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new("Drag to move; double-click to put back")
-                    .build(window, cx)
-            })
-            .on_drag(MoveBar(owner), move |_, offset, _, cx| {
-                _ = this.update(cx, |this, _| this.grab = offset);
-                cx.new(|_| NoGhost)
-            })
-            .on_click(cx.listener(|this, event: &gpui_kit::ClickEvent, _, cx| {
-                if event.click_count() == 2 {
-                    this.placed = None;
-                    cx.notify();
-                }
-            }))
+/// A kind of mark's icon and name.
+fn mark_kind(tool: Tool) -> (Icons, &'static str) {
+    match tool {
+        Tool::Rect => (Icons::Square, "Box"),
+        Tool::Arrow => (Icons::MoveUpRight, "Arrow"),
+        Tool::Pen => (Icons::Pencil, "Freehand"),
+        Tool::Pin => (Icons::MapPin, "Numbered pin"),
     }
 }
 
@@ -343,139 +371,96 @@ impl Render for LiveTools {
         let mode = surface.mode();
         let has_frame = surface.frame().is_some();
         let has_marks = surface.has_annotations();
-
-        let mode_button = |id: &'static str,
-                           icon: Icons,
-                           tooltip: &'static str,
-                           target: SurfaceMode,
-                           cx: &mut Context<Self>| {
-            Button::new(id)
-                .ghost()
-                .small()
-                .icon(icon)
-                .selected(mode == target)
-                .tooltip(ph_ui::tip(tooltip))
-                .accessibility_label(tooltip)
-                .on_click(cx.listener(move |this, _, _, cx| this.set_mode(target, cx)))
-        };
-        let border = cx.theme().border;
-        let divider = move || div().w_px().h_4().mx_0p5().bg(border);
+        // The outline of a picked element is cleared as the marks are.
+        let can_clear = has_marks || surface.has_highlight();
+        let marking = matches!(mode, SurfaceMode::Annotate(_));
+        let folded = self.folded;
         let recording = self
             .recorder
             .as_ref()
             .map(|recorder| recorder.elapsed().as_secs());
-
-        let fold = Button::new("tool-fold")
-            .ghost()
-            .small()
-            .icon(if self.folded {
-                Icons::Pencil
-            } else {
-                Icons::ChevronsLeft
-            })
-            .tooltip(if self.folded {
-                "Show the markup tools"
-            } else {
-                "Fold the markup tools"
-            })
-            .accessibility_label(if self.folded {
-                "Show the markup tools"
-            } else {
-                "Fold the markup tools"
-            })
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.folded = !this.folded;
-                // A mode left on would keep taking the page's clicks with
-                // its button hidden.
-                if this.folded {
-                    this.surface.update(cx, |surface, cx| {
-                        surface.set_mode(SurfaceMode::Interact, cx)
-                    });
-                }
-                cx.notify();
-            }));
+        let (mark_icon, mark_name) = mark_kind(self.mark);
+        let mark = self.mark;
         let this = cx.entity().downgrade();
-        let bar = h_flex()
+        h_flex()
             .id("live-tools")
-            .relative()
-            // Its size, for keeping it inside the area while it is dragged.
-            .child(
-                gpui_kit::canvas(
-                    move |bounds, _, cx| {
-                        _ = this.update(cx, |this, _| this.bar_size = bounds.size);
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
-            )
-            // Clicks on the toolbar must not reach the live page under it.
-            .occlude()
+            .flex_none()
             .gap_0p5()
-            .p_1()
-            .rounded_full()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .shadow_lg()
-            .child(self.grip(cx));
-        let bar = if self.folded {
-            bar.child(fold).when_some(recording, |this, seconds| {
-                this.child(
-                    div()
-                        .px_1()
-                        .text_xs()
-                        .text_color(cx.theme().danger)
-                        .child(format!("● {}:{:02}", seconds / 60, seconds % 60)),
+            .when(
+                self.can_pick && (!folded || mode == SurfaceMode::Pick),
+                |this| {
+                    this.child(
+                        Button::new("tool-pick")
+                            .ghost()
+                            .small()
+                            .icon(Icons::Crosshair)
+                            .selected(mode == SurfaceMode::Pick)
+                            .tooltip(ph_ui::tip(if mode == SurfaceMode::Pick {
+                                "Stop picking (Esc)"
+                            } else {
+                                "Pick an element: the next click sends what is under it to the chat"
+                            }))
+                            .accessibility_label("Pick an element")
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.set_mode(SurfaceMode::Pick, cx)),
+                            ),
+                    )
+                },
+            )
+            .when(!folded || marking, |row| {
+                row.child(
+                    // The two halves of one button: draw, and which kind.
+                    h_flex()
+                        .child(
+                            Button::new("tool-mark")
+                                .ghost()
+                                .small()
+                                .icon(mark_icon)
+                                .selected(marking)
+                                .tooltip(ph_ui::tip(if marking {
+                                    "Stop marking (Esc)".to_string()
+                                } else {
+                                    format!(
+                                        "Mark the picture ({}): marks go with the screenshot",
+                                        mark_name.to_lowercase()
+                                    )
+                                }))
+                                .accessibility_label("Mark the picture")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_mode(SurfaceMode::Annotate(mark), cx)
+                                })),
+                        )
+                        .when(!folded, |row| {
+                            row.child(
+                                Button::new("tool-mark-kind")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::ChevronDown)
+                                    .tooltip("The kind of mark")
+                                    .accessibility_label("The kind of mark")
+                                    .menu(gpui_kit::Anchor::TopLeft, move |menu, _, _| {
+                                        [Tool::Rect, Tool::Arrow, Tool::Pen, Tool::Pin]
+                                            .into_iter()
+                                            .fold(menu, |menu, tool| {
+                                                let this = this.clone();
+                                                let (icon, name) = mark_kind(tool);
+                                                menu.item(
+                                                    PopupMenuItem::new(name)
+                                                        .icon(icon)
+                                                        .checked(tool == mark)
+                                                        .on_click(move |_, _, cx| {
+                                                            _ = this.update(cx, |this, cx| {
+                                                                this.mark_with(tool, cx)
+                                                            });
+                                                        }),
+                                                )
+                                            })
+                                    }),
+                            )
+                        }),
                 )
             })
-        } else {
-            bar.child(mode_button(
-                "tool-interact",
-                Icons::MousePointer2,
-                "Use the app",
-                SurfaceMode::Interact,
-                cx,
-            ))
-            .when(self.can_pick, |this| {
-                this.child(mode_button(
-                    "tool-pick",
-                    Icons::Crosshair,
-                    "Pick an element",
-                    SurfaceMode::Pick,
-                    cx,
-                ))
-            })
-            .child(divider())
-            .child(mode_button(
-                "tool-rect",
-                Icons::Square,
-                "Draw a box",
-                SurfaceMode::Annotate(Tool::Rect),
-                cx,
-            ))
-            .child(mode_button(
-                "tool-arrow",
-                Icons::MoveUpRight,
-                "Draw an arrow",
-                SurfaceMode::Annotate(Tool::Arrow),
-                cx,
-            ))
-            .child(mode_button(
-                "tool-pen",
-                Icons::Pencil,
-                "Draw freehand",
-                SurfaceMode::Annotate(Tool::Pen),
-                cx,
-            ))
-            .child(mode_button(
-                "tool-pin",
-                Icons::MapPin,
-                "Drop a numbered pin",
-                SurfaceMode::Annotate(Tool::Pin),
-                cx,
-            ))
-            .when(has_marks, |this| {
+            .when(has_marks && !folded, |this| {
                 this.child(
                     Button::new("tool-undo")
                         .ghost()
@@ -488,12 +473,18 @@ impl Render for LiveTools {
                                 .update(cx, |surface, cx| surface.undo_annotation(cx))
                         })),
                 )
-                .child(
+            })
+            .when(can_clear, |this| {
+                this.child(
                     Button::new("tool-clear")
                         .ghost()
                         .small()
                         .icon(Icons::Eraser)
-                        .tooltip("Clear all marks")
+                        .tooltip(if has_marks {
+                            "Clear all marks"
+                        } else {
+                            "Clear the outline"
+                        })
                         .accessibility_label("Clear all marks")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.surface
@@ -501,87 +492,44 @@ impl Render for LiveTools {
                         })),
                 )
             })
-            .child(divider())
-            .child(
-                Button::new("tool-capture")
-                    .ghost()
-                    .small()
-                    .icon(Icons::Camera)
-                    .disabled(!has_frame || self.busy)
-                    .tooltip(ph_ui::tip(format!(
-                        "Send a screenshot to chat ({})",
-                        ph_ui::platform::shortcut("secondary-shift-s")
-                    )))
-                    .accessibility_label("Send a screenshot to chat")
-                    .on_click(cx.listener(|this, _, _, cx| this.capture(cx))),
-            )
-            .child(
-                Button::new("tool-record")
-                    .ghost()
-                    .small()
-                    .icon(if recording.is_some() {
-                        Icons::CircleStop
-                    } else {
-                        Icons::Video
-                    })
-                    .when_some(recording, |this, seconds| {
-                        this.label(format!("{}:{:02}", seconds / 60, seconds % 60))
-                            .text_color(cx.theme().danger)
-                    })
-                    .disabled(!has_frame || self.busy)
-                    .tooltip(if recording.is_some() {
-                        "Stop and send the recording"
-                    } else {
-                        "Record the screen"
-                    })
-                    .accessibility_label("Record the screen")
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_recording(cx))),
-            )
-            .child(
-                Button::new("tool-compare")
-                    .ghost()
-                    .small()
-                    .icon(Icons::GitCompareArrows)
-                    .selected(self.baseline.is_some())
-                    .when(self.baseline.is_some(), |this| this.label("Compare"))
-                    .disabled(!has_frame || self.busy)
-                    .tooltip(if self.baseline.is_some() {
-                        "Compare with the saved “before” and send both"
-                    } else {
-                        "Keep this as “before”, to compare after a change"
-                    })
-                    .accessibility_label("Before and after")
-                    .on_click(cx.listener(|this, _, _, cx| this.compare(cx))),
-            )
-            .child(divider())
-            .child(fold)
-        };
-        // A layer over the live area that only listens for the bar's drag,
-        // so the page under it stays usable.
-        let layer = div()
-            .id("live-tools-layer")
-            .size_full()
-            .relative()
-            .on_drag_move(
-                cx.listener(|this, event: &DragMoveEvent<MoveBar>, _, cx| this.move_bar(event, cx)),
-            );
-        match self.placed {
-            Some((x, y)) => layer.child(
-                div()
-                    .absolute()
-                    .left(relative(x))
-                    .top(relative(y))
-                    .child(bar),
-            ),
-            None => layer.child(
-                h_flex()
-                    .absolute()
-                    .bottom_3()
-                    .left_0()
-                    .right_0()
-                    .justify_center()
-                    .child(bar),
-            ),
-        }
+            .when(!folded, |this| {
+                this.child(
+                    Button::new("tool-capture")
+                        .ghost()
+                        .small()
+                        .icon(Icons::Camera)
+                        .disabled(!has_frame || self.busy)
+                        .tooltip(ph_ui::tip(format!(
+                            "Send a screenshot to chat ({})",
+                            ph_ui::platform::shortcut("secondary-shift-s")
+                        )))
+                        .accessibility_label("Send a screenshot to chat")
+                        .on_click(cx.listener(|this, _, _, cx| this.capture(cx))),
+                )
+            })
+            .when(!folded || recording.is_some(), |this| {
+                this.child(
+                    Button::new("tool-record")
+                        .ghost()
+                        .small()
+                        .icon(if recording.is_some() {
+                            Icons::CircleStop
+                        } else {
+                            Icons::Video
+                        })
+                        .when_some(recording, |this, seconds| {
+                            this.label(format!("{}:{:02}", seconds / 60, seconds % 60))
+                                .text_color(cx.theme().danger)
+                        })
+                        .disabled(!has_frame || self.busy)
+                        .tooltip(if recording.is_some() {
+                            "Stop and send the recording"
+                        } else {
+                            "Record the screen"
+                        })
+                        .accessibility_label("Record the screen")
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_recording(cx))),
+                )
+            })
     }
 }

@@ -34,6 +34,16 @@ impl RunConfig {
 /// Most `Makefile`/`justfile` targets worth listing.
 const MAX_TARGETS: usize = 12;
 
+/// Whether `config` is one of the Gradle tasks found for an Android app
+/// (install, build the debug APK): what the Run tab's Android card does,
+/// on the device and variant chosen there.
+pub(crate) fn is_android_task(config: &RunConfig) -> bool {
+    !config.custom
+        && [" installDebug", " assembleDebug"]
+            .iter()
+            .any(|task| config.command.ends_with(task))
+}
+
 pub fn detect(root: &Path) -> Vec<RunConfig> {
     let mut configs = Vec::new();
     let has = |name: &str| root.join(name).exists();

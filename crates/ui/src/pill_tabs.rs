@@ -64,11 +64,11 @@ impl PillTab {
     }
 
     /// About how wide the tab is with its name, in pixels at the default
-    /// interface size: the text at 14 px, its padding, and the icon.
+    /// interface size: the text at 14 px and its padding. (Its icon shows
+    /// only once the row is folded, so it takes no room here: counting it
+    /// folded rows whose names fitted.)
     fn full_width(&self) -> f32 {
-        let text = self.label.chars().count() as f32 * 7.6;
-        let icon = if self.icon.is_some() { 20. } else { 0. };
-        text + icon + 20.
+        self.label.chars().count() as f32 * 7.6 + 20.
     }
 }
 
@@ -87,12 +87,20 @@ impl PillTabs {
     }
 }
 
+impl PillTabs {
+    /// About how wide `tabs` are with every name shown, in pixels at the
+    /// default interface size: for a row that has more than the tabs, to
+    /// know when it runs out of room.
+    pub fn full_width(tabs: &[PillTab]) -> f32 {
+        tabs.iter().map(PillTab::full_width).sum::<f32>() + 4. * tabs.len().saturating_sub(1) as f32
+    }
+}
+
 impl RenderOnce for PillTabs {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let (width, probe) = crate::measure::width_of(self.id.clone(), window, cx);
         // The names fit, with the gaps between the tabs?
-        let needed: f32 = self.tabs.iter().map(PillTab::full_width).sum::<f32>()
-            + 4. * self.tabs.len().saturating_sub(1) as f32;
+        let needed = Self::full_width(&self.tabs);
         let fold = width.is_some_and(|width| crate::measure::design_px(width, window) < needed);
         let theme = cx.theme();
         h_flex()

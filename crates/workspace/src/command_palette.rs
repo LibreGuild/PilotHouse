@@ -165,6 +165,18 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
             &["aside", "btw", "question", "fork"],
         ),
         Entry::action(
+            "Switch workspace…",
+            Icons::Folders,
+            SwitchWorkspace,
+            &[
+                "switch workspace",
+                "workspaces",
+                "recent",
+                "project",
+                "open recent",
+            ],
+        ),
+        Entry::action(
             "Open a folder as a workspace",
             Icons::FolderPlus,
             AddProject,
@@ -220,22 +232,16 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         ),
     ];
     general.push(Entry::action(
-        "New presentation",
+        "New slides",
         Icons::Presentation,
-        NewPresentation,
-        &["slides", "deck", "powerpoint", "pptx", "keynote", "studio"],
-    ));
-    general.push(Entry::action(
-        "Open a presentation",
-        Icons::Presentation,
-        OpenPresentation,
+        NewSlides,
         &[
-            "open presentation",
-            "slides",
+            "presentation",
             "deck",
             "powerpoint",
             "pptx",
-            "studio",
+            "keynote",
+            "artifact",
         ],
     ));
     general.push(Entry::action(
@@ -243,19 +249,6 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         IconName::Search,
         SearchChats,
         &["find", "history", "messages", "conversation"],
-    ));
-    general.push(Entry::action(
-        "Architecture map",
-        IconName::Network,
-        ShowArchitecture,
-        &[
-            "architecture",
-            "dependencies",
-            "modules",
-            "crates",
-            "packages",
-            "overview",
-        ],
     ));
     general.push(Entry::action(
         "Parallel runs",
@@ -288,6 +281,12 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         Icons::Keyboard,
         ShowShortcuts,
         &["keys", "keymap", "hotkeys", "help", "cheat sheet"],
+    ));
+    general.push(Entry::action(
+        "Welcome tour",
+        Icons::Sparkles,
+        ShowTour,
+        &["onboarding", "what's new", "features", "help", "intro"],
     ));
     general.push(Entry::action(
         "Usage",
@@ -436,6 +435,12 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
                     "review",
                     "pr",
                 ],
+            ),
+            Entry::action(
+                "Show Artifacts",
+                ph_ui::Icons::Shapes,
+                ShowArtifacts,
+                &["artifact", "page", "published", "made", "library"],
             ),
         ]
         .into_iter()
@@ -637,7 +642,12 @@ pub(crate) fn open(
                             workspace.show_session(session, window, cx)
                         });
                     }
-                    Run::Utility(id) => crate::utilities::open(Some(id), window, cx),
+                    Run::Utility(id) => ph_utils::dialog::open(
+                        Some(id),
+                        crate::AppState::store(cx).clone(),
+                        window,
+                        cx,
+                    ),
                     Run::Custom(index) => {
                         if let Some(command) = ph_custom::commands().into_iter().nth(*index) {
                             let context = ph_custom::CustomContext {

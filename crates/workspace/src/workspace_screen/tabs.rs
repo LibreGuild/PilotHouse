@@ -10,6 +10,9 @@
 //! again or needs the user. They stand in the chat panel's own header,
 //! where a chat's title would be (the panel asks for them when it draws):
 //! one row says which chats there are and which is in front.
+//!
+//! A right click on a tab closes it, the others or all of them, as tabs do
+//! everywhere, over what can be done with its chat.
 
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::menu::ContextMenuExt as _;
@@ -56,9 +59,10 @@ pub(super) fn render(
         (this.shell.clone(), this.project.id, front, open)
     };
     let scroll = this.read(cx).tabs_scroll.clone();
+    let alone = open.len() < 2;
     let tabs: Vec<AnyElement> = open
         .iter()
-        .map(|chat| chat_tab(chat, front, project, screen, &shell, cx))
+        .map(|chat| chat_tab(chat, front, alone, project, screen, &shell, cx))
         .collect();
     // A chat not sent yet is in front: it has no tab of its own to show as
     // chosen, so the row says so.
@@ -92,6 +96,8 @@ pub(super) fn render(
 fn chat_tab(
     chat: &OpenChat,
     front: Option<SessionId>,
+    // The only tab of the row: there are no others to close.
+    alone: bool,
     project: ph_store::projects::ProjectId,
     screen: &WeakEntity<WorkspaceScreen>,
     shell: &WeakEntity<crate::workspace::Workspace>,
@@ -141,7 +147,34 @@ fn chat_tab(
     let menu = {
         let (shell, session) = (shell.clone(), chat.session.clone());
         let settled = chat.settled;
-        move |menu, _: &mut Window, _: &mut Context<gpui_kit::component::menu::PopupMenu>| {
+        let screen = screen.clone();
+        move |menu: gpui_kit::component::menu::PopupMenu,
+              _: &mut Window,
+              _: &mut Context<gpui_kit::component::menu::PopupMenu>| {
+            use gpui_kit::component::menu::PopupMenuItem;
+            // The tab first (the chats stay, in Past chats), then its chat.
+            let (one, others, all) = (screen.clone(), screen.clone(), screen.clone());
+            let menu = menu
+                .item(
+                    PopupMenuItem::new("Close tab")
+                        .icon(Icon::new(IconName::Close))
+                        .on_click(move |_, window, cx| {
+                            _ = one.update(cx, |this, cx| this.close_tab(id, window, cx));
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Close other tabs")
+                        .disabled(alone)
+                        .on_click(move |_, window, cx| {
+                            _ = others.update(cx, |this, cx| this.close_tabs(Some(id), window, cx));
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Close all tabs").on_click(move |_, window, cx| {
+                        _ = all.update(cx, |this, cx| this.close_tabs(None, window, cx));
+                    }),
+                )
+                .separator();
             // Pinning orders the Bridge's cards; a row of tabs has no top.
             let held = busy.then_some(crate::bridge::STILL_WORKING);
             crate::bridge::chat_menu_items(menu, &shell, project, &session, (None, settled), held)

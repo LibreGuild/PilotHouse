@@ -178,7 +178,25 @@ pub(crate) fn open(
             .p_0()
             .bg(frame_color)
             .close_button(true)
-            .title(div().px_4().pt_3().child("Settings"))
+            // The version rides small beside the title, raised like an
+            // exponent: there to be read when asked for ("which version are
+            // you on?"), and not a line of its own.
+            .title(
+                h_flex()
+                    .px_4()
+                    .pt_3()
+                    .items_start()
+                    .gap_1p5()
+                    .child("Settings")
+                    .child(
+                        div()
+                            .id("settings-version")
+                            .text_xs()
+                            .font_weight(gpui_kit::FontWeight::NORMAL)
+                            .text_color(theme.muted_foreground)
+                            .child(format!("v{}", ph_ui::version())),
+                    ),
+            )
             .child(
                 div()
                     .relative()
@@ -1101,6 +1119,41 @@ fn about_page() -> SettingPage {
                     )
                 })),
         );
+    // The cards of the first start, for someone who wants them again (or
+    // went through them too fast). Settings makes way for them.
+    let page = if ph_brand::enabled(ph_brand::Feature::Tour) {
+        page.group(
+            SettingGroup::new().item(
+                SettingItem::render(|_, _, cx| {
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .gap_3()
+                        .child(note(
+                            format!(
+                                "The welcome tour: what {} has, in a few cards.",
+                                ph_brand::NAME
+                            ),
+                            cx,
+                        ))
+                        .child(
+                            Button::new("show-welcome-tour")
+                                .small()
+                                .outline()
+                                .icon(Icons::Sparkles)
+                                .label("Show")
+                                .on_click(|_, window, cx| {
+                                    window.close_dialog(cx);
+                                    crate::tour::open_again(window, cx);
+                                }),
+                        )
+                })
+                .keywords(["tour", "welcome", "cards", "new", "onboarding"]),
+            ),
+        )
+    } else {
+        page
+    };
     // A build whose brand turns updates off has no Updates section; the
     // project's page is still linked.
     if !crate::updates::enabled() {

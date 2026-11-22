@@ -5,7 +5,7 @@ Code: `crates/workspace/src/schedules/` (runner and dialog), `crates/store/src/s
 A schedule does one thing for a workspace, at set times or when something happens:
 
 - **Ask the agent**: starts a chat with a prompt for the default agent, in the background; the chat on screen stays. When an event started it, the prompt ends with what happened ("Why now: pull request #12 … was opened", the changed files, the failing tests). Presets: *Morning summary*, *Nightly check*, *Review a pull request*, *Fix failing tests*.
-- **Run the UI tests**: replays every recorded test of the workspace (web tests at the desktop size) and says how many passed.
+- **Run the UI tests**: replays every recorded test of the workspace (web tests at the desktop size, phone tests on the device in view), each from a clean start, and says how many passed.
 
 **When** (`When` in the store):
 

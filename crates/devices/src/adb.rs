@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use ph_media::Frame;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeviceInfo {
     pub serial: String,
     /// `device`, `offline`, `unauthorized`…
@@ -16,6 +16,21 @@ pub struct DeviceInfo {
     /// The model for phones, the AVD name for emulators.
     pub name: String,
     pub emulator: bool,
+    /// What the device says of itself, once it has been asked.
+    pub about: Option<About>,
+}
+
+/// What a device says of itself.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct About {
+    /// The device's own serial number (`ro.serialno`): the same for one
+    /// phone on a cable and over the network, where adb's serial is its
+    /// address.
+    pub hardware: String,
+    /// Android's version as people say it: `13`.
+    pub android: String,
+    /// The API level: 33.
+    pub api: Option<u32>,
 }
 
 impl DeviceInfo {
@@ -26,6 +41,55 @@ impl DeviceInfo {
     /// The name for people: AVD ids use underscores for spaces.
     pub fn display_name(&self) -> String {
         self.name.replace('_', " ")
+    }
+
+    /// What tells this device from every other, however it is connected:
+    /// its own serial number when known. An emulator is told by adb's
+    /// serial (its port), as before.
+    pub fn identity(&self) -> &str {
+        match &self.about {
+            Some(about) if !self.emulator && !about.hardware.is_empty() => &about.hardware,
+            _ => &self.serial,
+        }
+    }
+
+    /// How the device is connected.
+    pub fn link(&self) -> Link {
+        if self.emulator {
+            Link::Emulator
+        } else if is_wireless(&self.serial) {
+            Link::Network
+        } else {
+            Link::Usb
+        }
+    }
+}
+
+/// How a device is connected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Link {
+    Usb,
+    Network,
+    Emulator,
+}
+
+/// A device adb found on the network (`adb mdns services`): a phone with
+/// Wireless debugging on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nearby {
+    /// The name the device announces: `adb-R5CT1234ABC-x7Yz`.
+    pub name: String,
+    /// Where it listens: `192.168.1.5:37123`.
+    pub address: String,
+    /// It waits to be paired (its pairing screen is open), not connected.
+    pub pairing: bool,
+}
+
+impl Nearby {
+    /// The device's own serial number, which the name it announces holds.
+    pub fn hardware(&self) -> &str {
+        let name = self.name.strip_prefix("adb-").unwrap_or(&self.name);
+        name.split('-').next().unwrap_or(name)
     }
 }
 
@@ -92,6 +156,8 @@ impl Adb {
     fn output(&self, serial: Option<&str>, args: &[&str]) -> Result<Output> {
         let limit = match args.first() {
             Some(&("install" | "push" | "pull")) => Duration::from_secs(10 * 60),
+            // A device that is not there is not waited on for a minute.
+            Some(&("connect" | "pair")) => Duration::from_secs(15),
             _ => Duration::from_secs(60),
         };
         let mut command = self.command(serial);
@@ -127,6 +193,29 @@ impl Adb {
         Ok(devices)
     }
 
+    /// What the device says of itself (one call).
+    pub fn about(&self, serial: &str) -> Option<About> {
+        let text = self
+            .shell(
+                serial,
+                "getprop ro.serialno; getprop ro.build.version.release; getprop ro.build.version.sdk",
+            )
+            .ok()?;
+        let mut lines = text.lines().map(str::trim);
+        Some(About {
+            hardware: lines.next()?.to_string(),
+            android: lines.next().unwrap_or_default().to_string(),
+            api: lines.next().and_then(|api| api.parse().ok()),
+        })
+    }
+
+    /// Phones with Wireless debugging on that adb sees on the network.
+    pub fn nearby(&self) -> Vec<Nearby> {
+        self.text(None, &["mdns", "services"])
+            .map(|text| parse_nearby(&text))
+            .unwrap_or_default()
+    }
+
     /// The device screen. Emulators send raw pixels (fast over localhost);
     /// USB devices send PNG (smaller over the cable).
     pub fn screencap(&self, serial: &str, raw: bool) -> Result<Frame> {
@@ -146,6 +235,32 @@ impl Adb {
             serial,
             &format!("uiautomator dump {path} >/dev/null && cat {path}"),
         )
+    }
+
+    /// The screen's size in device pixels, as it is used now (an override
+    /// wins over the panel's own).
+    pub fn screen_size(&self, serial: &str) -> Option<(i32, i32)> {
+        parse_screen_size(&self.shell(serial, "wm size").ok()?)
+    }
+
+    /// Where the status bar is (left, top, right, bottom in device pixels),
+    /// while it shows and the device says (Android 11 and later).
+    pub fn status_bar(&self, serial: &str) -> Option<(i32, i32, i32, i32)> {
+        let out = self
+            .shell(serial, "dumpsys window | grep -m 1 'type=statusBars'")
+            .ok()?;
+        parse_status_bar(&out)
+    }
+
+    /// The package of the app in front, if the device says.
+    pub fn front_app(&self, serial: &str) -> Option<String> {
+        let out = self
+            .shell(
+                serial,
+                "dumpsys activity activities | grep -E 'ResumedActivity|mFocusedApp' | head -n 3",
+            )
+            .ok()?;
+        parse_front_app(&out)
     }
 
     pub fn tap(&self, serial: &str, x: i32, y: i32) -> Result<()> {
@@ -246,6 +361,16 @@ impl Adb {
             .unwrap_or_default()
     }
 
+    /// The processes running on the device, by pid: `com.example.app`,
+    /// `com.example.app:sync`, `system_server`…
+    pub fn processes(&self, serial: &str) -> Vec<(u32, String)> {
+        // Android 8 and later list every process only with `-A`; before,
+        // `ps` alone did, and knew no `-A`.
+        self.shell(serial, "ps -A -o PID,NAME 2>/dev/null || ps")
+            .map(|out| parse_processes(&out))
+            .unwrap_or_default()
+    }
+
     pub fn launch(&self, serial: &str, package: &str) -> Result<()> {
         if !is_package_name(package) {
             bail!("`{package}` is not a package name");
@@ -260,13 +385,157 @@ impl Adb {
         Ok(())
     }
 
+    /// Starts `package` from its first screen: stopped first, and what its
+    /// task still showed (a screen of another app it had opened, which a
+    /// stop of this one leaves there) taken away. Waits until it is up.
+    pub fn launch_fresh(&self, serial: &str, package: &str) -> Result<()> {
+        if !is_package_name(package) {
+            bail!("`{package}` is not a package name");
+        }
+        let _ = self.shell(serial, &format!("am force-stop {package}"));
+        // `com.app/.MainActivity`, the last line of what the device answers.
+        let component = self
+            .shell(
+                serial,
+                &format!(
+                    "cmd package resolve-activity --brief -c android.intent.category.LAUNCHER {package}"
+                ),
+            )
+            .ok()
+            .and_then(|out| {
+                out.lines()
+                    .map(str::trim)
+                    .rfind(|line| line.starts_with(package) && line.contains('/'))
+                    .map(str::to_string)
+            });
+        let Some(component) = component else {
+            // An old device that does not say: started as it always was.
+            return self.launch(serial, package);
+        };
+        let output = self.shell(
+            serial,
+            &format!(
+                "am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER --activity-clear-task -n {component}"
+            ),
+        )?;
+        if output.contains("Error") {
+            bail!("{package} could not be started: {}", output.trim());
+        }
+        Ok(())
+    }
+
+    /// Removes the app `package` and its data from the device.
+    pub fn uninstall(&self, serial: &str, package: &str) -> Result<()> {
+        self.on_app(serial, package, &["uninstall", package], "Success")
+    }
+
+    /// Erases the app's data, as *Clear storage* in its settings does.
+    pub fn clear_data(&self, serial: &str, package: &str) -> Result<()> {
+        self.on_app(
+            serial,
+            package,
+            &["shell", "pm", "clear", package],
+            "Success",
+        )
+    }
+
+    pub fn force_stop(&self, serial: &str, package: &str) -> Result<()> {
+        self.on_app(serial, package, &["shell", "am", "force-stop", package], "")
+    }
+
+    /// Shows the app's page in the device's settings (its permissions,
+    /// storage, notifications).
+    pub fn app_info(&self, serial: &str, package: &str) -> Result<()> {
+        let uri = format!("package:{package}");
+        self.on_app(
+            serial,
+            package,
+            &[
+                "shell",
+                "am",
+                "start",
+                "-a",
+                "android.settings.APPLICATION_DETAILS_SETTINGS",
+                "-d",
+                &uri,
+            ],
+            "",
+        )
+    }
+
+    /// Grants the app every permission it asks for that can be granted
+    /// this way (those the user is otherwise asked about); how many.
+    pub fn grant_permissions(&self, serial: &str, package: &str) -> Result<usize> {
+        if !is_package_name(package) {
+            bail!("`{package}` is not a package name");
+        }
+        // What the app asks for, then each tried: one that is not a
+        // runtime permission is refused, which is no failure.
+        let granted = self.shell(
+            serial,
+            &format!(
+                "for p in $(dumpsys package {package} | sed -n '/requested permissions:/,/install permissions:/p' | grep -o '[A-Za-z0-9_.]*permission[A-Za-z0-9_.]*'); do pm grant {package} $p 2>/dev/null && echo granted; done"
+            ),
+        )?;
+        Ok(granted
+            .lines()
+            .filter(|line| line.trim() == "granted")
+            .count())
+    }
+
+    /// Opens `url` on the device, in the app `package` when one is given:
+    /// a deep link into it.
+    pub fn open_link(&self, serial: &str, url: &str, package: Option<&str>) -> Result<()> {
+        let mut command = format!(
+            "am start -a android.intent.action.VIEW -d {}",
+            shell_quote(url)
+        );
+        if let Some(package) = package {
+            if !is_package_name(package) {
+                bail!("`{package}` is not a package name");
+            }
+            command.push_str(&format!(" {package}"));
+        }
+        let said = self.shell(serial, &command)?;
+        // `am` exits 0 whatever happened.
+        if let Some(error) = said.lines().find(|line| line.starts_with("Error")) {
+            bail!("Nothing on the device opens that link ({})", error.trim());
+        }
+        Ok(())
+    }
+
+    /// Runs an adb command about the app `package`; `expect` is what it
+    /// prints when it worked (adb exits 0 either way).
+    fn on_app(&self, serial: &str, package: &str, args: &[&str], expect: &str) -> Result<()> {
+        if !is_package_name(package) {
+            bail!("`{package}` is not a package name");
+        }
+        let said = self.text(Some(serial), args)?;
+        if !said.contains(expect) {
+            bail!("{}", said.trim());
+        }
+        Ok(())
+    }
+
     /// Apps the user installed (not system apps), sorted.
     pub fn packages(&self, serial: &str) -> Result<Vec<String>> {
-        let mut packages: Vec<String> = self
-            .shell(serial, "pm list packages -3")?
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("package:").map(str::to_string))
-            .collect();
+        let listed = |command: &str| -> Result<Vec<String>> {
+            Ok(self
+                .shell(serial, command)?
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("package:").map(str::to_string))
+                .collect())
+        };
+        // Of the user in front. With no user named, a phone that has one
+        // the shell may not look into (Samsung's Secure Folder) refuses
+        // the whole list.
+        let mut packages = listed(
+            "pm list packages -3 --user $(am get-current-user 2>/dev/null || echo 0) 2>/dev/null",
+        )
+        .unwrap_or_default();
+        if packages.is_empty() {
+            packages = listed("pm list packages -3")?;
+        }
         packages.sort();
         Ok(packages)
     }
@@ -351,7 +620,44 @@ fn parse_devices(text: &str) -> Vec<DeviceInfo> {
                 serial,
                 state,
                 emulator,
+                about: None,
             })
+        })
+        .collect()
+}
+
+/// `adb mdns services`: a heading, then a service a line, its name, kind
+/// and address: `adb-R5CT1234ABC-x7Yz  _adb-tls-connect._tcp  192.168.1.5:37123`.
+fn parse_nearby(text: &str) -> Vec<Nearby> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let (name, kind, address) = (fields.next()?, fields.next()?, fields.next()?);
+            let pairing = kind.starts_with("_adb-tls-pairing");
+            (pairing || kind.starts_with("_adb-tls-connect")).then(|| Nearby {
+                name: name.to_string(),
+                address: address.to_string(),
+                pairing,
+            })
+        })
+        .collect()
+}
+
+/// `ps` output: a header naming the columns, then a process a line. The
+/// name is the last column, the pid the one under `PID`.
+fn parse_processes(output: &str) -> Vec<(u32, String)> {
+    let mut lines = output.lines();
+    let Some(pid_column) = lines
+        .next()
+        .and_then(|header| header.split_whitespace().position(|name| name == "PID"))
+    else {
+        return Vec::new();
+    };
+    lines
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let pid = fields.get(pid_column)?.parse().ok()?;
+            Some((pid, fields.last()?.to_string()))
         })
         .collect()
 }
@@ -445,6 +751,48 @@ fn output_within(mut command: Command, limit: Duration) -> std::io::Result<Outpu
 }
 
 /// `input text` takes no spaces (`%s` stands for one) and runs in a shell.
+/// `Physical size: 1080x2400` (and `Override size: 720x1600` after it, when
+/// set) → the size in use.
+fn parse_screen_size(out: &str) -> Option<(i32, i32)> {
+    out.lines()
+        .filter_map(|line| line.rsplit_once(':'))
+        .filter_map(|(_, size)| {
+            let (width, height) = size.trim().split_once('x')?;
+            Some((width.parse().ok()?, height.parse().ok()?))
+        })
+        .next_back()
+}
+
+/// `InsetsSource id=1cf90000 type=statusBars frame=[0,0][1080,63]
+/// visible=true …` → (0, 0, 1080, 63); `None` while it is hidden.
+fn parse_status_bar(out: &str) -> Option<(i32, i32, i32, i32)> {
+    if !out.contains("visible=true") {
+        return None;
+    }
+    let frame = out.split("frame=").nth(1)?.split_whitespace().next()?;
+    let numbers: Vec<i32> = frame
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse().ok())
+        .collect();
+    match numbers[..] {
+        [left, top, right, bottom] if right > left && bottom > top => {
+            Some((left, top, right, bottom))
+        }
+        _ => None,
+    }
+}
+
+/// `… ResumedActivity: ActivityRecord{1a2b u0 com.app/.MainActivity t12}` →
+/// `com.app`.
+fn parse_front_app(out: &str) -> Option<String> {
+    out.split_whitespace()
+        .filter_map(|word| word.split_once('/'))
+        .map(|(package, _)| package.trim_start_matches('{'))
+        .find(|package| is_package_name(package))
+        .map(str::to_string)
+}
+
 pub fn input_text_command(text: &str) -> String {
     format!("input text {}", shell_quote(&text.replace(' ', "%s")))
 }
@@ -488,6 +836,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_screen_size_in_use_and_the_app_in_front_are_read() {
+        assert_eq!(
+            parse_screen_size("Physical size: 1080x2400\n"),
+            Some((1080, 2400))
+        );
+        assert_eq!(
+            parse_screen_size("Physical size: 1080x2400\nOverride size: 720x1600\n"),
+            Some((720, 1600))
+        );
+        assert_eq!(parse_screen_size("error"), None);
+        assert_eq!(
+            parse_front_app(
+                "  mResumedActivity: ActivityRecord{1a2b u0 com.example.app/.MainActivity t12}"
+            )
+            .as_deref(),
+            Some("com.example.app")
+        );
+        assert_eq!(parse_front_app("nothing here"), None);
+        assert_eq!(
+            parse_status_bar(
+                "  InsetsSource id=1cf90000 type=statusBars frame=[0,0][1080,63] visible=true flags="
+            ),
+            Some((0, 0, 1080, 63))
+        );
+        assert_eq!(
+            parse_status_bar("InsetsSource type=statusBars frame=[0,0][1080,63] visible=false"),
+            None
+        );
+    }
+
+    #[test]
     fn parses_device_list() {
         let devices = parse_devices(
             "List of devices attached\nemulator-5554          device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64 transport_id:1\nR58M12ABC   unauthorized usb:1-1 transport_id:2\n\n",
@@ -496,6 +875,64 @@ mod tests {
         assert!(devices[0].emulator && devices[0].is_ready());
         assert_eq!(devices[0].name, "sdk gphone64 arm64");
         assert_eq!(devices[1].state, "unauthorized");
+    }
+
+    #[test]
+    fn reads_the_phones_adb_sees_on_the_network() {
+        let text = "List of discovered mdns services\nadb-R5CT1234ABC-x7Yz\t_adb-tls-connect._tcp\t192.168.1.5:37123\nadb-R5CT1234ABC-x7Yz\t_adb-tls-pairing._tcp\t192.168.1.5:41231\nother\t_adb._tcp\t192.168.1.9:5555\n";
+        let found = parse_nearby(text);
+        assert_eq!(found.len(), 2);
+        assert_eq!(
+            (found[0].address.as_str(), found[0].pairing),
+            ("192.168.1.5:37123", false)
+        );
+        assert!(found[1].pairing);
+        assert_eq!(found[0].hardware(), "R5CT1234ABC");
+        assert!(parse_nearby("List of discovered mdns services\n").is_empty());
+    }
+
+    #[test]
+    fn a_device_is_told_by_its_own_serial_number() {
+        let mut phone = DeviceInfo {
+            serial: "192.168.1.5:5555".into(),
+            state: "device".into(),
+            name: "Pixel 7".into(),
+            ..Default::default()
+        };
+        assert_eq!(phone.identity(), "192.168.1.5:5555", "not asked yet");
+        assert_eq!(phone.link(), Link::Network);
+        phone.about = Some(About {
+            hardware: "R5CT1234ABC".into(),
+            ..Default::default()
+        });
+        assert_eq!(phone.identity(), "R5CT1234ABC");
+        let emulator = DeviceInfo {
+            serial: "emulator-5554".into(),
+            emulator: true,
+            about: phone.about.clone(),
+            ..Default::default()
+        };
+        assert_eq!(emulator.identity(), "emulator-5554");
+        assert_eq!(emulator.link(), Link::Emulator);
+    }
+
+    #[test]
+    fn reads_the_processes_running() {
+        let new = "  PID NAME\n    1 init\n 4321 com.example.app\n 4400 com.example.app:sync\n";
+        assert_eq!(
+            parse_processes(new),
+            [
+                (1, "init".to_string()),
+                (4321, "com.example.app".to_string()),
+                (4400, "com.example.app:sync".to_string())
+            ]
+        );
+        let old = "USER     PID   PPID  VSIZE  RSS   WCHAN    PC  NAME\nroot      1     0     8904   788   ffffffff 00000000 S /init\nu0_a57    4321  218   1 2 ffffffff 00000000 S com.example.app\n";
+        assert_eq!(
+            parse_processes(old)[1],
+            (4321, "com.example.app".to_string())
+        );
+        assert!(parse_processes("").is_empty());
     }
 
     #[test]

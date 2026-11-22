@@ -140,13 +140,9 @@ impl FilesPanel {
                     })),
                 )
                 .when(
-                    target
-                        .absolute
-                        .extension()
-                        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
-                        .is_some_and(|extension| extension == "pptx" || extension == "potx"),
+                    crate::file_view::opens_as_slides(&target.absolute),
                     |menu| {
-                        menu.item(PopupMenuItem::new("Open in Studio Slides").on_click(run(
+                        menu.item(PopupMenuItem::new("Open as Slides").on_click(run(
                             |_, target, _, cx| {
                                 cx.emit(FilesPanelEvent::EditMedia(target.absolute.clone()))
                             },

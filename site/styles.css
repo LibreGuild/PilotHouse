@@ -479,6 +479,34 @@ main > section { position: relative; padding: clamp(72px, 13vh, 124px) var(--pad
 @keyframes boxed { 0%, 12% { box-shadow: none; } 22%, 90% { box-shadow: 0 0 0 2px var(--accent); } 100% { box-shadow: none; } }
 .mini-shot .draw { position: absolute; right: 10px; top: 22px; width: 62px; height: 2px; background: var(--accent); transform-origin: right center; transform: rotate(-28deg) scaleX(0); animation: draw 6s infinite; }
 .mini-shot .draw::after { content: ""; position: absolute; left: -1px; top: -4px; border: 5px solid transparent; border-right-color: var(--accent); border-left: 0; }
+/* Slides: the strip of slides (each in front in turn), the one shown with its chart, and what it is exported as. */
+.mini-deck { width: min(100%, 330px); display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 10px; }
+.mini-deck .strip { display: grid; gap: 6px; align-content: start; }
+.mini-deck .strip i { display: block; height: 28px; border-radius: 5px; border: 1.5px solid var(--line-2); background: rgba(255, 255, 255, 0.03); animation: deck-turn 9s infinite; }
+.mini-deck .strip i:nth-child(2) { animation-delay: 3s; } .mini-deck .strip i:nth-child(3) { animation-delay: 6s; }
+.mini-deck .stage { position: relative; display: grid; gap: 10px; align-content: start; min-height: 108px; padding: 12px; border: 1px solid var(--line-2); border-radius: 10px; background: linear-gradient(135deg, var(--accent-soft), rgba(255, 255, 255, 0.03)); }
+.mini-deck .chart, .mini-app .chart { display: flex; align-items: flex-end; gap: 6px; height: 44px; }
+.mini-deck .chart { width: 46%; }
+.mini-deck .chart i, .mini-app .chart i { flex: 1; border-radius: 3px 3px 0 0; background: var(--accent); opacity: 0.8; animation: bars 6s infinite; }
+.mini-deck .chart i:nth-child(1), .mini-app .chart i:nth-child(1) { --a: 25%; --b: 45%; } .mini-deck .chart i:nth-child(2), .mini-app .chart i:nth-child(2) { --a: 40%; --b: 60%; }
+.mini-deck .chart i:nth-child(3), .mini-app .chart i:nth-child(3) { --a: 35%; --b: 75%; } .mini-deck .chart i:nth-child(4), .mini-app .chart i:nth-child(4) { --a: 60%; --b: 85%; }
+.mini-deck .chart i:nth-child(5) { --a: 70%; --b: 100%; }
+.mini-deck .out { position: absolute; right: 9px; bottom: 9px; display: flex; gap: 5px; }
+@keyframes deck-turn { 0%, 30% { border-color: var(--accent); background: var(--accent-soft); } 34%, 100% { border-color: var(--line-2); background: rgba(255, 255, 255, 0.03); } }
+/* An artifact: a small app in a window of its own, in use by others. */
+.mini-app { position: relative; width: min(100%, 200px); border: 1px solid var(--line-2); border-radius: 10px; overflow: hidden; background: rgba(255, 255, 255, 0.03); }
+.mini-app .addr { display: block; padding: 7px 9px; border-bottom: 1px solid var(--line); }
+.mini-app .body { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: end; padding: 12px 10px 10px; }
+.mini-app .num { font: 600 18px/1 var(--sans); }
+.mini-app .live { position: absolute; top: 5px; right: 6px; display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--green) 20%, transparent); color: var(--green); font-size: 10px; font-weight: 600; }
+.mini-app .live i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: live 2.4s infinite; }
+@keyframes live { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+/* Utilities: the tools by name, one in use after another. */
+.mini-tools { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; max-width: 190px; }
+.mini-tools span { padding: 3px 9px; border-radius: 7px; background: var(--fill); font: 600 10.5px var(--mono); animation: tool 9s infinite; }
+.mini-tools span:nth-child(2) { animation-delay: 1.5s; } .mini-tools span:nth-child(3) { animation-delay: 3s; } .mini-tools span:nth-child(4) { animation-delay: 4.5s; }
+.mini-tools span:nth-child(5) { animation-delay: 6s; } .mini-tools span:nth-child(6) { animation-delay: 7.5s; }
+@keyframes tool { 0%, 14% { background: var(--accent); color: var(--accent-ink); } 18%, 100% { background: var(--fill); color: inherit; } }
 @keyframes draw { 0%, 16% { transform: rotate(-28deg) scaleX(0); } 28%, 90% { transform: rotate(-28deg) scaleX(1); } 100% { transform: rotate(-28deg) scaleX(0); } }
 
 /* Make it yours: the page takes the colour. */
@@ -590,13 +618,9 @@ em.add { color: var(--green); } em.del { color: var(--red); }
 /* The app's window: the column of icons, the chat, the result pane. */
 .app { display: grid; grid-template-columns: 66px minmax(0, 1fr) minmax(0, 1.15fr); min-height: 380px; }
 .rail { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 4px; background: rgba(255, 255, 255, 0.03); border-right: 1px solid var(--line); }
-.rail hr { width: 22px; border: none; border-top: 1px solid var(--line-2); margin: 4px 0; }
 .r { position: relative; display: grid; justify-items: center; gap: 3px; width: 56px; padding: 6px 0; border-radius: 8px; font-size: 9.5px; color: var(--muted); }
 .r .ico { font-size: 16px; }
 .r.on { background: var(--fill); color: var(--ink); }
-.badge { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; font-size: 11px; font-weight: 650; }
-.badge.b1 { background: rgba(240, 111, 168, 0.3); outline: 1.5px solid #f06fa8; }
-.badge.b2 { background: rgba(142, 203, 255, 0.26); }
 .count { position: absolute; top: 2px; right: 6px; min-width: 15px; padding: 0 3px; border-radius: 999px; background: var(--amber); color: #2a1a00; font-size: 9px; font-weight: 700; text-align: center; }
 .chat { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--line); }
 .tabs { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); overflow: hidden; }
@@ -707,6 +731,9 @@ em.add { color: var(--green); } em.del { color: var(--red); }
   .mini-findings .tick.a, .mini-findings .tick.b { background: var(--accent); border-color: var(--accent); }
   .mini-shot .draw { transform: rotate(-28deg); }
   .mini-night li { opacity: 1; }
+  .mini-deck .strip i:first-child { border-color: var(--accent); background: var(--accent-soft); }
+  .mini-tools span:nth-child(2) { background: var(--accent); color: var(--accent-ink); }
+  .mini-deck .chart i, .mini-app .chart i { height: var(--b); }
 }
 @media (max-width: 1000px) {
   main > section { padding-block: 84px; }

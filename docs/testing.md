@@ -15,7 +15,11 @@ Some tests touch the real machine: `ph-changes` runs `git` in a temp repo, `ph-a
 
 Use `gpui_kit::test::TestWindowExt` (`click`, `press`, `input`, `find`) and `TestQueryExt` (`find_by_label`). Open the production `Workspace` on `Store::open_in_memory()`. Assert on the outcome the user cares about: state, what is saved, what is visible. Check [the gpui-kit testing guide](https://gpui-kit.com/docs/test).
 
+A kit control (a button, a tab) is found by its id as it is. A row made of a plain `div` with an id and `on_click` is found, by a test and by `ui.click`, only when it also calls `.test_support()` (`gpui_kit::TestSupportExt`); without it the test says the id is missing though the row is drawn.
+
 ## Driving the running app
+
+A start on a profile that has not seen the [welcome tour](features/tour.md) opens it over the window, where nothing else can be clicked until its last card. `PILOTHOUSE_NO_TOUR=1` starts without it.
 
 `cargo dev` builds with the `automation` feature. The app then answers `ui.*` methods on its [control socket](control-socket.md). Input is injected straight into GPUI, so your real mouse and keyboard are never touched, and the window can stay in the background.
 
@@ -33,6 +37,19 @@ pilothouse ctl app.state                            # projects, active tab, sess
 ```
 
 Screenshots render the window offscreen (`Window::render_to_image`), so they need no screen-recording permission. Release builds do not include the `ui.*` methods.
+
+### A deck's window
+
+A deck of [slides](features/slides.md) is a web page in the system's web view, which the app's own screenshots and injected input do not reach. Three more methods (development builds only) do:
+
+```sh
+pilothouse ctl deck.screen '{"project_id":10}'                       # a picture of the page, as the window shows it
+pilothouse ctl deck.script '{"project_id":10,"script":"window.deckEditor.store.go(2)"}'
+pilothouse ctl deck.keys   '{"project_id":10,"take":true}'           # gives the page the keyboard; answers who has it
+pilothouse ctl deck.keys   '{"project_id":10,"press":"t","code":17}' # a key, pressed as the system presses it (macOS)
+```
+
+`project_id` is the deck's chat space (`app.state`). `deck.keys` with `press` posts a real key event to the app, so it goes through the window's key equivalents and the menus to whatever has the keyboard, as a person's key does: this is how to check that a key typed in the chat does not act on the deck, and the other way round. It needs the window in front (`"front": true` puts it there). The page exposes `window.deckEditor` (`state`, `store`, `editing`, `view`, `comments`, `checks`) for scripts. With `PILOTHOUSE_SLIDES_PAGE=crates/slides/src/page` a debug build reads the page's files from that folder, so a change to them shows on reload.
 
 ## The explanation prompt
 

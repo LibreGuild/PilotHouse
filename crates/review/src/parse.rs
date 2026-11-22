@@ -38,6 +38,8 @@ pub struct ReportedFinding {
     pub line: Option<u64>,
     pub end_line: Option<u64>,
     pub title: String,
+    /// The finding's text: what happens, why it matters and an example
+    /// under their labels (see [`crate::writing`]), or free text.
     pub details: String,
     pub evidence: String,
     pub suggestion: String,
@@ -140,6 +142,24 @@ fn finding(value: &Value) -> Option<ReportedFinding> {
             .find_map(|key| value.get(*key).and_then(Value::as_str))
             .unwrap_or_default()
             .to_string();
+    }
+    // The three parts a finding is written in, under their labels; an
+    // agent that also wrote free `details` has them after it.
+    let part = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| value.get(*key).and_then(Value::as_str))
+            .unwrap_or_default()
+    };
+    let parts = crate::writing::compose(
+        part(&["what", "what_happens", "problem"]),
+        part(&["why", "why_it_matters"]),
+        part(&["example", "when", "scenario"]),
+    );
+    if !parts.is_empty() {
+        finding.details = match finding.details.trim() {
+            "" => parts,
+            free => format!("{free}\n\n{parts}"),
+        };
     }
     // The severity is read from what goes wrong and how often, when given.
     finding.severity = match (
@@ -341,6 +361,21 @@ mod tests {
         let report = parse(reply).unwrap();
         assert_eq!(report.findings.len(), 1);
         assert!(report.findings[0].suggestion.contains("```rust"));
+    }
+
+    #[test]
+    fn reads_a_finding_written_in_parts() {
+        let reply = r#"```json pilothouse-review
+{"summary": "s", "findings": [
+  {"path": "a.rs", "line": 3, "title": "A shopper cannot check out", "impact": "crash", "likelihood": "specific",
+   "what": "`restore` fails on an old cart.", "why": "The order is refused.", "example": "A cart saved in March."}
+]}
+```"#;
+        let report = parse(reply).unwrap();
+        let parts = crate::writing::sections(&report.findings[0].details);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[2].label, Some(crate::writing::EXAMPLE));
+        assert_eq!(parts[2].text, "A cart saved in March.");
     }
 
     #[test]

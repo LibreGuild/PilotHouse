@@ -33,7 +33,7 @@ impl Repo {
         })
     }
 
-    fn path(&self, rest: &str) -> String {
+    pub(crate) fn path(&self, rest: &str) -> String {
         format!("repos/{}/{}/{rest}", self.owner, self.name)
     }
 }
@@ -148,6 +148,15 @@ pub fn checks(client: &Client, repo: &Repo, sha: &str) -> Result<Vec<Check>> {
             },
             name: run.name,
             url: run.html_url,
+            id: Some(run.id).filter(|id| *id > 0),
+            summary: [run.output.title, run.output.summary]
+                .into_iter()
+                .flatten()
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            actions: run.app.slug == "github-actions",
         })
         .collect();
     checks.extend(statuses.statuses.into_iter().map(|status| Check {
@@ -157,6 +166,7 @@ pub fn checks(client: &Client, repo: &Repo, sha: &str) -> Result<Vec<Check>> {
             other => other.into(),
         },
         url: status.target_url.unwrap_or_default(),
+        ..Check::default()
     }));
     Ok(checks)
 }
@@ -285,31 +295,6 @@ pub fn resolve_thread(client: &Client, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Opens an issue; `labels` are added when the repository has them (a
-/// label GitHub refuses is left off).
-pub fn create_issue(
-    client: &Client,
-    repo: &Repo,
-    title: &str,
-    body: &str,
-    labels: &[&str],
-) -> Result<Issue> {
-    let path = repo.path("issues");
-    if !labels.is_empty()
-        && let Ok(issue) = client.post::<Issue>(
-            &path,
-            &json!({ "title": title, "body": body, "labels": labels }),
-        )
-    {
-        return Ok(issue);
-    }
-    client.post(&path, &json!({ "title": title, "body": body }))
-}
-
-pub fn issue(client: &Client, repo: &Repo, number: u64) -> Result<Issue> {
-    client.get(&repo.path(&format!("issues/{number}")))
-}
-
 /// A file of branch `branch`: its text and blob sha; `None` when missing.
 pub fn file_at(
     client: &Client,
@@ -375,6 +360,119 @@ pub fn branch_head(client: &Client, repo: &Repo, name: &str) -> Result<String> {
         .as_str()
         .map(str::to_string)
         .ok_or_else(|| anyhow::anyhow!("branch {name} not found"))
+}
+
+/// What a failed check says: the places it points at, and for a GitHub
+/// Actions job the part of its log around the first error.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CheckDetail {
+    pub annotations: Vec<Annotation>,
+    pub log: String,
+}
+
+/// Reads [`CheckDetail`] of check run `check` (whatever can be read: a
+/// check by another app has no log here).
+pub fn check_detail(client: &Client, repo: &Repo, check: &Check) -> Result<CheckDetail> {
+    let Some(id) = check.id else {
+        bail!("{} reports only a link", check.name);
+    };
+    let annotations: Vec<Annotation> = client
+        .get(&repo.path(&format!("check-runs/{id}/annotations?per_page=50")))
+        .unwrap_or_default();
+    let log = if check.actions {
+        client
+            .download_text(&repo.path(&format!("actions/jobs/{id}/logs")), LOG_LIMIT)
+            .map(|log| log_excerpt(&log))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    Ok(CheckDetail {
+        // The noise first out: a notice says nothing about the failure.
+        annotations: annotations
+            .into_iter()
+            .filter(|note| note.annotation_level != "notice")
+            .collect(),
+        log,
+    })
+}
+
+/// Most of a job's log read.
+const LOG_LIMIT: u64 = 24 * 1024 * 1024;
+/// Lines of a log shown.
+const LOG_LINES: usize = 60;
+
+/// The part of a job's log worth reading: around its first error (GitHub
+/// Actions marks it `##[error]`), else its end. Timestamps are dropped.
+pub fn log_excerpt(log: &str) -> String {
+    let lines: Vec<&str> = log
+        .lines()
+        .map(|line| {
+            // `2026-11-18T10:00:00.1234567Z text`
+            match line.split_once(' ') {
+                Some((stamp, rest))
+                    if stamp.len() >= 20 && stamp.ends_with('Z') && stamp.contains('T') =>
+                {
+                    rest
+                }
+                _ => line,
+            }
+        })
+        .collect();
+    let first_error = lines.iter().position(|line| line.contains("##[error]"));
+    let (start, end) = match first_error {
+        Some(at) => (
+            at.saturating_sub(LOG_LINES - 12),
+            (at + 12).min(lines.len()),
+        ),
+        None => (lines.len().saturating_sub(LOG_LINES), lines.len()),
+    };
+    lines[start..end]
+        .iter()
+        // Folding marks say nothing here.
+        .filter(|line| !line.starts_with("##[group]") && !line.starts_with("##[endgroup]"))
+        .map(|line| line.replace("##[error]", "error: "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Runs check run `check` again: the job for GitHub Actions, else a
+/// request to the app that made it.
+pub fn rerun_check(client: &Client, repo: &Repo, check: &Check) -> Result<()> {
+    let Some(id) = check.id else {
+        bail!("{} cannot be run again from here", check.name);
+    };
+    if check.actions {
+        return client.act("POST", &repo.path(&format!("actions/jobs/{id}/rerun")));
+    }
+    client.act("POST", &repo.path(&format!("check-runs/{id}/rerequest")))
+}
+
+/// What changed between commits `base` and `head` (three dots: since their
+/// common ancestor), as a pull request's files are listed.
+pub fn compare(client: &Client, repo: &Repo, base: &str, head: &str) -> Result<Vec<PullFile>> {
+    let hex = |sha: &str| !sha.is_empty() && sha.chars().all(|c| c.is_ascii_hexdigit());
+    if !hex(base) || !hex(head) {
+        bail!("not commit ids: {base}, {head}");
+    }
+    #[derive(serde::Deserialize, Default)]
+    #[serde(default)]
+    struct Compared {
+        files: Vec<PullFile>,
+    }
+    let compared: Compared = client.get(&repo.path(&format!("compare/{base}...{head}")))?;
+    Ok(compared.files)
+}
+
+/// Brings pull request `number`'s branch up to date with its base (a merge
+/// of the base into it), if its head is still `sha`.
+pub fn update_branch(client: &Client, repo: &Repo, number: u64, sha: &str) -> Result<()> {
+    client
+        .put::<Value>(
+            &repo.path(&format!("pulls/{number}/update-branch")),
+            &json!({ "expected_head_sha": sha }),
+        )
+        .map(|_| ())
 }
 
 /// Merges pull request `number` if its head is still `sha`, the commit the

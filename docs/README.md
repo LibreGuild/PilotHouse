@@ -19,14 +19,16 @@ Short, practical notes on how PilotHouse is built. Start with **architecture**, 
 | [features/chat.md](features/chat.md) | Agent chat over ACP, permissions, the approval inbox, mentions |
 | [features/files.md](features/files.md) | File tree, editor, ⌘P finder, project search |
 | [features/previews.md](features/previews.md) | Viewers: rich Markdown and Mermaid, images, data trees, tables, notebooks, audio, video, PDF, databases, archives, fonts |
-| [features/pulls.md](features/pulls.md) | GitHub PRs, accounts, agent reviews with findings and re-review |
+| [features/pulls.md](features/pulls.md) | GitHub PRs and issues, accounts, agent reviews with findings and re-review, finishing a review |
 | [features/tests.md](features/tests.md) | UI tests: recorded from an agent's browser or device actions, replayed without AI, repaired by an agent |
 | [features/schedules.md](features/schedules.md) | Agent prompts and UI test runs at set times or on events (files, commits, pull requests, checks, chains) |
 | [features/inbox.md](features/inbox.md) | The title-bar inbox (approvals, reminders, finished runs) and to-dos |
 | [features/studio.md](features/studio.md) | Studio: edit a picture or a video by hand or with an agent (crop, mark up, hide, resize, frame, compress; cut, speed up, step frames, export MP4 or GIF) |
-| [features/slides.md](features/slides.md) | Slides in Studio: presentations by hand or with an agent (themes, layouts, shapes, tables, charts, icons, code, SVG; point and edit; present; export PPTX, PDF, PNG) |
+| [features/tour.md](features/tour.md) | The welcome tour: a few cards that say what the app has, shown once after an install and after an update that added some |
+| [features/slides.md](features/slides.md) | Slides: decks made beside a chat, as web pages in the system's web view (the agent edits files; edit by hand; comments; present; share; export PDF, web page, PNG, PowerPoint; start from a `.pptx`) |
+| [features/artifacts.md](features/artifacts.md) | Artifacts: web pages agents make, kept in a folder of yours and served from this computer; the list, versions, what a page stores, sharing on your network and using one together, live |
 | [features/themes.md](features/themes.md) | Eight themes, and designing your own with an agent, shown live as it changes |
-| [features/utilities.md](features/utilities.md) | Offline utilities: formats, encodings, hashes, ids, times, regex, diff, SQLite |
+| [features/utilities.md](features/utilities.md) | Offline utilities, each in a view of its own: formats, encodings, tokens, certificates, hashes, ids, times, regex, diff, colors, SQLite |
 | [features/changes.md](features/changes.md) | Git: branch picker, commit, history graph, stashes, conflicts, blame, review per hunk |
 | [features/explanations.md](features/explanations.md) | Explain: a change told in plain words before it is committed, kept with its commit, *Why Is This Here?* for a line, sharing one as a file |
 | [features/terminal.md](features/terminal.md) | Embedded terminals |

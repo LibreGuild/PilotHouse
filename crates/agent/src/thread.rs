@@ -271,6 +271,9 @@ pub struct ChatThread {
     /// They do in every turn (a chat beside a Studio picture, where
     /// changing it is what the chat is for).
     app_tools_always: bool,
+    /// A folder whose files this chat's agent changes without asking (a
+    /// deck's own).
+    own_files: Option<std::path::PathBuf>,
     /// Stored message ids of user entries, by entry index, so a checkpoint
     /// taken after the message was saved can be added to it.
     user_message_ids: HashMap<usize, i64>,
@@ -358,6 +361,7 @@ impl ChatThread {
             reads_this_turn: false,
             app_tools_this_turn: false,
             app_tools_always: false,
+            own_files: None,
             user_message_ids: HashMap::new(),
             restoring: false,
             note_for_agent: None,
@@ -608,6 +612,12 @@ impl ChatThread {
     /// Lets every turn use PilotHouse's app tools without asking.
     pub fn trust_app_tools(&mut self) {
         self.app_tools_always = true;
+    }
+
+    /// Lets every turn change the files in `folder` without asking (a
+    /// deck's own, in the chat beside it).
+    pub fn trust_own_files(&mut self, folder: std::path::PathBuf) {
+        self.own_files = Some(folder);
     }
 
     /// Forwards a review card's requests (open a file, review again).
@@ -1987,7 +1997,10 @@ impl ChatThread {
             || self.reads_this_turn
             || self.project.read_only;
         let app_tools = self.app_tools_this_turn || self.app_tools_always;
-        if reads_only || app_tools {
+        // The files of the decks made from this workspace: its chats work
+        // on those as a deck's own chat does.
+        let decks: Vec<std::path::PathBuf> = crate::own_files::of(self.project.id, cx).to_vec();
+        if reads_only || app_tools || self.own_files.is_some() || !decks.is_empty() {
             let known =
                 self.tool_index(&request.tool_call.tool_call_id.0)
                     .and_then(|ix| match &self.entries[ix] {
@@ -2025,7 +2038,26 @@ impl ChatThread {
                 && ((reads_only
                     && crate::review_policy::allows(kind, raw_input.as_ref(), &self.project.path))
                     || (app_tools
-                        && crate::review_policy::is_app_tool(kind, &title, raw_input.as_ref())))
+                        && crate::review_policy::is_app_tool(kind, &title, raw_input.as_ref()))
+                    || self.own_files.as_ref().is_some_and(|folder| {
+                        crate::review_policy::changes_within(
+                            kind,
+                            raw_input.as_ref(),
+                            folder,
+                            &self.project.path,
+                        )
+                    })
+                    || (!decks.is_empty()
+                        && !self.project.read_only
+                        && (crate::review_policy::is_deck_tool(kind, &title, raw_input.as_ref())
+                            || decks.iter().any(|folder| {
+                                crate::review_policy::changes_within(
+                                    kind,
+                                    raw_input.as_ref(),
+                                    folder,
+                                    &self.project.path,
+                                )
+                            }))))
             {
                 respond(Some(allow.option_id.0.to_string()), cx);
                 return;

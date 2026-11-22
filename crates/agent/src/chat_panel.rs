@@ -147,6 +147,10 @@ pub struct ChatContext {
     pub instructions: Option<Instructions>,
     /// PilotHouse's app tools run without asking in this chat.
     pub app_tools: bool,
+    /// A folder whose files the agent changes without asking in this chat:
+    /// a deck's own files, where each change shows beside the chat at once
+    /// and can be undone there.
+    pub own_files: Option<std::path::PathBuf>,
 }
 
 /// Makes a chat's instructions when a message is sent.
@@ -765,12 +769,6 @@ impl ChatPanel {
         self.terminal_session.is_none()
     }
 
-    /// What the chat in view did to check its work (tests, commands,
-    /// screenshots), read off its tool calls.
-    pub fn evidence(&self, cx: &App) -> crate::evidence::Evidence {
-        crate::evidence::of(self.active.read(cx).entries())
-    }
-
     pub fn active_session_id(&self, cx: &App) -> Option<SessionId> {
         if let Some(shown) = &self.terminal_session {
             return Some(shown.session.id);
@@ -1049,6 +1047,25 @@ impl ChatPanel {
             .update(cx, |composer, cx| composer.set_value(prompt, window, cx));
         self.next_title = title;
         self.send(window, cx);
+    }
+
+    /// Sends `prompt` like [`Self::send_text`], leaving what the user is
+    /// writing in the message box as it is: for what comes from beside the
+    /// chat (a comment on a slide) while a message is being written.
+    pub fn send_aside(
+        &mut self,
+        prompt: String,
+        title: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let draft = self.composer.read(cx).value().to_string();
+        self.send_text(prompt, title, window, cx);
+        // Sent (or waiting its turn): the box is the user's again.
+        if !draft.trim().is_empty() && self.composer.read(cx).value().trim().is_empty() {
+            self.composer
+                .update(cx, |composer, cx| composer.set_value(draft, window, cx));
+        }
     }
 
     /// The workspace's open pull requests, for `@pr:` mentions.
@@ -1450,6 +1467,14 @@ impl ChatPanel {
             .is_some_and(|context| context.app_tools)
         {
             self.active.update(cx, |thread, _| thread.trust_app_tools());
+        }
+        if let Some(folder) = self
+            .context
+            .as_ref()
+            .and_then(|context| context.own_files.clone())
+        {
+            self.active
+                .update(cx, |thread, _| thread.trust_own_files(folder));
         }
         if !text.is_empty() {
             blocks.push(agent_client_protocol_schema::v1::ContentBlock::Text(

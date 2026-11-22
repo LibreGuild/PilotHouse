@@ -14,7 +14,7 @@
 mod actions;
 mod agent_updates;
 mod app_state;
-mod arch_map;
+mod artifacts;
 mod attention;
 mod bridge;
 mod browser_inbox;
@@ -31,9 +31,9 @@ mod housekeeping;
 mod inbox;
 mod instructions_view;
 mod network_drives;
+mod no_workspaces;
 mod open;
 mod parallel;
-mod presentations;
 mod quick_chat;
 mod rail;
 mod rename_dialog;
@@ -45,6 +45,7 @@ mod shell_integration;
 mod shortcuts;
 mod sidebar;
 mod signals;
+mod slides_window;
 mod status;
 mod status_bar;
 mod storage;
@@ -54,12 +55,13 @@ mod tasks;
 mod terminal_agents;
 pub mod theme_mods;
 mod title_bar;
+pub mod tour;
 mod updates;
 mod usage_view;
-mod utilities;
 mod windows;
 mod workspace;
 mod workspace_screen;
+mod workspace_switcher;
 
 pub use actions::*;
 pub use app_state::AppState;
@@ -71,18 +73,6 @@ pub use quick_chat::toggle as toggle_quick_chat;
 
 /// Opens `path` (a picture or video) in Studio without a chat (testing).
 pub fn open_in_studio(path: std::path::PathBuf, cx: &mut gpui_kit::App) -> anyhow::Result<()> {
-    if ph_studio::slides::space::is_powerpoint(&path) {
-        let window = cx
-            .windows()
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("no window to open it from"))?;
-        return window
-            .update(cx, |_, window, cx| {
-                presentations::open_powerpoint(path, window, cx)
-            })
-            .map_err(|err| anyhow::anyhow!("{err}"));
-    }
     studio_window::open(path, None, cx)
 }
 pub use windows::{open_window, window_options};
@@ -127,6 +117,7 @@ pub fn init(cx: &mut App) {
     ph_terminal::TerminalHub::keep_between_runs(ph_store::paths::data_dir().join("terminals"), cx);
     quick_chat::init(cx);
     browser_inbox::install(cx);
+    artifacts::install(cx);
     // The organisation's own additions (crates/custom): last, so they can
     // use all of the above. PilotHouse's own does nothing.
     let context = ph_custom::CustomContext {
