@@ -9,7 +9,7 @@
 // (`position: absolute`), as on a slide in any presentation program.
 
 import { carried, chartSpec, dress, elementFrom, linkOf } from "./core.js";
-import { h, button, menu, popover, dialog, toast, colourPicker, hex, closeFloats, icon, keys as keyHint } from "./ui.js";
+import { h, button, menu, popover, dialog, toast, colourPicker, hex, closeFloats, icon, keys as keyHint } from "/_artifact/kit/ui.js";
 import * as store from "./store.js";
 import { state, emit } from "./store.js";
 

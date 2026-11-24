@@ -259,3 +259,118 @@ fn a_finished_review_goes_out_once_with_what_was_picked() {
     // GitHub wants words with a request for changes.
     assert!(sent["body"].as_str().unwrap().contains("2 comments"));
 }
+
+/// A review that found nothing is still said to the author: the summary
+/// comment alone (reviewed, looks good, nothing open), with no review made
+/// of it and nothing put on the code. So it is on one's own pull request,
+/// where GitHub takes no verdict.
+#[test]
+fn a_review_that_found_nothing_posts_its_summary_alone() {
+    let server = MockServer::start(vec![(
+        "POST",
+        "/repos/o/r/issues/7/comments",
+        200,
+        r#"{"id": 700, "body": "summary"}"#,
+    )]);
+    let client = Client::new(&server.base, "test-token");
+    let repo = Repo::new("o", "r").unwrap();
+    let target = Target {
+        client: &client,
+        repo: &repo,
+        number: 7,
+        head: "abc123",
+    };
+    let summary = |findings: &[Finding]| {
+        comment::render(&Summary {
+            round: 1,
+            sha: "abc123",
+            verdict: ph_review::severity::verdict(findings),
+            summary: "The change does what it says.",
+            reviewer: "me",
+            agents: "Codex",
+            repo_url: "https://github.com/o/r",
+            number: 7,
+            findings,
+        })
+    };
+    let nothing: [String; 0] = [];
+    let plan = post::Plan {
+        picked: Some(&nothing),
+        summary: true,
+        ..post::Plan::default()
+    };
+    let published = post::publish(&target, &[], &[], &plan, &summary, None).unwrap();
+    assert_eq!(published.summary_comment, Some(700));
+    assert!(published.on_code.is_empty() && published.off_code.is_empty());
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "one comment, no review");
+    let body = &requests[0].body;
+    assert!(body.contains("Looks good"), "{body}");
+    assert!(body.contains("nothing open"), "{body}");
+    assert!(body.contains("The change does what it says."), "{body}");
+    assert!(body.contains("Codex"), "{body}");
+}
+
+/// After a review that found nothing to send was posted, a later post
+/// brings its summary up to date without the findings that were held back
+/// (one the agent could not place, one not picked): the summary lists what
+/// was sent. Only a summary written before findings could be held back
+/// (of every finding, none marked as sent) goes on listing them all.
+#[test]
+fn a_summary_of_what_was_sent_never_takes_in_what_was_held_back() {
+    let server = MockServer::start(vec![(
+        "PATCH",
+        "/repos/o/r/issues/comments/700",
+        200,
+        r#"{"id": 700, "body": "summary"}"#,
+    )]);
+    let client = Client::new(&server.base, "test-token");
+    let repo = Repo::new("o", "r").unwrap();
+    let target = Target {
+        client: &client,
+        repo: &repo,
+        number: 7,
+        head: "abc123",
+    };
+    let summary = |findings: &[Finding]| {
+        comment::render(&Summary {
+            round: 1,
+            sha: "abc123",
+            verdict: ph_review::severity::verdict(findings),
+            summary: "Read.",
+            reviewer: "me",
+            agents: "Codex",
+            repo_url: "https://github.com/o/r",
+            number: 7,
+            findings,
+        })
+    };
+    // Open, but not placed in the code: it cannot be sent, and was not.
+    let held = Finding {
+        verified: false,
+        ..finding("F1", 11, "open")
+    };
+    let nothing: [String; 0] = [];
+    let plan = post::Plan {
+        picked: Some(&nothing),
+        summary: true,
+        sent_only: true,
+        ..post::Plan::default()
+    };
+    let findings = [held];
+    let published = post::publish(&target, &findings, &[], &plan, &summary, Some(700)).unwrap();
+    assert_eq!(published.summary_comment, Some(700));
+    let body = server.requests()[0].body.clone();
+    assert!(!body.contains("Problem F1"), "{body}");
+    assert!(body.contains("Looks good"), "{body}");
+
+    // The summary of an older version, of all there was.
+    let plan = post::Plan {
+        sent_only: false,
+        ..plan
+    };
+    post::publish(&target, &findings, &[], &plan, &summary, Some(700)).unwrap();
+    let body = server.requests()[1].body.clone();
+    assert!(body.contains("Problem F1"), "{body}");
+}

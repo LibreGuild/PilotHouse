@@ -245,6 +245,21 @@ fn groups(workspace: &Workspace, cx: &App) -> Vec<(&'static str, Vec<Entry>)> {
         ],
     ));
     general.push(Entry::action(
+        "New whiteboard",
+        Icons::StickyNote,
+        NewWhiteboard,
+        &[
+            "board",
+            "canvas",
+            "sticky",
+            "notes",
+            "diagram",
+            "flowchart",
+            "brainstorm",
+            "artifact",
+        ],
+    ));
+    general.push(Entry::action(
         "Search chats",
         IconName::Search,
         SearchChats,

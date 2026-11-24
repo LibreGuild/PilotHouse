@@ -51,6 +51,10 @@ pilothouse ctl deck.keys   '{"project_id":10,"press":"t","code":17}' # a key, pr
 
 `project_id` is the deck's chat space (`app.state`). `deck.keys` with `press` posts a real key event to the app, so it goes through the window's key equivalents and the menus to whatever has the keyboard, as a person's key does: this is how to check that a key typed in the chat does not act on the deck, and the other way round. It needs the window in front (`"front": true` puts it there). The page exposes `window.deckEditor` (`state`, `store`, `editing`, `view`, `comments`, `checks`) for scripts. With `PILOTHOUSE_SLIDES_PAGE=crates/slides/src/page` a debug build reads the page's files from that folder, so a change to them shows on reload.
 
+### A board's window
+
+A [whiteboard](features/whiteboard.md) is shown the same way, and has the same three methods: `board.screen`, `board.script` and `board.keys` (with `take`, `press`, `code`, `front` as above). They act on the board whose window is open; `"id"` (the artifact's id) names one when several are. `ui.window '{"index":1}'` points the `ui.*` methods at the board's window, for its chat and the app's dialogs over the board.
+
 ## The explanation prompt
 
 What an agent is asked when it explains a change (`crates/review/src/explanation/prompt.rs`, see [explanations](features/explanations.md)) is tried on real agents and real changes, without the app:

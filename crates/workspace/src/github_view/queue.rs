@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use gpui_kit::TestSupportExt as _;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -790,7 +791,7 @@ impl GithubView {
                     .id("github-inbox-list")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .p_2()
                     .gap_3()
                     .when(empty, |this| {

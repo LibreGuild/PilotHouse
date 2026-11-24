@@ -928,11 +928,13 @@ pub(crate) struct Launch<'a> {
 
 /// The command that starts an agent's CLI: its program, the session to go
 /// on with, the model and mode asked for, and `more` (hooks, PilotHouse's
-/// own tools), each already written as the shell takes it.
+/// own tools), each already written as the shell that reads it (`quoting`)
+/// takes it.
 fn command(
     start: &Launch,
     profile: &ph_agent::profiles::Profile,
     more: &[String],
+    quoting: Quoting,
 ) -> anyhow::Result<String> {
     let name = |id: &str| {
         ph_agent::agents::find(id).map_or_else(|| id.to_string(), |agent| agent.name.to_string())
@@ -967,7 +969,7 @@ fn command(
         {
             value.to_string()
         } else {
-            quoted(Path::new(value))
+            quoted(Path::new(value), quoting)
         }
     };
     let mut words = vec![program.to_string()];
@@ -1031,7 +1033,7 @@ fn command(
         if plain {
             argument.clone()
         } else {
-            quoted(Path::new(argument))
+            quoted(Path::new(argument), quoting)
         }
     }));
     words.extend(more.iter().cloned());
@@ -1041,8 +1043,15 @@ fn command(
 /// PilotHouse's own tools (the browser, devices, tests) for an agent's CLI,
 /// as the flags it takes MCP servers by: a chat gets them when its session
 /// is set up, and a session's CLI form must not have less. `file` is where
-/// a CLI that reads its servers from a file finds them.
-fn own_tools(agent_id: &str, cwd: &Path, project: ProjectId, file: &Path) -> Vec<String> {
+/// a CLI that reads its servers from a file finds them; `quoting` is the
+/// shell's that reads the flags.
+fn own_tools(
+    agent_id: &str,
+    cwd: &Path,
+    project: ProjectId,
+    file: &Path,
+    quoting: Quoting,
+) -> Vec<String> {
     let Some((program, args, env)) = ph_agent::own_tools_command(cwd, agent_id, project) else {
         return Vec::new();
     };
@@ -1057,7 +1066,7 @@ fn own_tools(agent_id: &str, cwd: &Path, project: ProjectId, file: &Path) -> Vec
                 .ok()
                 .and_then(|json| std::fs::write(file, json).ok())
             {
-                Some(()) => vec!["--mcp-config".into(), quoted(file)],
+                Some(()) => vec!["--mcp-config".into(), quoted(file, quoting)],
                 None => Vec::new(),
             }
         }
@@ -1071,22 +1080,28 @@ fn own_tools(agent_id: &str, cwd: &Path, project: ProjectId, file: &Path) -> Vec
             };
             let mut flags = vec![
                 "-c".to_string(),
-                quoted(Path::new(&format!(
-                    "mcp_servers.pilothouse.command={}",
-                    text(&program.to_string_lossy())
-                ))),
+                quoted(
+                    Path::new(&format!(
+                        "mcp_servers.pilothouse.command={}",
+                        text(&program.to_string_lossy())
+                    )),
+                    quoting,
+                ),
                 "-c".to_string(),
-                quoted(Path::new(&format!(
-                    "mcp_servers.pilothouse.args={}",
-                    list(&args)
-                ))),
+                quoted(
+                    Path::new(&format!("mcp_servers.pilothouse.args={}", list(&args))),
+                    quoting,
+                ),
             ];
             for (name, value) in env {
                 flags.push("-c".into());
-                flags.push(quoted(Path::new(&format!(
-                    "mcp_servers.pilothouse.env.{name}={}",
-                    text(&value)
-                ))));
+                flags.push(quoted(
+                    Path::new(&format!(
+                        "mcp_servers.pilothouse.env.{name}={}",
+                        text(&value)
+                    )),
+                    quoting,
+                ));
             }
             flags
         }
@@ -1116,6 +1131,10 @@ pub(crate) fn launch(
             .unwrap_or_default()
     );
     std::fs::create_dir_all(settings_dir())?;
+    // The shell that runs the CLI reads its command line: each word is
+    // written as that shell takes it.
+    let shell = ph_env::program_shell(&start.cwd);
+    let quoting = Quoting::of(&shell.0);
     let mut more = Vec::new();
     // Claude Code tells PilotHouse what it does through hooks, set for
     // this run only; the others are followed by what they say in the
@@ -1127,13 +1146,14 @@ pub(crate) fn launch(
             &settings,
             serde_json::to_vec_pretty(&hook_settings(&hook_command(&pane)?))?,
         )?;
-        more.extend(["--settings".to_string(), quoted(&settings)]);
+        more.extend(["--settings".to_string(), quoted(&settings, quoting)]);
     }
     more.extend(own_tools(
         start.agent_id,
         &start.cwd,
         start.project,
         &settings_dir().join(format!("{pane}.mcp.json")),
+        quoting,
     ));
     // As Settings → Agents says it runs, in the account its chat is in.
     let store = crate::AppState::store(cx).clone();
@@ -1143,13 +1163,19 @@ pub(crate) fn launch(
     let profile = ph_agent::profiles::Profiles::load(&store).of(start.agent_id);
     let environment =
         profile.environment_for(chat.as_ref().map_or("", |chat| chat.account.as_str()));
-    let command = command(&start, &profile, &more)?;
+    let command = command(&start, &profile, &more, quoting)?;
     let label = free_label(agent.name, terminals, cx);
     let terminal = terminals
         .update(cx, |terminals, cx| {
-            terminals.run_program(&label, &command, start.cwd.clone(), &environment, cx)
+            terminals.run_program(&label, &command, start.cwd.clone(), &environment, shell, cx)
         })
-        .ok_or_else(|| anyhow::anyhow!("Could not open a terminal"))?;
+        .ok_or_else(|| {
+            let why = terminals.read(cx).error().cloned();
+            match why {
+                Some(why) => anyhow::anyhow!("{why}"),
+                None => anyhow::anyhow!("Could not open a terminal"),
+            }
+        })?;
     // A chat that has its name keeps it; its row is there already.
     let (session, title) = match start.chat {
         Some((id, named)) => (
@@ -1254,13 +1280,21 @@ fn free_label(name: &str, terminals: &Entity<WorkspaceTerminals>, cx: &App) -> S
 }
 
 /// The hook command: this program, told where the app listens and which
-/// terminal the agent runs in.
+/// terminal the agent runs in. Claude Code runs it in a shell of its own
+/// choosing, not the one its CLI was started by: on Windows Git Bash where
+/// it is installed, else Command Prompt or PowerShell. Double quotes are
+/// what the first two take alike; elsewhere it is a POSIX shell.
 fn hook_command(pane: &str) -> anyhow::Result<String> {
     let exe = std::env::current_exe()?;
+    let quoting = if cfg!(windows) {
+        Quoting::CommandPrompt
+    } else {
+        Quoting::Posix
+    };
     Ok(format!(
         "{} agent-hook --socket {} --pane {pane}",
-        quoted(&exe),
-        quoted(&paths::control_socket_path())
+        quoted(&exe, quoting),
+        quoted(&paths::control_socket_path(), quoting)
     ))
 }
 
@@ -1282,23 +1316,79 @@ fn hook_settings(command: &str) -> Value {
     })
 }
 
-/// `path` quoted for the shell it is typed into: in single quotes, where
-/// sh, zsh, bash, fish and PowerShell expand neither `$` nor backticks. A
-/// quote in it is written as each reads it: `'\''` (POSIX shells, fish),
-/// `''` (PowerShell). Command Prompt has no single quotes: double ones.
-fn quoted(path: &Path) -> String {
-    let text = path.display().to_string();
-    if cfg!(windows) {
-        let (shell, _) = ph_env::default_shell();
-        if shell
+/// How the shell that reads a command line takes a word that is more than
+/// plain letters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Quoting {
+    /// sh, zsh, bash, fish (and Git Bash on Windows): single quotes, a
+    /// quote inside written `'\''`.
+    Posix,
+    /// Single quotes, a quote inside doubled.
+    PowerShell,
+    /// Command Prompt has no single quotes: double ones, with what is
+    /// inside written as Windows programs split their command line.
+    CommandPrompt,
+}
+
+impl Quoting {
+    /// The quoting of shell `program`, whichever way its path is written.
+    fn of(program: &Path) -> Self {
+        let name = program
             .file_stem()
-            .is_some_and(|name| name.eq_ignore_ascii_case("cmd"))
-        {
-            return format!("\"{text}\"");
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        match name.as_str() {
+            "cmd" => Quoting::CommandPrompt,
+            "pwsh" | "powershell" => Quoting::PowerShell,
+            _ => Quoting::Posix,
         }
-        return format!("'{}'", text.replace('\'', "''"));
     }
-    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// `path` (or any word) quoted for the shell it is typed into. In single
+/// quotes sh, zsh, bash, fish and PowerShell expand neither `$` nor
+/// backticks.
+///
+/// Command Prompt reads a line before the program does, and then the
+/// program splits it. To Command Prompt every `"` opens or closes a quote,
+/// and `&`, `|`, `<`, `>` outside one end the command. So a quote inside a
+/// word is written `""`: the program (as the C runtime, Node, Rust and Go
+/// read a command line) takes that for one quote, and for Command Prompt
+/// the word's quotes still pair up, whatever follows them staying inside.
+/// (Written `\"`, a `&` after it would start a second command, and again
+/// in the `.cmd` file npm starts an agent's CLI with, which reads the line
+/// once more.) Backslashes before a quote (or before the closing one) are
+/// doubled. A `%NAME%` whose variable is set is still replaced: Command
+/// Prompt has no way to write one that is not.
+fn quoted(path: &Path, quoting: Quoting) -> String {
+    let text = path.display().to_string();
+    match quoting {
+        Quoting::Posix => format!("'{}'", text.replace('\'', "'\\''")),
+        Quoting::PowerShell => format!("'{}'", text.replace('\'', "''")),
+        Quoting::CommandPrompt => {
+            let mut quoted = String::with_capacity(text.len() + 2);
+            quoted.push('"');
+            let mut backslashes = 0;
+            for c in text.chars() {
+                match c {
+                    '\\' => backslashes += 1,
+                    '"' => {
+                        // 2n backslashes before a quote, and the quote
+                        // itself written twice.
+                        quoted.extend(std::iter::repeat_n('\\', backslashes));
+                        quoted.push('"');
+                        backslashes = 0;
+                    }
+                    _ => backslashes = 0,
+                }
+                quoted.push(c);
+            }
+            // 2n before the quote that closes.
+            quoted.extend(std::iter::repeat_n('\\', backslashes));
+            quoted.push('"');
+            quoted
+        }
+    }
 }
 
 /// An id safe to put on a command line (Cline's have `_`).
@@ -1499,13 +1589,16 @@ mod tests {
             ("antigravity", "agy", format!("agy --conversation {id}")),
             ("cline", "cline", format!("cline --id {id}")),
         ] {
-            assert_eq!(command(&start(agent, None), &usual, &[]).unwrap(), fresh);
             assert_eq!(
-                command(&start(agent, Some(id)), &usual, &[]).unwrap(),
+                command(&start(agent, None), &usual, &[], Quoting::Posix).unwrap(),
+                fresh
+            );
+            assert_eq!(
+                command(&start(agent, Some(id)), &usual, &[], Quoting::Posix).unwrap(),
                 resumed
             );
         }
-        assert!(command(&start("nobody", None), &usual, &[]).is_err());
+        assert!(command(&start("nobody", None), &usual, &[], Quoting::Posix).is_err());
 
         // The user's own command for it, and what they add to every start.
         let mut theirs = ph_agent::profiles::Profile::default();
@@ -1515,22 +1608,32 @@ mod tests {
             "--append-system-prompt".into(),
             "Be brief; it's late".into(),
         ];
-        assert_eq!(
+        let theirs_in = |quoting| {
             command(
                 &start("claude", Some(id)),
                 &theirs,
-                &["--settings 'h.json'".to_string()]
+                &["--settings h.json".to_string()],
+                quoting,
             )
-            .unwrap(),
-            if cfg!(windows) {
-                format!(
-                    "claude-beta --resume {id} --verbose --append-system-prompt 'Be brief; it''s late' --settings 'h.json'"
-                )
-            } else {
-                format!(
-                    "claude-beta --resume {id} --verbose --append-system-prompt 'Be brief; it'\\''s late' --settings 'h.json'"
-                )
-            }
+            .unwrap()
+        };
+        assert_eq!(
+            theirs_in(Quoting::Posix),
+            format!(
+                "claude-beta --resume {id} --verbose --append-system-prompt 'Be brief; it'\\''s late' --settings h.json"
+            )
+        );
+        assert_eq!(
+            theirs_in(Quoting::PowerShell),
+            format!(
+                "claude-beta --resume {id} --verbose --append-system-prompt 'Be brief; it''s late' --settings h.json"
+            )
+        );
+        assert_eq!(
+            theirs_in(Quoting::CommandPrompt),
+            format!(
+                "claude-beta --resume {id} --verbose --append-system-prompt \"Be brief; it's late\" --settings h.json"
+            )
         );
     }
 
@@ -1545,6 +1648,7 @@ mod tests {
                 },
                 &ph_agent::profiles::Profile::default(),
                 &["--settings 'hooks.json'".to_string()],
+                Quoting::Posix,
             )
             .unwrap()
         };
@@ -1570,14 +1674,6 @@ mod tests {
         // zsh would read it as a file pattern.
         assert_eq!(
             with("claude", Some("opus[1m]"), None),
-            format!(
-                "claude --model {} --settings 'hooks.json'",
-                quoted(Path::new("opus[1m]"))
-            )
-        );
-        #[cfg(not(windows))]
-        assert_eq!(
-            with("claude", Some("opus[1m]"), None),
             "claude --model 'opus[1m]' --settings 'hooks.json'"
         );
         // An agent whose CLI takes neither.
@@ -1588,10 +1684,56 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(windows))]
-    fn quotes_paths_for_the_shell() {
-        assert_eq!(quoted(Path::new("/a b/$x`y`")), "'/a b/$x`y`'");
-        assert_eq!(quoted(Path::new("/it's")), "'/it'\\''s'");
+    fn quotes_words_for_the_shell_that_reads_them() {
+        let posix = |text: &str| quoted(Path::new(text), Quoting::Posix);
+        assert_eq!(posix("/a b/$x`y`"), "'/a b/$x`y`'");
+        assert_eq!(posix("/it's"), "'/it'\\''s'");
+        assert_eq!(
+            quoted(Path::new("C:\\it's"), Quoting::PowerShell),
+            "'C:\\it''s'"
+        );
+        // Command Prompt: as a Windows program splits its command line. A
+        // path that ends in a backslash must not swallow the closing quote,
+        // and a setting given as TOML keeps its own quotes.
+        let cmd = |text: &str| quoted(Path::new(text), Quoting::CommandPrompt);
+        assert_eq!(cmd(r"C:\Program Files\app"), r#""C:\Program Files\app""#);
+        assert_eq!(cmd(r"C:\work dir\"), r#""C:\work dir\\""#);
+        assert_eq!(
+            cmd(r#"mcp_servers.x.command="C:\\Users\\a\\ph.exe""#),
+            r#""mcp_servers.x.command=""C:\\Users\\a\\ph.exe""""#
+        );
+        assert_eq!(cmd(r#"a\"b"#), r#""a\\""b""#);
+        // What ends a command for Command Prompt stays inside its quotes,
+        // which pair up in every word: nothing after a quote in the text
+        // is read as a second command.
+        let said = cmd(r#"Say "yes & no" | more"#);
+        assert_eq!(said, r#""Say ""yes & no"" | more""#);
+        for word in [said, cmd(r#"""#), cmd(r#"a"b"c"#), cmd(r#"\""#)] {
+            let mut inside = false;
+            for c in word.chars() {
+                if c == '"' {
+                    inside = !inside;
+                } else {
+                    assert!(inside || !"&|<>".contains(c), "{word}");
+                }
+            }
+            assert!(!inside, "{word}: its quotes pair up");
+        }
+
+        for (program, quoting) in [
+            (r"C:\Windows\System32\cmd.exe", Quoting::CommandPrompt),
+            ("cmd.exe", Quoting::CommandPrompt),
+            ("pwsh.exe", Quoting::PowerShell),
+            ("powershell", Quoting::PowerShell),
+            ("/bin/zsh", Quoting::Posix),
+            ("bash.exe", Quoting::Posix),
+        ] {
+            // (A Windows path's name is read as such on Windows only.)
+            if program.contains('\\') && !cfg!(windows) {
+                continue;
+            }
+            assert_eq!(Quoting::of(Path::new(program)), quoting, "{program}");
+        }
     }
 
     #[test]

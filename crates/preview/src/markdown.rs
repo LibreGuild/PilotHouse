@@ -9,6 +9,7 @@ use gpui_kit::base::text::{
     MarkdownNode, MarkdownParseContext, MarkdownPlugin, TextView, markdown_ast,
 };
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, Context, EventEmitter, ImageSource, InteractiveElement as _, IntoElement,
@@ -559,25 +560,32 @@ impl Render for MarkdownPreview {
             dark,
             opener(cx.weak_entity()),
         );
+        // (Its scroll is its own, to go to a heading; the bar is laid over it.)
         div()
-            .id("markdown-scroll")
+            .relative()
             .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .bg(cx.theme().background)
             .child(
                 div()
-                    .w_full()
-                    .max_w(ph_ui::rems_from_px(READING_WIDTH))
-                    .mx_auto()
-                    .px_8()
-                    .py_6()
-                    .when(empty, |this| {
-                        this.text_color(cx.theme().muted_foreground)
-                            .child("Nothing written yet.")
-                    })
-                    .when(!empty, |this| this.child(view)),
+                    .id("markdown-scroll")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .bg(cx.theme().background)
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(ph_ui::rems_from_px(READING_WIDTH))
+                            .mx_auto()
+                            .px_8()
+                            .py_6()
+                            .when(empty, |this| {
+                                this.text_color(cx.theme().muted_foreground)
+                                    .child("Nothing written yet.")
+                            })
+                            .when(!empty, |this| this.child(view)),
+                    ),
             )
+            .vertical_scrollbar(&self.scroll)
             .into_any_element()
     }
 }

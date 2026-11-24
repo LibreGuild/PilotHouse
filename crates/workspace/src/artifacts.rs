@@ -46,6 +46,29 @@ pub(crate) fn install(cx: &mut App) {
             }),
         });
     }
+    // So are whiteboards.
+    if enabled(Feature::Whiteboards) {
+        ph_boards::init(cx);
+        kinds.push(NewKind {
+            kind: ph_boards::board::KIND,
+            label: "Whiteboard",
+            hint: "notes, shapes and arrows on an endless board, beside a chat",
+            icon: ph_ui::Icons::StickyNote,
+            art: Rc::new(|width, _, cx| ph_boards::card_art(width, cx)),
+            create: Rc::new(crate::board_window::create),
+            open: Rc::new(|artifact, window, cx| {
+                if let Err(err) = crate::board_window::open(artifact, cx) {
+                    use gpui_kit::component::WindowExt as _;
+                    window.push_notification(
+                        gpui_kit::component::notification::Notification::error(format!(
+                            "The board could not be opened: {err:#}"
+                        )),
+                        cx,
+                    );
+                }
+            }),
+        });
+    }
     ph_artifacts::set_host(
         Host {
             workspace: Rc::new(workspace),
@@ -57,41 +80,77 @@ pub(crate) fn install(cx: &mut App) {
         },
         cx,
     );
-    if let Some(decks) = ph_slides::Decks::global(cx) {
-        // A deck made from a workspace's chat, and its page asking for the
-        // deck's own window.
-        cx.subscribe(&decks, |_, event: &ph_slides::DeckEvent, cx| {
-            deck_said(event, cx)
+    // A deck or a board made from a workspace's chat, and its page asking
+    // for its own window.
+    let decks = ph_slides::Decks::global(cx);
+    let boards = ph_boards::Boards::global(cx);
+    if let Some(decks) = &decks {
+        cx.subscribe(decks, |_, event: &ph_slides::DeckEvent, cx| {
+            said(Made::DECK, &event.id, &event.what, cx)
         })
         .detach();
-        if let Some(artifacts) = ph_artifacts::Artifacts::global(cx) {
-            // Which decks belong to which workspace changes with the list.
-            cx.observe(&artifacts, |artifacts, cx| trust_decks(&artifacts, cx))
-                .detach();
-            trust_decks(&artifacts, cx);
-        }
     }
-}
-
-/// The setting that keeps which chat a deck was last worked on in.
-fn chat_key(deck: &str) -> String {
-    format!("slides.chat.{deck}")
-}
-
-/// Notes the chat deck `deck` is worked on in (a workspace's chat).
-pub(crate) fn remember_deck_chat(deck: &str, session: Option<i64>, cx: &App) {
-    if let Some(session) = session
-        && let Err(err) = AppState::store(cx).set_setting(&chat_key(deck), &session)
+    if let Some(boards) = &boards {
+        cx.subscribe(boards, |_, event: &ph_boards::BoardEvent, cx| {
+            said(Made::BOARD, &event.id, &event.what, cx)
+        })
+        .detach();
+    }
+    if (decks.is_some() || boards.is_some())
+        && let Some(artifacts) = ph_artifacts::Artifacts::global(cx)
     {
-        tracing::warn!("a deck's chat could not be noted: {err:#}");
+        // Which of them belong to which workspace changes with the list.
+        cx.observe(&artifacts, |artifacts, cx| trust_made(&artifacts, cx))
+            .detach();
+        trust_made(&artifacts, cx);
     }
 }
 
-/// The chat deck `deck` was last worked on in, while it is still one of
-/// workspace `project`'s.
-pub(crate) fn deck_chat(deck: &str, project: i64, cx: &App) -> Option<ph_store::sessions::Session> {
+/// A kind of artifact a workspace's agent makes for it and its chats then
+/// work on (a deck, a whiteboard): what it is, and its own window.
+#[derive(Clone, Copy)]
+struct Made {
+    kind: &'static str,
+    open: fn(&ph_artifacts::Artifact, &mut App) -> Result<()>,
+}
+
+impl Made {
+    const DECK: Self = Self {
+        kind: ph_slides::deck::KIND,
+        open: crate::slides_window::open,
+    };
+    const BOARD: Self = Self {
+        kind: ph_boards::board::KIND,
+        open: crate::board_window::open,
+    };
+}
+
+/// The setting that keeps which chat a deck or a board (`kind`) was last
+/// worked on in.
+fn chat_key(kind: &str, id: &str) -> String {
+    format!("{kind}.chat.{id}")
+}
+
+/// Notes the chat the deck or board `id` is worked on in (a workspace's
+/// chat).
+pub(crate) fn remember_chat(kind: &str, id: &str, session: Option<i64>, cx: &App) {
+    if let Some(session) = session
+        && let Err(err) = AppState::store(cx).set_setting(&chat_key(kind, id), &session)
+    {
+        tracing::warn!("an artifact's chat could not be noted: {err:#}");
+    }
+}
+
+/// The chat the deck or board `id` was last worked on in, while it is
+/// still one of workspace `project`'s.
+pub(crate) fn chat_of(
+    kind: &str,
+    id: &str,
+    project: i64,
+    cx: &App,
+) -> Option<ph_store::sessions::Session> {
     let store = AppState::store(cx);
-    let session: Option<i64> = store.setting(&chat_key(deck));
+    let session: Option<i64> = store.setting(&chat_key(kind, id));
     store
         .session(session?)
         .ok()
@@ -113,7 +172,7 @@ fn chat_at_work(project: i64, cx: &App) -> Option<i64> {
         .collect();
     match working.as_slice() {
         [one] => Some(*one),
-        // No chat is at work: none is known to have asked, and the deck
+        // No chat is at work: none is known to have asked, and the artifact
         // opens on a new one rather than on whichever was looked at.
         [] => None,
         several => chats
@@ -124,13 +183,15 @@ fn chat_at_work(project: i64, cx: &App) -> Option<i64> {
 }
 
 /// The folders the chats of each workspace change without asking: the
-/// files of the decks made from it.
-fn trust_decks(artifacts: &gpui_kit::Entity<ph_artifacts::Artifacts>, cx: &mut App) {
+/// files of the decks and the boards made from it.
+fn trust_made(artifacts: &gpui_kit::Entity<ph_artifacts::Artifacts>, cx: &mut App) {
     let mut folders: std::collections::HashMap<i64, Vec<PathBuf>> = Default::default();
     for artifact in artifacts.read(cx).all() {
-        if artifact.manifest.kind == ph_slides::deck::KIND
-            && let Some(source) = &artifact.manifest.source
-        {
+        // (Of the kinds this build has: one switched off has no way in.)
+        let kind = artifact.manifest.kind.as_str();
+        let made = (kind == ph_slides::deck::KIND && enabled(Feature::Presentations))
+            || (kind == ph_boards::board::KIND && enabled(Feature::Whiteboards));
+        if made && let Some(source) = &artifact.manifest.source {
             folders
                 .entry(source.project)
                 .or_default()
@@ -144,18 +205,19 @@ fn trust_decks(artifacts: &gpui_kit::Entity<ph_artifacts::Artifacts>, cx: &mut A
     ph_agent::own_files::keep_only(&kept, cx);
 }
 
-/// What the decks said that the windows act on.
-fn deck_said(event: &ph_slides::DeckEvent, cx: &mut App) {
+/// What the decks or the boards said that the windows act on (`what`,
+/// about the one with the id `id`).
+fn said(made: Made, id: &str, what: &serde_json::Value, cx: &mut App) {
     let Some(artifacts) = ph_artifacts::Artifacts::global(cx) else {
         return;
     };
-    if let Some(project) = event.what["made"]["project"].as_i64() {
-        // A workspace's agent made it: the chat that asked is the deck's
-        // from here on, and the deck shows beside that chat as it is
-        // written (its own window is the user's to open).
-        trust_decks(&artifacts, cx);
-        remember_deck_chat(&event.id, chat_at_work(project, cx), cx);
-        let id = event.id.clone();
+    if let Some(project) = what["made"]["project"].as_i64() {
+        // A workspace's agent made it: the chat that asked is its chat
+        // from here on, and it shows beside that chat as it is written
+        // (its own window is the user's to open).
+        trust_made(&artifacts, cx);
+        remember_chat(made.kind, id, chat_at_work(project, cx), cx);
+        let id = id.to_string();
         let address = artifacts.update(cx, |artifacts, cx| artifacts.address(&id, cx));
         cx.spawn(async move |cx| {
             let Ok(address) = address.await else {
@@ -164,31 +226,41 @@ fn deck_said(event: &ph_slides::DeckEvent, cx: &mut App) {
             cx.update(|cx| {
                 if enabled(Feature::Browser) {
                     show(project, format!("{address}?preview=1"), cx).detach();
-                } else if let Some(deck) = artifacts.read(cx).find(&id).cloned() {
+                } else if let Some(artifact) = artifacts.read(cx).find(&id).cloned() {
                     // No pane to show it in: its own window, then.
-                    _ = crate::slides_window::open(&deck, cx);
+                    _ = (made.open)(&artifact, cx);
                 }
             });
         })
         .detach();
-    } else if event.what.get("open").is_some()
-        && let Some(deck) = artifacts.read(cx).find(&event.id).cloned()
-        && let Err(err) = crate::slides_window::open(&deck, cx)
+    } else if what.get("open").is_some()
+        && let Some(artifact) = artifacts.read(cx).find(id).cloned()
+        && artifact.manifest.kind == made.kind
+        && let Err(err) = (made.open)(&artifact, cx)
     {
-        tracing::warn!("a deck could not be opened: {err:#}");
+        tracing::warn!("an artifact's window could not be opened: {err:#}");
     }
 }
 
-/// An artifact was renamed in the list. A deck's chats are kept by its
-/// folder, which took the new name; and the deck says the name of itself.
+/// An artifact was renamed in the list. The chats of a deck or a
+/// whiteboard are kept by its folder, which took the new name; and a deck
+/// says the name of itself.
 fn renamed(artifact: &ph_artifacts::Artifact, before: &std::path::Path, cx: &mut App) {
-    if artifact.manifest.kind != ph_slides::deck::KIND {
+    let kind = artifact.manifest.kind.as_str();
+    if kind != ph_slides::deck::KIND && kind != ph_boards::board::KIND {
         return;
     }
     if artifact.folder != before
         && let Err(err) = AppState::store(cx).move_presentation_space(before, &artifact.folder)
     {
-        tracing::warn!("a deck's chats could not follow its folder: {err:#}");
+        tracing::warn!("an artifact's chats could not follow its folder: {err:#}");
+    }
+    if kind == ph_boards::board::KIND {
+        if let Some(boards) = ph_boards::Boards::global(cx) {
+            boards.read(cx).renamed(artifact);
+        }
+        crate::board_window::moved(artifact, cx);
+        return;
     }
     if let Some(decks) = ph_slides::Decks::global(cx) {
         decks.read(cx).renamed(artifact);

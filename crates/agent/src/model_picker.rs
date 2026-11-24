@@ -9,13 +9,17 @@
 //! agent is live; other agents show what was cached the last time they ran,
 //! or loaded in the background after start ([`crate::preload`]; meanwhile
 //! "Loading models…"). An agent whose models are still unknown offers to
-//! load them. Picking another
+//! load them, and the button beside the search asks every agent again (a
+//! model released since the last look). Picking another
 //! agent's model switches a fresh chat to it, or opens a new chat if this one
 //! already started (an agent cannot change mid-conversation).
 
 use gpui_kit::TestSupportExt as _;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _, h_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
     input::{Enter, IndentInline, Input, InputState, MoveDown, MoveUp},
     v_flex,
 };
@@ -147,6 +151,8 @@ pub fn render(
     cx: &App,
 ) -> AnyElement {
     let keys = panel.clone();
+    let refresher = panel.clone();
+    let refreshing = crate::preload::ModelLoads::running(cx);
     let key = move |key: PickerKey| {
         let panel = keys.clone();
         move |window: &mut Window, cx: &mut App| {
@@ -292,18 +298,43 @@ pub fn render(
         .capture_action(move |_: &Enter, window, cx| enter(window, cx))
         .capture_action(move |_: &IndentInline, window, cx| next(window, cx))
         .child(
-            div().flex_none().p_1p5().child(
-                Input::new(search)
-                    .small()
-                    .prefix(Icon::new(Icons::Search).xsmall()),
-            ),
+            h_flex()
+                .flex_none()
+                .p_1p5()
+                .gap_1()
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Input::new(search)
+                            .small()
+                            .prefix(Icon::new(Icons::Search).xsmall()),
+                    ),
+                )
+                // What is listed is what each agent said when it was last
+                // asked (at most a day ago): this asks them all again.
+                .child(
+                    Button::new("picker-refresh")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::RefreshCw)
+                        .loading(refreshing)
+                        .disabled(refreshing)
+                        .tooltip(if refreshing {
+                            "Asking the agents for their models…"
+                        } else {
+                            "Refresh: ask the agents for their models again"
+                        })
+                        .accessibility_label("Refresh models")
+                        .on_click(move |_, _, cx| {
+                            _ = refresher.update(cx, |panel, cx| panel.refresh_models(cx));
+                        }),
+                ),
         )
         .child(
             v_flex()
                 .id("picker-list")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
+                .overflow_y_scrollbar()
                 .px_1()
                 .pb_1()
                 .gap_0p5()

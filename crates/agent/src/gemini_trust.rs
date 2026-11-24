@@ -5,8 +5,10 @@
 //! in and asks for a login, which reads like a fault of the chat: the same
 //! key works in a terminal in another folder. So when Gemini asks for a
 //! login, this looks whether that is why, and the chat says so and how to
-//! change it. Nothing is changed here: which folders Gemini trusts is the
-//! user's to say, to Gemini.
+//! change it. In such a folder it also refuses every mode but its default
+//! and plan ones ("cannot enable privileged approval modes"), which the
+//! chat says the same way. Nothing is changed here: which folders Gemini
+//! trusts is the user's to say, to Gemini.
 //!
 //! The rule is Gemini's (`packages/core/src/utils/trust.ts`, 0.66): its
 //! environment switches first, then whether folder trust is on at all
@@ -126,9 +128,37 @@ pub fn explanation(folder: &Path) -> String {
     )
 }
 
+/// Whether `error` is Gemini refusing a mode that lets it act without
+/// asking (anything but its default and plan modes), because it does not
+/// trust the folder: "Cannot enable privileged approval modes in an
+/// untrusted folder", which its ACP side reports as an internal error.
+pub fn refuses_mode(error: &str) -> bool {
+    error.to_lowercase().contains("untrusted folder")
+}
+
+/// What the chat says then, in place of "internal error".
+pub fn mode_explanation(folder: &Path) -> String {
+    format!(
+        "Gemini takes this mode only in folders it trusts, and this one is not: {}\n\n\
+         It stays in the mode it was in. To trust the folder:\n\
+         • Switch to CLI above and answer Gemini's question about the folder, then switch back to Chat.\n\
+         • Or set GEMINI_CLI_TRUST_WORKSPACE=true for Gemini CLI in Settings → Agents (it then trusts every folder opened here).",
+        folder.display()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_mode_is_known_by_what_gemini_says() {
+        assert!(refuses_mode(
+            "Internal error: Cannot enable privileged approval modes in an untrusted folder."
+        ));
+        assert!(!refuses_mode("Internal error: model not found"));
+        assert!(mode_explanation(Path::new("/work/app")).contains("/work/app"));
+    }
 
     fn none(_: &str) -> Option<String> {
         None

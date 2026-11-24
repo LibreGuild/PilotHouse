@@ -1,6 +1,7 @@
 //! The tools the server offers, and how each maps to a control method.
 
 mod artifacts;
+mod boards;
 mod browser;
 mod chrome;
 mod decks;
@@ -33,8 +34,13 @@ pub struct Tool {
 pub fn all() -> impl Iterator<Item = &'static Tool> {
     use ph_brand::{Feature, enabled};
     // Whether the build has each group, and the group.
-    let groups: [(bool, &'static [Tool]); 11] = [
+    let groups: [(bool, &'static [Tool]); 12] = [
         (enabled(Feature::Artifacts), artifacts::TOOLS),
+        // A board is an artifact of a kind too.
+        (
+            enabled(Feature::Whiteboards) && enabled(Feature::Artifacts),
+            boards::TOOLS,
+        ),
         (enabled(Feature::Browser), browser::TOOLS),
         (enabled(Feature::ChromeExtension), chrome::TOOLS),
         // A deck is an artifact of a kind: without artifacts there are none.

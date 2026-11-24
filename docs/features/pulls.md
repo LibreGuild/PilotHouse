@@ -72,7 +72,7 @@ Four tabs, in this order: *Conversation*, *Findings*, *Walkthrough*, *Files*. Th
 - **Findings**: what agent reviews found, kept across rounds (see [Findings](#findings)). The tab shows how many are open; opening it reads the author's ticks and replies.
 - **Walkthrough**: a briefing on the change for whoever reviews it (see [Walkthrough](#walkthrough)).
 - **Files**: each file's diff with what is said about its lines where they are (see [Files](#files)).
-- **The header** has one filled button, what comes next: **Review with agent** while nobody reviewed it, **Finish review** once there is something to send (it counts the findings and comments that wait). On your own pull request with reviewers' comments, **Address comments** is beside it. A word says when checks fail or still run; a click goes to them. The rest is under **⋯** (*Review again with an agent*, *Watch*, *Check out this branch*, *Refresh*); **Watching** shows beside it while it is on.
+- **The header** has one filled button, what comes next: **Review with** the agent chats start with (named on the button) while nobody reviewed it, **Finish review** once there is something to send (it counts the findings and comments that wait) or an agent's review here has nothing on GitHub yet. *Finish review* is on every open pull request, your own included. On your own pull request with reviewers' comments, **Address comments** is beside it. A word says when checks fail or still run; a click goes to them. The rest is under **⋯** (*Review again with an agent*, *Watch*, *Check out this branch*, *Refresh*); **Watching** shows beside it while it is on.
 - **Watch**: PilotHouse looks at the pull request every three minutes and tells you (a system notification) when the author pushes or answers a finding; answers are applied. A pull request is watched from the moment you finish its review, since its author's answer is what you wait for. Merged or closed pull requests stop being watched.
 - **Address comments** (your own pull requests): a [task](#fix-in-a-task) on the branch whose agent works through the reviewers' comments not yet resolved, changes what is right and drafts a reply for each.
 - **Check out** (in a workspace's PRs tool): fetches the PR head and switches to a local `pr/<number>` branch.
@@ -87,6 +87,8 @@ Four tabs, in this order: *Conversation*, *Findings*, *Walkthrough*, *Files*. Th
 - **Your comments** on lines, each with a cross to delete it.
 - **The agent's findings**, each with a tick. Those at least *minor* are ticked to begin with; nits, the noise authors complain of, are left for you to add (*Tick:* all, minor, major or critical and above, kept for next time). **Ticked findings are sent; the others stay on this computer**, open, marked *not sent*.
 - **A summary comment** the author can tick findings off in (on unless unticked, kept for next time).
+
+- **A review that found nothing** is still worth a word to the author. When nothing the agent found is open any more (it found nothing, or all is dealt with), *Post the result as a comment* (ticked unless unticked, kept for next time) posts the summary comment alone: what was reviewed, *Looks good*, nothing open. No GitHub review is made of it, so it works on your own pull request too. It is not offered while a finding is open that only cannot be sent (its code was not found). A summary written by a finished review lists what was sent, and stays so when it is brought up to date (`review.finished` in the settings names the pull requests; a summary of an older version, of every finding, goes on listing them all).
 
 It is sent as **one GitHub review**: the ticked findings and your comments on their lines, the note, and how it ends, so the author is told once (the findings on the code, a separate summary and an approval were three notices before). A request for changes without a note says how many comments there are, since GitHub takes one only with words. Should GitHub refuse one line, the comments are posted one by one and the review's end after them.
 
@@ -206,6 +208,6 @@ It is shown as the chat shows a reply: Markdown with its Mermaid diagrams drawn 
 
 ## On the Bridge
 
-Reviews an agent works on, or waits for you in, show on the [Bridge](workspace.md#the-bridge) with the workspaces' tasks (*Reviews · owner/name*), also while their repository is still being cloned. Finished ones are read here, in the queue.
+Reviews an agent works on, or waits for you in, show on the [Bridge](workspace.md#the-bridge) with the workspaces' tasks (*Reviews · owner/name*), also while their repository is still being cloned. One finished in this run waits under *Ready for review* (a click opens it in Reviews) until **Done** puts it away; after that, and after a restart, finished ones are read here, in the queue.
 
 History lives in SQLite (`pr_reviews`: every round, its kind, agent, round number and summary comment; `pr_findings`: each finding of each round with its status, who set it and why, its comments and issue).

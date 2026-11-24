@@ -201,6 +201,17 @@ impl WorkspaceScreen {
         if let Some(view) = self.explanations.get(&self.git_folder) {
             view.update(cx, |view, cx| view.reload(cx));
         }
+        self.name_agent(cx);
+    }
+
+    /// Tells the Git panel which agent its *Review* and *Explain* run
+    /// with (the one chats start with now), so the buttons name it.
+    pub(super) fn name_agent(&mut self, cx: &mut Context<Self>) {
+        let Some(changes) = self.changes.get(&self.git_folder).cloned() else {
+            return;
+        };
+        let agent = ph_agent::chats::default_agent(AppState::store(cx)).name;
+        changes.update(cx, |changes, cx| changes.set_agent_name(agent, cx));
     }
 
     /// History shows a commit (or none now): its explanation goes with it.
@@ -254,6 +265,25 @@ impl WorkspaceScreen {
         let Some(root) = self.project.folders().get(self.git_folder).cloned() else {
             return;
         };
+        // One at a time: readying it reads Git and the chats, which takes
+        // seconds on a large change, and a second press meanwhile would
+        // start a second agent on the same work.
+        if self.explain_preparing {
+            return;
+        }
+        self.explain_preparing = true;
+        // Shown at once, saying that it is being readied: the pane was
+        // empty (or the button unchanged) until then.
+        // The view told is the one told again when it is ready: by then
+        // the Git tab may show another folder, whose view is another.
+        let asking = self.explanation_of(&target, cx);
+        if let Some(view) = &asking {
+            view.update(cx, |view, cx| view.set_asking(true, false, cx));
+        }
+        let asking = asking.map(|view| view.downgrade());
+        if target == Target::Changes {
+            self.show_explanation(&target, window, cx);
+        }
         let store = AppState::store(cx).clone();
         let (project_id, agent) = (self.project.id, ph_agent::chats::default_agent(&store));
         let asked = target.clone();
@@ -263,6 +293,11 @@ impl WorkspaceScreen {
         cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
             _ = this.update_in(cx, |this, window, cx| {
+                this.explain_preparing = false;
+                let started = matches!(&result, Ok(Some(_)));
+                if let Some(view) = asking.and_then(|view| view.upgrade()) {
+                    view.update(cx, |view, cx| view.set_asking(false, started, cx));
+                }
                 let prepared = match result {
                     Ok(prepared) => prepared,
                     Err(err) => {
@@ -293,6 +328,19 @@ impl WorkspaceScreen {
             });
         })
         .detach();
+    }
+
+    /// The view that shows the explanation of `target`, when there is one
+    /// (the Git tab's folder's changes, or the commit History shows).
+    fn explanation_of(&self, target: &Target, cx: &App) -> Option<Entity<ExplanationView>> {
+        match target {
+            Target::Changes => self.explanations.get(&self.git_folder).cloned(),
+            Target::Commit { .. } => self
+                .commit_explanation
+                .as_ref()
+                .map(|(view, _)| view.clone())
+                .filter(|view| view.read(cx).target() == target),
+        }
     }
 
     /// Brings the explanation of `target` into view in the Git tab (being

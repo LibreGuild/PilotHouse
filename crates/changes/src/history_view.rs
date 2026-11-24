@@ -1,5 +1,6 @@
 //! History: commits with a branch graph, and one commit's changes.
 
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -339,7 +340,6 @@ impl HistoryView {
             .map(|(_, view)| view.clone());
         let explaining = self.explaining && explanation.is_some();
         if let Some(detail) = detail.filter(|detail| detail.files > 0 && !explaining) {
-            use gpui_kit::component::scroll::ScrollableElement as _;
             // Drawn only where it shows (see `diff_list`).
             let entity = cx.entity().downgrade();
             return Some(
@@ -362,7 +362,7 @@ impl HistoryView {
             v_flex()
                 .id("commit-detail")
                 .size_full()
-                .overflow_y_scroll()
+                .overflow_y_scrollbar()
                 .p_3()
                 .gap_2()
                 .child(self.render_detail_top(cx)?)
@@ -493,7 +493,7 @@ impl Render for HistoryView {
         let list = v_flex()
             .id("history-list")
             .size_full()
-            .overflow_y_scroll()
+            .overflow_y_scrollbar()
             .children(
                 {
                     let lanes = self

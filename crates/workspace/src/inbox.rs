@@ -13,6 +13,7 @@
 //! reminders) and after every change here, not on every frame.
 
 use gpui_kit::TestSupportExt as _;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
     badge::Badge,
@@ -629,7 +630,7 @@ impl InboxView {
                 v_flex()
                     .id("todos-list")
                     .max_h(ph_ui::rems_from_px(320.))
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .children(rows),
             )
             .into_any_element()

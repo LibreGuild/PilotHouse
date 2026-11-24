@@ -15,7 +15,9 @@
 //!
 //! A release says it has something new by adding a card to [`CARDS`], in
 //! the place where someone new should meet it; nothing else decides. A card
-//! of a feature the build has switched off is left out.
+//! of a feature the build has switched off is left out. Where the welcome
+//! would grow too long by it, the card is marked as news: it shows after
+//! the update alone, and someone new reads of the thing on another card.
 //!
 //! **No way round it.** At a start the cards have no close button and Esc
 //! does nothing: the way out is the last card's *Done*, by its button (the
@@ -62,6 +64,10 @@ struct Card {
     /// card's: left out with it, so a build that has no phone pane does not
     /// promise one.
     needs: &'static [(usize, Feature)],
+    /// News of a release: shows (*What's new*) only to someone who went
+    /// through the cards before it was added. Someone new hears of the
+    /// thing on another card, so that the welcome stays as short as it was.
+    news: bool,
     art: fn(&App) -> AnyElement,
 }
 
@@ -96,6 +102,7 @@ const CARDS: &[Card] = &[
             "No sign-up and no tracking. It all runs on this computer.",
         ],
         needs: &[],
+        news: false,
         art: art::agents,
     },
     Card {
@@ -109,6 +116,7 @@ const CARDS: &[Card] = &[
             "Bridge: all your tasks on one board, the ones waiting for you first.",
         ],
         needs: &[],
+        news: false,
         art: art::places,
     },
     Card {
@@ -122,6 +130,7 @@ const CARDS: &[Card] = &[
             "Your Android phone, by USB or Wi-Fi: the agent taps, types and looks.",
         ],
         needs: &[(1, Feature::ChromeExtension), (2, Feature::Devices)],
+        news: false,
         art: art::preview,
     },
     Card {
@@ -135,6 +144,7 @@ const CARDS: &[Card] = &[
             "Utilities: small offline tools for JSON, JWT, Base64, regex, hashes.",
         ],
         needs: &[(2, Feature::Utilities)],
+        news: false,
         art: art::tests,
     },
     Card {
@@ -148,6 +158,7 @@ const CARDS: &[Card] = &[
             "Tick the findings you agree with, then post your review to GitHub.",
         ],
         needs: &[],
+        news: false,
         art: art::review,
     },
     Card {
@@ -157,11 +168,26 @@ const CARDS: &[Card] = &[
         title: "Slides and small apps, made in a chat",
         points: &[
             "Slides about your project or any topic, to PowerPoint or PDF.",
-            "Small apps: a dashboard, a planner, a game, saved on this computer.",
-            "Share one by link on your own network. Nothing goes on the internet.",
+            "A whiteboard the agent draws on: a flow, a map of your code, a plan.",
+            "Small apps: a dashboard, a planner, a game. Share one on your network.",
         ],
-        needs: &[(0, Feature::Presentations)],
+        needs: &[(0, Feature::Presentations), (1, Feature::Whiteboards)],
+        news: false,
         art: art::artifacts,
+    },
+    Card {
+        id: "whiteboard",
+        feature: Some(Feature::Whiteboards),
+        place: "Artifacts → Whiteboard",
+        title: "A whiteboard the agent draws on",
+        points: &[
+            "Ask for a flow, a plan or a map of your code: the agent draws it.",
+            "Move things, add notes and arrows by hand. Each change can be undone.",
+            "Pin a note to anything and send it to the agent, which makes the change.",
+        ],
+        needs: &[],
+        news: true,
+        art: art::whiteboard,
     },
     Card {
         id: "studio",
@@ -174,6 +200,7 @@ const CARDS: &[Card] = &[
             "Cut parts out, speed up the slow bits, export MP4 or GIF.",
         ],
         needs: &[],
+        news: false,
         art: art::studio,
     },
     Card {
@@ -187,6 +214,7 @@ const CARDS: &[Card] = &[
             "Schedules run an agent on a timer. Themes: light, dark or your own.",
         ],
         needs: &[(1, Feature::QuickChat), (2, Feature::Schedules)],
+        news: false,
         art: art::everyday,
     },
 ];
@@ -196,8 +224,10 @@ const CARDS: &[Card] = &[
 fn cards(seen: &[String], all: bool) -> Vec<&'static Card> {
     CARDS
         .iter()
-        .filter(|card| card.feature.is_none_or(enabled))
+        .filter(|card| card.feature.is_none_or(crate::features::has))
         .filter(|card| all || !seen.iter().any(|id| id == card.id))
+        // News is for someone who has gone through the cards before.
+        .filter(|card| !card.news || (!all && !seen.is_empty()))
         .collect()
 }
 
@@ -319,7 +349,10 @@ impl Tour {
         // Gone through: these do not show at a start again.
         let store = AppState::store(cx).clone();
         let mut seen: Vec<String> = store.setting(SEEN);
-        for card in &self.cards {
+        // (Nor does the news someone new was not shown: they read of it
+        // on the other cards.)
+        let news = CARDS.iter().filter(|card| card.news);
+        for card in self.cards.iter().copied().chain(news) {
             if !seen.iter().any(|id| id == card.id) {
                 seen.push(card.id.to_string());
             }
@@ -450,13 +483,19 @@ mod tests {
     #[test]
     fn the_cards_not_seen_show_and_no_others() {
         let all: Vec<&str> = cards(&[], false).iter().map(|card| card.id).collect();
+        let welcome = CARDS.iter().filter(|card| !card.news).count();
         assert_eq!(
             all.len(),
-            CARDS.len(),
-            "a build with every feature shows them all"
+            welcome,
+            "a build with every feature shows them all, but for the news"
         );
+        // Someone who went through them before a release added news: the
+        // news alone.
+        let before: Vec<String> = all.iter().map(|id| id.to_string()).collect();
+        let news: Vec<&str> = cards(&before, false).iter().map(|card| card.id).collect();
+        assert_eq!(news, ["whiteboard"]);
         // Gone through all of them: nothing at the next start.
-        let seen: Vec<String> = all.iter().map(|id| id.to_string()).collect();
+        let seen: Vec<String> = CARDS.iter().map(|card| card.id.to_string()).collect();
         assert!(cards(&seen, false).is_empty());
         // A release added one since: that one alone, in its place.
         let before: Vec<String> = seen.iter().filter(|id| *id != "studio").cloned().collect();
@@ -466,14 +505,15 @@ mod tests {
         let mut odd = seen.clone();
         odd.push("gone".into());
         assert!(cards(&odd, false).is_empty());
-        // Asked for again: all of them, whatever was seen.
-        assert_eq!(cards(&seen, true).len(), CARDS.len());
+        // Asked for again: the welcome whole, whatever was seen.
+        assert_eq!(cards(&seen, true).len(), welcome);
     }
 
     /// Nobody can skip the cards, so they stay few and short.
     #[test]
     fn the_cards_are_few_and_short() {
-        assert!(CARDS.len() <= 8, "{} cards", CARDS.len());
+        let welcome = CARDS.iter().filter(|card| !card.news).count();
+        assert!(welcome <= 8, "{welcome} cards");
         let mut ids: Vec<&str> = CARDS.iter().map(|card| card.id).collect();
         ids.sort_unstable();
         ids.dedup();

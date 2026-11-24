@@ -1,0 +1,430 @@
+/* What the app's own pages share (a deck's, a board's): the colours and
+   sizes they take from the app, and the controls of `ui.js`. A page's own
+   sheet comes after this one and lays the page out.
+
+   Colours and sizes come from the app (`--ui-*`, put into the page by the
+   app); the values here stand in when the page is opened where the app did
+   not say (they are of no weight, so what the app says wins). */
+:where(:root) {
+  --ui-bg: #17181c;
+  --ui-fg: #e9eaee;
+  --ui-muted: #9a9ea9;
+  --ui-border: #2c2e36;
+  --ui-surface: #1f2126;
+  --ui-hover: #2a2c33;
+  --ui-accent: #4f7cff;
+  --ui-accent-fg: #ffffff;
+  --ui-danger: #e5484d;
+  --ui-success: #3fb76b;
+  --ui-warning: #e2a336;
+  --ui-stage: #111216;
+  --ui-radius: 8px;
+  --ui-size: 13px;
+  --ui-font: Inter, -apple-system, "Segoe UI", sans-serif;
+  --ui-mono: "JetBrains Mono", ui-monospace, monospace;
+  --ui-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+/* Hidden is hidden, whatever else lays the element out. */
+[hidden] {
+  display: none !important;
+}
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--ui-stage);
+  color: var(--ui-fg);
+  font: 400 var(--ui-size) / 1.4 var(--ui-font);
+  color-scheme: var(--ui-scheme);
+  -webkit-font-smoothing: antialiased;
+  /* The page is part of the app: its text is not selected by a drag across
+     the toolbars, and it does not bounce when scrolled past its end. */
+  user-select: none;
+  -webkit-user-select: none;
+  overscroll-behavior: none;
+  cursor: default;
+}
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 1px;
+}
+
+/* ---- Controls ---------------------------------------------------------- */
+.icon {
+  display: inline-flex;
+  flex: none;
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: calc(var(--ui-radius) - 2px);
+  background: transparent;
+  color: var(--ui-fg);
+  white-space: nowrap;
+}
+.btn-icon {
+  width: 28px;
+  padding: 0;
+}
+.btn:hover:not(:disabled) {
+  background: var(--ui-hover);
+}
+/* What is on wears a wash of the accent, so it is told from what the
+   pointer merely rests on. */
+.btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--ui-accent) 18%, transparent);
+  color: var(--ui-accent);
+}
+.btn:disabled {
+  opacity: 0.4;
+}
+.btn-primary {
+  background: var(--ui-accent);
+  color: var(--ui-accent-fg);
+  font-weight: 550;
+}
+.btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ui-accent) 88%, #fff);
+}
+.btn-outline {
+  box-shadow: inset 0 0 0 1px var(--ui-border);
+}
+.btn-danger {
+  color: var(--ui-danger);
+}
+.input {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: calc(var(--ui-radius) - 2px);
+  background: var(--ui-bg);
+  min-width: 0;
+  user-select: text;
+  -webkit-user-select: text;
+}
+textarea.input {
+  height: auto;
+  padding: 7px 9px;
+  resize: none;
+  line-height: 1.45;
+}
+.select {
+  appearance: none;
+  padding-right: 22px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ui-muted) 50%), linear-gradient(135deg, var(--ui-muted) 50%, transparent 50%);
+  background-position: calc(100% - 12px) 12px, calc(100% - 8px) 12px;
+  background-size: 4px 4px;
+  background-repeat: no-repeat;
+}
+.field-number {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  min-width: 0;
+}
+.field-number .number {
+  width: 100%;
+}
+/* Room for the unit after the number. */
+.field-number:has(.unit) .number {
+  padding-right: 24px;
+}
+.field-number .unit {
+  position: absolute;
+  right: 8px;
+  color: var(--ui-muted);
+  pointer-events: none;
+  font-size: 0.9em;
+}
+
+/* ---- Small controls of panels and forms -------------------------------- */
+.segmented {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  padding: 2px;
+  border-radius: calc(var(--ui-radius) - 2px);
+  background: var(--ui-surface);
+}
+.segmented .btn {
+  height: 24px;
+}
+.colour-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: calc(var(--ui-radius) - 2px);
+  background: var(--ui-bg);
+  text-align: left;
+}
+/* A button with a second one for its choices: they read as one. */
+.split {
+  display: inline-flex;
+  align-items: center;
+}
+.split > .btn:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.btn-caret {
+  width: 18px;
+  padding: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.chip {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px rgb(127 127 127 / 0.45);
+  background-image: linear-gradient(45deg, #bbb 25%, transparent 25%, transparent 75%, #bbb 75%), linear-gradient(45deg, #bbb 25%, #fff 25%, #fff 75%, #bbb 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 4px 4px;
+}
+.chip > i {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ui-muted);
+}
+.check input {
+  margin: 0;
+  accent-color: var(--ui-accent);
+}
+
+/* ---- Menus, popovers, dialogs ------------------------------------------ */
+.layer {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+}
+.layer > * {
+  pointer-events: auto;
+}
+.popover {
+  position: fixed;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: calc(var(--ui-radius) + 2px);
+  background: var(--ui-surface);
+  box-shadow: 0 12px 34px rgb(0 0 0 / 0.32);
+}
+.popover-menu {
+  padding: 4px;
+  min-width: 190px;
+}
+.menu {
+  display: flex;
+  flex-direction: column;
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: calc(var(--ui-radius) - 3px);
+  background: transparent;
+  text-align: left;
+  white-space: nowrap;
+}
+.menu-item:hover:not(:disabled),
+.menu-item:focus-visible {
+  background: var(--ui-hover);
+  outline: none;
+}
+.menu-item:disabled {
+  opacity: 0.4;
+}
+.menu-item.danger {
+  color: var(--ui-danger);
+}
+.menu-label {
+  flex: 1;
+}
+.menu-hint {
+  color: var(--ui-muted);
+  font-size: 0.92em;
+  margin-left: 18px;
+}
+.menu-check {
+  display: inline-flex;
+  width: 14px;
+}
+.menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--ui-border);
+}
+.menu-heading {
+  padding: 6px 9px 3px;
+  color: var(--ui-muted);
+  font-size: 0.9em;
+}
+.scrim {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  /* One row as tall as the page: a dialog taller than that scrolls inside
+     itself rather than running off the page. */
+  grid-template-rows: minmax(0, 1fr);
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 0.42);
+}
+.dialog {
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+  max-height: 100%;
+  border: 1px solid var(--ui-border);
+  border-radius: calc(var(--ui-radius) + 4px);
+  background: var(--ui-surface);
+  box-shadow: 0 24px 70px rgb(0 0 0 / 0.45);
+  outline: none;
+}
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 12px 8px 16px;
+}
+.dialog-title {
+  font-weight: 600;
+  font-size: calc(var(--ui-size) + 1px);
+}
+.dialog-body {
+  min-height: 0;
+  padding: 4px 16px 16px;
+  overflow: auto;
+}
+.dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 16px 14px;
+}
+.toasts {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+  background: var(--ui-surface);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.35);
+  pointer-events: auto;
+  animation: toast-in 0.18s ease-out;
+}
+.toast.error {
+  border-color: var(--ui-danger);
+}
+.toast.leaving {
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.toast-action {
+  border: 0;
+  background: none;
+  color: var(--ui-accent);
+  font-weight: 600;
+  padding: 0;
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* Colours. */
+.colours {
+  width: 216px;
+}
+.colours-heading {
+  margin: 6px 0 5px;
+  color: var(--ui-muted);
+  font-size: 0.9em;
+}
+.colours-heading:first-child {
+  margin-top: 0;
+}
+.swatches {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 5px;
+}
+.swatch {
+  aspect-ratio: 1;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 1px rgb(127 127 127 / 0.4);
+}
+.swatch:hover,
+.swatch.picked {
+  box-shadow: 0 0 0 2px var(--ui-surface), 0 0 0 4px var(--ui-accent);
+}
+.colours-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+.colour-any {
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+.colour-hex {
+  flex: 1;
+  font-family: var(--ui-mono);
+  font-size: 0.92em;
+}
+

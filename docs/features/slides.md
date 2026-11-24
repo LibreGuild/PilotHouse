@@ -14,7 +14,7 @@ The feature is the brand's `presentations` key and needs `artifacts`.
 
 ## The window
 
-The chat is on the left (its width is kept; at least 340 points), the deck on the right. The deck is a web page shown in the system's web view (WKWebView on macOS, WebView2 on Windows) with no browser controls, so it reads as part of the window; its colours and sizes follow the app's theme and interface size. On Linux there is no web view to put in the window: the deck opens in the user's browser and the window keeps the chat.
+The chat is on the left (its width is kept; at least 340 points), the deck on the right. The deck is a web page shown in the system's web view (WKWebView on macOS, WebView2 on Windows) with no browser controls, so it reads as part of the window; its colours and sizes follow the app's theme and interface size. On Linux there is no web view to put in the window: the deck opens in the user's browser and the window keeps the chat. On Windows the web view is a child window of the deck's window, and shows only because the app presents its windows to the window itself, not through DirectComposition (`show_child_windows` in `crates/app/src/main.rs` sets GPUI's `GPUI_DISABLE_DIRECT_COMPOSITION`): GPUI's composition layer is put over a window's child windows, and the deck's pane stayed empty under it. WebView2's profile is kept in `<data dir>/webview` (`ph_webview::keep_data_in`).
 
 The system draws a web view over everything the app draws, and gives it the keyboard when it is clicked. The window deals with both:
 
@@ -59,6 +59,8 @@ Details:
 The files are the truth. The agent edits them with its own tools; a watcher sees the change (140 ms after the last write) and every open page draws it. A change made in the page is sent with the marks of the files it was made on, and is refused if one changed meanwhile (the page reads again and tries once more). Every change is one step of undo, whoever made it: typing within 2 seconds is one step, an agent's burst of writes within 6 seconds is one step.
 
 ## Changing a deck by hand
+
+The bar on top adds things on its left (*Add*: Text, Picture, Video, Table, Chart, Shape) and has comments, share, export, the deck's look and **Present** on its right. Under the stage, a row has *New slide*, which slide this is, the notes, undo and redo, zoom and the grid; under that row are the slides, in a strip.
 
 - **Insert**: text (`T`), a picture, a video, a table, a chart, shapes. A picture or video can be dropped or pasted in; a chart keeps its numbers (`data-chart`) and is changed in a small sheet.
 - **Select, move, resize**: with snapping and guides; arrows nudge (Shift: ten at a time); pictures crop; ⌘D duplicates; ⌘C, ⌘X and ⌘V go through the system's clipboard, so a thing copied from one deck pastes into another.
@@ -115,4 +117,4 @@ Each message in a deck's chat tells the agent where the deck's files are, what i
 
 ## Working on it
 
-The page is plain modules in `crates/slides/src/page/`, built into the app; a debug build reads them from the folder named by `PILOTHOUSE_SLIDES_PAGE`, so a change shows on reload. A development build (`automation`) has three methods for tests of the deck's window: `deck.screen` (a picture of the page as the window shows it), `deck.script` (a script in it) and `deck.keys` (who has the keyboard; a key pressed as the system presses it, on macOS). See [testing.md](../testing.md).
+The page is plain modules in `crates/slides/src/page/`, built into the app; a debug build reads them from the folder named by `PILOTHOUSE_SLIDES_PAGE`, so a change shows on reload. Its buttons, menus, dialogs and icons are the kit's (`crates/artifacts/src/kit/`, served at `/_artifact/kit/` and read from `PILOTHOUSE_KIT_PAGE` in a debug build), which the [whiteboard](whiteboard.md)'s page uses too; the icons are the app's own, drawn for these pages. A development build (`automation`) has three methods for tests of the deck's window: `deck.screen` (a picture of the page as the window shows it), `deck.script` (a script in it) and `deck.keys` (who has the keyboard; a key pressed as the system presses it, on macOS). See [testing.md](../testing.md).

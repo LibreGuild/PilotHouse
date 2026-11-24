@@ -69,12 +69,16 @@ pub struct WalkthroughView {
     older: bool,
     /// A walkthrough was asked for and is being written.
     waiting: bool,
+    /// The agent that writes one when asked (the one chats start with), by
+    /// name: said on the page, so it is known before it is asked.
+    agent: &'static str,
 }
 
 impl EventEmitter<WalkthroughEvent> for WalkthroughView {}
 
 impl WalkthroughView {
     pub fn new(store: Store, hosting: Hosting, number: u64, cx: &mut Context<Self>) -> Self {
+        let agent = ph_agent::chats::default_agent(&store).name;
         let mut view = Self {
             store,
             hosting,
@@ -84,6 +88,7 @@ impl WalkthroughView {
             shown: None,
             older: false,
             waiting: false,
+            agent,
         };
         view.reload(&[], cx);
         view
@@ -101,6 +106,7 @@ impl WalkthroughView {
         if !changed.is_empty() {
             self.changed = changed.to_vec();
         }
+        self.agent = ph_agent::chats::default_agent(&self.store).name;
         let pull = PullRef {
             host: self.hosting.account.host.clone(),
             owner: self.hosting.repo.owner.clone(),
@@ -207,6 +213,7 @@ impl WalkthroughView {
                     .into_any_element()
             } else {
                 h_flex()
+                    .gap_2()
                     .child(
                         Button::new("walk-ask")
                             .small()
@@ -215,6 +222,13 @@ impl WalkthroughView {
                             .label("Explain this pull request")
                             .disabled(self.pull.is_none())
                             .on_click(cx.listener(|this, _, _, cx| this.ask(cx))),
+                    )
+                    // Which agent: the one chats start with.
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("Written by {}", self.agent)),
                     )
                     .into_any_element()
             })

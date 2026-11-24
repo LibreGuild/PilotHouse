@@ -9,7 +9,7 @@
 // **Open in Slides** opens the deck's own window, where it is changed.
 
 import { Look, Show, mountSlide, fitFrame, scaleFrame, parseDeck } from "./core.js";
-import { h, button, icon } from "./ui.js";
+import { h, button, icon } from "/_artifact/kit/ui.js";
 
 const audience = new URLSearchParams(location.search).has("audience");
 const preview = Boolean(window.DECK.preview);

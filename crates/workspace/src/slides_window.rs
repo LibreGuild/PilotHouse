@@ -29,7 +29,6 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    menu::PopupMenuItem,
     notification::Notification,
     v_flex,
 };
@@ -47,8 +46,9 @@ use ph_store::Store;
 use ph_store::projects::Project;
 use ph_theme::layout;
 use ph_ui::Icons;
-use ph_ui::MenuButton as _;
 use serde_json::Value;
+
+use crate::artifact_window::{overlay_open, workspace_button, workspace_of};
 
 /// The chat's width at first, and its least: narrower, and its menus would
 /// reach over the deck, where they cannot show.
@@ -131,17 +131,6 @@ fn starters(from_workspace: bool) -> Vec<(&'static str, &'static str, &'static s
             }
         })
         .collect()
-}
-
-/// The workspace a deck belongs to, while there is such a workspace: its
-/// chats are the deck's.
-fn workspace_of(artifact: &Artifact, cx: &App) -> Option<Project> {
-    let source = artifact.manifest.source.as_ref()?;
-    crate::AppState::store(cx)
-        .project(source.project)
-        .ok()
-        .flatten()
-        .filter(Project::is_workspace)
 }
 
 /// Makes a deck and opens its window: the *Slides* card at the head of the
@@ -311,6 +300,9 @@ pub struct DeckWindow {
     /// The workspace whose chat this is (its id and name), for a deck that
     /// belongs to one; `None` for the deck's own chat.
     workspace: Option<(i64, String)>,
+    /// The workspace just chosen is being noted with the deck: until it
+    /// is, the list still names the one before, which is not followed.
+    noting: bool,
     _chat: Subscription,
     chat_shown: bool,
     chat_width: f32,
@@ -354,7 +346,7 @@ impl DeckWindow {
                     // worked on in is the one it opens with next time.
                     if this.workspace.is_some() {
                         let chat = this.chat.read(cx).active_session_id(cx);
-                        crate::artifacts::remember_deck_chat(&id, chat, cx);
+                        crate::artifacts::remember_chat(ph_slides::deck::KIND, &id, chat, cx);
                     }
                 }
             }),
@@ -381,8 +373,9 @@ impl DeckWindow {
                             // from elsewhere (or its workspace is gone):
                             // the chat beside it follows.
                             let from = workspace_of(&artifact, cx);
-                            if from.as_ref().map(|project| project.id)
-                                != this.workspace.as_ref().map(|(id, _)| *id)
+                            if !this.noting
+                                && from.as_ref().map(|project| project.id)
+                                    != this.workspace.as_ref().map(|(id, _)| *id)
                             {
                                 this.work_from(from, window, cx);
                             }
@@ -420,6 +413,7 @@ impl DeckWindow {
             drawn: false,
             chat,
             workspace: linked,
+            noting: false,
             _chat: chat_events,
             chat_shown,
             chat_width,
@@ -498,7 +492,7 @@ impl DeckWindow {
         // A workspace has many chats: the one the deck was made or last
         // worked on in is the one shown.
         let session = workspace
-            .then(|| crate::artifacts::deck_chat(&id, space, cx))
+            .then(|| crate::artifacts::chat_of(ph_slides::deck::KIND, &id, space, cx))
             .flatten();
         chat.update(cx, |chat, cx| {
             chat.set_context(Some(context), window, cx);
@@ -556,18 +550,24 @@ impl DeckWindow {
         // The chat it leaves keeps its place for the next time.
         if self.workspace.is_some() {
             let chat = self.chat.read(cx).active_session_id(cx);
-            crate::artifacts::remember_deck_chat(&self.id, chat, cx);
+            crate::artifacts::remember_chat(ph_slides::deck::KIND, &self.id, chat, cx);
         }
         let source = to.as_ref().map(|workspace| ph_artifacts::library::Source {
             project: workspace.id,
             workspace: workspace.name.clone(),
             path: workspace.path.clone(),
         });
-        artifacts
-            .update(cx, |artifacts, cx| {
-                artifacts.set_source(&self.id, source, cx)
-            })
-            .detach_and_log(cx);
+        let noted = artifacts.update(cx, |artifacts, cx| {
+            artifacts.set_source(&self.id, source, cx)
+        });
+        self.noting = true;
+        cx.spawn(async move |this, cx| {
+            if let Err(err) = noted.await {
+                tracing::warn!("a deck's workspace could not be noted: {err:#}");
+            }
+            _ = this.update(cx, |this, _| this.noting = false);
+        })
+        .detach();
         self.workspace = to
             .as_ref()
             .map(|workspace| (workspace.id, workspace.name.clone()));
@@ -916,93 +916,6 @@ impl Render for Audience {
     }
 }
 
-/// Whether something of the app's is open that may be drawn where the deck
-/// is: a dialog or sheet, a note at the window's edge, a menu or pop-up of
-/// the chat (those hold the app's focus while open).
-///
-/// `drawn`: the window has drawn a frame; before that there is no focus to
-/// ask about.
-fn overlay_open(drawn: bool, window: &mut Window, cx: &mut App) -> bool {
-    window.has_active_dialog(cx)
-        || window.has_active_sheet(cx)
-        || !window.notifications(cx).is_empty()
-        || (drawn
-            && window
-                .context_stack()
-                .iter()
-                .any(|context| context.contains("PopupMenu") || context.contains("Popover")))
-}
-
-impl DeckWindow {
-    /// Which workspace the deck works from, and the menu that changes it:
-    /// a workspace's agent has its files to make the deck of.
-    fn workspace_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        /// Workspaces offered: the ones used last.
-        const OFFERED: usize = 12;
-        let current = self.workspace.as_ref().map(|(id, _)| *id);
-        let mut workspaces: Vec<Project> = crate::AppState::store(cx)
-            .projects()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(Project::is_workspace)
-            .collect();
-        workspaces.sort_by_key(|project| std::cmp::Reverse(project.last_opened_at));
-        // The deck's own is among them however long ago it was used.
-        let mut offered: Vec<Project> = workspaces.iter().take(OFFERED).cloned().collect();
-        if let Some(own) = workspaces
-            .iter()
-            .find(|project| Some(project.id) == current)
-            .filter(|own| !offered.iter().any(|project| project.id == own.id))
-        {
-            offered.push(own.clone());
-        }
-        let this = cx.entity().downgrade();
-        let button = Button::new("deck-workspace")
-            .ghost()
-            .small()
-            .icon(Icons::FolderOpen)
-            .accessibility_label("The workspace this deck works from")
-            .tooltip(ph_ui::tip(match &self.workspace {
-                Some(_) => "The chat is this workspace's: its agent works in the workspace's folders and on this deck",
-                None => "Work from a workspace: its agent gets the workspace's files to make this deck from",
-            }));
-        let button = match &self.workspace {
-            Some((_, name)) => {
-                let short: String = name.chars().take(28).collect();
-                button.label(if short.len() < name.len() {
-                    format!("{short}…")
-                } else {
-                    short
-                })
-            }
-            None => button,
-        };
-        button.menu(gpui_kit::Anchor::TopRight, move |menu, _, _| {
-            let pick = |to: Option<Project>| {
-                let this = this.clone();
-                move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut App| {
-                    let to = to.clone();
-                    _ = this.update(cx, |this, cx| this.work_from(to, window, cx));
-                }
-            };
-            let mut menu = menu.label("The agent works from");
-            for workspace in &offered {
-                // No icon: its place is where the tick of the one chosen is.
-                menu = menu.item(
-                    PopupMenuItem::new(workspace.name.clone())
-                        .checked(Some(workspace.id) == current)
-                        .on_click(pick(Some(workspace.clone()))),
-                );
-            }
-            menu.separator().item(
-                PopupMenuItem::new("No workspace: this deck only")
-                    .checked(current.is_none())
-                    .on_click(pick(None)),
-            )
-        })
-    }
-}
-
 impl Render for DeckWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The system draws the deck's web view over everything the app
@@ -1103,7 +1016,12 @@ impl Render for DeckWindow {
                             )
                             .child(div().min_w_0().truncate().text_sm().child(self.title.clone()))
                             .child(div().flex_1().min_w_2())
-                            .child(div().flex_none().occlude().child(self.workspace_button(cx))),
+                            .child(div().flex_none().occlude().child(workspace_button(
+                                "deck",
+                                self.workspace.as_ref(),
+                                Self::work_from,
+                                cx,
+                            ))),
                     ),
                 )
             })

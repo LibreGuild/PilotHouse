@@ -158,6 +158,9 @@ pub struct WorkspaceScreen {
     explanations: HashMap<usize, Entity<ph_explain::ExplanationView>>,
     /// The explanation of the commit History shows, with what it asks for.
     commit_explanation: Option<(Entity<ph_explain::ExplanationView>, Subscription)>,
+    /// An explanation is being readied for an agent (Git and the chats
+    /// are read): another is not started meanwhile.
+    explain_preparing: bool,
     /// What the open *Why Is This Here?* pop-up asks for.
     _why: Option<Subscription>,
     terminal: Option<Entity<TerminalPanel>>,
@@ -398,6 +401,7 @@ impl WorkspaceScreen {
             changes: HashMap::new(),
             explanations: HashMap::new(),
             commit_explanation: None,
+            explain_preparing: false,
             _why: None,
             terminal: None,
             browser: None,

@@ -21,6 +21,9 @@ pub(crate) mod keys {
     pub const SIDEBAR_SETTLED: &str = "workspace.sidebar_settled";
     pub const DISABLED_FEATURES: &str = "features.disabled";
     pub const PREFERENCES: &str = "appearance.preferences";
+    /// The shell new terminals start, by the name it is listed under
+    /// (empty: the system's default).
+    pub const TERMINAL_SHELL: &str = "terminal.shell";
 }
 
 /// Process-wide services shared by every view.
@@ -53,6 +56,7 @@ impl AppState {
         {
             tracing::warn!("saving the theme choice failed: {err:#}");
         }
+        ph_env::choose_shell(Some(store.setting::<String>(keys::TERMINAL_SHELL)));
         cx.set_global(Self { store });
         cx.set_global(preferences);
         ph_theme::themes::set_user_dir(ph_store::paths::data_dir().join("themes"), cx);
@@ -68,6 +72,22 @@ impl AppState {
 
     pub fn appearance(cx: &App) -> Appearance {
         Self::store(cx).setting(keys::APPEARANCE)
+    }
+
+    /// The shell chosen for new terminals, by name (empty: the system's).
+    /// As set at start and since: asked while Settings is drawn.
+    pub fn terminal_shell() -> String {
+        ph_env::chosen_shell_name().unwrap_or_default()
+    }
+
+    /// Chooses the shell new terminals start (`""`: the system's default),
+    /// from now on and for the next runs.
+    pub fn set_terminal_shell(name: &str, cx: &mut App) {
+        if let Err(err) = Self::store(cx).set_setting(keys::TERMINAL_SHELL, &name) {
+            tracing::warn!("saving the shell choice failed: {err:#}");
+        }
+        ph_env::choose_shell(Some(name.to_string()));
+        cx.refresh_windows();
     }
 
     /// Context-panel tools the user has switched on (Settings → Features),

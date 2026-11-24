@@ -16,6 +16,7 @@
 //! switcher is a popover, and a menu over it would close it.
 
 use gpui_kit::TestSupportExt as _;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -39,8 +40,13 @@ use crate::workspace::{View, Workspace};
 pub(crate) struct WorkspaceSwitcher {
     workspace: WeakEntity<Workspace>,
     search: Entity<InputState>,
-    /// The row the arrow keys are on, which Enter opens.
-    cursor: usize,
+    /// The row the arrow keys are on, which Enter opens. None while the
+    /// list was opened with the pointer and no key moved through it: a row
+    /// marked there says nothing (the pointer marks the one it is over).
+    cursor: Option<usize>,
+    /// Where the keys start with nothing typed: the workspace used before
+    /// the one in front when the list was opened by a key, else nowhere.
+    start: Option<usize>,
     /// The workspace whose actions show under its row.
     open: Option<ProjectId>,
     /// Its colours show there, to pick one.
@@ -61,7 +67,8 @@ impl WorkspaceSwitcher {
             |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => {
                     // What is typed starts at the best match.
-                    this.cursor = 0;
+                    let typed = !this.search.read(cx).value().trim().is_empty();
+                    this.cursor = if typed { Some(0) } else { this.start };
                     this.open = None;
                     cx.notify();
                 }
@@ -72,20 +79,21 @@ impl WorkspaceSwitcher {
         Self {
             workspace,
             search,
-            cursor: 0,
+            cursor: None,
+            start: None,
             open: None,
             colours: false,
             _subscriptions: subscriptions,
         }
     }
 
-    /// The switcher opens: an empty search with the keyboard, and the
-    /// arrow keys on the workspace used before the one in front, so that
-    /// Enter goes back to it.
+    /// The switcher opens: an empty search with the keyboard, and no row
+    /// marked (see [`Self::keys_on`] for a list opened by a key).
     pub(crate) fn opened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = None;
         self.colours = false;
-        self.cursor = 1;
+        self.cursor = None;
+        self.start = None;
         let search = self.search.clone();
         // Once it is drawn: there is nothing to focus before.
         window.defer(cx, move |window, cx| {
@@ -94,12 +102,39 @@ impl WorkspaceSwitcher {
                 search.focus(window, cx);
             })
         });
-        // Emptying the search put the keys on the first row again.
-        cx.defer_in(window, |this, _, cx| {
-            this.cursor = 1;
-            cx.notify();
-        });
         cx.notify();
+    }
+
+    /// Opened by a key: the arrow keys start on `row` (the workspace used
+    /// before the one in front), so that Enter goes back to it. (The row
+    /// is the window's to say: it calls this while it is being changed,
+    /// and cannot be read from here then.)
+    pub(crate) fn keys_on(&mut self, row: Option<usize>, cx: &mut Context<Self>) {
+        self.start = row;
+        self.cursor = row;
+        cx.notify();
+    }
+
+    /// The next row, round and round: Ctrl+Tab pressed again while Ctrl is
+    /// held, as Alt+Tab goes through windows.
+    pub(crate) fn step(&mut self, cx: &mut Context<Self>) {
+        let rows = self
+            .workspace
+            .upgrade()
+            .map_or(0, |workspace| self.found(workspace.read(cx), cx).len());
+        if rows == 0 {
+            return;
+        }
+        self.cursor = Some(
+            self.cursor
+                .map_or(0, |cursor| (cursor.min(rows - 1) + 1) % rows),
+        );
+        cx.notify();
+    }
+
+    /// Opens the row the keys are on (Ctrl let go after Ctrl+Tab).
+    pub(crate) fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.enter(window, cx);
     }
 
     /// The user's workspaces that have what is typed in their name or in
@@ -139,8 +174,14 @@ impl WorkspaceSwitcher {
             return;
         };
         let found = self.found(workspace.read(cx), cx);
-        if let Some(project) = found.get(self.cursor.min(found.len().saturating_sub(1))) {
-            self.switch_to(project.id, window, cx);
+        let row = self
+            .cursor
+            .map(|cursor| cursor.min(found.len().saturating_sub(1)));
+        match row.and_then(|row| found.get(row)) {
+            Some(project) => self.switch_to(project.id, window, cx),
+            // No row was chosen: nothing to open, and the list has done
+            // its part.
+            None => self.close(window, cx),
         }
     }
 
@@ -153,12 +194,14 @@ impl WorkspaceSwitcher {
         if rows == 0 {
             return;
         }
-        let cursor = self.cursor.min(rows - 1);
-        self.cursor = match event.keystroke.key.as_str() {
-            "down" => (cursor + 1) % rows,
-            "up" => (cursor + rows - 1) % rows,
+        let cursor = self.cursor.map(|cursor| cursor.min(rows - 1));
+        self.cursor = Some(match (event.keystroke.key.as_str(), cursor) {
+            ("down", None) => 0,
+            ("down", Some(cursor)) => (cursor + 1) % rows,
+            ("up", None) => rows - 1,
+            ("up", Some(cursor)) => (cursor + rows - 1) % rows,
             _ => return,
-        };
+        });
         cx.stop_propagation();
         cx.notify();
     }
@@ -410,7 +453,7 @@ impl WorkspaceSwitcher {
                         cx.listener(move |this, _, _, cx| {
                             this.open = (this.open != Some(id)).then_some(id);
                             this.colours = false;
-                            this.cursor = row;
+                            this.cursor = Some(row);
                             cx.notify();
                         }),
                     )
@@ -610,7 +653,9 @@ impl Render for WorkspaceSwitcher {
                 workspace.listed().next().is_some(),
             )
         };
-        let cursor = self.cursor.min(found.len().saturating_sub(1));
+        let cursor = self
+            .cursor
+            .map(|cursor| cursor.min(found.len().saturating_sub(1)));
         let searching = !self.search.read(cx).value().trim().is_empty();
         let muted = cx.theme().muted_foreground;
         let rows: Vec<AnyElement> = found
@@ -624,7 +669,7 @@ impl Render for WorkspaceSwitcher {
                     in_front == Some(project.id),
                     status,
                     before == Some(project.id),
-                    row == cursor,
+                    Some(row) == cursor,
                     cx,
                 )
             })
@@ -673,7 +718,7 @@ impl Render for WorkspaceSwitcher {
                 v_flex()
                     .id("workspace-switcher-rows")
                     .max_h(ph_ui::rems_from_px(420.))
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .gap_0p5()
                     .children(rows)
                     .when(none, |this| {

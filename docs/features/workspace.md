@@ -51,7 +51,8 @@ The places are in the order a day goes: where the work is done, then what goes o
 `workspace_switcher.rs`. The name of the workspace in front, in the title bar, opens it (as a project switcher does in an editor); so do ⌘E, *Workspaces* in the column while a workspace is in front, and *Switch workspace…* in the palette.
 
 - **The one used last is on top**, then the one before it, and so on: each with its letter on its colour, its name over its folder (`~/…`, or the last folders of a long path; *and 2 more* for a workspace of several), the dot for what goes on in it, and a tick on the one in front. A folder line that leaves something out (a long path cut short, folders not named) says all of it in a tooltip. The workspace Ctrl+Tab goes back to says that key.
-- **Type to find one** by a part of its name or of a folder. The arrow keys move through the rows and Enter opens the one they are on: on opening, that is the workspace used before the one in front, so ⌘E and Enter go back and forth between two, as Ctrl+Tab does without the list.
+- **Type to find one** by a part of its name or of a folder. The arrow keys move through the rows and Enter opens the one they are on. Opened by a key (⌘E), that is the workspace used before the one in front, so ⌘E and Enter go back and forth between two, as Ctrl+Tab does without the list. Opened with the pointer, no row is marked until a key moves through the list: a mark on the second row said nothing to someone about to click.
+- **Ctrl+Tab, held**, goes through all of them, as Alt+Tab goes through windows: the list shows on the workspace before, each more Tab (with Ctrl still down) goes a row further, round and round, and letting Ctrl go opens the row reached. Pressed and let go at once it is the workspace before.
 - **No numbers.** Each workspace had a key of its own (⌃1–⌃9, Alt+1–9 off macOS) while each was a badge in the column of icons, where the numbers could be counted. In a list by last use they would be scattered, and in any order they would say nothing one can see without opening it. Two keys do the work: the list, and back.
 - **What can be done with a workspace** opens under its row, from the ⋯ at its end or a right click: *New chat*, *New task*, *Finish task*, *Add a folder*, *Rename*, *New window*, *Colour* (the colours, to pick one) and *Remove*. (In place, not as a menu: the list is a popover, and a menu over it would close it.) The same is the right-click menu of the name in the title bar, for the workspace in front.
 - **Open a folder…** and **New workspace without folders** are at its foot, always in view.
@@ -184,7 +185,7 @@ Removing a folder leaves it on disk; removing the primary folder makes the next 
 | ⌘1 | Files |
 | ⌘2, ⌘4–9 | Git, Terminal, Browser, Devices, Run, PRs, Tests (⌘3 was the board's, and is free) |
 | ⌘E | The list of workspaces (Enter there: the one before) |
-| Ctrl+Tab | The workspace shown before |
+| Ctrl+Tab | The workspace shown before; held, through the list of them |
 | ⌘P / ⌘⇧F | Go to file / search in workspace |
 | ⌘, | Settings |
 

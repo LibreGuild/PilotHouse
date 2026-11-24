@@ -52,6 +52,8 @@ pub(crate) fn of_action(action: &dyn Action) -> Option<Feature> {
         Feature::ParallelRuns
     } else if any.is::<NewSlides>() {
         Feature::Presentations
+    } else if any.is::<NewWhiteboard>() {
+        Feature::Whiteboards
     } else if any.is::<ShowTour>() {
         Feature::Tour
     } else if any.is::<ph_browser::OpenChromeExtensionSettings>() {
@@ -62,14 +64,19 @@ pub(crate) fn of_action(action: &dyn Action) -> Option<Feature> {
     Some(feature)
 }
 
+/// Whether this build has `feature`, with what it rests on: slides and
+/// whiteboards are kept with the artifacts, and without those there are
+/// none.
+pub(crate) fn has(feature: Feature) -> bool {
+    enabled(feature)
+        && (!matches!(feature, Feature::Presentations | Feature::Whiteboards)
+            || enabled(Feature::Artifacts))
+}
+
 /// Whether this build has what `action` opens (an action that opens no
 /// feature always is).
 pub(crate) fn allows(action: &dyn Action) -> bool {
-    // Slides are kept with the artifacts: without those there are none.
-    if action.as_any().is::<NewSlides>() && !enabled(Feature::Artifacts) {
-        return false;
-    }
-    of_action(action).is_none_or(enabled)
+    of_action(action).is_none_or(has)
 }
 
 #[cfg(test)]
@@ -85,6 +92,7 @@ mod tests {
         assert_eq!(of_action(&ShowGitHubView), Some(Feature::GitHub));
         assert_eq!(of_action(&ShowArtifacts), Some(Feature::Artifacts));
         assert_eq!(of_action(&NewSlides), Some(Feature::Presentations));
+        assert_eq!(of_action(&NewWhiteboard), Some(Feature::Whiteboards));
         assert_eq!(of_action(&NewSession), None);
         assert!(allows(&NewSession));
     }

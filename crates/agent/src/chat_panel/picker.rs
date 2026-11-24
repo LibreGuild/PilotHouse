@@ -109,6 +109,13 @@ impl ChatPanel {
             .update(cx, |search, cx| search.focus(window, cx));
     }
 
+    /// The picker's refresh button: every installed agent is asked for its
+    /// models again, now (a model released since the last look).
+    pub(crate) fn refresh_models(&mut self, cx: &mut Context<Self>) {
+        crate::preload::refresh(self.store.clone(), cx);
+        cx.notify();
+    }
+
     /// The picker opened: this chat's agent, no filter, typing goes there.
     pub(super) fn picker_opened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.picker_highlight = 0;

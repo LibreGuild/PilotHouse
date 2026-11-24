@@ -597,6 +597,21 @@ fn switch_workspace(window: AnyWindowHandle, id: i64, cx: &mut TestAppContext) {
     click_id(window, ("switch-workspace", id as u64), cx);
 }
 
+/// The modifier keys held change to `modifiers` (Ctrl pressed, or let go).
+fn hold(window: AnyWindowHandle, modifiers: gpui_kit::Modifiers, cx: &mut TestAppContext) {
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_event(
+            gpui_kit::PlatformInput::ModifiersChanged(gpui_kit::ModifiersChangedEvent {
+                modifiers,
+                capslock: Default::default(),
+            }),
+            cx,
+        );
+    })
+    .unwrap();
+    cx.run_until_parked();
+}
+
 fn press(window: AnyWindowHandle, key: &str, cx: &mut TestAppContext) {
     cx.update_window(window, |_, window, cx| window.press(key, cx))
         .unwrap();
@@ -642,6 +657,49 @@ fn the_list_opens_workspaces_and_cards_open_their_chats(cx: &mut TestAppContext)
     cx.update(|cx| assert_eq!(workspace.read(cx).active_project_id(), Some(beta)));
     press(window, "ctrl-tab", cx);
     cx.update(|cx| assert_eq!(workspace.read(cx).active_project_id(), Some(alpha)));
+
+    // With Ctrl held, Ctrl+Tab shows the list on the workspace before and
+    // opens nothing yet (more Tabs go down the list, as Alt+Tab goes
+    // through windows): letting Ctrl go opens the one the keys are on.
+    hold(window, gpui_kit::Modifiers::control(), cx);
+    press(window, "ctrl-tab", cx);
+    cx.update(|cx| {
+        assert_eq!(
+            workspace.read(cx).active_project_id(),
+            Some(alpha),
+            "nothing opens while Ctrl is held"
+        )
+    });
+    // Twice more: past the last row to the first, and down again.
+    press(window, "ctrl-tab", cx);
+    press(window, "ctrl-tab", cx);
+    hold(window, gpui_kit::Modifiers::none(), cx);
+    cx.update(|cx| assert_eq!(workspace.read(cx).active_project_id(), Some(beta)));
+    press(window, "ctrl-tab", cx);
+    cx.update(|cx| assert_eq!(workspace.read(cx).active_project_id(), Some(alpha)));
+
+    // The one before may be Chats, which the list of workspaces does not
+    // have: Ctrl+Tab goes back to it at once, Ctrl held or let go.
+    let open = |cx: &mut TestAppContext, id: Option<i64>| {
+        cx.update_window(window, |_, window, cx| {
+            workspace.update(cx, |workspace, cx| match id {
+                Some(id) => workspace.open_project(id, window, cx),
+                None => workspace.show_scratch(window, cx),
+            })
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    open(cx, None);
+    let chats = cx.update(|cx| workspace.read(cx).active_project_id());
+    assert!(chats.is_some() && chats != Some(alpha) && chats != Some(beta));
+    open(cx, Some(alpha));
+    hold(window, gpui_kit::Modifiers::control(), cx);
+    press(window, "ctrl-tab", cx);
+    hold(window, gpui_kit::Modifiers::none(), cx);
+    cx.update(|cx| assert_eq!(workspace.read(cx).active_project_id(), chats));
+    open(cx, Some(beta));
+    open(cx, Some(alpha));
 
     // A chat of beta's, made while alpha is in front.
     let session = cx.update(|cx| {

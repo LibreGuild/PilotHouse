@@ -29,7 +29,7 @@ pub enum PostMode {
 
 /// What one post sends, beyond bringing GitHub up to date with what became
 /// of the findings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Plan<'a> {
     pub mode: PostMode,
     /// The findings to put on GitHub now, by label; `None`: every open,
@@ -44,6 +44,11 @@ pub struct Plan<'a> {
     /// Whether a summary comment is written when the pull request has none
     /// (one that exists is always brought up to date).
     pub summary: bool,
+    /// The summary there was written of what was sent alone (it may list
+    /// nothing: a review that found nothing). Without this, a summary with
+    /// no finding marked as sent is taken for one written before findings
+    /// could be held back, and lists them all.
+    pub sent_only: bool,
 }
 
 impl Default for Plan<'_> {
@@ -55,6 +60,7 @@ impl Default for Plan<'_> {
             event: ReviewEvent::Comment,
             note: "",
             summary: true,
+            sent_only: false,
         }
     }
 }
@@ -305,9 +311,11 @@ pub fn publish(
         // The summary says what is on GitHub: a finding the reviewer held
         // back stays on this computer. (Every finding when none was picked
         // by name, and for a summary written before findings could be held
-        // back, when none carries a mark of where it went.)
+        // back: one there already, of all there was, with no finding
+        // carrying a mark of where it went.)
         let unmarked = findings.iter().all(|f| f.comment_kind.is_none());
-        let shared: Vec<Finding> = if plan.picked.is_none() || (existing.is_some() && unmarked) {
+        let before_picks = existing.is_some() && unmarked && !plan.sent_only;
+        let shared: Vec<Finding> = if plan.picked.is_none() || before_picks {
             findings.clone()
         } else {
             findings

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::Engine as _;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -263,22 +264,29 @@ impl Render for NotebookPreview {
             .enumerate()
             .map(|(ix, cell)| render_cell(ix, cell, &language, &path, dark, cx))
             .collect();
+        // (Its scroll is its own, to go to a heading; the bar is laid over it.)
         div()
-            .id("notebook-scroll")
+            .relative()
             .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .bg(cx.theme().background)
             .child(
-                v_flex()
-                    .w_full()
-                    .max_w(ph_ui::rems_from_px(READING_WIDTH + 80.))
-                    .mx_auto()
-                    .px_6()
-                    .py_5()
-                    .gap_4()
-                    .children(cells),
+                div()
+                    .id("notebook-scroll")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .bg(cx.theme().background)
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(ph_ui::rems_from_px(READING_WIDTH + 80.))
+                            .mx_auto()
+                            .px_6()
+                            .py_5()
+                            .gap_4()
+                            .children(cells),
+                    ),
             )
+            .vertical_scrollbar(&self.scroll)
             .into_any_element()
     }
 }

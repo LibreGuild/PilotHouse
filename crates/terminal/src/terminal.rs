@@ -179,7 +179,17 @@ impl Terminal {
             }
             None => {
                 let (shell, args) = ph_env::default_shell();
-                Self::start_program(&shell.to_string_lossy(), args, cwd)
+                let started = Self::start_program(&shell.to_string_lossy(), args, cwd.clone());
+                // Windows' default is PowerShell, which a company's policy
+                // may not let start: Command Prompt then, so there is a
+                // terminal at all (Settings → Terminal chooses for good).
+                if cfg!(windows) && started.is_err() && !ph_env::is_command_prompt(&shell) {
+                    let (cmd, args) = ph_env::command_prompt();
+                    if let Ok(started) = Self::start_program(&cmd.to_string_lossy(), args, cwd) {
+                        return Ok(started);
+                    }
+                }
+                started
             }
         }
     }
@@ -201,6 +211,31 @@ impl Terminal {
         args: Vec<String>,
         cwd: std::path::PathBuf,
         environment: &[(String, String)],
+    ) -> anyhow::Result<StartedShell> {
+        Self::spawn(program, args, cwd, environment, true)
+    }
+
+    /// [`Self::start_program_with`], the arguments given to the program as
+    /// they are written. Windows hands a program one command line, and
+    /// each argument is normally quoted into it as programs split it; a
+    /// shell told to run a command (`cmd /S /C "…"`) reads the line its
+    /// own way, and takes the command as written. Elsewhere arguments are
+    /// passed apart, and this is [`Self::start_program_with`].
+    pub fn start_program_verbatim(
+        program: &str,
+        args: Vec<String>,
+        cwd: std::path::PathBuf,
+        environment: &[(String, String)],
+    ) -> anyhow::Result<StartedShell> {
+        Self::spawn(program, args, cwd, environment, false)
+    }
+
+    fn spawn(
+        program: &str,
+        args: Vec<String>,
+        cwd: std::path::PathBuf,
+        environment: &[(String, String)],
+        #[cfg_attr(not(target_os = "windows"), allow(unused_variables))] escape_args: bool,
     ) -> anyhow::Result<StartedShell> {
         let shell = std::path::PathBuf::from(program);
         // Not waiting for the login shell's environment (a terminal opened
@@ -224,7 +259,7 @@ impl Terminal {
             drain_on_exit: true,
             env: extra_env,
             #[cfg(target_os = "windows")]
-            escape_args: true,
+            escape_args,
         };
         let (columns, rows) = (80, 24);
         let size = WindowSize {

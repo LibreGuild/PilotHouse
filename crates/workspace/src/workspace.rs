@@ -99,6 +99,9 @@ pub struct Workspace {
     /// the title bar, and whether it is open.
     switcher: Entity<crate::workspace_switcher::WorkspaceSwitcher>,
     switcher_open: bool,
+    /// The list was opened by Ctrl+Tab and Ctrl is still held: each more
+    /// Tab goes a row down, and letting Ctrl go opens the row.
+    switcher_cycling: bool,
     /// Reviews' list of repositories is hidden.
     sidebar_collapsed: bool,
     /// What each workspace is doing, read again every second.
@@ -214,6 +217,7 @@ impl Workspace {
             previous_project: None,
             switcher,
             switcher_open: false,
+            switcher_cycling: false,
             sidebar_collapsed,
             statuses: HashMap::new(),
             hidden_since: HashMap::new(),
@@ -535,6 +539,7 @@ impl Workspace {
             return;
         }
         self.switcher_open = open;
+        self.switcher_cycling = false;
         if open {
             self.switcher
                 .update(cx, |switcher, cx| switcher.opened(window, cx));
@@ -578,6 +583,22 @@ impl Workspace {
         {
             self.set_switcher_open(true, window, cx);
         }
+        // Asked for by a key: the keys start on the workspace before, so
+        // that Enter goes back to it.
+        if self.switcher_open {
+            let row = self.row_before();
+            self.switcher
+                .update(cx, |switcher, cx| switcher.keys_on(row, cx));
+        }
+    }
+
+    /// The row of the list of workspaces the one used before this one is
+    /// on (the list is [`Self::recent`]).
+    fn row_before(&self) -> Option<usize> {
+        let before = self.before()?;
+        self.recent()
+            .iter()
+            .position(|project| project.id == before)
     }
 
     /// The workspace for chats that need no folder ("Chats"); this
@@ -2515,8 +2536,63 @@ impl Workspace {
         if self.view != View::Workspaces && self.active_project.is_some() {
             return self.bring_forward(window, cx);
         }
-        if let Some(id) = self.before() {
-            self.open_project(id, window, cx);
+        // Tab again with Ctrl still held: the next workspace down the list.
+        // (Once this window is done changing: the list reads it.)
+        if self.switcher_open && self.switcher_cycling {
+            let switcher = self.switcher.clone();
+            return window.defer(cx, move |_, cx| {
+                switcher.update(cx, |switcher, cx| switcher.step(cx))
+            });
+        }
+        let Some(id) = self.before() else {
+            return;
+        };
+        // While Ctrl is held the list shows, on the workspace before; more
+        // Tabs go further down it, and letting Ctrl go opens the one
+        // reached (as Alt+Tab does with windows). Pressed and let go at
+        // once, that is the workspace before: back and forth between two.
+        let listed = self.view == View::Workspaces
+            && self.active_project.is_some_and(|id| Some(id) != self.chats);
+        // (The one before may be Chats, which the list does not have: that
+        // is opened at once, as when Ctrl is let go.)
+        if listed
+            && window.modifiers().control
+            && let Some(row) = self.row_before()
+        {
+            if self.switcher_open {
+                // Open already, perhaps with something typed: the rows are
+                // counted in the whole list.
+                self.switcher
+                    .update(cx, |switcher, cx| switcher.opened(window, cx));
+            } else {
+                self.set_switcher_open(true, window, cx);
+            }
+            self.switcher
+                .update(cx, |switcher, cx| switcher.keys_on(Some(row), cx));
+            self.switcher_cycling = true;
+            return;
+        }
+        self.open_project(id, window, cx);
+    }
+
+    /// Ctrl was let go while Ctrl+Tab's list is open: the workspace the
+    /// keys are on comes in front.
+    fn modifiers_changed(
+        &mut self,
+        event: &gpui_kit::ModifiersChangedEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.switcher_cycling || event.modifiers.control {
+            return;
+        }
+        self.switcher_cycling = false;
+        if self.switcher_open {
+            // (Once this window is done changing: the list reads it.)
+            let switcher = self.switcher.clone();
+            window.defer(cx, move |window, cx| {
+                switcher.update(cx, |switcher, cx| switcher.commit(window, cx))
+            });
         }
     }
 
@@ -2912,6 +2988,9 @@ impl Render for Workspace {
                     crate::slides_window::create(window, cx)
                 }),
             )
+            .on_action(cx.listener(|_, _: &NewWhiteboard, window, cx| {
+                crate::board_window::create(window, cx)
+            }))
             .on_action(
                 cx.listener(|_, _: &ShowShortcuts, window, cx| crate::shortcuts::open(window, cx)),
             )
@@ -2960,6 +3039,7 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(Self::switch_workspace))
             .on_action(cx.listener(Self::previous_workspace))
+            .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_action(cx.listener(Self::remove_workspace))
             .on_action(cx.listener(|this, _: &OpenInNewWindow, window, cx| {
                 this.bring_forward(window, cx);

@@ -13,7 +13,7 @@ use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    menu::{PopupMenu, PopupMenuItem},
+    menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
     resizable::{h_resizable, resizable_panel},
     tab::{Tab, TabBar},
     v_flex,
@@ -22,8 +22,8 @@ use gpui_kit::component::{Disableable as _, Selectable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext as _, Context, Entity, EntityId, Focusable as _,
-    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, SharedString,
-    Styled as _, Subscription, Window, div, px,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Render,
+    SharedString, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use ph_ui::MenuButton as _;
 use ph_ui::{EmptyState, Icons};
@@ -58,6 +58,8 @@ pub struct TerminalPanel {
     /// Agent sessions shown beside their terminal, by terminal.
     transcripts: HashMap<EntityId, AnyView>,
     has_transcript: Option<HasTranscript>,
+    /// The tab a right click was on: the one its menu is about.
+    menu_tab: Option<EntityId>,
     _observe: Subscription,
 }
 
@@ -68,27 +70,115 @@ impl TerminalPanel {
         let Some(terminal) = self.terminals.read(cx).terminals().get(ix).cloned() else {
             return;
         };
-        if !agent_busy(terminal.read(cx)) {
-            self.terminals
-                .update(cx, |terminals, cx| terminals.close(&terminal, cx));
+        self.close_terminals(vec![terminal], window, cx);
+    }
+
+    /// Closes `closing` (their shells stop). When an agent in one of them
+    /// is at work, or waits for an answer, only after asking, once for all
+    /// of them: closing stops the agent.
+    fn close_terminals(
+        &mut self,
+        closing: Vec<Entity<Terminal>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let busy: Vec<SharedString> = closing
+            .iter()
+            .map(|terminal| terminal.read(cx))
+            .filter(|terminal| agent_busy(terminal))
+            .map(|terminal| terminal.title().clone())
+            .collect();
+        if busy.is_empty() {
+            self.terminals.update(cx, |terminals, cx| {
+                for terminal in &closing {
+                    terminals.close(terminal, cx);
+                }
+            });
             return;
         }
-        let name = terminal.read(cx).title().clone();
+        let (title, said) = match (closing.len(), busy.as_slice()) {
+            (1, [name]) => (
+                "Close the terminal?",
+                format!(
+                    "The agent in “{name}” is still at work or waiting for you. Closing the terminal stops it; what it did so far stays."
+                ),
+            ),
+            (_, [name]) => (
+                "Close the terminals?",
+                format!(
+                    "The agent in “{name}” is still at work or waiting for you. Closing its terminal stops it; what it did so far stays."
+                ),
+            ),
+            (_, names) => (
+                "Close the terminals?",
+                format!(
+                    "Agents in {} of these terminals are still at work or waiting for you. Closing the terminals stops them; what they did so far stays.",
+                    names.len()
+                ),
+            ),
+        };
         let terminals = self.terminals.downgrade();
         window.open_dialog(cx, move |dialog, window, _| {
-            let (terminals, terminal) = (terminals.clone(), terminal.clone());
+            let (terminals, closing) = (terminals.clone(), closing.clone());
             dialog
-                .title("Close the terminal?")
+                .title(title)
                 .w(ph_ui::scaled_px(440., window))
-                .child(format!(
-                    "The agent in “{name}” is still at work or waiting for you. Closing the terminal stops it; what it did so far stays."
-                ))
+                .child(said.clone())
                 .footer(ph_ui::dialog_buttons("Close", true))
                 .on_ok(move |_, _, cx| {
-                    _ = terminals.update(cx, |terminals, cx| terminals.close(&terminal, cx));
+                    _ = terminals.update(cx, |terminals, cx| {
+                        for terminal in &closing {
+                            terminals.close(terminal, cx);
+                        }
+                    });
                     true
                 })
         });
+    }
+
+    /// A right click on a tab: closing it, the others, those after it, or
+    /// all of them, as editors' tabs offer. Built as it opens, about the
+    /// tab the click was on (none: no menu).
+    fn tab_menu(
+        panel: WeakEntity<Self>,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        move |menu, _, cx| {
+            let Some(this) = panel.upgrade() else {
+                return menu;
+            };
+            let (all, at) = {
+                let this = this.read(cx);
+                let all = this.terminals.read(cx).terminals().to_vec();
+                let at = this
+                    .menu_tab
+                    .and_then(|id| all.iter().position(|known| known.entity_id() == id));
+                (all, at)
+            };
+            let Some(at) = at else {
+                return menu;
+            };
+            let close = |label: &'static str, closing: Vec<Entity<Terminal>>| {
+                let panel = panel.clone();
+                PopupMenuItem::new(label)
+                    .disabled(closing.is_empty())
+                    .on_click(move |_, window, cx| {
+                        _ = panel.update(cx, |panel, cx| {
+                            panel.close_terminals(closing.clone(), window, cx)
+                        });
+                    })
+            };
+            let others: Vec<Entity<Terminal>> = all
+                .iter()
+                .enumerate()
+                .filter(|(ix, _)| *ix != at)
+                .map(|(_, terminal)| terminal.clone())
+                .collect();
+            menu.item(close("Close", vec![all[at].clone()]))
+                .item(close("Close others", others))
+                .item(close("Close to the right", all[at + 1..].to_vec()))
+                .separator()
+                .item(close("Close all", all.clone()))
+        }
     }
 
     /// Shows the workspace's `terminals`.
@@ -110,6 +200,7 @@ impl TerminalPanel {
             views: HashMap::new(),
             transcripts: HashMap::new(),
             has_transcript: None,
+            menu_tab: None,
         }
     }
 
@@ -556,7 +647,7 @@ impl Render for TerminalPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let terminals = self.terminals.read(cx);
         let active = terminals.active_index();
-        let titles: Vec<(SharedString, Option<crate::AgentBadge>, bool)> = terminals
+        let titles: Vec<(EntityId, SharedString, Option<crate::AgentBadge>, bool)> = terminals
             .terminals()
             .iter()
             .map(|entity| {
@@ -567,14 +658,14 @@ impl Render for TerminalPanel {
                     terminal.shell(),
                     terminal.label().map(|label| label.as_ref()),
                 );
-                (title, terminal.badge(), split)
+                (entity.entity_id(), title, terminal.badge(), split)
             })
             .collect();
         let muted = cx.theme().muted_foreground;
         let tabs = titles
             .into_iter()
             .enumerate()
-            .map(|(ix, (title, badge, split))| {
+            .map(|(ix, (id, title, badge, split))| {
                 let prefix = (split || badge.is_some()).then(|| {
                     h_flex()
                         .gap_1()
@@ -589,6 +680,11 @@ impl Render for TerminalPanel {
                 });
                 Tab::new()
                     .label(title)
+                    // The tab its menu (on the row of tabs) is about.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _, _, _| this.menu_tab = Some(id)),
+                    )
                     .when_some(prefix, |tab, prefix| tab.prefix(prefix))
                     .suffix(
                         Button::new(("close-terminal", ix))
@@ -613,22 +709,37 @@ impl Render for TerminalPanel {
                     .child(
                         // Shells set long titles (user@host:path); the tabs
                         // give way so the buttons stay visible.
-                        div().flex_1().min_w_0().overflow_hidden().child(
-                            TabBar::new("terminal-tabs")
-                                .underline()
-                                .small()
-                                .selected_index(active)
-                                .on_click(cx.listener(|this, ix: &usize, window, cx| {
-                                    let ix = *ix;
-                                    this.terminals
-                                        .update(cx, |terminals, cx| terminals.select(ix, cx));
-                                    let terminal = this.terminals.read(cx).active().cloned();
-                                    if let Some(terminal) = terminal {
-                                        this.focus(&terminal, window, cx);
+                        div()
+                            .id("terminal-tab-strip")
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            // A right click beside the tabs is about none
+                            // of them (the tab under one says so after).
+                            .capture_any_mouse_down(cx.listener(
+                                |this, event: &MouseDownEvent, _, _| {
+                                    if event.button == MouseButton::Right {
+                                        this.menu_tab = None;
                                     }
-                                }))
-                                .children(tabs),
-                        ),
+                                },
+                            ))
+                            .child(
+                                TabBar::new("terminal-tabs")
+                                    .underline()
+                                    .small()
+                                    .selected_index(active)
+                                    .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                                        let ix = *ix;
+                                        this.terminals
+                                            .update(cx, |terminals, cx| terminals.select(ix, cx));
+                                        let terminal = this.terminals.read(cx).active().cloned();
+                                        if let Some(terminal) = terminal {
+                                            this.focus(&terminal, window, cx);
+                                        }
+                                    }))
+                                    .children(tabs),
+                            )
+                            .context_menu(Self::tab_menu(cx.weak_entity())),
                     )
                     .children(self.render_transcript_button(cx))
                     .child(self.render_split_button(cx))

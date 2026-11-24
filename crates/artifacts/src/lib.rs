@@ -10,6 +10,7 @@
 //! - [`hub`]: the running app's artifacts ([`Artifacts`]).
 //! - [`control`]: `artifacts.*` for agents (the `artifact_` tools).
 //! - [`guide`]: what agents are told about making one.
+//! - [`kit`]: what the app's own pages (a deck's, a board's) share.
 //! - [`view`]: the list (the *Artifacts* place of the window).
 //!
 //! Behind the `artifacts` feature (`brand/brand.toml`).
@@ -18,6 +19,7 @@ mod control;
 pub mod guide;
 mod http;
 mod hub;
+pub mod kit;
 pub mod library;
 mod room;
 mod server;

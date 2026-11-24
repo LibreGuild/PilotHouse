@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -451,7 +452,7 @@ impl Codec {
                     .id("utility-hex-dump")
                     .flex_1()
                     .min_h_0()
-                    .overflow_scroll()
+                    .overflow_scrollbar()
                     .whitespace_nowrap()
                     .font_family(theme.mono_font_family.clone())
                     .text_xs()

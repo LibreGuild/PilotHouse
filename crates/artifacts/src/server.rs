@@ -702,6 +702,13 @@ fn service(site: &Site, request: &Request, call: &str, visitor: Visitor) -> Resp
             .header("Cache-Control", "no-cache")
             .body(Body::Bytes(CLIENT.as_bytes().to_vec()));
     }
+    // What the app's own pages are drawn with (a deck's, a board's).
+    if reading
+        && let Some(name) = call.strip_prefix("kit/")
+        && let Some(answer) = crate::kit::respond(name)
+    {
+        return answer;
+    }
     if !matches!(call, "storage" | "shared" | "room") {
         return Response::text(404, "The app has no such call.");
     }

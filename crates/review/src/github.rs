@@ -200,7 +200,9 @@ pub struct Finish {
     pub picked: Vec<String>,
     /// The reviewer's own line comments.
     pub own: Vec<ph_github::models::DraftComment>,
-    /// Whether a summary comment the author can tick is written.
+    /// Whether a summary comment is written: the one the author can tick
+    /// findings off in, or, with nothing found, the word that the pull
+    /// request was reviewed and nothing is open.
     pub summary: bool,
 }
 
@@ -221,7 +223,10 @@ pub fn finish(store: &Store, pull: &PullRef, finish: &Finish) -> Result<String> 
                 own: &finish.own,
                 event: finish.event,
                 note: &finish.note,
-                summary: finish.summary && !finish.picked.is_empty(),
+                // Whoever finishes decides (a review that found nothing is
+                // posted as its summary alone).
+                summary: finish.summary,
+                sent_only: false,
             },
         )?,
         None => {
@@ -248,6 +253,11 @@ pub fn finish(store: &Store, pull: &PullRef, finish: &Finish) -> Result<String> 
         pulls::ReviewEvent::RequestChanges => format!("Changes requested. {said}"),
         pulls::ReviewEvent::Comment => said,
     };
+    // Its summary, when it has one, is of what was picked from here on.
+    let mut finished: std::collections::BTreeSet<String> = store.setting(FINISHED_KEY);
+    if finished.insert(watch_key(pull)) {
+        store.set_setting(FINISHED_KEY, &finished)?;
+    }
     // The review is out: it is the author's turn, and their answer is news.
     if let Err(err) = set_watched(store, pull, true) {
         tracing::info!("watching #{} after its review: {err:#}", pull.number);
@@ -312,6 +322,14 @@ fn send(store: &Store, pull: &PullRef, plan: &post::Plan) -> Result<String> {
         })
     };
     let existing = store.summary_comment_of(pull)?;
+    // The summary there lists what was sent alone when a review of this
+    // pull request was finished here before (it may list nothing), or when
+    // it is an earlier round's: this round's findings were never all in it.
+    let finished: std::collections::BTreeSet<String> = store.setting(FINISHED_KEY);
+    let plan = &post::Plan {
+        sent_only: finished.contains(&watch_key(pull)) || round.summary_comment_id.is_none(),
+        ..*plan
+    };
     let published = post::publish(&target, &findings, &files, plan, &summary, existing)?;
     if let Some(comment) = published.summary_comment {
         store.set_summary_comment(round.id, comment)?;
@@ -611,6 +629,11 @@ pub fn repo_stats(store: &Store, pull: &PullRef) -> Result<crate::stats::Stats> 
 
 /// Settings key: per pull request, the newest conversation comment read.
 const CONVERSATION_SEEN_KEY: &str = "review.conversation_seen";
+
+/// Settings key: the pull requests whose review was finished here
+/// (`host/owner/name#number`): their summary comment lists what was sent,
+/// not every finding.
+const FINISHED_KEY: &str = "review.finished";
 
 /// Settings key: the pull requests watched (`host/owner/name#number`).
 const WATCHED_KEY: &str = "review.watched";

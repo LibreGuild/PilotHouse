@@ -13,7 +13,7 @@ path = "src/main.rs"
 [features]
 default = []
 # Dev-only UI automation over the control socket. See docs/testing.md.
-automation = ["ph-control/automation", "ph-slides/automation"]
+automation = ["ph-control/automation", "ph-slides/automation", "ph-workspace/automation"]
 
 [dependencies]
 ph-brand.workspace = true
@@ -21,6 +21,7 @@ anyhow.workspace = true
 gpui-kit.workspace = true
 ph-artifacts.workspace = true
 ph-slides.workspace = true
+ph-boards.workspace = true
 ph-browser.workspace = true
 ph-devices.workspace = true
 ph-runs.workspace = true

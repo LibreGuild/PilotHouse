@@ -30,6 +30,19 @@ mod system;
 #[path = "windows.rs"]
 mod system;
 
+/// Where the system's web view keeps what it keeps (its profile: a cache,
+/// what pages store). Windows' WebView2 otherwise makes a folder beside the
+/// program (`pilothouse.exe.WebView2`), which an update replaces and which
+/// cannot be written to where the program is installed for every user:
+/// there no web view could be made at all. Say it once, before the first
+/// web view. (macOS keeps WebKit's own place.)
+pub fn keep_data_in(folder: std::path::PathBuf) {
+    let _ = DATA.set(folder);
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+static DATA: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
 /// One PDF of the pages of `parts`, in order: each part is a PDF of its
 /// own, as [`WebView::pdf`] makes them.
 pub fn join_pdfs(parts: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {

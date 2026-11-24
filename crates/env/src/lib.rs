@@ -251,7 +251,26 @@ fn capture() -> Option<HashMap<String, String>> {
 /// Windows sessions give apps the user's full environment.
 #[cfg(not(unix))]
 fn capture() -> Option<HashMap<String, String>> {
-    Some(std::env::vars().collect())
+    let own = APP_ONLY.lock().unwrap_or_else(|err| err.into_inner());
+    Some(
+        std::env::vars()
+            .filter(|(name, _)| !own.iter().any(|kept| kept.eq_ignore_ascii_case(name)))
+            .collect(),
+    )
+}
+
+/// Variables the app set for itself at its start (how its own windows are
+/// drawn), by name: the terminals and agents it starts do not get them.
+static APP_ONLY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Says that the app set variable `name` for itself alone: what it starts
+/// is given the environment without it. (Another app of the same toolkit
+/// started from a terminal here would else be drawn the app's way.)
+pub fn keep_to_app(name: &str) {
+    APP_ONLY
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(name.to_string());
 }
 
 #[cfg(unix)]
@@ -438,17 +457,52 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     command
 }
 
-/// The user's default shell for terminals: `$SHELL` on Unix; on Windows
-/// PowerShell 7 if installed, else Windows PowerShell, else `cmd`.
+/// The shell the user chose for new terminals (Settings → Terminal), by
+/// the name [`shells`] lists it under; `None`: the system's.
+static CHOSEN_SHELL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Chooses the shell new terminals start, by the name [`shells`] lists it
+/// under (`None`, or a shell that is not installed: the system's). On a
+/// computer where the system's default may not be run (PowerShell held back
+/// by a policy), this is how another one is used.
+pub fn choose_shell(name: Option<String>) {
+    if let Ok(mut chosen) = CHOSEN_SHELL.lock() {
+        *chosen = name.filter(|name| !name.trim().is_empty());
+    }
+}
+
+/// The name given to [`choose_shell`] (`None`: the system's shell).
+pub fn chosen_shell_name() -> Option<String> {
+    CHOSEN_SHELL.lock().ok()?.clone()
+}
+
+/// The shell chosen with [`choose_shell`], when it is installed.
+fn chosen_shell() -> Option<Shell> {
+    let name = chosen_shell_name()?;
+    installed_shells(&system_shell())
+        .into_iter()
+        .find(|shell| shell.name == name)
+}
+
+/// The shell new terminals start: the one the user chose, else the
+/// system's ([`system_shell`]).
 pub fn default_shell() -> (PathBuf, Vec<String>) {
+    match chosen_shell() {
+        Some(shell) => (shell.program, shell.args),
+        None => system_shell(),
+    }
+}
+
+/// The system's default shell: `$SHELL` on Unix; on Windows PowerShell 7 if
+/// installed, else Windows PowerShell, else `cmd`.
+pub fn system_shell() -> (PathBuf, Vec<String>) {
     if cfg!(windows) {
         for shell in ["pwsh", "powershell"] {
             if let Some(path) = which(shell) {
                 return (path, vec!["-NoLogo".into()]);
             }
         }
-        let cmd = var("COMSPEC").unwrap_or("cmd.exe");
-        return (PathBuf::from(cmd), Vec::new());
+        return command_prompt();
     }
     // Never waits for the login shell: terminals start on the UI thread, and
     // the shell asked for the environment is this same `$SHELL` anyway.
@@ -458,6 +512,60 @@ pub fn default_shell() -> (PathBuf, Vec<String>) {
         .unwrap_or_else(|| "/bin/zsh".into());
     // A login shell, so profile files run as in the user's own terminal.
     (PathBuf::from(shell), vec!["-l".into()])
+}
+
+/// Windows' Command Prompt.
+pub fn command_prompt() -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from(var("COMSPEC").unwrap_or("cmd.exe")),
+        Vec::new(),
+    )
+}
+
+/// Whether `program` is Command Prompt, whichever way its path is written.
+pub fn is_command_prompt(program: &Path) -> bool {
+    program
+        .file_stem()
+        .is_some_and(|name| name.eq_ignore_ascii_case("cmd"))
+}
+
+/// The shell that runs a program as a terminal's whole point (an agent's
+/// CLI, in `cwd`), told its command line.
+///
+/// On Unix the default shell. On Windows Command Prompt, or Git Bash when
+/// that is the shell the user chose; never PowerShell, chosen or not: the
+/// command-line tools npm installs are `.cmd` files with a PowerShell
+/// script beside them, which PowerShell prefers and then refuses to run
+/// where scripts are not allowed (Windows' own default, and many
+/// companies' policy), and PowerShell passes on an argument with quotes in
+/// it differently from version to version. Nobody types in this shell: it
+/// only starts the program. Command Prompt cannot start in a folder named
+/// by a network path (`\\server\share`): there the default shell runs it.
+pub fn program_shell(cwd: &Path) -> (PathBuf, Vec<String>) {
+    if !cfg!(windows) {
+        return default_shell();
+    }
+    if let Some(shell) = chosen_shell()
+        && starts_programs(&shell.program)
+    {
+        return (shell.program, shell.args);
+    }
+    if cwd.to_string_lossy().starts_with(r"\\") {
+        return system_shell();
+    }
+    command_prompt()
+}
+
+/// Whether the shell `program`, chosen for terminals, is also the one to
+/// start an agent's CLI with on Windows: Command Prompt and Git Bash find
+/// a tool's `.cmd` file; PowerShell would take the script beside it (see
+/// [`program_shell`]), and WSL's launcher is no shell of this computer.
+fn starts_programs(program: &Path) -> bool {
+    program.file_stem().is_some_and(|name| {
+        ["cmd", "bash"]
+            .iter()
+            .any(|known| name.eq_ignore_ascii_case(known))
+    })
 }
 
 /// A shell a terminal can start.
@@ -475,7 +583,19 @@ pub struct Shell {
 /// `/etc/shells` that exist (each once, by name); on Windows PowerShell 7,
 /// Windows PowerShell, Command Prompt, Git Bash and WSL, as found.
 pub fn shells() -> Vec<Shell> {
-    let (default_program, default_args) = default_shell();
+    let mut list = installed_shells(&system_shell());
+    let (default_program, _) = default_shell();
+    for shell in &mut list {
+        shell.default = shell.program == default_program;
+    }
+    // The default leads.
+    list.sort_by_key(|shell| !shell.default);
+    list
+}
+
+/// The shells installed here, the system's own (`system`) first on Unix;
+/// none marked as the default.
+fn installed_shells((system_program, system_args): &(PathBuf, Vec<String>)) -> Vec<Shell> {
     let mut list: Vec<Shell> = Vec::new();
     let mut add = |name: String, program: PathBuf, args: Vec<String>| {
         if list
@@ -484,12 +604,11 @@ pub fn shells() -> Vec<Shell> {
         {
             return;
         }
-        let default = program == default_program;
         list.push(Shell {
             name,
             program,
             args,
-            default,
+            default: false,
         });
     };
     if cfg!(windows) {
@@ -500,7 +619,7 @@ pub fn shells() -> Vec<Shell> {
         if let Some(path) = found("powershell") {
             add("Windows PowerShell".into(), path, vec!["-NoLogo".into()]);
         }
-        let cmd = PathBuf::from(var("COMSPEC").unwrap_or("cmd.exe"));
+        let (cmd, _) = command_prompt();
         add("Command Prompt".into(), cmd, Vec::new());
         let git_bash = [
             var("ProgramFiles"),
@@ -527,16 +646,16 @@ pub fn shells() -> Vec<Shell> {
             add("WSL".into(), path, Vec::new());
         }
     } else {
-        // The default first, then the rest as /etc/shells lists them.
+        // The system's first, then the rest as /etc/shells lists them.
         let name_of = |path: &std::path::Path| {
             path.file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default()
         };
         add(
-            name_of(&default_program),
-            default_program.clone(),
-            default_args.clone(),
+            name_of(system_program),
+            system_program.clone(),
+            system_args.clone(),
         );
         let listed = std::fs::read_to_string("/etc/shells").unwrap_or_default();
         for line in listed.lines().map(str::trim) {
@@ -571,14 +690,27 @@ pub fn shells() -> Vec<Shell> {
             }
         }
     }
-    // The default leads.
-    list.sort_by_key(|shell| !shell.default);
     list
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An agent's CLI is never started through PowerShell, whichever shell
+    /// terminals start: it would run the script npm puts beside the
+    /// `.cmd`, which a computer that allows no scripts refuses.
+    #[test]
+    fn an_agents_cli_is_not_started_by_powershell() {
+        // (Named without their folders: a path of Windows is read as one
+        // only there.)
+        for shell in ["cmd.exe", "CMD", "bash.exe", "Git/bin/bash.exe"] {
+            assert!(starts_programs(Path::new(shell)), "{shell}");
+        }
+        for shell in ["pwsh.exe", "powershell.exe", "PowerShell", "wsl.exe"] {
+            assert!(!starts_programs(Path::new(shell)), "{shell}");
+        }
+    }
 
     #[test]
     fn only_a_sessions_own_marks_are_forgotten() {
@@ -623,6 +755,27 @@ mod tests {
         let mut names: Vec<_> = shells.iter().map(|shell| &shell.name).collect();
         names.dedup();
         assert_eq!(names.len(), shells.len(), "each shell once");
+    }
+
+    #[test]
+    fn a_chosen_shell_is_the_default_while_it_is_installed() {
+        let system = system_shell();
+        let other = shells().into_iter().find(|shell| !shell.default);
+        if let Some(other) = other {
+            choose_shell(Some(other.name.clone()));
+            assert_eq!(default_shell().0, other.program);
+            let listed = shells();
+            assert!(listed[0].default && listed[0].name == other.name);
+            assert_eq!(listed.iter().filter(|shell| shell.default).count(), 1);
+        }
+        // One that is not installed (taken off since): the system's again.
+        choose_shell(Some("no such shell".into()));
+        assert_eq!(default_shell(), system);
+        choose_shell(None);
+        assert_eq!(default_shell(), system);
+        assert!(is_command_prompt(Path::new(r"C:\Windows\System32\cmd.exe")) || !cfg!(windows));
+        assert!(is_command_prompt(Path::new("cmd.exe")));
+        assert!(!is_command_prompt(Path::new("/bin/zsh")));
     }
 
     #[test]

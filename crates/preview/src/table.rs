@@ -4,6 +4,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, h_flex,
     input::{Input, InputEvent, InputState},
@@ -381,19 +382,30 @@ impl Render for TableGrid {
                     }),
             )
             .child(
+                // Both bars over the table, not in it: the rows' own bar
+                // would go out of sight with the columns scrolled, and a
+                // table wider than the pane has no other handle for a
+                // mouse without a sideways wheel.
                 div()
-                    .id("table-across")
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_x_scroll()
-                    .track_scroll(&self.across)
                     .child(
-                        v_flex()
-                            .h_full()
-                            .w(ph_ui::rems_from_px(total))
-                            .child(header)
-                            .child(div().flex_1().min_h_0().child(rows)),
-                    ),
+                        div()
+                            .id("table-across")
+                            .size_full()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.across)
+                            .child(
+                                v_flex()
+                                    .h_full()
+                                    .w(ph_ui::rems_from_px(total))
+                                    .child(header)
+                                    .child(div().flex_1().min_h_0().child(rows)),
+                            ),
+                    )
+                    .horizontal_scrollbar(&self.across)
+                    .vertical_scrollbar(&self.rows_scroll),
             )
     }
 }

@@ -98,6 +98,7 @@ For what goes with the work, by hand or by asking the agent in the chat beside i
 - **Pictures:** arrows, boxes, numbered steps, labels and highlights; blur or pixelate emails and tokens; crop, resize and frame for docs.
 - **Video:** cut and speed up parts of a screen recording on a timeline, add labels and blurs that show at set times, and export MP4, HEVC, WebM or GIF.
 - **Artifacts:** a page an agent made for you (a planner, a dashboard, a small game) kept with an address of its own on your computer; it remembers what you enter, you ask for changes beside it, and you can share it with the people on your network to use together, live.
+- **Whiteboard:** an endless board beside a chat: the agent draws the flow, the plan or the parts of a system, and you move, type and draw by hand. Notes, shapes, arrows that stay tied to what they join, sections, tables, a pen, templates, a timer, votes, and notes pinned to the board for the agent to answer.
 - **Slides:** a deck made beside a chat: the agent drafts and changes it, you move, type and restyle things by hand, and point at something to comment on it or send it to the agent. Charts keep their numbers; present with notes; share it on your network; start from any `.pptx` and export editable PowerPoint, PDF, a web page or pictures.
 
 <p align="center">
