@@ -48,7 +48,7 @@ ignore.workspace = true
 jiff.workspace = true
 serde.workspace = true
 # The quick chat's shortcut, taken from the system (macOS, Windows, X11).
-global-hotkey = "0.9"
+global-hotkey = "0.10"
 smol.workspace = true
 serde_json.workspace = true
 toml.workspace = true
