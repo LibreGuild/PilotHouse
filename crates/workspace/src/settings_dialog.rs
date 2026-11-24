@@ -59,6 +59,8 @@ pub(crate) fn open(
     // about 100 ms on a Mac with many installed).
     let fonts = font_options(cx);
     let themes = theme_options(cx);
+    // The shells installed, as found now (a few files looked for).
+    let shells = shell_choices();
     let store = AppState::store(cx).clone();
     // Each page's view is made when its page is first shown: several start
     // work of their own (a walk of every clone's size, a request to each
@@ -226,7 +228,7 @@ pub(crate) fn open(
                                         [
                                             Some(appearance_page(&fonts, &themes, workspace)),
                                             Some(editor_page(&fonts)),
-                                            Some(terminal_page()),
+                                            Some(terminal_page(&shells)),
                                             Some(chat_page()),
                                             Some(agents_page(agents.clone())),
                                             Some(tools_page(tools.clone())),
@@ -681,7 +683,7 @@ fn editor_page(fonts: &[(SharedString, SharedString)]) -> SettingPage {
         )
 }
 
-fn terminal_page() -> SettingPage {
+fn terminal_page(shells: &[(SharedString, SharedString)]) -> SettingPage {
     SettingPage::new("Terminal")
         .icon(Icon::new(Icons::Terminal))
         .group(
@@ -703,18 +705,56 @@ fn terminal_page() -> SettingPage {
                 .item(
                     SettingItem::new(
                         "Shell",
-                        SettingField::render(|_, _, cx| {
-                            let (shell, _) = ph_env::default_shell();
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(shell.display().to_string())
-                        }),
+                        SettingField::dropdown(
+                            shells.to_vec(),
+                            |_| AppState::terminal_shell().into(),
+                            |picked, cx| AppState::set_terminal_shell(picked.as_ref(), cx),
+                        ),
                     )
-                    .description("New terminals start your system's default shell.")
-                    .keywords(["shell", "powershell", "zsh", "bash"]),
+                    .description(if cfg!(windows) {
+                        "What new terminals start. An agent's CLI (Chat | CLI) is started by Command Prompt unless you choose a shell here: PowerShell does not run the commands npm installs where scripts are not allowed."
+                    } else {
+                        "What new terminals start, and what starts an agent's CLI (Chat | CLI)."
+                    })
+                    .keywords([
+                        "shell",
+                        "powershell",
+                        "command prompt",
+                        "cmd",
+                        "zsh",
+                        "bash",
+                        "default",
+                    ]),
                 ),
         )
+}
+
+/// The shells to choose from for new terminals: the system's own (said by
+/// its name), then each one installed. Looked for on the disk: asked once
+/// when Settings opens, not at each frame of it.
+fn shell_choices() -> Vec<(SharedString, SharedString)> {
+    let (system, _) = ph_env::system_shell();
+    let installed = ph_env::shells();
+    let system = installed
+        .iter()
+        .find(|shell| shell.program == system)
+        .map(|shell| shell.name.clone())
+        .unwrap_or_else(|| {
+            system
+                .file_stem()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+    std::iter::once((
+        SharedString::default(),
+        SharedString::from(format!("System default ({system})")),
+    ))
+    .chain(
+        installed
+            .into_iter()
+            .map(|shell| (shell.name.clone().into(), shell.name.into())),
+    )
+    .collect()
 }
 
 /// A page that is one view of its own. `keywords` are what Search finds it

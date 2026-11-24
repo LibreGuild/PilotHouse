@@ -103,6 +103,7 @@ A pane is as narrow as 320 px (`CONTEXT_PANEL_MIN`; less in a small window) and 
 - Text in a row gives way before it is cut: `div().flex_1().min_w_0().truncate()` for a name, `min_w_0()` without `truncate()` for a sentence that should wrap. A bare string in an `h_flex` does neither.
 - A row of named buttons folds to icons when the pane is narrow (`ph_ui::measure::narrower_than`, the breakpoint in pixels at the default interface size); each keeps its name in its tooltip and `accessibility_label`.
 - A row of tabs is `ph_ui::PillTabs`: the tabs not in front fold to icons.
+- **What scrolls shows a scrollbar.** `overflow_y_scrollbar()` (or `overflow_x_scrollbar()`, `overflow_scrollbar()`) in place of the plain `overflow_*_scroll()`; for an area that keeps its own scroll handle, the area in a `relative()` wrapper with `.vertical_scrollbar(&handle)` on the wrapper. Scrollbars stay in sight on Windows and Linux, and on a Mac set to always show them (`ph_theme::preferences::apply`): a mouse without a sideways wheel has no other way across a wide table. (An element that calls `.test_support()` after its scroll cannot take the first form.)
 - A row that still cannot fit wraps (`flex_wrap`) with its main action at the right, or scrolls sideways (code, diffs: `ph_preview::diff::scroller`). Nothing is pushed out of the pane.
 - A size that is known to the layout as a fixed width counts as the least its row can be: give what should shrink a `flex_basis` with `min_w_0()`, not a width.
 

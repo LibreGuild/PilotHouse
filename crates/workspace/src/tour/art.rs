@@ -1470,6 +1470,147 @@ pub(crate) fn artifacts(cx: &App) -> AnyElement {
     })
 }
 
+// ---- Whiteboard (news of 0.8.1) -------------------------------------------
+
+/// A flow asked for in the chat and drawn, thing by thing, each joined to
+/// the one before; then the user pins a note to one of them, and the agent
+/// draws what the note asks for.
+pub(crate) fn whiteboard(cx: &App) -> AnyElement {
+    let ink = Ink::of(cx);
+    playing("tour-whiteboard", 10., &ink, move |at| {
+        // A thing on the board, there from `from`: it settles into place.
+        let thing = |x: f32, y: f32, w: f32, text: &'static str, color: Hsla, from: f32| {
+            let seen = span(at, from, from + 0.05);
+            div()
+                .absolute()
+                .left(r(x))
+                .top(r(y + 6. * (1. - seen)))
+                .w(r(w))
+                .h(r(40.))
+                .rounded(r(9.))
+                .bg(color.opacity(0.2))
+                .border_1()
+                .border_color(color)
+                .opacity(seen)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(words(text, 12., FontWeight::MEDIUM, ink.ink))
+        };
+        // An arrow drawn from left to right between `from` and `to`.
+        let arrow = |x: f32, y: f32, length: f32, from: f32, to: f32| {
+            let drawn = span(at, from, to);
+            h_flex()
+                .absolute()
+                .left(r(x))
+                .top(r(y - 7.))
+                .h(r(14.))
+                .opacity(if drawn > 0. { 1. } else { 0. })
+                .child(line((length - 9.) * drawn, 2., ink.faint))
+                .child(
+                    Icon::new(IconName::ArrowRight)
+                        .size(r(12.))
+                        .ml(r(-5.))
+                        .text_color(ink.faint)
+                        .opacity(if drawn >= 1. { 1. } else { 0. }),
+                )
+        };
+        // The note the user pins, and where their pointer is with it.
+        let pinned = span(at, 0.56, 0.62);
+        let hand = span(at, 0.46, 0.56);
+        let (hand_x, hand_y) = (mix(520., 318., hand), mix(250., 132., hand));
+        let board = sheet(28., 52., 556., 224., &ink)
+            .child(thing(34., 44., 104., "Cart", ink.blue, 0.1))
+            .child(arrow(140., 64., 56., 0.16, 0.22))
+            .child(thing(198., 44., 104., "Pay", ink.magenta, 0.22))
+            .child(arrow(304., 64., 56., 0.28, 0.34))
+            .child(thing(362., 44., 124., "Order sent", ink.green, 0.34))
+            // What the note asks for, drawn under the step it is pinned to.
+            .child(
+                div()
+                    .absolute()
+                    .left(r(249.))
+                    .top(r(86.))
+                    .w(r(2.))
+                    .h(r(40. * span(at, 0.8, 0.86)))
+                    .bg(ink.faint),
+            )
+            .child(thing(198., 128., 104., "Refund", ink.yellow, 0.86))
+            // The pinned note.
+            .child(
+                h_flex()
+                    .absolute()
+                    .left(r(296.))
+                    .top(r(24.))
+                    .gap(r(5.))
+                    .px(r(9.))
+                    .py(r(4.))
+                    .rounded(r(10.))
+                    .bg(ink.primary)
+                    .shadow_md()
+                    .opacity(pinned)
+                    .child(
+                        Icon::new(Icons::MessageSquare)
+                            .size(r(11.))
+                            .text_color(ink.on_primary),
+                    )
+                    .child(words(
+                        "What about refunds?",
+                        11.,
+                        FontWeight::MEDIUM,
+                        ink.on_primary,
+                    )),
+            )
+            // The agent's answer, once it has drawn it.
+            .child(
+                h_flex()
+                    .absolute()
+                    .left(r(318.))
+                    .top(r(138.))
+                    .gap(r(6.))
+                    .opacity(span(at, 0.9, 0.94))
+                    .child(tick(14., &ink))
+                    .child(words(
+                        "Added a refund step",
+                        11.,
+                        FontWeight::MEDIUM,
+                        ink.faint,
+                    )),
+            );
+        ground(ink.green, ink.cyan, ink.yellow, &ink)
+            // What was asked, as the chat has it.
+            .child(
+                h_flex()
+                    .absolute()
+                    .left(r(28.))
+                    .top(r(16.))
+                    .gap(r(6.))
+                    .px(r(10.))
+                    .py(r(5.))
+                    .rounded(r(10.))
+                    .bg(ink.sheet)
+                    .shadow_md()
+                    .opacity(span(at, 0.02, 0.07))
+                    .child(
+                        Icon::new(Icons::MessageSquare)
+                            .size(r(12.))
+                            .text_color(ink.primary),
+                    )
+                    .child(words(
+                        "Draw how checkout works",
+                        11.,
+                        FontWeight::MEDIUM,
+                        ink.ink,
+                    )),
+            )
+            .child(board)
+            .child(press(318., 132., span(at, 0.56, 0.66), ink.primary))
+            .when(during(at, 0.44, 0.72) && !ink.still, |picture| {
+                picture.child(pointer(hand_x, hand_y, &ink))
+            })
+    })
+}
+
 // ---- 7. Studio ------------------------------------------------------------
 
 /// The user asks, and the agent does it on the screenshot: the email is

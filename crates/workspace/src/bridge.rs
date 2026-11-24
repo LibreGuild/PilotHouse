@@ -15,7 +15,8 @@
 //! workspace's chats at a time) and of the Agents pop-up (which showed only
 //! what was loaded): the same cards, for everything, always in the same
 //! place. Reviews of other people's pull requests have their own view; the
-//! Bridge shows that some wait, and those an agent is working on.
+//! Bridge shows that some wait, those an agent is working on, and those an
+//! agent finished in this run, until they are marked done.
 
 use std::collections::HashSet;
 
@@ -241,7 +242,8 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
         })
         .collect();
     let mut cards = Vec::new();
-    // Reviews: those an agent works on, or is being readied for.
+    // Reviews: those an agent works on, is being readied for, or finished
+    // in this run.
     if let Some(github) = workspace.github_view() {
         for (project, name) in github.read(cx).spaces() {
             let Some(chats) = ph_agent::ChatHub::existing(*project, cx) else {
@@ -320,8 +322,17 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
             }
             for (session, summary) in chats.read(cx).live(cx) {
                 let busy = matches!(summary.state, ChatState::Working | ChatState::NeedsYou);
-                // Finished reviews are read in Reviews, not here.
-                if !busy && (!live || workspace.is_settled(session)) {
+                // A finished review waits for a look like any task: it was
+                // gone from here the moment its agent stopped, and whoever
+                // started it from the Bridge had to know to look in
+                // Reviews. Only one that ended a turn since the app started:
+                // an older one opened to be read is no task. Marked done, it
+                // is read in Reviews only, until it ends another turn.
+                let ended = chats.read(cx).ended_at(session);
+                if !busy
+                    && (ended.is_none()
+                        || (workspace.is_settled(session) && summary.state != ChatState::Done))
+                {
                     continue;
                 }
                 cards.push(Card {
@@ -331,8 +342,8 @@ fn cards(workspace: &Workspace, live: bool, cx: &App) -> Vec<Card> {
                     title: summary.title.to_string(),
                     place: place.clone(),
                     color: None,
-                    // Loaded in this run and busy, or just finished: now.
-                    updated_at: now,
+                    // Busy: now. Finished: when it did.
+                    updated_at: ended.filter(|_| !busy).unwrap_or(now),
                     summary,
                     session: None,
                     pinned: false,
@@ -934,7 +945,12 @@ fn column_view(
     let settle: Vec<(ProjectId, SessionId)> = if column == Column::Review {
         cards
             .iter()
-            .filter_map(|card| Some((card.project, card.session.as_ref()?.id)))
+            .filter_map(|card| match (&card.session, &card.target) {
+                (Some(session), _) => Some((card.project, session.id)),
+                // A review's chat is not among a workspace's stored ones.
+                (None, Target::Chat(session)) if card.github => Some((card.project, *session)),
+                _ => None,
+            })
             .collect()
     } else {
         Vec::new()
@@ -1187,6 +1203,29 @@ fn card_view(
                             .icon(Icons::Check)
                             .label("Done")
                             .tooltip("Mark this task as done")
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                _ = done.update(cx, |workspace, cx| {
+                                    workspace.settle_all(&[(project, session)], cx)
+                                });
+                            }),
+                    )
+                    .into_any_element(),
+            )
+        }
+        // A finished review of a pull request: read in Reviews (a click
+        // on the card), and put away here.
+        (Column::Review, Target::Chat(session)) if card.github => {
+            let (project, session, done) = (card.project, *session, entity.clone());
+            Some(
+                h_flex()
+                    .child(
+                        Button::new(SharedString::from(format!("bridge-done-{key}")))
+                            .ghost()
+                            .small()
+                            .icon(Icons::Check)
+                            .label("Done")
+                            .tooltip("Mark this review as done (it stays in Reviews)")
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
                                 _ = done.update(cx, |workspace, cx| {

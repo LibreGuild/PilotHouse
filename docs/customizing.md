@@ -32,7 +32,7 @@ releases = "https://git.acme.example/tools/code-desk/releases/latest"
 The app reads this file when it is built (`crates/brand`), and so do the packaging scripts (`scripts/package/brand.sh`), so it is the one place to change. A mistake (an unknown key, a name with a `/`) stops the build with a message saying what is wrong.
 
 - **A new `data_folder` is a separate install.** Nothing is copied from the old folder. That is usually what you want: your build and PilotHouse can be installed side by side without touching each other's data. If your people already use PilotHouse and should keep their chats, keep `data_folder = "PilotHouse"` (and `keychain`).
-- **About** says "Acme Code Desk 0.8.0 · based on PilotHouse · Apache-2.0".
+- **About** says "Acme Code Desk 0.8.1 · based on PilotHouse · Apache-2.0".
 - The installers and their file names follow the name: `Acme Code Desk.app`, `AcmeCodeDesk-macOS-universal.dmg`, `AcmeCodeDesk-Windows-Setup-x64.exe`, `AcmeCodeDesk-Linux-x86_64.AppImage` (the name without spaces).
 
 **Icons** are in `brand/icons/`. Make them all from one square picture (a PNG, 1024 px or more):
@@ -80,6 +80,7 @@ A feature that is off is not in the app at all. It is not in the tools beside th
 | `network_drives` | Network drives: Git, shells and runs on a server over SSH |
 | `parallel_runs` | One prompt to several agents, each in its own copy |
 | `presentations` | Slides (decks made under Artifacts, which they need), and their agent tools (`deck_`) |
+| `whiteboards` | Whiteboards (boards of notes, shapes and arrows made under Artifacts, which they need), and their agent tools (`board_`) |
 | `chrome_extension` | Agents in the user's own Chrome, through PilotHouse's extension |
 | `quick_chat` | A small chat window over every app, opened with a global shortcut |
 | `explanations` | Changes explained in plain words: *Explain* in the Git tab and on a commit, *Why Is This Here?* in the editor |
@@ -235,13 +236,13 @@ Keep it current: ask your agent to update it whenever it customises something.
 
 ## 7. Merging a new PilotHouse release
 
-PilotHouse publishes a tag per release (`v0.8.0`), one commit each. To take one in:
+PilotHouse publishes a tag per release (`v0.8.1`), one commit each. To take one in:
 
 ```sh
 git remote add upstream https://github.com/LibreGuild/PilotHouse.git   # once
 git fetch upstream --tags
-git switch -c merge-v0.8.0
-git merge v0.8.0
+git switch -c merge-v0.8.1
+git merge v0.8.1
 ```
 
 Then, or ask your coding agent to (the `merge-upstream` skill in `.claude/skills/` walks it through):

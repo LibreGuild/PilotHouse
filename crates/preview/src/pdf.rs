@@ -9,6 +9,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarAxis};
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -467,6 +468,8 @@ impl Render for PdfView {
                             .children(pages),
                     ),
             )
+            // (Under the bar of buttons, which stays on top.)
+            .scrollbar(&self.scroll, ScrollbarAxis::Both)
             .child(
                 h_flex()
                     .absolute()

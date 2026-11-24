@@ -1232,9 +1232,31 @@ impl ChatThread {
 
     /// Before its session starts, a chat shows its agent's cached options:
     /// again once they were loaded in the background
-    /// ([`crate::preload`]).
+    /// ([`crate::preload`]). One whose session runs keeps what it is set
+    /// to, and takes what there is to choose from: a model the agent has
+    /// learned of since the session started is listed.
     pub fn reload_cached_options(&mut self, cx: &mut Context<Self>) {
         if self.acp_session_id.is_some() || self.setup.is_some() {
+            let cached = changeable(
+                self.agent,
+                &self.store,
+                options::cached(&self.store, self.agent.id),
+            );
+            let mut changed = false;
+            for option in &mut self.options {
+                if let Some(newer) = cached
+                    .iter()
+                    .find(|newer| newer.id == option.id && newer.source == option.source)
+                    // Only a list that still has what the chat is set to.
+                    .filter(|newer| newer.kind != option.kind && newer.offers(&option.current))
+                {
+                    option.kind = newer.kind.clone();
+                    changed = true;
+                }
+            }
+            if changed {
+                cx.notify();
+            }
             return;
         }
         let options = changeable(
@@ -1295,7 +1317,7 @@ impl ChatThread {
         else {
             return;
         };
-        option.current = value.to_string();
+        let previous = std::mem::replace(&mut option.current, value.to_string());
         let option = option.clone();
         cx.notify();
 
@@ -1316,13 +1338,34 @@ impl ChatThread {
             .await;
             _ = this.update(cx, |this, cx| match result {
                 Ok(response) => this.update_options(response.get("configOptions"), cx),
-                Err(err) => this.push(
-                    Entry::Notice {
-                        text: format!("Could not change {}: {err}", option.name),
-                        is_error: true,
-                    },
-                    cx,
-                ),
+                Err(err) => {
+                    // The agent is still on what it was: the chat says so
+                    // again, instead of showing a choice that did not take.
+                    if let Some(shown) = this
+                        .options
+                        .iter_mut()
+                        .find(|shown| shown.id == option.id && shown.current == option.current)
+                    {
+                        shown.current = previous.clone();
+                    }
+                    this.keep_choice(&option.id, &previous);
+                    // Gemini's refusal of a mode in a folder it does not
+                    // trust reads like a fault ("internal error"): said as
+                    // what it is, with what to do about it.
+                    let text =
+                        if this.agent.id == "gemini" && crate::gemini_trust::refuses_mode(&err) {
+                            crate::gemini_trust::mode_explanation(&this.project.path)
+                        } else {
+                            format!("Could not change {}: {err}", option.name)
+                        };
+                    this.push(
+                        Entry::Notice {
+                            text,
+                            is_error: true,
+                        },
+                        cx,
+                    )
+                }
             });
         })
         .detach();
@@ -1997,8 +2040,8 @@ impl ChatThread {
             || self.reads_this_turn
             || self.project.read_only;
         let app_tools = self.app_tools_this_turn || self.app_tools_always;
-        // The files of the decks made from this workspace: its chats work
-        // on those as a deck's own chat does.
+        // The files of the decks and whiteboards made from this workspace:
+        // its chats work on those as a deck's or a board's own chat does.
         let decks: Vec<std::path::PathBuf> = crate::own_files::of(self.project.id, cx).to_vec();
         if reads_only || app_tools || self.own_files.is_some() || !decks.is_empty() {
             let known =
@@ -2050,6 +2093,11 @@ impl ChatThread {
                     || (!decks.is_empty()
                         && !self.project.read_only
                         && (crate::review_policy::is_deck_tool(kind, &title, raw_input.as_ref())
+                            || crate::review_policy::is_board_tool(
+                                kind,
+                                &title,
+                                raw_input.as_ref(),
+                            )
                             || decks.iter().any(|folder| {
                                 crate::review_policy::changes_within(
                                     kind,
@@ -2389,14 +2437,29 @@ impl ChatThread {
             };
 
             let offered = changeable(agent, &store, options::parse_session_options(&result));
-            // Apply remembered choices the agent did not pick itself.
+            // Whether a mode asked for was refused for the folder's sake:
+            // said in the chat, which else shows another mode in silence.
+            let mut refused_mode = false;
+            // Apply remembered choices the agent did not pick itself. One
+            // the agent refuses here is left out (Gemini takes a mode that
+            // acts without asking only in a folder it trusts): the chat
+            // shows what the session is on, not what was asked for.
             for option in &offered {
                 if let Some(value) = prefs
                     .get(&option.id)
                     .filter(|value| **value != option.current && option.offers(value))
                 {
                     let (method, params) = option.set_request(&session_id, value);
-                    let _ = ready.process.request(method, params).await;
+                    if let Err(err) = ready.process.request(method, params).await {
+                        tracing::info!(
+                            "{} did not take the remembered {}: {err:#}",
+                            agent.name,
+                            option.name
+                        );
+                        prefs.remove(&option.id);
+                        refused_mode |= agent.id == "gemini"
+                            && crate::gemini_trust::refuses_mode(&format!("{err:#}"));
+                    }
                 }
             }
             let weak = this.clone();
@@ -2409,6 +2472,15 @@ impl ChatThread {
                     return;
                 }
                 this.acp_session_id = Some(id.clone());
+                if refused_mode {
+                    this.push(
+                        Entry::Notice {
+                            text: crate::gemini_trust::mode_explanation(&this.project.path),
+                            is_error: false,
+                        },
+                        cx,
+                    );
+                }
                 // The chat had a session the agent did not take back: it
                 // starts over in this one.
                 this.recap_due = resume_id.is_some() && !resumed;

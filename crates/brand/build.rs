@@ -38,6 +38,7 @@ const FEATURES: &[&str] = &[
     "network_drives",
     "parallel_runs",
     "presentations",
+    "whiteboards",
     "chrome_extension",
     "quick_chat",
     "explanations",

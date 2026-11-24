@@ -8,7 +8,7 @@
 // the shared link show the same slide.
 
 import { Show, mountSlide, fitFrame } from "./core.js";
-import { h, button } from "./ui.js";
+import { h, button } from "/_artifact/kit/ui.js";
 import * as store from "./store.js";
 import { state, on } from "./store.js";
 

@@ -6,6 +6,7 @@
 //! They are a GPUI global; panels read the editor and terminal parts.
 
 use gpui_kit::component::Theme;
+use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::{App, Global, Hsla, Window, WindowBackgroundAppearance, px, rgb};
 use serde::{Deserialize, Serialize};
 
@@ -514,8 +515,19 @@ pub fn apply(window: Option<&mut Window>, cx: &mut App) {
     // The theme shown is the selected one, or the preview of one being
     // designed.
     let config = crate::themes::current(cx);
+    // Scrollbars stay in sight, so there is always something to take hold
+    // of: a mouse without a sideways wheel has no other way to scroll a
+    // wide table or a long line, and dragging the bar is how a long page is
+    // crossed. Only a Mac set to show them while scrolling (its default
+    // with a trackpad, which scrolls both ways) keeps to that.
+    let scrollbars = if cfg!(target_os = "macos") && cx.should_auto_hide_scrollbars() {
+        ScrollbarMode::Scrolling
+    } else {
+        ScrollbarMode::Always
+    };
     Theme::update(cx, |theme| theme.apply_config(&config));
     Theme::update(cx, |theme| {
+        theme.scrollbar_mode = scrollbars;
         theme.font_family = ui_font.into();
         theme.font_size = px(preferences.ui_font_size.clamp(11.0, MAX_UI_FONT_SIZE));
         theme.mono_font_family = code_font.into();

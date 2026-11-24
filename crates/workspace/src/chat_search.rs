@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -245,7 +246,7 @@ impl Render for ChatSearch {
                 v_flex()
                     .id("chat-search-results")
                     .max_h(ph_ui::rems_from_px(420.))
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .children(rows)
                     .when(self.searched && self.hits.is_empty() && !empty, |this| {
                         this.child(

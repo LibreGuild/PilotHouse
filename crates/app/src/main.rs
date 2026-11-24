@@ -51,6 +51,32 @@ fn main() {
     }
 }
 
+/// Has the app's windows drawn so that a window of the system's inside
+/// them shows (Windows).
+///
+/// A deck's page is the system's web view (WebView2), a child window of the
+/// deck's window. GPUI draws a window through DirectComposition, in a layer
+/// the system puts *over* the window's child windows: the web view was
+/// there, loaded and working, under the app's own picture of the pane, and
+/// the pane stayed empty. Presenting to the window itself (GPUI's other
+/// way, the usual one for a Direct3D window) leaves child windows on top,
+/// as on macOS, where the rest of the deck's code already counts on it (the
+/// web view steps aside for the app's dialogs). What is given up is a
+/// see-through window, which the app does not have.
+///
+/// GPUI reads this once, when the app is made, for every window. Whoever
+/// sets the variable themselves (`0` for the layer back) is left alone.
+#[cfg(windows)]
+fn show_child_windows() {
+    const SWITCH: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
+    if std::env::var_os(SWITCH).is_none() {
+        // SAFETY: at the start of the app, before any thread that reads
+        // the environment is started (as `forget_parent_session` above).
+        unsafe { std::env::set_var(SWITCH, "1") };
+        ph_env::keep_to_app(SWITCH);
+    }
+}
+
 fn run_app(open: Vec<std::path::PathBuf>, quick_chat: bool) -> Result<()> {
     // One app per data folder, settled before the database or a window is
     // opened: two launches at once (several files opened from Explorer, an
@@ -67,6 +93,8 @@ fn run_app(open: Vec<std::path::PathBuf>, quick_chat: bool) -> Result<()> {
     // Started from a terminal inside an agent's session (or by an agent):
     // the agents this app starts are not that session's children.
     ph_env::forget_parent_session();
+    #[cfg(windows)]
+    show_child_windows();
     logs::write_to_file();
     // Agents and terminals need the login shell's PATH; read it while the UI starts.
     ph_env::warm_up();

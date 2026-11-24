@@ -18,6 +18,7 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui_kit::TestSupportExt as _;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -211,6 +212,20 @@ impl FindingsView {
             .filter(|f| f.status == "open" && f.verified && f.comment_kind.is_none())
             .cloned()
             .collect()
+    }
+
+    /// Whether an agent reviewed the pull request on this computer (what
+    /// Finish review can post; a review read from someone's summary
+    /// comment is theirs).
+    pub fn has_own_review(&self) -> bool {
+        self.review.is_some()
+    }
+
+    /// How many findings of this computer's review are still open, those
+    /// that cannot be sent among them; `None` without such a review.
+    pub fn still_open(&self) -> Option<usize> {
+        self.review.as_ref()?;
+        Some(self.findings.iter().filter(|f| f.status == "open").count())
     }
 
     /// Whether this computer's review has something on GitHub already.
@@ -1651,7 +1666,7 @@ impl Render for FindingsView {
             + usize::from(self.show_rules && !self.rules.is_empty())
             + usize::from(done > 0)
             + usize::from(shown.is_empty());
-        v_flex()
+        let list = v_flex()
             .id("findings-scroll")
             .size_full()
             .overflow_y_scroll()
@@ -1676,6 +1691,9 @@ impl Render for FindingsView {
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(match self.filter {
+                            Filter::Open if findings.is_empty() && self.review.is_some() => {
+                                "The agent found nothing worth raising. Finish review (above) posts that on the pull request, so the author knows it was reviewed."
+                            }
                             Filter::Open if findings.is_empty() => {
                                 "The agent found nothing worth raising."
                             }
@@ -1688,7 +1706,14 @@ impl Render for FindingsView {
                 shown
                     .into_iter()
                     .map(|finding| self.render_finding(finding, cx)),
-            )
+            );
+        // (It scrolls itself, to bring a finding into sight; the bar is
+        // laid over it.)
+        div()
+            .relative()
+            .size_full()
+            .child(list)
+            .vertical_scrollbar(&self.scroll)
             .into_any_element()
     }
 }

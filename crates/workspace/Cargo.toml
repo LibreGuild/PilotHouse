@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# The app's own tests of a board's window over the control socket
+# (`board.screen`, `board.script`, `board.keys`). See docs/testing.md.
+automation = []
+
 [dependencies]
 ph-brand.workspace = true
 ph-custom.workspace = true
@@ -16,6 +21,7 @@ gpui-kit.workspace = true
 ph-agent.workspace = true
 ph-artifacts.workspace = true
 ph-slides.workspace = true
+ph-boards.workspace = true
 ph-webview.workspace = true
 ph-browser.workspace = true
 ph-changes.workspace = true

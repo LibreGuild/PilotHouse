@@ -14,8 +14,10 @@
 mod actions;
 mod agent_updates;
 mod app_state;
+mod artifact_window;
 mod artifacts;
 mod attention;
+mod board_window;
 mod bridge;
 mod browser_inbox;
 mod chat_search;
@@ -65,6 +67,8 @@ mod workspace_switcher;
 
 pub use actions::*;
 pub use app_state::AppState;
+#[cfg(feature = "automation")]
+pub use board_window::register_automation as register_board_automation;
 pub use context_panel::ContextTab;
 pub use detect::Stack;
 pub use github_view::GithubView;
@@ -115,6 +119,9 @@ pub fn init(cx: &mut App) {
     ph_studio::bind_keys(cx);
     ph_terminal::init(cx);
     ph_terminal::TerminalHub::keep_between_runs(ph_store::paths::data_dir().join("terminals"), cx);
+    // (Windows: the system's web view keeps its profile here, not beside
+    // the program.)
+    ph_webview::keep_data_in(ph_store::paths::data_dir().join("webview"));
     quick_chat::init(cx);
     browser_inbox::install(cx);
     artifacts::install(cx);

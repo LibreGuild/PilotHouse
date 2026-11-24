@@ -10,7 +10,8 @@
 //! is made and nothing is prompted. An agent that does not answer within
 //! [`TIMEOUT`] or fails (not signed in, offline) is left for this run; the
 //! picker then says why, and its *Load models* row still loads them the
-//! usual way. Claude Code and Codex run through an npm adapter, which `npx`
+//! usual way. The picker's refresh button asks every installed agent
+//! again at once ([`refresh`]): a model released since is listed then. Claude Code and Codex run through an npm adapter, which `npx`
 //! downloads on the first start.
 
 use std::collections::HashMap;
@@ -54,6 +55,11 @@ impl ModelLoads {
         cx.try_global::<Self>()?.states.get(id).cloned()
     }
 
+    /// Whether agents are being asked for their models now.
+    pub fn running(cx: &App) -> bool {
+        cx.try_global::<Self>().is_some_and(|loads| loads.running)
+    }
+
     /// Records agent `id`'s state; observers (the chat panels) hear of it.
     fn set(id: &'static str, state: Option<LoadState>, cx: &mut App) {
         cx.default_global::<Self>();
@@ -89,6 +95,23 @@ pub(crate) fn start(store: Store, installed: Vec<&'static AgentSpec>, cx: &mut A
                 && needs_models(options::cached_at(&store, spec.id), now)
         })
         .collect();
+    run(store, due, DELAY, cx);
+}
+
+/// Asks every installed agent for its models again, now: the refresh
+/// button of the model picker. An agent learns of a new model from its
+/// provider; what the picker lists is what the agent said the last time it
+/// was asked, which can be a day old. Nothing happens while a load runs.
+pub fn refresh(store: Store, cx: &mut App) {
+    if ModelLoads::running(cx) {
+        return;
+    }
+    let installed = crate::agents::installed().unwrap_or_default();
+    run(store, installed, Duration::ZERO, cx);
+}
+
+/// Loads the models of `due`, one agent at a time, after `delay`.
+fn run(store: Store, due: Vec<&'static AgentSpec>, delay: Duration, cx: &mut App) {
     if due.is_empty() {
         return;
     }
@@ -97,7 +120,9 @@ pub(crate) fn start(store: Store, installed: Vec<&'static AgentSpec>, cx: &mut A
         ModelLoads::set(spec.id, Some(LoadState::Loading), cx);
     }
     let task = cx.spawn(async move |cx| {
-        cx.background_executor().timer(DELAY).await;
+        if !delay.is_zero() {
+            cx.background_executor().timer(delay).await;
+        }
         for spec in due {
             let env = if spec.id == "cline" {
                 crate::cline::env_for(&store)

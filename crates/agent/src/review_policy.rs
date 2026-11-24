@@ -573,6 +573,9 @@ pub fn is_app_tool(kind: Option<ToolKind>, title: &str, raw_input: Option<&Value
             "deck_look",
             "deck_comments",
             "deck_import",
+            // A whiteboard: its guide, and what is on it.
+            "board_guide",
+            "board_look",
         ]
         .iter()
         .any(|prefix| name.starts_with(prefix))
@@ -598,6 +601,14 @@ pub fn is_deck_tool(kind: Option<ToolKind>, title: &str, raw_input: Option<&Valu
             "deck_list",
         ]
         .contains(&name)
+    })
+}
+
+/// The same for a whiteboard made from a workspace: the tools that read
+/// one. Making a board is not among them.
+pub fn is_board_tool(kind: Option<ToolKind>, title: &str, raw_input: Option<&Value>) -> bool {
+    names_own_tool(kind, title, raw_input, |name: &str| {
+        ["board_guide", "board_look", "board_list"].contains(&name)
     })
 }
 
@@ -1019,6 +1030,20 @@ mod tests {
         assert!(!deck("mcp__pilothouse__deck_export"), "exporting asks");
         assert!(!deck("mcp__pilothouse__browser_open"));
         assert!(!deck("mcp__other__deck_look"));
+        // A whiteboard: read in its own chat and in its workspace's.
+        assert!(tool("mcp__pilothouse__board_look"));
+        assert!(
+            !tool("mcp__pilothouse__board_create"),
+            "making a board asks"
+        );
+        let board = |title: &str| is_board_tool(None, title, None);
+        assert!(board("mcp__pilothouse__board_look"));
+        assert!(board("board_list (pilothouse)"));
+        assert!(
+            !board("mcp__pilothouse__board_create"),
+            "making a board asks"
+        );
+        assert!(!board("mcp__other__board_look"));
         assert!(!tool("mcp__other__browser_click"));
         assert!(
             !tool("mcp__pilothouse__browser_evaluate"),

@@ -50,7 +50,6 @@ const FILES: &[(&str, &str)] = &[
     ("app.css", include_str!("page/app.css")),
     ("slide.css", include_str!("page/slide.css")),
     ("core.js", include_str!("page/core.js")),
-    ("ui.js", include_str!("page/ui.js")),
     ("store.js", include_str!("page/store.js")),
     ("editor.js", include_str!("page/editor.js")),
     ("edit.js", include_str!("page/edit.js")),
@@ -582,18 +581,7 @@ fn app_file(name: &str) -> Response {
 /// The fonts the app brings, declared for a page; their files are under
 /// `base`.
 pub fn fonts_css(base: &str) -> String {
-    ph_theme::fonts::WEB_FACES
-        .iter()
-        .map(|face| {
-            format!(
-                "@font-face {{ font-family: \"{}\"; font-weight: {}; font-style: {}; font-display: block; src: url(\"{base}{}\") format(\"truetype\"); }}\n",
-                face.family,
-                face.weight,
-                if face.italic { "italic" } else { "normal" },
-                face.file,
-            )
-        })
-        .collect()
+    ph_artifacts::kit::fonts_css(base)
 }
 
 /// Keeps what the page sent as a file in `media/`, named after what it was

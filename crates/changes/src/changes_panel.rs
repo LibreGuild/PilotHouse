@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui_kit::TestSupportExt as _;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -129,6 +130,9 @@ pub struct ChangesPanel {
     explanation: Option<gpui_kit::AnyView>,
     /// The explanation shows in place of the diff.
     explaining: bool,
+    /// The agent *Review* and *Explain* run with, by name (the one chats
+    /// start with), as whoever shows the panel says it.
+    agent: Option<SharedString>,
     /// The pane has the room to show the diff beside the list (under it
     /// otherwise); not known until it was drawn once.
     wide: Option<bool>,
@@ -235,6 +239,7 @@ impl ChangesPanel {
             review: review::Review::new(cx),
             explanation: None,
             explaining: false,
+            agent: None,
             wide: None,
             undo: Vec::new(),
             refresh_again: false,
@@ -532,6 +537,16 @@ impl ChangesPanel {
         self.writer = Some(writer);
     }
 
+    /// Says which agent *Review* and *Explain* run with, so their buttons
+    /// can name it.
+    pub fn set_agent_name(&mut self, name: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let name = name.into();
+        if self.agent.as_ref() != Some(&name) {
+            self.agent = Some(name);
+            cx.notify();
+        }
+    }
+
     /// Gives the view that explains the changes in plain words: it shows
     /// in place of the diff when asked for (*Explain*, or the switch over
     /// the diff). With `None` the panel offers no explanations.
@@ -679,7 +694,6 @@ impl ChangesPanel {
                 )
                 .into_any_element(),
             Some(Ok(Some(branch))) => {
-                use gpui_kit::component::scroll::ScrollableElement as _;
                 // Drawn only where it shows (see `diff_list`).
                 let entity = cx.entity().downgrade();
                 div()
@@ -879,6 +893,8 @@ impl ChangesPanel {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Who reviews and explains, when the panel was told.
+        let agent = self.agent.clone().unwrap_or_else(|| "An agent".into());
         let summary = match &self.state {
             State::Loaded(changes) => {
                 let added: usize = changes.files.iter().map(FileChange::added).sum();
@@ -913,11 +929,10 @@ impl ChangesPanel {
                         .icon(ph_ui::Icons::Sparkles)
                         .when(!narrow, |this| this.label("Review"))
                         .accessibility_label("Review")
-                        .tooltip(ph_ui::tip(if narrow {
-                            "Review: an agent reviews these changes before you push; its findings land on the lines as notes"
-                        } else {
-                            "An agent reviews these changes before you push; its findings land on the lines as notes"
-                        }))
+                        .tooltip(ph_ui::tip(format!(
+                            "{}{agent} reviews these changes before you push; its findings land on the lines as notes",
+                            if narrow { "Review: " } else { "" }
+                        )))
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesPanelEvent::ReviewChanges))),
                 )
                 .when(self.explanation.is_some(), |this| {
@@ -928,11 +943,10 @@ impl ChangesPanel {
                             .icon(ph_ui::Icons::MessageSquare)
                             .when(!narrow, |this| this.label("Explain"))
                             .accessibility_label("Explain")
-                            .tooltip(ph_ui::tip(if narrow {
-                                "Explain: an agent tells you in plain words what these changes do, how it worked before and why, before you commit"
-                            } else {
-                                "An agent tells you in plain words what these changes do, how it worked before and why, before you commit"
-                            }))
+                            .tooltip(ph_ui::tip(format!(
+                                "{}{agent} tells you in plain words what these changes do, how it worked before and why, before you commit",
+                                if narrow { "Explain: " } else { "" }
+                            )))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.explaining = true;
                                 cx.emit(ChangesPanelEvent::ExplainChanges);
@@ -1574,7 +1588,6 @@ impl ChangesPanel {
                 }
                 let entity = cx.entity().downgrade();
                 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
-                use gpui_kit::component::scroll::ScrollableElement as _;
                 let list = div()
                     .relative()
                     .size_full()
@@ -1630,7 +1643,7 @@ impl ChangesPanel {
         v_flex()
             .id("git-changes")
             .size_full()
-            .overflow_y_scroll()
+            .overflow_y_scrollbar()
             .when(is_repo, |this| {
                 this.child(div().flex_none().child(self.commit_box.clone()))
                     .children(self.render_conflicts(cx))

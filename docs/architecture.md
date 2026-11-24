@@ -38,6 +38,8 @@ crates/
   slides/     decks of slides, an artifact of a kind: the deck's files and their undo, its
               page (editor, viewer), comments, exports, PowerPoint files in and out, and the
               agents' control methods
+  boards/     whiteboards, an artifact of a kind: the board's file, its page (the board and
+              its tools), and the agents' control methods
   webview/    the system's web view inside a window (WKWebView, WebView2): placing it, the
               keyboard, a picture or a PDF of the page
   uitest/     The Tests tab: the project's own suites (run and read back per test), and UI
@@ -69,6 +71,7 @@ app ──► workspace ──► agent, files, changes, terminal, browser, devi
  │                          browser, devices, runs ──► control
  │        workspace ──► artifacts ──► control, ui
  │        workspace ──► slides ──► artifacts, webview, control, ui, theme
+ │        workspace ──► boards ──► artifacts, control, ui
  ├──► mcp ──► control
  └──► agy ──► env
 ```

@@ -105,6 +105,13 @@ pub struct ExplanationView {
     busy: bool,
     /// The last one did not work: why.
     failed: Option<String>,
+    /// One was asked for and the change is being read for the agent (Git
+    /// and the chats that made it: seconds on a large change or a slow
+    /// disk). Said, so a press of the button is seen to do something, and
+    /// not pressed again.
+    asking: bool,
+    /// The agent that writes one when asked, by name.
+    agent: &'static str,
     /// Something changed since the last look: looked at again when the view
     /// is drawn, so a hidden one costs nothing.
     stale: bool,
@@ -125,6 +132,8 @@ impl ExplanationView {
         let written = cx.subscribe(&explanations, |this, _, _: &ExplanationWritten, cx| {
             this.reload(cx)
         });
+        // (Read here, not while drawing: it is a setting in the store.)
+        let agent = ph_agent::chats::default_agent(&store).name;
         Self {
             store,
             root,
@@ -132,6 +141,8 @@ impl ExplanationView {
             state: State::Loading,
             busy: false,
             failed: None,
+            asking: false,
+            agent,
             stale: true,
             looking: false,
             _load: None,
@@ -212,7 +223,29 @@ impl ExplanationView {
     }
 
     fn ask(&mut self, cx: &mut Context<Self>) {
+        if self.asking {
+            return;
+        }
         cx.emit(ExplanationEvent::Ask(self.target.clone()));
+    }
+
+    /// One is being readied for an agent (`true`), or that ended: `started`
+    /// when an agent now writes it, which shows at once instead of after
+    /// the next look.
+    pub fn set_asking(&mut self, asking: bool, started: bool, cx: &mut Context<Self>) {
+        self.asking = asking;
+        if asking {
+            // Whichever agent chats start with now.
+            self.agent = ph_agent::chats::default_agent(&self.store).name;
+        }
+        if started {
+            match &mut self.state {
+                State::Missing { writing } => *writing = true,
+                State::Shown(shown) => shown.looked.writing = true,
+                State::Loading => {}
+            }
+        }
+        cx.notify();
     }
 
     /// Writes the explanation as a file in the repository, so it goes with
@@ -325,10 +358,25 @@ impl ExplanationView {
                 div()
                     .text_sm()
                     .text_color(muted)
-                    .child("The agent is reading the change and writing (in the chat beside)…")
+                    .child(format!(
+                        "{} is reading the change and writing (in the chat beside)…",
+                        self.agent
+                    ))
+                    .into_any_element()
+            } else if self.asking {
+                h_flex()
+                    .gap_2()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(ph_ui::Loader::new().xsmall())
+                    .child(format!(
+                        "Reading the change and what was asked for, for {}…",
+                        self.agent
+                    ))
                     .into_any_element()
             } else {
                 h_flex()
+                    .gap_2()
                     .child(
                         Button::new("explain-ask")
                             .small()
@@ -336,6 +384,13 @@ impl ExplanationView {
                             .icon(Icons::Sparkles)
                             .label(button)
                             .on_click(cx.listener(|this, _, _, cx| this.ask(cx))),
+                    )
+                    // Which agent: the one chats start with.
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("Written by {}", self.agent)),
                     )
                     .into_any_element()
             })
@@ -439,11 +494,16 @@ impl ExplanationView {
                             .icon(IconName::RefreshCw)
                             .label(if looked.writing {
                                 "Writing…"
+                            } else if self.asking {
+                                "Getting ready…"
                             } else {
                                 "Again"
                             })
-                            .tooltip("Write it again, from the change as it is now")
-                            .disabled(looked.writing)
+                            .tooltip(format!(
+                                "{} writes it again, from the change as it is now",
+                                self.agent
+                            ))
+                            .disabled(looked.writing || self.asking)
                             .on_click(cx.listener(|this, _, _, cx| this.ask(cx))),
                     ),
             )
@@ -463,7 +523,18 @@ impl Render for ExplanationView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.look_when_stale(cx);
         let body = match &self.state {
-            State::Loading => div().into_any_element(),
+            // The first look reads Git (every changed file's content):
+            // said, where an empty pane looked like nothing happening.
+            State::Loading => h_flex()
+                .gap_2()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(ph_ui::Loader::new().xsmall())
+                .child(match &self.target {
+                    Target::Changes => "Looking for an explanation of these changes…",
+                    Target::Commit { .. } => "Looking for an explanation of this commit…",
+                })
+                .into_any_element(),
             State::Missing { writing } => self.render_missing(*writing, cx).into_any_element(),
             State::Shown(shown) => {
                 // Borrowed apart from `self` for the listeners.

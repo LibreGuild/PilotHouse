@@ -21,6 +21,7 @@ if-addrs = "0.15"
 # The picture of an artifact in the list, made small (already in the tree).
 image = { version = "0.25", default-features = false, features = ["png"] }
 ph-control.workspace = true
+ph-theme.workspace = true
 ph-ui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -29,4 +30,3 @@ tracing.workspace = true
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
-ph-theme.workspace = true

@@ -51,6 +51,12 @@ pub fn register(cx: &mut App) {
         if ph_brand::enabled(ph_brand::Feature::Presentations) {
             ph_slides::register_control_methods(cx);
         }
+        // So are whiteboards.
+        if ph_brand::enabled(ph_brand::Feature::Whiteboards) {
+            ph_boards::register_control_methods(cx);
+            #[cfg(feature = "automation")]
+            ph_workspace::register_board_automation(cx);
+        }
     }
     // An agent's export from Studio may be written in its workspace's
     // folders (as they are when it asks), and nowhere else but the folder

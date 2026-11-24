@@ -216,6 +216,9 @@ pub struct WorkspaceChats {
     viewing: Option<SessionId>,
     /// Chats with a finished turn not looked at yet.
     unread: HashSet<SessionId>,
+    /// Chats whose turn ended since the app started, and when the last did
+    /// (milliseconds): one loaded only to be read has none.
+    ended: HashMap<SessionId, i64>,
     /// What is being readied for a chat about to start.
     preparing: Option<Preparing>,
 }
@@ -247,6 +250,7 @@ impl WorkspaceChats {
             unseen: Vec::new(),
             viewing: None,
             unread: HashSet::new(),
+            ended: HashMap::new(),
             preparing: None,
         }
     }
@@ -311,6 +315,8 @@ impl WorkspaceChats {
             cx.observe(&thread, |_, _, cx| cx.notify()),
             cx.subscribe(&thread, move |this, _, event: &ThreadEvent, cx| {
                 if let ThreadEvent::TurnEnded = event {
+                    this.ended
+                        .insert(session, jiff::Timestamp::now().as_millisecond());
                     if !this.on_screen && !this.unseen.contains(&session) {
                         this.unseen.push(session);
                     }
@@ -566,6 +572,12 @@ impl WorkspaceChats {
     /// Whether `session` is the chat on screen.
     pub fn is_viewing(&self, session: SessionId) -> bool {
         self.on_screen && self.viewing == Some(session)
+    }
+
+    /// When chat `session` last ended a turn since the app started
+    /// (milliseconds), if it did.
+    pub fn ended_at(&self, session: SessionId) -> Option<i64> {
+        self.ended.get(&session).copied()
     }
 
     /// Every loaded chat that wants the user or is busy, with its summary.

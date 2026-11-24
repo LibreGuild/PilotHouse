@@ -1,6 +1,7 @@
 //! The Schedules dialog: a workspace's schedules, their last results, and a
 //! form to make or change one.
 
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -12,8 +13,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    WeakEntity, Window, div,
+    ParentElement as _, Render, SharedString, Styled as _, WeakEntity, Window, div,
 };
 use ph_store::projects::ProjectId;
 use ph_store::schedules::{Job, Schedule, ScheduleId, When};
@@ -827,7 +827,7 @@ impl Render for SchedulesView {
                     .id("schedules-list")
                     .gap_2()
                     .max_h(ph_ui::rems_from_px(420.))
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .children(rows),
             )
     }

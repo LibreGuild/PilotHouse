@@ -2,7 +2,7 @@
 // its fill), or, with nothing selected, the slide and the deck. Every
 // field changes the element's own style and saves at once.
 
-import { h, button, select, numberField, colourPicker, dialog } from "./ui.js";
+import { h, button, select, numberField, colourPicker, dialog } from "/_artifact/kit/ui.js";
 import * as store from "./store.js";
 import { state } from "./store.js";
 import { kindOf, textStyleOf, TEXT_STYLES, palette } from "./edit.js";

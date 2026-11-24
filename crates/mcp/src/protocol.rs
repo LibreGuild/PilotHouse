@@ -103,6 +103,22 @@ fn instructions(browsers: Browsers) -> String {
             deck_list shows a workspace's decks; `deck` names one when there are several."
         ));
     }
+    if enabled(Feature::Artifacts) && enabled(Feature::Whiteboards) {
+        text.push_str(concat!(
+            "\n",
+            ph_brand::name!(),
+            " Whiteboard: a board is one file (board.json) listing notes, shapes, text, sections, \
+            arrows tied to what they join, tables and pictures, which the user moves and adds to \
+            by hand. When the user asks in a workspace's chat to draw, map or sketch something (a \
+            flowchart, an architecture, how the code hangs together, a plan), make one with \
+            board_create (not a picture, a Mermaid block or artifact_publish): it shows beside \
+            the chat as you draw. A board made under Artifacts → Whiteboard has a chat of its own \
+            (each message there says so). Either way you change the board by editing its file: \
+            read board_guide once first, and call board_look before and after (it says what is \
+            on the board, what the user selected and whether they changed it by hand). \
+            board_list shows a workspace's boards; `board` names one when there are several."
+        ));
+    }
     if enabled(Feature::Devices) {
         text.push_str(
             "\nDevices: Android emulators and phones connected over adb. device_list first, then \

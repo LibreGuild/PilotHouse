@@ -8,6 +8,7 @@
 //! of offering a button GitHub will refuse.
 
 use gpui_kit::TestSupportExt as _;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -408,6 +409,12 @@ impl PullView {
 
     /// Why a check failed, and what can be done about it.
     fn render_check_detail(&self, ix: usize, check: &Check, cx: &mut Context<Self>) -> AnyElement {
+        // A log keeps its place by its check, not by its row: the rows
+        // change places when the checks are read again.
+        let log_id = |name: &'static str| match check.id {
+            Some(id) => gpui_kit::ElementId::from((name, id)),
+            None => gpui_kit::ElementId::from((name, ix)),
+        };
         let state = check.id.and_then(|id| self.check_details.get(&id));
         let muted = cx.theme().muted_foreground;
         let url = check.url.clone();
@@ -453,9 +460,12 @@ impl PullView {
                     .when(!detail.log.trim().is_empty(), |this| {
                         this.child(
                             div()
-                                .id(("check-log", ix))
+                                .id(log_id("check-log"))
                                 .max_h(ph_ui::rems_from_px(260.))
-                                .overflow_scroll()
+                                // A log's lines are long: both bars, each
+                                // check's log with its own place.
+                                .overflow_scrollbar()
+                                .id(log_id("check-log-scroll"))
                                 .p_2()
                                 .rounded(cx.theme().radius)
                                 .bg(cx.theme().secondary)

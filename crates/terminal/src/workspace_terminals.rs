@@ -532,16 +532,18 @@ impl WorkspaceTerminals {
     }
 
     /// Runs `command` as the whole point of a new terminal named `label`
-    /// in `cwd` (an agent's CLI): the user's shell starts it and ends with
-    /// it, so no prompt is left behind and the command is not shown typed.
-    /// The shell reads the user's profile as for a terminal of their own,
-    /// so `PATH` and aliases are theirs.
+    /// in `cwd` (an agent's CLI): `shell` (the user's, see
+    /// [`ph_env::program_shell`]; `command` is written for it) starts it
+    /// and ends with it, so no prompt is left behind and the command is
+    /// not shown typed. A Unix shell reads the user's profile as for a
+    /// terminal of their own, so `PATH` and aliases are theirs.
     pub fn run_program(
         &mut self,
         label: &str,
         command: &str,
         cwd: PathBuf,
         environment: &[(String, String)],
+        shell: (PathBuf, Vec<String>),
         cx: &mut Context<Self>,
     ) -> Option<Entity<Terminal>> {
         // On a server (a network drive's folder) the shell is the
@@ -550,19 +552,38 @@ impl WorkspaceTerminals {
         if ph_remote::remote_of(&cwd).is_some() {
             return self.run_in(label, command, Some(cwd), cx);
         }
-        let (program, args) = run_with(ph_env::default_shell(), command);
-        let started =
-            Terminal::start_program_with(&program.to_string_lossy(), args, cwd, environment).map(
-                |mut started| {
-                    // Named after what it runs, not after the shell that
-                    // starts it: "zsh" says nothing of an agent's CLI (a
-                    // program that names its terminal itself still does).
-                    started.shell = label.to_string().into();
-                    started.title = label.to_string().into();
-                    started
-                },
-            );
-        let terminal = self.follow(started, cx)?;
+        let run = run_with(shell, command);
+        let program = run.program.to_string_lossy();
+        let started = if run.verbatim {
+            Terminal::start_program_verbatim(&program, run.args, cwd, environment)
+        } else {
+            Terminal::start_program_with(&program, run.args, cwd, environment)
+        }
+        .map(|mut started| {
+            // Named after what it runs, not after the shell that
+            // starts it: "zsh" says nothing of an agent's CLI (a
+            // program that names its terminal itself still does).
+            started.shell = label.to_string().into();
+            started.title = label.to_string().into();
+            started
+        });
+        let terminal = match self.follow(started, cx) {
+            Some(terminal) => terminal,
+            None => {
+                // Said with what can be done about it: which shell runs it
+                // is the user's to choose.
+                if let Some(error) = &self.error {
+                    self.error = Some(
+                        format!(
+                            "{error} ({} runs it: another shell can be chosen in Settings → Terminal.)",
+                            run.program.display()
+                        )
+                        .into(),
+                    );
+                }
+                return None;
+            }
+        };
         terminal.update(cx, |terminal, _| terminal.set_label(label.to_string()));
         self.terminals.push(terminal.clone());
         self.active = self.terminals.len() - 1;
@@ -599,26 +620,46 @@ impl WorkspaceTerminals {
 /// The most terminals side by side: each needs room for its lines.
 const MAX_SPLIT: usize = 4;
 
-/// The tab shown after closing tab `closed` (`active` was shown; `left`
-/// remain): the same terminal if another closed, else the one that took its
-/// place, else the last.
+/// A shell started to run one command and end.
+struct Run {
+    program: PathBuf,
+    args: Vec<String>,
+    /// The arguments are the command line as the shell is to read it: not
+    /// to be quoted again (see [`Terminal::start_program_verbatim`]).
+    verbatim: bool,
+}
+
 /// `shell` (a program and what it is started with) told to run `command`
 /// and end: `-c` for a Unix shell, interactive so that what a profile sets
 /// up for interactive shells (aliases, a version manager's `PATH`) is
-/// there; `-Command` for PowerShell, `/C` for Command Prompt.
-fn run_with((program, mut args): (PathBuf, Vec<String>), command: &str) -> (PathBuf, Vec<String>) {
+/// there; `-Command` for PowerShell. Command Prompt gets `/S /C "…"`: with
+/// `/S` it drops the outer quotes and runs what is between them as
+/// written, quotes and all (an argument quoted for it again would reach
+/// the program with `\"` in it, which Command Prompt does not read).
+fn run_with((program, mut args): (PathBuf, Vec<String>), command: &str) -> Run {
     // Its name, whichever way its path is written.
     let path = program.to_string_lossy().to_lowercase();
     let file = path.rsplit(['/', '\\']).next().unwrap_or_default();
     let name = file.strip_suffix(".exe").unwrap_or(file);
+    let mut verbatim = false;
     match name {
-        "cmd" => args.extend(["/C".to_string(), command.to_string()]),
+        "cmd" => {
+            args.extend(["/S".to_string(), "/C".to_string(), format!("\"{command}\"")]);
+            verbatim = true;
+        }
         "pwsh" | "powershell" => args.extend(["-Command".to_string(), command.to_string()]),
         _ => args.extend(["-i".to_string(), "-c".to_string(), command.to_string()]),
     }
-    (program, args)
+    Run {
+        program,
+        args,
+        verbatim,
+    }
 }
 
+/// The tab shown after closing tab `closed` (`active` was shown; `left`
+/// remain): the same terminal if another closed, else the one that took its
+/// place, else the last.
 fn active_after_close(active: usize, closed: usize, left: usize) -> usize {
     let active = if closed < active { active - 1 } else { active };
     active.min(left.saturating_sub(1))
@@ -653,14 +694,16 @@ mod tests {
     #[test]
     fn a_program_is_run_by_the_users_shell() {
         let run = |program: &str, args: &[&str]| {
-            let (_, args) = run_with(
+            let run = run_with(
                 (
                     PathBuf::from(program),
                     args.iter().map(|arg| arg.to_string()).collect(),
                 ),
                 "claude --resume x",
             );
-            args.join(" ")
+            // Only Command Prompt reads its command line as written.
+            assert_eq!(run.verbatim, program.contains("cmd"));
+            run.args.join(" ")
         };
         assert_eq!(run("/bin/zsh", &["-l"]), "-l -i -c claude --resume x");
         assert_eq!(
@@ -671,7 +714,11 @@ mod tests {
             run("C:\\Program Files\\PowerShell\\7\\pwsh.exe", &["-NoLogo"]),
             "-NoLogo -Command claude --resume x"
         );
-        assert_eq!(run("cmd.exe", &[]), "/C claude --resume x");
+        assert_eq!(run("cmd.exe", &[]), "/S /C \"claude --resume x\"");
+        assert_eq!(
+            run("C:\\Windows\\System32\\cmd.exe", &[]),
+            "/S /C \"claude --resume x\""
+        );
     }
 
     #[test]

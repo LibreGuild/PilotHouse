@@ -25,24 +25,10 @@ impl Client {
     /// `base` is the API root: `https://api.github.com` or
     /// `https://HOST/api/v3` for GitHub Enterprise Server.
     pub fn new(base: &str, token: &str) -> Self {
-        let tls = TlsConfig::builder()
-            .provider(TlsProvider::NativeTls)
-            .root_certs(RootCerts::PlatformVerifier)
-            .build();
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .tls_config(tls)
-            .timeout_global(Some(Duration::from_secs(60)))
-            .http_status_as_error(false)
-            // Redirects are followed in `request`: ureq drops the token on
-            // every one and turns a write into a GET.
-            .max_redirects(0)
-            .user_agent(concat!(ph_brand::stem!(), "/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .into();
         Self {
             base: base.trim_end_matches('/').to_string(),
             token: token.to_string(),
-            agent,
+            agent: shared_agent(),
         }
     }
 
@@ -282,6 +268,42 @@ impl Client {
         };
         result.map_err(|err| anyhow!("could not reach {}: {err}", host_of(&self.base)))
     }
+}
+
+/// The connections to GitHub, shared by every [`Client`] of the app.
+///
+/// A client is made wherever one is needed (a page, a review being sent, a
+/// look for news), and each used to open connections of its own: a TLS
+/// handshake per request, which behind a company's proxy or certificate
+/// checks takes longer than the request. One pool keeps them open between
+/// requests and between clients. A pull request's page asks for seven
+/// things at once, so that many are kept for a host, and for longer than
+/// the library's fifteen seconds (the time it takes to read one page and
+/// open the next). A connection belongs to a host; the token goes with
+/// each request, so accounts share nothing but the wire.
+fn shared_agent() -> ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT
+        .get_or_init(|| {
+            let tls = TlsConfig::builder()
+                .provider(TlsProvider::NativeTls)
+                .root_certs(RootCerts::PlatformVerifier)
+                .build();
+            ureq::Agent::config_builder()
+                .tls_config(tls)
+                .timeout_global(Some(Duration::from_secs(60)))
+                .http_status_as_error(false)
+                // Redirects are followed in `request`: ureq drops the token
+                // on every one and turns a write into a GET.
+                .max_redirects(0)
+                .max_idle_connections(24)
+                .max_idle_connections_per_host(8)
+                .max_idle_age(Duration::from_secs(55))
+                .user_agent(concat!(ph_brand::stem!(), "/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .into()
+        })
+        .clone()
 }
 
 /// Most redirects followed for one request.

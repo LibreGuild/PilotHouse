@@ -135,9 +135,17 @@ pub fn checks(client: &Client, repo: &Repo, sha: &str) -> Result<Vec<Check>> {
     if !sha.chars().all(|c| c.is_ascii_hexdigit()) {
         bail!("not a commit id: {sha}");
     }
-    let runs: CheckRuns =
-        client.get(&repo.path(&format!("commits/{sha}/check-runs?per_page=100")))?;
-    let statuses: CombinedStatus = client.get(&repo.path(&format!("commits/{sha}/status")))?;
+    // The two lists are asked for at once: one after the other, the checks
+    // took two round trips after the pull request itself had answered.
+    let (runs, statuses) = std::thread::scope(|scope| {
+        let runs = scope.spawn(|| {
+            client.get::<CheckRuns>(&repo.path(&format!("commits/{sha}/check-runs?per_page=100")))
+        });
+        let statuses = client.get::<CombinedStatus>(&repo.path(&format!("commits/{sha}/status")));
+        (runs.join(), statuses)
+    });
+    let runs = runs.map_err(|_| anyhow::anyhow!("reading the checks stopped"))??;
+    let statuses = statuses?;
     let mut checks: Vec<Check> = runs
         .check_runs
         .into_iter()

@@ -17,13 +17,13 @@ use gpui_kit::component::{
     h_flex,
     input::{Textarea, TextareaState},
     menu::PopupMenuItem,
+    scroll::ScrollableElement as _,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
-    Window, div,
+    ParentElement as _, Render, SharedString, Styled as _, Task, Window, div,
 };
 use ph_github::models::DraftComment;
 use ph_github::pulls::ReviewEvent;
@@ -92,6 +92,8 @@ pub fn save_drafts(store: &Store, pull: &PullRef, drafts: &[Draft]) {
 /// summary comment is added.
 const LEAST_KEY: &str = "review.finish.least";
 const SUMMARY_KEY: &str = "review.finish.summary";
+/// Whether a review that found nothing is posted as a comment.
+const CLEAN_KEY: &str = "review.finish.clean";
 
 /// The least severity ticked by default: nits are the noise authors
 /// complain of, so they are left for the reviewer to add.
@@ -117,12 +119,20 @@ pub struct FinishView {
     pull: PullRef,
     /// The reviewer's own pull request: GitHub takes only a comment.
     own: bool,
+    /// An agent reviewed the pull request on this computer: how many of
+    /// its findings are still open, those that cannot be sent among them
+    /// (their code not found, or on GitHub already).
+    reviewed: Option<usize>,
     findings: Vec<Finding>,
     picked: BTreeSet<String>,
     drafts: Vec<Draft>,
     verdict: ReviewEvent,
     note: Entity<TextareaState>,
     summary: bool,
+    /// With nothing left to send on the code, the agent's result is posted
+    /// all the same: that the pull request was reviewed and nothing is
+    /// open.
+    clean: bool,
     least: String,
     busy: bool,
     error: Option<SharedString>,
@@ -134,11 +144,15 @@ impl EventEmitter<FinishEvent> for FinishView {}
 
 impl FinishView {
     /// `findings`: those that can be sent (open, their code found, not on
-    /// GitHub yet).
+    /// GitHub yet). `reviewed`: an agent reviewed the pull request on this
+    /// computer, and so many of its findings are still open; with none
+    /// there is a result to post all the same.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Store,
         pull: PullRef,
         own: bool,
+        reviewed: Option<usize>,
         findings: Vec<Finding>,
         drafts: Vec<Draft>,
         window: &mut Window,
@@ -151,6 +165,7 @@ impl FinishView {
         });
         let least = least(&store);
         let summary: Option<bool> = store.setting(SUMMARY_KEY);
+        let clean: Option<bool> = store.setting(CLEAN_KEY);
         // ⌘↵ (Ctrl+Enter) in the note sends, as the button does.
         let enter = cx.subscribe(
             &note_state,
@@ -171,12 +186,14 @@ impl FinishView {
             store,
             pull,
             own,
+            reviewed,
             findings,
             picked: BTreeSet::new(),
             drafts,
             verdict: ReviewEvent::Comment,
             note: note_state,
             summary: summary.unwrap_or(true),
+            clean: clean.unwrap_or(true),
             least,
             busy: false,
             error: None,
@@ -224,12 +241,32 @@ impl FinishView {
         self.note.read(cx).value().trim().to_string()
     }
 
+    /// Whether the agent reviewed the pull request and nothing of what it
+    /// found is open any more (it found nothing, or all is dealt with).
+    /// Not so while a finding is open that only cannot be sent: "nothing
+    /// is open" would not be true of it.
+    fn nothing_open(&self) -> bool {
+        self.reviewed == Some(0) && self.findings.is_empty()
+    }
+
+    /// Whether the agent's result is posted with nothing to put on the
+    /// code.
+    fn posts_clean(&self) -> bool {
+        self.nothing_open() && self.clean
+    }
+
+    /// Whether a summary comment is written (or brought up to date).
+    fn posts_summary(&self) -> bool {
+        (self.summary && !self.picked.is_empty()) || self.posts_clean()
+    }
+
     /// Whether there is anything to send.
     fn sendable(&self, cx: &Context<Self>) -> bool {
         self.verdict != ReviewEvent::Comment
             || !self.picked.is_empty()
             || !self.drafts.is_empty()
             || !self.note(cx).is_empty()
+            || self.posts_clean()
     }
 
     fn send(&mut self, cx: &mut Context<Self>) {
@@ -244,7 +281,7 @@ impl FinishView {
             note: self.note(cx),
             picked: self.picked.iter().cloned().collect(),
             own: self.drafts.iter().map(Draft::comment).collect(),
-            summary: self.summary,
+            summary: self.posts_summary(),
         };
         let (store, pull) = (self.store.clone(), self.pull.clone());
         let work = cx.background_spawn(async move {
@@ -275,8 +312,20 @@ impl FinishView {
             ReviewEvent::Comment => "a review",
         };
         if !self.sendable(cx) {
-            return "Nothing to send yet: tick a finding, write a note, or choose how it ends."
-                .into();
+            return if self.own {
+                "Nothing to send yet: write a note, or comment on lines in Files."
+            } else {
+                "Nothing to send yet: tick a finding, write a note, or choose how it ends."
+            }
+            .into();
+        }
+        // Only the agent's result, as a comment: no review is made of it.
+        if self.verdict == ReviewEvent::Comment
+            && comments == 0
+            && self.note(cx).is_empty()
+            && self.posts_clean()
+        {
+            return "Posts a comment: what the agent reviewed, and that nothing is open.".into();
         }
         let mut said = format!("Sends {what}");
         match comments {
@@ -285,7 +334,7 @@ impl FinishView {
             n => said.push_str(&format!(" with {n} comments on the code")),
         }
         said.push_str(", in one post");
-        if self.summary && !self.picked.is_empty() {
+        if self.posts_summary() {
             said.push_str(", and a summary comment");
         }
         said.push('.');
@@ -490,7 +539,7 @@ impl Render for FinishView {
                             v_flex()
                                 .id("finish-findings")
                                 .max_h(ph_ui::rems_from_px(220.))
-                                .overflow_y_scroll()
+                                .overflow_y_scrollbar()
                                 .gap_0p5()
                                 .children(self.findings.iter().map(|finding| {
                                     let name = finding.label.clone();
@@ -549,6 +598,25 @@ impl Render for FinishView {
                                     })),
                             )
                         }),
+                )
+            })
+            // Nothing to put on the code: the review itself is still worth
+            // a word to the author.
+            .when(self.nothing_open(), |this| {
+                this.child(
+                    v_flex()
+                        .gap_1()
+                        .child(label("The agent's review".into()))
+                        .child(
+                            Checkbox::new("finish-clean")
+                                .checked(self.clean)
+                                .label("Post the result as a comment: what was reviewed, and that nothing is open")
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.clean = *checked;
+                                    let _ = this.store.set_setting(CLEAN_KEY, &Some(*checked));
+                                    cx.notify();
+                                })),
+                        ),
                 )
             })
             .when_some(self.error.clone(), |this, error| {
@@ -636,7 +704,16 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let findings = vec![finding("F1", "major"), finding("F2", "nit")];
         let (view, cx) = cx.add_window_view(|window, cx| {
-            FinishView::new(store, pull(), false, findings, Vec::new(), window, cx)
+            FinishView::new(
+                store,
+                pull(),
+                false,
+                Some(2),
+                findings,
+                Vec::new(),
+                window,
+                cx,
+            )
         });
         view.update(cx, |view, cx| {
             assert_eq!(view.picked.iter().collect::<Vec<_>>(), ["F1"]);
@@ -655,6 +732,63 @@ mod tests {
             assert_eq!(view.picked.len(), 2);
             assert_eq!(least(&view.store), "nit");
         });
+    }
+
+    /// A review that found nothing is still said to the author, on one's
+    /// own pull request too; without any agent's review there is nothing
+    /// to post until something is written.
+    #[gpui_kit::test]
+    fn a_review_that_found_nothing_can_be_posted(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            ph_theme::init(cx);
+        });
+        let store = Store::open_in_memory().unwrap();
+        let (view, cx) = cx.add_window_view({
+            let store = store.clone();
+            |window, cx| {
+                FinishView::new(
+                    store,
+                    pull(),
+                    true,
+                    Some(0),
+                    Vec::new(),
+                    Vec::new(),
+                    window,
+                    cx,
+                )
+            }
+        });
+        view.update(cx, |view, cx| {
+            assert!(view.sendable(cx) && view.posts_summary());
+            assert_eq!(
+                view.outcome(cx),
+                "Posts a comment: what the agent reviewed, and that nothing is open."
+            );
+            // Unticked: nothing to send, and it stays so next time.
+            view.clean = false;
+            assert!(!view.sendable(cx));
+        });
+        // No agent's review; or one with a finding still open that cannot
+        // be sent (its code was not found): "nothing is open" is not said.
+        for reviewed in [None, Some(1)] {
+            let store = store.clone();
+            let (view, cx) = cx.add_window_view(move |window, cx| {
+                FinishView::new(
+                    store,
+                    pull(),
+                    true,
+                    reviewed,
+                    Vec::new(),
+                    Vec::new(),
+                    window,
+                    cx,
+                )
+            });
+            view.update(cx, |view, cx| {
+                assert!(!view.sendable(cx) && !view.posts_summary());
+            });
+        }
     }
 
     /// The reviewer's own comments wait in the settings until they are

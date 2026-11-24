@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
-use gpui_kit::component::{ActiveTheme as _, Theme};
+use gpui_kit::component::Theme;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, Global, Hsla,
-    Subscription, Task, WeakEntity,
+    AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, Global, Subscription,
+    Task, WeakEntity,
 };
 use ph_artifacts::library::Source;
 use ph_artifacts::{Artifact, Artifacts};
@@ -459,50 +459,5 @@ impl Decks {
 /// The app's colours and sizes as CSS variables: what makes a deck's page
 /// look like the window it is in.
 fn chrome(cx: &App) -> String {
-    let theme = cx.theme();
-    let colour = |colour: Hsla| {
-        let rgba = colour.to_rgb();
-        let part = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
-        format!(
-            "rgba({},{},{},{:.3})",
-            part(rgba.r),
-            part(rgba.g),
-            part(rgba.b),
-            rgba.a.clamp(0., 1.)
-        )
-    };
-    let dark = theme.is_dark();
-    let font = |family: &str| match family {
-        // The system's own font has no name a page could ask for.
-        name if name.starts_with('.') => "system-ui".to_string(),
-        name => format!("\"{name}\", system-ui"),
-    };
-    [
-        ("bg", colour(theme.background)),
-        ("fg", colour(theme.foreground)),
-        ("muted", colour(theme.muted_foreground)),
-        ("border", colour(theme.border)),
-        ("surface", colour(theme.popover)),
-        ("hover", colour(theme.secondary_hover)),
-        ("accent", colour(theme.primary)),
-        ("accent-fg", colour(theme.primary_foreground)),
-        ("danger", colour(theme.danger)),
-        ("success", colour(theme.success)),
-        ("warning", colour(theme.warning)),
-        ("stage", colour(theme.muted)),
-        ("radius", format!("{}px", f32::from(theme.radius))),
-        ("size", format!("{}px", f32::from(theme.font_size))),
-        ("font", format!("{}, sans-serif", font(&theme.font_family))),
-        (
-            "mono",
-            format!(
-                "{}, monospace",
-                font(&theme.mono_font_family).replace(" NL\"", "\"")
-            ),
-        ),
-        ("scheme", if dark { "dark" } else { "light" }.to_string()),
-    ]
-    .iter()
-    .map(|(name, value)| format!("--ui-{name}:{value};"))
-    .collect()
+    ph_artifacts::kit::chrome(cx)
 }

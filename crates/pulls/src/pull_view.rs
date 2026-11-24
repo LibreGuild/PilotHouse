@@ -16,6 +16,7 @@ use gpui_kit::component::{
     h_flex,
     input::{Textarea, TextareaState},
     notification::Notification,
+    scroll::ScrollableElement as _,
     text::{TextView, TextViewState},
     v_flex,
 };
@@ -79,6 +80,9 @@ pub struct PullView {
     store: ph_store::Store,
     /// The newest finished agent review: (session, open, fixed) counts.
     last_review: Option<(Option<i64>, usize, usize, String)>,
+    /// The agent a review asked for here runs with (the one chats start
+    /// with): named on the button, so it is known before it is pressed.
+    agent: &'static ph_agent::agents::AgentSpec,
     hosting: Hosting,
     /// The workspace checkout to check the PR out in (none in the GitHub
     /// view, which reviews in its own clones).
@@ -217,9 +221,11 @@ impl PullView {
         subscriptions.push(on_enter(cx, &composer, Self::comment));
         subscriptions.push(on_enter(cx, &reply_box, Self::reply));
         subscriptions.push(on_enter(cx, &comment_box, Self::add_draft));
+        let agent = ph_agent::chats::default_agent(&store);
         let mut view = Self {
             store,
             last_review: None,
+            agent,
             hosting,
             local,
             replying: None,
@@ -372,9 +378,13 @@ impl PullView {
             .login
             .eq_ignore_ascii_case(&self.hosting.account.login);
         let (store, pull) = (self.store.clone(), self.pull_ref());
-        let findings = self.findings.read(cx).sendable();
+        let (findings, reviewed) = {
+            let findings = self.findings.read(cx);
+            (findings.sendable(), findings.still_open())
+        };
         let drafts = self.drafts.clone();
-        let view = cx.new(|cx| FinishView::new(store, pull, own, findings, drafts, window, cx));
+        let view =
+            cx.new(|cx| FinishView::new(store, pull, own, reviewed, findings, drafts, window, cx));
         let events =
             cx.subscribe_in(
                 &view,
@@ -424,8 +434,10 @@ impl PullView {
         self.number
     }
 
-    /// What the newest agent review of this PR found.
+    /// What the newest agent review of this PR found (and which agent the
+    /// next one runs with: read here, never while drawing).
     fn read_last_review(&mut self) {
+        self.agent = ph_agent::chats::default_agent(&self.store);
         let pull = ph_store::reviews::PullRef {
             host: self.hosting.account.host.clone(),
             owner: self.hosting.repo.owner.clone(),
@@ -693,11 +705,14 @@ impl PullView {
             .user
             .login
             .eq_ignore_ascii_case(&self.hosting.account.login);
-        let (has_review, to_send) = {
+        let (has_review, to_send, unposted) = {
             let findings = self.findings.read(cx);
             (
                 findings.has_review(),
                 findings.sendable().len() + self.drafts.len(),
+                // An agent reviewed it here and GitHub has nothing of that
+                // yet: also when it found nothing, which is worth saying.
+                findings.has_own_review() && !findings.posted(),
             )
         };
         // What comes next is the one filled button: an agent's review
@@ -719,15 +734,17 @@ impl PullView {
                     .iter()
                     .any(|review| review.state == "CHANGES_REQUESTED"));
         let review_pull = pull.clone();
+        let agent = self.agent;
         let review_button = |primary: bool, cx: &mut Context<Self>| {
             Button::new("pull-review-agent")
                 .small()
                 .map(|this| if primary { this.primary() } else { this.outline() })
                 .icon(Icons::Sparkles)
-                .label("Review with agent")
-                .tooltip(ph_ui::tip(
-                    "An agent reads the change on its own copy of the pull request. Nothing is sent to GitHub.",
-                ))
+                .label(format!("Review with {}", agent.short_name()))
+                .tooltip(ph_ui::tip(format!(
+                    "{} reads the change on its own copy of the pull request. Nothing is sent to GitHub. (It is the agent chats start with: pick another in a chat's model list.)",
+                    agent.name
+                )))
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.emit(PullViewEvent::Agent(crate::AgentRequest::Review {
                         pull: Box::new(review_pull.clone()),
@@ -744,9 +761,9 @@ impl PullView {
                     n => format!("Finish review · {n}"),
                 })
                 .tooltip(ph_ui::tip(if mine {
-                    "Send your comments on the code in one post"
+                    "Post what the agent found (or that it found nothing) and your comments on the code, in one post. On your own pull request a review can only comment."
                 } else {
-                    "Choose what is sent and how it ends: comment, approve or request changes. One post."
+                    "Choose what is sent and how it ends: comment, approve or request changes. A review that found nothing can be posted too. One post."
                 }))
                 .on_click(cx.listener(|this, _, window, cx| this.finish_review(window, cx)))
         };
@@ -842,16 +859,21 @@ impl PullView {
                     .gap_1p5()
                     .flex_wrap()
                     .when(open, |this| {
+                        // Finishing is always in reach, on one's own pull
+                        // request too (where it can only comment): a
+                        // review that found nothing is posted with it, and
+                        // so is a note without any agent's review.
                         if to_send > 0 {
                             this.child(finish_button(true, cx))
                                 .when(!has_review, |this| this.child(review_button(false, cx)))
                         } else if has_review {
-                            // Reviewed, and nothing waits to be sent: the
-                            // review can still be ended (approved) later.
-                            this.when(!mine, |this| this.child(finish_button(false, cx)))
+                            // Nothing waits on the code: what the agent
+                            // made of it can still be posted, and the
+                            // review ended (approved) later.
+                            this.child(finish_button(unposted, cx))
                         } else {
                             this.child(review_button(true, cx))
-                                .when(!mine, |this| this.child(finish_button(false, cx)))
+                                .child(finish_button(false, cx))
                         }
                     })
                     .when(to_address, |this| {
@@ -900,7 +922,10 @@ impl PullView {
                                 if let Some(again) = again.clone() {
                                     let view = view.clone();
                                     menu = menu.item(
-                                        PopupMenuItem::new("Review again with an agent")
+                                        PopupMenuItem::new(format!(
+                                            "Review again with {}",
+                                            agent.short_name()
+                                        ))
                                             .icon(Icons::Sparkles)
                                             .on_click(move |_, _, cx| {
                                                 let pull = again.clone();
@@ -1171,16 +1196,24 @@ impl Render for PullView {
                 .id("pull-walkthrough")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
+                .overflow_y_scrollbar()
                 .child(self.walkthrough.clone())
                 .into_any_element(),
+            // (Its scroll is the page's own, so the checks under the
+            // conversation can be gone to; the bar is laid over it.)
             Tab::Overview => div()
-                .id("pull-body")
+                .relative()
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(&self.conversation_scroll)
-                .child(self.render_overview(&data, cx))
+                .child(
+                    div()
+                        .id("pull-body")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.conversation_scroll)
+                        .child(self.render_overview(&data, cx)),
+                )
+                .vertical_scrollbar(&self.conversation_scroll)
                 .into_any_element(),
         };
         v_flex()

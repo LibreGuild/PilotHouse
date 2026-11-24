@@ -38,6 +38,9 @@ actions!(
         /// A new deck of slides, in a window of its own beside a chat (it
         /// is kept with the artifacts).
         NewSlides,
+        /// A new whiteboard, in a window of its own beside a chat (it is
+        /// kept with the artifacts).
+        NewWhiteboard,
         /// The keyboard shortcuts sheet.
         ShowShortcuts,
         /// The cards that say what the app has, again (they show by

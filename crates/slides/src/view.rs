@@ -63,12 +63,28 @@ pub struct DeckView {
     /// it tells, so that two views of one deck (its window's, and one
     /// drawing out of sight) never take each other's answers.
     key: &'static str,
+    /// What is shown, in the words said when it cannot be shown here
+    /// ("deck"; a whiteboard's window shows its page the same way).
+    noun: &'static str,
     _decks: Option<Subscription>,
 }
 
 impl DeckView {
     /// The deck of artifact `id` at `address`, shown in `window`.
     pub fn new(id: &str, address: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::of("deck", id, address, window, cx)
+    }
+
+    /// The page of artifact `id` at `address`, shown in `window` as a deck
+    /// is: an artifact of another kind whose page is its editor (a
+    /// whiteboard). `noun` is what it is called where that is said.
+    pub fn of(
+        noun: &'static str,
+        id: &str,
+        address: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // The page is told it is in the app's own window.
         let shown = if address.contains('?') {
             format!("{address}&app=1")
@@ -79,14 +95,16 @@ impl DeckView {
             match WebView::new(&shown, window, cx) {
                 Ok(web) => (Some(web), None),
                 Err(err) => {
-                    tracing::warn!("a deck's web view could not be made: {err:#}");
+                    tracing::warn!("a {noun}'s web view could not be made: {err:#}");
                     (None, Some(format!("{err:#}").into()))
                 }
             }
         } else {
             (None, None)
         };
-        Self::made(id, address, web, failed, "w", cx)
+        let mut view = Self::made(id, address, web, failed, "w", cx);
+        view.noun = noun;
+        view
     }
 
     /// The deck of artifact `id` at `address`, not shown anywhere: a place
@@ -128,6 +146,7 @@ impl DeckView {
             ready: Vec::new(),
             drawn: HashMap::new(),
             tokens: 0,
+            noun: "deck",
             _decks: decks,
         }
     }
@@ -491,8 +510,9 @@ impl Render for DeckView {
                 }));
         }
         let address = self.address.clone();
+        let noun = self.noun;
         let why = self.failed.clone().unwrap_or_else(|| {
-            "On this system the deck opens in your browser. Edit it there; this chat works on the same deck.".into()
+            format!("On this system the {noun} opens in your browser. Edit it there; this chat works on the same {noun}.").into()
         });
         ground.child(
             v_flex()
@@ -518,7 +538,7 @@ impl Render for DeckView {
                     Button::new("deck-open-browser")
                         .small()
                         .primary()
-                        .label("Open the deck in the browser")
+                        .label(format!("Open the {noun} in the browser"))
                         .on_click(move |_, _, cx| cx.open_url(&address)),
                 ),
         )

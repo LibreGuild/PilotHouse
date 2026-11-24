@@ -2,7 +2,7 @@
 // thread at the pin, and the choice to send it to the agent, which then
 // changes the slide and answers in the thread.
 
-import { h, button, popover, menu, icon, toast } from "./ui.js";
+import { h, button, popover, menu, icon, toast } from "/_artifact/kit/ui.js";
 import * as store from "./store.js";
 import { state } from "./store.js";
 

@@ -7,6 +7,9 @@ use wry::{Rect, WebViewBuilder};
 
 pub struct Native {
     view: wry::WebView,
+    /// Where the view keeps its data (Windows), for as long as it lives.
+    #[cfg(target_os = "windows")]
+    _context: wry::WebContext,
 }
 
 /// The site of an address: its scheme, host and port.
@@ -30,7 +33,15 @@ impl Native {
     ) -> Result<Self> {
         let home = site_of(url).to_string();
         let elsewhere = outside.clone();
-        let view = WebViewBuilder::new()
+        // WebView2 keeps its profile where it is told (see
+        // `crate::keep_data_in`), not beside the program.
+        #[cfg(target_os = "windows")]
+        let mut context = wry::WebContext::new(crate::DATA.get().cloned());
+        #[cfg(target_os = "windows")]
+        let builder = WebViewBuilder::new_with_web_context(&mut context);
+        #[cfg(not(target_os = "windows"))]
+        let builder = WebViewBuilder::new();
+        let view = builder
             .with_url(url)
             .with_navigation_handler(move |to| {
                 if site_of(&to) == home || to.starts_with("about:") {
@@ -56,7 +67,11 @@ impl Native {
             .with_back_forward_navigation_gestures(false)
             .build_as_child(&*window)
             .context("the system's web view could not be made")?;
-        Ok(Self { view })
+        Ok(Self {
+            view,
+            #[cfg(target_os = "windows")]
+            _context: context,
+        })
     }
 
     pub fn load(&self, url: &str) {

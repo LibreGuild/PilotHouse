@@ -435,15 +435,17 @@ pub(crate) fn setup_command(command: &str, port: u16) -> String {
     if !cfg!(windows) {
         return format!("export PILOTHOUSE_PORT={port}; {command}");
     }
-    // Windows: in the shell terminals start (PowerShell, else Command Prompt).
+    // Windows: in the shell terminals start (PowerShell, Command Prompt,
+    // or one chosen in Settings: Git Bash, WSL).
     let (shell, _) = ph_env::default_shell();
-    let cmd = shell
+    let name = shell
         .file_stem()
-        .is_some_and(|name| name.eq_ignore_ascii_case("cmd"));
-    if cmd {
-        format!("set PILOTHOUSE_PORT={port}&& {command}")
-    } else {
-        format!("$env:PILOTHOUSE_PORT={port}; {command}")
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match name.as_str() {
+        "cmd" => format!("set PILOTHOUSE_PORT={port}&& {command}"),
+        "pwsh" | "powershell" => format!("$env:PILOTHOUSE_PORT={port}; {command}"),
+        _ => format!("export PILOTHOUSE_PORT={port}; {command}"),
     }
 }
 

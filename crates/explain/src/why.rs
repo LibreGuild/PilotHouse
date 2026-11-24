@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -26,8 +27,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div,
+    ParentElement as _, Render, SharedString, Styled as _, Window, div,
 };
 use ph_agent::reply::{OnLink, Reply};
 use ph_git::content::LineOrigin;
@@ -449,7 +449,7 @@ impl Render for WhyView {
             .id("why-here")
             .gap_3()
             .max_h(ph_ui::rems_from_px(520.))
-            .overflow_y_scroll()
+            .overflow_y_scrollbar()
             .child(line)
             .child(body)
             .when_some(self.full.clone(), |this, full| {

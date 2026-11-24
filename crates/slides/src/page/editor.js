@@ -1,10 +1,12 @@
-// The deck's page for its owner: the slide on a stage, the slides along the
-// foot, and the few bars and panels that change them. What changes a deck
+// The deck's page for its owner: a bar of what can be added and done on
+// top, the slide on a stage, and under it a line of status (a new slide,
+// notes, undo, zoom) over the slides in a row; the panel of how things
+// look opens at the right. What changes a deck
 // is in edit.js (what is on a slide), panel.js (how it looks) and store.js
 // (the slides themselves); this file lays the page out and draws it.
 
 import { Look, mountSlide, fitFrame, scaleFrame, slideTitle, dress } from "./core.js";
-import { h, button, menu, dialog, toast, icon, closeFloats, keys as keyHint } from "./ui.js";
+import { h, button, menu, dialog, toast, icon, closeFloats, keys as keyHint } from "/_artifact/kit/ui.js";
 import * as store from "./store.js";
 import { state, on, emit } from "./store.js";
 import { Editing, SHAPES } from "./edit.js";
@@ -64,14 +66,17 @@ function build() {
   el.stage = h("div", { class: "stage" }, el.inner, el.empty);
   el.grid = h("div", { class: "grid", hidden: true });
   el.marks = h("div", { class: "marks" });
-  el.toolsLeft = h("div", { class: "tools tools-left" });
-  el.toolsRight = h("div", { class: "tools tools-right" });
-  el.main = h("div", { class: "main" }, el.stage, el.grid, el.marks, el.toolsLeft, el.toolsRight);
+  el.toolsLeft = h("div", { class: "top-group", role: "toolbar", "aria-label": "Add to the slide" });
+  el.toolsRight = h("div", { class: "top-group", role: "toolbar", "aria-label": "The deck" });
+  el.top = h("div", { class: "topbar" }, el.toolsLeft, h("span", { class: "top-space" }), el.toolsRight);
+  el.main = h("div", { class: "main" }, el.stage, el.grid, el.marks);
   el.panel = h("div", { class: "panel", hidden: true });
-  el.trayBar = h("div", { class: "tray-bar" });
   el.strip = h("div", { class: "strip", role: "listbox", "aria-label": "Slides" });
-  el.tray = h("div", { class: "tray" }, el.trayBar, el.strip);
-  document.getElementById("app").replaceChildren(el.main, el.panel, el.tray);
+  el.foot = h("div", { class: "foot" });
+  // The slides run along the foot: beside a chat the page is narrow, and a
+  // list down its side would take the stage's width.
+  el.tray = h("div", { class: "tray" }, el.foot, el.strip);
+  document.getElementById("app").replaceChildren(el.top, el.main, el.panel, el.tray);
 }
 
 let editing;
@@ -211,7 +216,7 @@ function drawStrip() {
       tiles.delete(file);
     }
   }
-  el.count.textContent = wanted.length ? `${state.current + 1} / ${wanted.length}` : "";
+  el.count.textContent = wanted.length ? `Slide ${state.current + 1} of ${wanted.length}` : "No slides";
   const current = tiles.get(store.currentSlide()?.file)?.tile;
   current?.scrollIntoView({ block: "nearest", inline: "nearest" });
   if (view.mode === "grid") drawGrid();
@@ -434,8 +439,10 @@ function currentLook() {
 
 function buildBars() {
   const insert = (kind, more) => () => editing.insert(kind, more);
+  const add = (name, label, title, more) => button({ icon: name, label, title, onClick: insert(more?.kind || name, more) });
   const shapes = button({
     icon: "shapes",
+    label: "Shape",
     title: "Shapes",
     caret: true,
     onClick: (_, anchor) =>
@@ -447,18 +454,16 @@ function buildBars() {
         ]),
       ),
   });
-  shapes.classList.remove("btn-icon");
+  // What is added is named, not only drawn: six pictures in a row are
+  // guessed at, six words are read. (The names go in a narrow window.)
   el.toolsLeft.replaceChildren(
-    h(
-      "div",
-      { class: "bar", role: "toolbar", "aria-label": "Add to the slide" },
-      button({ icon: "text", title: "Text (T)", onClick: insert("text") }),
-      button({ icon: "image", title: "Picture", onClick: insert("image") }),
-      button({ icon: "video", title: "Video", onClick: insert("video") }),
-      button({ icon: "table", title: "Table", onClick: insert("table") }),
-      button({ icon: "chart", title: "Chart", onClick: insert("chart") }),
-      shapes,
-    ),
+    h("span", { class: "top-label" }, "Add"),
+    add("text", "Text", "Text (T)"),
+    add("image", "Picture", "Picture"),
+    add("video", "Video", "Video"),
+    add("table", "Table", "Table"),
+    add("chart", "Chart", "Chart"),
+    shapes,
   );
   el.commentButton = button({
     icon: "comment",
@@ -472,45 +477,72 @@ function buildBars() {
     title: "Comments",
     onClick: (_, anchor) => comments.list(anchor),
   });
-  commentMore.style.width = "18px";
-  el.zoomLabel = h("span", { class: "btn-label" }, "100%");
-  const zoom = h("button", { type: "button", class: "btn", title: "Zoom" }, el.zoomLabel, icon("down", 12));
-  zoom.addEventListener("click", () => zoomMenu(zoom));
+  commentMore.classList.add("btn-caret");
   el.panelButton = button({
     icon: "sliders",
     title: "How it looks",
     pressed: view.panel,
     onClick: () => setPanel(!view.panel),
   });
+  // Presenting is what a deck is for: the one filled button, with its name.
+  const presentNow = button({ icon: "present", label: "Present", title: `Present (${keyHint("⌘↩")})`, kind: "primary", onClick: () => startPresenting(false) });
+  const presentMore = button({ icon: "down", size: 12, title: "Ways to present", kind: "primary", onClick: (_, anchor) => presentMenu(anchor) });
+  presentMore.classList.add("btn-caret");
   el.toolsRight.replaceChildren(
-    h(
-      "div",
-      { class: "bar", role: "toolbar", "aria-label": "The deck" },
-      el.commentButton,
-      commentMore,
-      button({ icon: "share", label: "Share", title: "Share on your network", onClick: () => store.tell({ share: true }) }),
-      h("span", { class: "bar-rule" }),
-      button({ icon: "download", title: "Export", onClick: (_, anchor) => exportMenu(anchor) }),
-      button({ icon: "play", title: "Present", onClick: (_, anchor) => presentMenu(anchor) }),
-      h("span", { class: "bar-rule" }),
-      el.panelButton,
-      zoom,
-    ),
+    h("span", { class: "split" }, el.commentButton, commentMore),
+    button({ icon: "share", title: "Share on your network", onClick: () => store.tell({ share: true }) }),
+    button({ icon: "download", title: "Export", caret: true, onClick: (_, anchor) => exportMenu(anchor) }),
+    el.panelButton,
+    h("span", { class: "split split-primary" }, presentNow, presentMore),
   );
-  el.count = h("span", { class: "tray-count" });
-  el.notesButton = button({ icon: "notes", title: "Speaker notes", pressed: view.notes, onClick: () => setNotes(!view.notes) });
-  el.singleButton = button({ icon: "single", title: "One slide", pressed: true, onClick: () => setMode("single") });
-  el.gridButton = button({ icon: "grid", title: "All slides", pressed: false, onClick: () => setMode("grid") });
+
+  // Under the stage, over the slides: a new slide, where one is, what is
+  // said on the slide, a step back and forward, and how large the slide
+  // is drawn.
+  el.count = h("span", { class: "foot-count" });
   el.trayButton = button({ icon: "down", title: "Hide the slides", onClick: () => setTray(!view.tray) });
-  el.trayBar.replaceChildren(
-    button({ icon: "plus", title: "New slide", onClick: () => newSlide() }),
-    el.notesButton,
+  el.gridButton = button({ icon: "grid", title: "All slides", pressed: false, onClick: () => setMode(view.mode === "grid" ? "single" : "grid") });
+  el.notesButton = button({ icon: "notes", label: "Notes", title: "Speaker notes", pressed: view.notes, onClick: () => setNotes(!view.notes) });
+  el.undoButton = button({ icon: "undo", title: `Undo (${keyHint("⌘Z")})`, disabled: true, onClick: () => store.undo() });
+  el.redoButton = button({ icon: "redo", title: `Redo (${keyHint("⇧⌘Z")})`, disabled: true, onClick: () => store.redo() });
+  el.zoomLabel = h("span", { class: "btn-label" }, "100%");
+  const zoom = h("button", { type: "button", class: "btn zoom-value", title: "Zoom" }, el.zoomLabel);
+  zoom.addEventListener("click", () => zoomMenu(zoom));
+  const step = (by) => () => {
+    view.zoom = Math.max(0.05, Math.min(4, +(view.scale * by).toFixed(3)));
+    fitStage();
+  };
+  el.foot.replaceChildren(
+    button({ icon: "plus", label: "New slide", title: "New slide", kind: "outline", onClick: () => newSlide() }),
     el.count,
-    h("span", { class: "tray-space" }),
-    el.singleButton,
+    h("span", { class: "foot-rule" }),
+    el.notesButton,
+    h("span", { class: "foot-rule" }),
+    el.undoButton,
+    el.redoButton,
+    h("span", { class: "foot-space" }),
+    button({ icon: "minus", title: "Zoom out (−)", onClick: step(0.8) }),
+    zoom,
+    button({ icon: "plus", title: "Zoom in (+)", onClick: step(1.25) }),
+    button({
+      icon: "fit",
+      title: "Fit the slide (0)",
+      onClick: () => {
+        view.zoom = null;
+        fitStage();
+      },
+    }),
+    h("span", { class: "foot-rule" }),
     el.gridButton,
     el.trayButton,
   );
+}
+
+// What can be stepped back and forward shows on the two buttons.
+function drawHistory() {
+  if (!el.undoButton) return;
+  el.undoButton.disabled = !state.canUndo;
+  el.redoButton.disabled = !state.canRedo;
 }
 
 function zoomMenu(anchor) {
@@ -599,8 +631,8 @@ function slideMenu(anchor, index) {
     },
     { label: "Use as the deck's picture", onSelect: () => store.tell({ thumbnail: slide.file }) },
     { separator: true },
-    { label: "Move left", disabled: index === 0, onSelect: () => store.moveSlide(index, index - 1) },
-    { label: "Move right", disabled: index === last, onSelect: () => store.moveSlide(index, index + 1) },
+    { label: "Move earlier", disabled: index === 0, onSelect: () => store.moveSlide(index, index - 1) },
+    { label: "Move later", disabled: index === last, onSelect: () => store.moveSlide(index, index + 1) },
     { separator: true },
     { label: "Delete slide", hint: "⌫", danger: true, onSelect: () => store.removeSlide(index) },
   ]);
@@ -664,9 +696,10 @@ function setMode(mode) {
   if (view.mode === mode) return;
   view.mode = mode;
   editing.select(null);
-  el.singleButton.setAttribute("aria-pressed", String(mode === "single"));
   el.gridButton.setAttribute("aria-pressed", String(mode === "grid"));
-  el.toolsLeft.hidden = mode !== "single";
+  el.gridButton.title = mode === "grid" ? "Back to one slide" : "All slides";
+  // Nothing is added to a slide while all of them are laid out.
+  el.toolsLeft.classList.toggle("off", mode !== "single");
   drawStage();
   if (mode === "grid") drawGrid();
 }
@@ -796,6 +829,7 @@ async function start() {
     }
     drawStage();
     drawStrip();
+    drawHistory();
     if (view.panel) panel.draw();
     checks.soon();
   });
@@ -815,7 +849,7 @@ async function start() {
   on("selection", () => {
     if (view.panel) panel.draw();
   });
-  on("history", () => {});
+  on("history", drawHistory);
   on("failed", (error) => toast(`That change was not saved: ${error.message}`, { kind: "error", stay: 7000 }));
   on("command", (command) => run(command));
 

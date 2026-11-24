@@ -3,6 +3,7 @@
 //! and how their events reach the rest of the screen.
 
 use super::*;
+use gpui_kit::component::scroll::ScrollableElement as _;
 
 /// How sharp phones stream (`ph_devices::StreamQuality`), app-wide.
 const STREAM_QUALITY: &str = "devices.stream_quality";
@@ -667,7 +668,7 @@ impl WorkspaceScreen {
                             gpui_kit::component::v_flex()
                                 .id("agent-sessions")
                                 .max_h(ph_ui::rems_from_px(420.))
-                                .overflow_y_scroll()
+                                .overflow_y_scrollbar()
                                 .children(rows)
                                 .into_any_element()
                         })

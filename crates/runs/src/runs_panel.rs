@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -13,8 +14,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Task, Window, div,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Task, Window, div,
 };
 use ph_store::Store;
 use ph_ui::Icons;
@@ -574,7 +574,7 @@ impl Render for RunsPanel {
         v_flex()
             .id("runs-panel")
             .size_full()
-            .overflow_y_scroll()
+            .overflow_y_scrollbar()
             .px_2()
             .pb_3()
             .when_some(self.android.clone(), |this, android| {

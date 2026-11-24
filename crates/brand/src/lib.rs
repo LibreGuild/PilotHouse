@@ -43,6 +43,9 @@ pub enum Feature {
     NetworkDrives,
     ParallelRuns,
     Presentations,
+    /// Whiteboards: endless boards of notes, shapes and arrows, kept with
+    /// the artifacts (which they need), and the agents' `board_` tools.
+    Whiteboards,
     ChromeExtension,
     QuickChat,
     /// Changes explained in plain words: Explain in the Git tab and on a
@@ -57,7 +60,7 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Feature; 21] = [
+    pub const ALL: [Feature; 22] = [
         Feature::Files,
         Feature::Changes,
         Feature::Pulls,
@@ -74,6 +77,7 @@ impl Feature {
         Feature::NetworkDrives,
         Feature::ParallelRuns,
         Feature::Presentations,
+        Feature::Whiteboards,
         Feature::ChromeExtension,
         Feature::QuickChat,
         Feature::Explanations,
@@ -100,6 +104,7 @@ impl Feature {
             Feature::NetworkDrives => "network_drives",
             Feature::ParallelRuns => "parallel_runs",
             Feature::Presentations => "presentations",
+            Feature::Whiteboards => "whiteboards",
             Feature::ChromeExtension => "chrome_extension",
             Feature::QuickChat => "quick_chat",
             Feature::Explanations => "explanations",
